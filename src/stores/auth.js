@@ -5,6 +5,7 @@ export const useAuthStore = defineStore('auth', {
     user: null,
     token: null,
     isAuthenticated: false,
+    sessionChecked: false,  // Track if initial session check is complete
     loading: false,
     error: null
   }),
@@ -106,6 +107,8 @@ export const useAuthStore = defineStore('auth', {
       } catch (error) {
         console.error('Error checking session:', error);
         this.isAuthenticated = false;
+      } finally {
+        this.sessionChecked = true;
       }
     },
 

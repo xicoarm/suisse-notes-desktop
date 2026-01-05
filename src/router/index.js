@@ -60,8 +60,13 @@ export default function (/* { store, ssrContext } */) {
   });
 
   // Navigation guard for authentication
-  Router.beforeEach((to, from, next) => {
+  Router.beforeEach(async (to, from, next) => {
     const authStore = useAuthStore();
+
+    // Wait for session check to complete on first navigation
+    if (!authStore.sessionChecked) {
+      await authStore.checkSession();
+    }
 
     if (to.meta.requiresAuth && !authStore.isAuthenticated) {
       next({ name: 'login' });
