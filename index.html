@@ -3,6 +3,7 @@
   <head>
     <title><%= productName %></title>
     <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://app.suisse-notes.ch https://*.ingest.de.sentry.io; media-src 'self' local-audio: blob:; base-uri 'self'; form-action 'self';">
     <meta name="description" content="<%= productDescription %>">
     <meta name="format-detection" content="telephone=no">
     <meta name="msapplication-tap-highlight" content="no">

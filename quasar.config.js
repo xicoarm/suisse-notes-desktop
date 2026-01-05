@@ -89,13 +89,47 @@ export default function (/* ctx */) {
           target: 'nsis',
           icon: 'src-electron/icons/icon.ico',
           publisherName: 'Suisse Notes',
-          signAndEditExecutable: false  // Skip code signing (no certificate yet)
+          // Code signing - enable when certificate is available
+          // Set environment variables in CI/CD:
+          //   CSC_LINK: path to .pfx certificate file
+          //   CSC_KEY_PASSWORD: certificate password
+          signAndEditExecutable: !!process.env.CSC_LINK
         },
         nsis: {
           oneClick: false,
           allowToChangeInstallationDirectory: true,
           installerIcon: 'src-electron/icons/icon.ico',
           uninstallerIcon: 'src-electron/icons/icon.ico'
+        },
+        mac: {
+          target: [
+            { target: 'dmg', arch: ['x64', 'arm64'] },
+            { target: 'zip', arch: ['x64', 'arm64'] }
+          ],
+          icon: 'src-electron/icons/icon.icns',
+          category: 'public.app-category.productivity',
+          hardenedRuntime: true,
+          gatekeeperAssess: false,
+          entitlements: 'build/entitlements.mac.plist',
+          entitlementsInherit: 'build/entitlements.mac.plist',
+          // Code signing - enable when certificate is available
+          // Set environment variables in CI/CD:
+          //   CSC_LINK: path to .p12 certificate file
+          //   CSC_KEY_PASSWORD: certificate password
+          //   APPLE_ID: Apple ID for notarization
+          //   APPLE_APP_SPECIFIC_PASSWORD: App-specific password
+          identity: process.env.CSC_LINK ? null : null // Use auto-detect when CSC_LINK is set
+        },
+        dmg: {
+          contents: [
+            { x: 130, y: 220 },
+            { x: 410, y: 220, type: 'link', path: '/Applications' }
+          ]
+        },
+        linux: {
+          target: ['AppImage', 'deb'],
+          icon: 'src-electron/icons',
+          category: 'AudioVideo'
         },
         extraResources: [
           {

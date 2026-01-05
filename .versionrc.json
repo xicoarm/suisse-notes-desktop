@@ -1,0 +1,16 @@
+{
+  "types": [
+    { "type": "feat", "section": "Features" },
+    { "type": "fix", "section": "Bug Fixes" },
+    { "type": "perf", "section": "Performance Improvements" },
+    { "type": "refactor", "section": "Code Refactoring" },
+    { "type": "docs", "section": "Documentation", "hidden": true },
+    { "type": "style", "section": "Styles", "hidden": true },
+    { "type": "chore", "section": "Maintenance", "hidden": true },
+    { "type": "test", "section": "Tests", "hidden": true },
+    { "type": "ci", "section": "CI/CD", "hidden": true },
+    { "type": "build", "section": "Build System", "hidden": true }
+  ],
+  "commitUrlFormat": "https://github.com/xicoarm/suisse-notes-desktop/commit/{{hash}}",
+  "compareUrlFormat": "https://github.com/xicoarm/suisse-notes-desktop/compare/{{previousTag}}...{{currentTag}}"
+}

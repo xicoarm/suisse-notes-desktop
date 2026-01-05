@@ -2,32 +2,48 @@
   <q-page class="record-page">
     <div class="record-container">
       <!-- IDLE STATE: Two-column layout -->
-      <div class="idle-layout" v-if="recordingStore.status === 'idle' && !recordingStore.isUploaded">
+      <div
+        v-if="recordingStore.status === 'idle' && !recordingStore.isUploaded"
+        class="idle-layout"
+      >
         <!-- Left Column: Upload File -->
         <div
-          class="upload-column modern-card no-hover"
+          class="upload-column modern-card no-hover clickable"
           :class="{ 'drag-over': isDragOver }"
+          @click="selectFileForUpload"
           @dragover.prevent="onDragOver"
           @dragleave.prevent="onDragLeave"
           @drop.prevent="onDrop"
         >
           <div class="upload-content">
-            <div class="upload-icon-wrapper" :class="{ 'drag-active': isDragOver }">
-              <q-icon :name="isDragOver ? 'file_download' : 'cloud_upload'" :size="isDragOver ? '40px' : '36px'" :color="isDragOver ? 'primary' : 'grey-6'" />
+            <div
+              class="upload-icon-wrapper"
+              :class="{ 'drag-active': isDragOver }"
+            >
+              <q-icon
+                :name="isDragOver ? 'file_download' : 'cloud_upload'"
+                :size="isDragOver ? '40px' : '36px'"
+                :color="isDragOver ? 'primary' : 'grey-6'"
+              />
             </div>
             <h3>{{ isDragOver ? $t('dropHere') : $t('uploadFile') }}</h3>
-            <p class="column-desc">{{ $t('uploadDesc') }}</p>
+            <p class="column-desc">
+              {{ $t('uploadDesc') }}
+            </p>
             <q-btn
               unelevated
               color="secondary"
               :label="$t('selectFile')"
               icon="folder_open"
-              @click="selectFileForUpload"
               :loading="isFileUploading"
               class="upload-btn"
+              @click="selectFileForUpload"
             />
             <div class="drag-drop-hint">
-              <q-icon name="mouse" size="12px" />
+              <q-icon
+                name="mouse"
+                size="12px"
+              />
               <span>{{ $t('dragDropHint') }}</span>
             </div>
             <div class="supported-formats">
@@ -44,7 +60,11 @@
         <!-- Right Column: Start Recording -->
         <div class="record-column modern-card no-hover">
           <div class="column-header">
-            <q-icon name="mic" size="sm" color="primary" />
+            <q-icon
+              name="mic"
+              size="sm"
+              color="primary"
+            />
             <h3>{{ $t('recordNew') }}</h3>
           </div>
 
@@ -62,7 +82,11 @@
           <!-- Microphone Selection -->
           <div class="mic-section">
             <div class="section-label">
-              <q-icon name="settings_voice" size="xs" color="grey-6" />
+              <q-icon
+                name="settings_voice"
+                size="xs"
+                color="grey-6"
+              />
               <span>{{ $t('microphone') }}</span>
             </div>
             <q-select
@@ -89,8 +113,8 @@
                   icon="refresh"
                   size="sm"
                   color="grey-6"
-                  @click.stop="loadMicrophones"
                   :loading="loadingMicrophones"
+                  @click.stop="loadMicrophones"
                 >
                   <q-tooltip>Refresh microphones</q-tooltip>
                 </q-btn>
@@ -102,7 +126,11 @@
           <div class="system-audio-section">
             <div class="system-audio-row">
               <div class="system-audio-info">
-                <q-icon name="volume_up" size="xs" color="grey-6" />
+                <q-icon
+                  name="volume_up"
+                  size="xs"
+                  color="grey-6"
+                />
                 <div class="system-audio-text">
                   <span class="label">{{ $t('systemAudio') }}</span>
                   <span class="description">{{ $t('systemAudioDesc') }}</span>
@@ -115,12 +143,26 @@
                 @update:model-value="toggleSystemAudio"
               />
             </div>
-            <div v-if="systemAudioEnabled" class="system-audio-active">
-              <q-icon name="check_circle" size="xs" color="positive" />
+            <div
+              v-if="systemAudioEnabled"
+              class="system-audio-active"
+            >
+              <q-icon
+                name="check_circle"
+                size="xs"
+                color="positive"
+              />
               <span>{{ $t('systemAudioEnabled') }}</span>
             </div>
-            <div v-if="showMacPermissionNotice" class="permission-notice">
-              <q-icon name="warning" size="xs" color="warning" />
+            <div
+              v-if="showMacPermissionNotice"
+              class="permission-notice"
+            >
+              <q-icon
+                name="warning"
+                size="xs"
+                color="warning"
+              />
               <span>{{ $t('macPermissionNotice') }}</span>
             </div>
           </div>
@@ -128,11 +170,19 @@
       </div>
 
       <!-- RECORDING/PAUSED STATE: Full-width recording card -->
-      <div class="recording-card modern-card no-hover" v-if="(recordingStore.isRecording || recordingStore.isPaused) && !recordingStore.isUploaded">
+      <div
+        v-if="(recordingStore.isRecording || recordingStore.isPaused) && !recordingStore.isUploaded"
+        class="recording-card modern-card no-hover"
+      >
         <!-- Header -->
         <div class="card-header text-center">
           <h2>Meeting Recorder</h2>
-          <p class="status-text" :class="statusClass">{{ statusText }}</p>
+          <p
+            class="status-text"
+            :class="statusClass"
+          >
+            {{ statusText }}
+          </p>
         </div>
 
         <!-- Timer Display -->
@@ -159,37 +209,70 @@
         </div>
 
         <!-- Error Display -->
-        <div class="error-section" v-if="recordingStore.error && !isAutoUploading">
-          <q-banner class="error-banner" rounded>
+        <div
+          v-if="recordingStore.error && !isAutoUploading"
+          class="error-section"
+        >
+          <q-banner
+            class="error-banner"
+            rounded
+          >
             <template #avatar>
-              <q-icon name="error_outline" color="negative" />
+              <q-icon
+                name="error_outline"
+                color="negative"
+              />
             </template>
             {{ recordingStore.error }}
             <template #action>
-              <q-btn flat color="negative" label="Dismiss" @click="recordingStore.error = null" />
+              <q-btn
+                flat
+                color="negative"
+                label="Dismiss"
+                @click="recordingStore.error = null"
+              />
             </template>
           </q-banner>
         </div>
       </div>
 
       <!-- Auto-Upload Progress Section -->
-      <div class="upload-card modern-card no-hover" v-if="showUploadSection">
+      <div
+        v-if="showUploadSection"
+        class="upload-card modern-card no-hover"
+      >
         <!-- Only show header during processing/uploading/error, not when complete -->
-        <div class="upload-header" v-if="!recordingStore.isUploaded">
-          <q-icon :name="uploadIcon" size="sm" :color="uploadIconColor" />
+        <div
+          v-if="!recordingStore.isUploaded"
+          class="upload-header"
+        >
+          <q-icon
+            :name="uploadIcon"
+            size="sm"
+            :color="uploadIconColor"
+          />
           <span>{{ uploadHeaderText }}</span>
         </div>
 
         <!-- Processing state -->
-        <div class="upload-content" v-if="isProcessing">
+        <div
+          v-if="isProcessing"
+          class="upload-content"
+        >
           <div class="processing-state">
-            <q-spinner-dots color="primary" size="40px" />
+            <q-spinner-dots
+              color="primary"
+              size="40px"
+            />
             <span>Processing recording...</span>
           </div>
         </div>
 
         <!-- Uploading state -->
-        <div class="upload-content" v-else-if="isAutoUploading">
+        <div
+          v-else-if="isAutoUploading"
+          class="upload-content"
+        >
           <div class="upload-progress-section">
             <div class="progress-info">
               <span class="progress-text">
@@ -211,15 +294,25 @@
               size="8px"
               rounded
             />
-            <div class="progress-meta" v-if="displayProgress < 100">
+            <div
+              v-if="displayProgress < 100"
+              class="progress-meta"
+            >
               <span>{{ formatBytes(recordingStore.bytesUploaded) }} / {{ formatBytes(recordingStore.bytesTotal) }}</span>
             </div>
-            <div class="progress-meta" v-else>
+            <div
+              v-else
+              class="progress-meta"
+            >
               <span>Upload complete, waiting for server response...</span>
             </div>
           </div>
           <div class="upload-note">
-            <q-icon name="info" size="xs" color="grey-6" />
+            <q-icon
+              name="info"
+              size="xs"
+              color="grey-6"
+            />
             <span>Upload continues in background - you can start a new recording</span>
           </div>
           <div class="upload-actions">
@@ -231,13 +324,28 @@
               size="sm"
               @click="startNewWhileUploading"
             />
+            <q-btn
+              flat
+              color="negative"
+              label="Cancel Upload"
+              icon="close"
+              size="sm"
+              @click="cancelUpload"
+            />
           </div>
         </div>
 
         <!-- Upload Error state -->
-        <div class="upload-content" v-else-if="uploadError">
+        <div
+          v-else-if="uploadError"
+          class="upload-content"
+        >
           <div class="error-state">
-            <q-icon name="cloud_off" size="lg" color="negative" />
+            <q-icon
+              name="cloud_off"
+              size="lg"
+              color="negative"
+            />
             <div class="error-info">
               <span class="error-title">Upload Failed</span>
               <span class="error-message">{{ uploadError }}</span>
@@ -250,8 +358,8 @@
               class="gradient-btn"
               label="Retry Upload"
               icon="refresh"
-              @click="retryUpload"
               :loading="isRetrying"
+              @click="retryUpload"
             />
             <q-btn
               flat
@@ -263,20 +371,38 @@
           </div>
 
           <div class="error-note">
-            <q-icon name="save" size="xs" color="grey-6" />
+            <q-icon
+              name="save"
+              size="xs"
+              color="grey-6"
+            />
             <span>Your recording is saved locally and can be uploaded later from History</span>
           </div>
         </div>
 
         <!-- Upload Complete state -->
-        <div class="upload-success" v-else-if="recordingStore.isUploaded">
+        <div
+          v-else-if="recordingStore.isUploaded"
+          class="upload-success"
+        >
           <!-- Main CTA: View Transcript (the primary focus) -->
-          <div class="transcript-cta" v-if="currentAudioFileId">
+          <div
+            v-if="currentAudioFileId"
+            class="transcript-cta"
+          >
             <div class="cta-icon">
-              <q-icon name="check_circle" size="80px" color="positive" />
+              <q-icon
+                name="check_circle"
+                size="80px"
+                color="positive"
+              />
             </div>
-            <h3 class="cta-title">{{ $t('transcriptReady') }}</h3>
-            <p class="cta-subtitle">{{ $t('transcriptCta') }}</p>
+            <h3 class="cta-title">
+              {{ $t('transcriptReady') }}
+            </h3>
+            <p class="cta-subtitle">
+              {{ $t('transcriptCta') }}
+            </p>
 
             <!-- Prominent clickable button with animation -->
             <div class="cta-button-wrapper">
@@ -286,12 +412,20 @@
                 @click="openInSuisseNotes"
               >
                 <div class="button-content">
-                  <q-icon name="open_in_new" size="28px" class="q-mr-md" />
+                  <q-icon
+                    name="open_in_new"
+                    size="28px"
+                    class="q-mr-md"
+                  />
                   <div class="button-text">
                     <span class="button-label">{{ $t('openInSuisseNotes') }}</span>
                     <span class="button-hint">{{ $t('clickHereToView') }}</span>
                   </div>
-                  <q-icon name="arrow_forward" size="24px" class="q-ml-md arrow-icon" />
+                  <q-icon
+                    name="arrow_forward"
+                    size="24px"
+                    class="q-ml-md arrow-icon"
+                  />
                 </div>
               </q-btn>
             </div>
@@ -300,11 +434,19 @@
           <!-- Secondary info -->
           <div class="success-secondary">
             <div class="success-badge">
-              <q-icon name="check_circle" size="sm" color="positive" />
+              <q-icon
+                name="check_circle"
+                size="sm"
+                color="positive"
+              />
               <span>{{ $t('uploadComplete') }}</span>
             </div>
             <div class="success-meta">
-              <q-icon name="schedule" size="sm" color="grey-6" />
+              <q-icon
+                name="schedule"
+                size="sm"
+                color="grey-6"
+              />
               <span>{{ formattedFinalDuration }}</span>
             </div>
           </div>
@@ -315,25 +457,32 @@
               color="primary"
               :label="$t('newRecording')"
               icon="mic"
-              @click="handleNewRecording"
               class="secondary-action-btn"
+              @click="handleNewRecording"
             />
             <q-btn
               flat
               color="grey-7"
               :label="$t('viewHistory')"
               icon="history"
-              @click="goToHistory"
               class="secondary-action-btn"
+              @click="goToHistory"
             />
           </div>
         </div>
       </div>
 
       <!-- Tips Section (only when idle) -->
-      <div class="tips-card modern-card no-hover" v-if="recordingStore.status === 'idle'">
+      <div
+        v-if="recordingStore.status === 'idle'"
+        class="tips-card modern-card no-hover"
+      >
         <div class="tips-header">
-          <q-icon name="tips_and_updates" size="sm" color="primary" />
+          <q-icon
+            name="tips_and_updates"
+            size="sm"
+            color="primary"
+          />
           <span>Tips for better recordings</span>
         </div>
         <ul class="tips-list">
@@ -342,7 +491,11 @@
           <li>Recording will be automatically uploaded when you stop</li>
         </ul>
         <div class="tips-contact">
-          <q-icon name="headset_mic" size="xs" color="grey-6" />
+          <q-icon
+            name="headset_mic"
+            size="xs"
+            color="grey-6"
+          />
           <span>Need help choosing a microphone? Contact us at <a href="mailto:info@suisse-voice.ch">info@suisse-voice.ch</a></span>
         </div>
       </div>
@@ -771,6 +924,35 @@ const startNewWhileUploading = () => {
   recordingStore.bytesUploaded = 0;
   recordingStore.bytesTotal = 0;
   recordingStore.error = null;
+};
+
+// Cancel the current upload
+const cancelUpload = async () => {
+  try {
+    if (recordingStore.recordId) {
+      await window.electronAPI.upload.cancel(recordingStore.recordId);
+    }
+
+    // Reset UI state
+    isProcessing.value = false;
+    isAutoUploading.value = false;
+    uploadError.value = null;
+    retryAttempt.value = 0;
+
+    // Reset store
+    recordingStore.status = 'idle';
+    recordingStore.uploadProgress = 0;
+    recordingStore.bytesUploaded = 0;
+    recordingStore.bytesTotal = 0;
+    recordingStore.error = null;
+
+    $q.notify({
+      type: 'info',
+      message: 'Upload cancelled'
+    });
+  } catch (error) {
+    console.error('Error cancelling upload:', error);
+  }
 };
 
 const openInSuisseNotes = async () => {

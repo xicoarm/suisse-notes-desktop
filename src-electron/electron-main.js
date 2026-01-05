@@ -842,7 +842,7 @@ function getDeviceId() {
 // Authentication - Production only (no demo mode)
 ipcMain.handle('auth:login', async (event, email, password) => {
   try {
-    // Suisse-Notes API authentication
+    // Suisse Notes API authentication
     const response = await axios.post(`${API_BASE_URL}/api/auth/desktop`, {
       email,
       password,
@@ -882,7 +882,7 @@ ipcMain.handle('auth:login', async (event, email, password) => {
       // Server responded with error
       errorMessage = error.response.data?.error || error.response.data?.message || `Server error: ${error.response.status}`;
     } else if (error.code === 'ECONNREFUSED') {
-      errorMessage = 'Could not connect to Suisse-Notes server';
+      errorMessage = 'Could not connect to Suisse Notes server';
     } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
       errorMessage = 'Connection timed out. Please check your internet connection.';
     } else if (error.code === 'ENOTFOUND') {
@@ -947,7 +947,7 @@ ipcMain.handle('auth:register', async (event, email, password, name) => {
         errorMessage = error.response.data?.error || `Server error: ${error.response.status}`;
       }
     } else if (error.code === 'ECONNREFUSED') {
-      errorMessage = 'Could not connect to Suisse-Notes server';
+      errorMessage = 'Could not connect to Suisse Notes server';
     } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
       errorMessage = 'Connection timed out. Please check your internet connection.';
     } else if (error.code === 'ENOTFOUND') {
@@ -1706,6 +1706,15 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
   const retryDelays = [0, 2000, 5000, 10000]; // Exponential backoff
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    // Define progress tracking variables at loop scope so catch block can access them
+    let progressInterval = null;
+    const stopProgressUpdates = () => {
+      if (progressInterval) {
+        clearInterval(progressInterval);
+        progressInterval = null;
+      }
+    };
+
     try {
       // Wait before retry (except first attempt)
       if (attempt > 0) {
@@ -1779,7 +1788,6 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
       const estimatedUploadMs = (fileSizeBytes / (1.5 * 1024 * 1024)) * 1000 + 10000;
 
       let lastProgress = 0;
-      let progressInterval = null;
 
       // Update progress based on elapsed time (more realistic than axios progress)
       const startProgressUpdates = () => {
@@ -1800,13 +1808,6 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
             });
           }
         }, 500);
-      };
-
-      const stopProgressUpdates = () => {
-        if (progressInterval) {
-          clearInterval(progressInterval);
-          progressInterval = null;
-        }
       };
 
       startProgressUpdates();

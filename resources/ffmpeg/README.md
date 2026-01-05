@@ -2,15 +2,37 @@
 
 Place FFmpeg binaries here for production builds.
 
-## Required Files (Windows)
-- `ffmpeg.exe`
-- `ffprobe.exe`
+## Current Structure
+```
+resources/ffmpeg/
+├── ffmpeg.exe      # Windows (current)
+├── ffprobe.exe     # Windows (current)
+└── darwin/         # macOS (add when ready)
+    └── ffmpeg
+```
 
-## Download
-Download FFmpeg from: https://ffmpeg.org/download.html
+## Windows (Current)
+- `ffmpeg.exe` ✓
+- `ffprobe.exe` ✓
 
-For Windows, you can get pre-built binaries from:
+## macOS (When Ready)
+Create a `darwin/` folder and add:
+- `darwin/ffmpeg` (universal binary for x64 + arm64)
+
+### Download Sources
+
+**Windows:**
 - https://github.com/BtbN/FFmpeg-Builds/releases (recommended)
 - https://www.gyan.dev/ffmpeg/builds/
 
-Download the "essentials" or "full" build and extract `ffmpeg.exe` and `ffprobe.exe` to this folder.
+**macOS:**
+- https://evermeet.cx/ffmpeg/ (pre-built universal binaries)
+- Or build from source with: `./configure --enable-cross-compile && make`
+
+### macOS Setup Steps
+1. Download FFmpeg for macOS (universal binary recommended)
+2. Create folder: `resources/ffmpeg/darwin/`
+3. Copy `ffmpeg` binary to `resources/ffmpeg/darwin/ffmpeg`
+4. Make executable: `chmod +x resources/ffmpeg/darwin/ffmpeg`
+5. Create `src-electron/icons/icon.icns` (convert from PNG)
+6. Enable macOS build in `.github/workflows/release.yml`

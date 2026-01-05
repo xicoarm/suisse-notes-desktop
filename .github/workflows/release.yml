@@ -30,15 +30,99 @@ jobs:
       - name: Build Electron app
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Code signing (optional - uncomment and add secrets when certificate is available)
+          # CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          # CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
         run: npm run build
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: |
+            dist/electron/Packaged/*.exe
+            dist/electron/Packaged/*.exe.blockmap
+            dist/electron/Packaged/latest.yml
+
+  # ============================================================================
+  # macOS Build (DISABLED - uncomment when ready)
+  #
+  # To enable macOS builds:
+  # 1. Add resources/ffmpeg/darwin/ffmpeg binary (download from https://ffmpeg.org/download.html)
+  # 2. Add src-electron/icons/icon.icns (convert from PNG using iconutil or online tool)
+  # 3. Uncomment the build-macos job below
+  # 4. Change release job 'needs' to: [build-windows, build-macos]
+  # 5. Uncomment the macOS artifact download and file entries in release job
+  #
+  # For code signing (recommended for distribution):
+  # - Get Apple Developer account ($99/year)
+  # - Create Developer ID Application certificate
+  # - Add secrets: MAC_CSC_LINK, MAC_CSC_KEY_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD
+  # ============================================================================
+
+  # build-macos:
+  #   runs-on: macos-latest
+  #
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #       with:
+  #         lfs: true
+  #
+  #     - name: Setup Node.js
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: '20'
+  #         cache: 'npm'
+  #
+  #     - name: Install dependencies
+  #       run: npm ci
+  #
+  #     - name: Build Electron app for macOS
+  #       env:
+  #         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #         # Code signing (uncomment when Apple Developer certificate is available)
+  #         # CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+  #         # CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+  #         # APPLE_ID: ${{ secrets.APPLE_ID }}
+  #         # APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+  #       run: npm run build
+  #
+  #     - name: Upload macOS artifacts
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: macos-build
+  #         path: |
+  #           dist/electron/Packaged/*.dmg
+  #           dist/electron/Packaged/*.dmg.blockmap
+  #           dist/electron/Packaged/*.zip
+  #           dist/electron/Packaged/latest-mac.yml
+
+  release:
+    needs: [build-windows]  # Add build-macos when enabled
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build
+          path: artifacts/windows
+
+      # Uncomment when macOS build is enabled:
+      # - name: Download macOS artifacts
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: macos-build
+      #     path: artifacts/macos
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            dist/electron/Packaged/*.exe
-            dist/electron/Packaged/*.exe.blockmap
-            dist/electron/Packaged/latest.yml
+            artifacts/windows/*
+          # Add when macOS is enabled:
+          #   artifacts/macos/*
           draft: false
           prerelease: false
         env:

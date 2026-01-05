@@ -35,3 +35,6 @@ Thumbs.db
 # Keep icons - needed for build
 # /src-electron/icons/icon.icns
 # /src-electron/icons/icon.ico
+
+# Claude AI context file (local development notes)
+CLAUDE_CONTEXT.md
