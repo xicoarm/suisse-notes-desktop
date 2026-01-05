@@ -1379,6 +1379,53 @@ ipcMain.handle('history:delete', async (event, id, deleteFile = false, userId) =
   }
 });
 
+// Delete ALL recordings for a user (irreversible!)
+ipcMain.handle('history:deleteAll', async (event, userId) => {
+  try {
+    // CRITICAL: userId is required to prevent cross-account deletions
+    if (!userId) {
+      console.error('SECURITY: Attempted to delete all recordings without userId');
+      return { success: false, error: 'userId is required' };
+    }
+
+    const recordings = historyStore.get('recordings', []);
+    const userRecordings = recordings.filter(r => r.userId === userId);
+
+    let deletedCount = 0;
+    let errorCount = 0;
+
+    // Delete all recording files for this user
+    for (const recording of userRecordings) {
+      if (recording.filePath) {
+        try {
+          const recordingDir = path.dirname(recording.filePath);
+          if (fs.existsSync(recordingDir)) {
+            await fs.promises.rm(recordingDir, { recursive: true, force: true });
+            deletedCount++;
+          }
+        } catch (e) {
+          console.warn('Could not delete recording file:', recording.id, e);
+          errorCount++;
+        }
+      }
+    }
+
+    // Remove all user's recordings from history
+    const newRecordings = recordings.filter(r => r.userId !== userId);
+    historyStore.set('recordings', newRecordings);
+
+    console.log(`Deleted ${deletedCount} recordings for user ${userId} (${errorCount} errors)`);
+    return {
+      success: true,
+      deletedCount,
+      errorCount
+    };
+  } catch (error) {
+    console.error('Error deleting all recordings:', error);
+    return { success: false, error: error.message };
+  }
+});
+
 // Get default storage preference
 ipcMain.handle('history:getDefaultStoragePreference', async () => {
   return historyStore.get('defaultStoragePreference', 'keep');

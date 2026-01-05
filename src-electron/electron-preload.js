@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     add: (recording) => ipcRenderer.invoke('history:add', recording),
     update: (id, updates, userId) => ipcRenderer.invoke('history:update', id, updates, userId),
     delete: (id, deleteFile, userId) => ipcRenderer.invoke('history:delete', id, deleteFile, userId),
+    deleteAll: (userId) => ipcRenderer.invoke('history:deleteAll', userId),
     getDefaultStoragePreference: () =>
       ipcRenderer.invoke('history:getDefaultStoragePreference'),
     setDefaultStoragePreference: (preference) =>

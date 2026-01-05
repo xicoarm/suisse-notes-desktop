@@ -62,7 +62,61 @@
           <div class="setting-label">Data location</div>
           <div class="setting-value path-value">{{ userDataPath }}</div>
         </div>
+
+        <div class="setting-row danger-zone">
+          <div class="setting-info">
+            <div class="setting-label danger-label">Delete all recordings</div>
+            <div class="setting-description">Permanently delete all local recordings. This cannot be undone.</div>
+          </div>
+          <q-btn
+            flat
+            color="negative"
+            label="Delete All"
+            icon="delete_forever"
+            @click="showDeleteConfirmation = true"
+            :loading="isDeleting"
+          />
+        </div>
       </div>
+
+      <!-- Delete Confirmation Dialog -->
+      <q-dialog v-model="showDeleteConfirmation" persistent>
+        <q-card class="delete-dialog">
+          <q-card-section class="dialog-header">
+            <q-icon name="warning" color="negative" size="48px" />
+            <div class="dialog-title">Delete All Recordings?</div>
+          </q-card-section>
+
+          <q-card-section class="dialog-content">
+            <p><strong>This action is irreversible.</strong></p>
+            <p>All {{ recordingsCount }} local recording(s) will be permanently deleted from this device.</p>
+            <p class="warning-text">Recordings that have been uploaded to Suisse Notes will still be available in the web app.</p>
+
+            <div class="confirm-input">
+              <p>Type <strong>DELETE</strong> to confirm:</p>
+              <q-input
+                v-model="deleteConfirmText"
+                outlined
+                dense
+                placeholder="Type DELETE"
+                :error="deleteConfirmText.length > 0 && deleteConfirmText !== 'DELETE'"
+              />
+            </div>
+          </q-card-section>
+
+          <q-card-actions align="right" class="dialog-actions">
+            <q-btn flat label="Cancel" color="primary" v-close-popup />
+            <q-btn
+              flat
+              label="Delete All Recordings"
+              color="negative"
+              :disable="deleteConfirmText !== 'DELETE'"
+              :loading="isDeleting"
+              @click="handleDeleteAll"
+            />
+          </q-card-actions>
+        </q-card>
+      </q-dialog>
 
       <!-- About Section -->
       <div class="settings-section">
@@ -94,12 +148,14 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
+import { useQuasar } from 'quasar';
 import { useConfigStore } from '../stores/config';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 
+const $q = useQuasar();
 const router = useRouter();
 const configStore = useConfigStore();
 const authStore = useAuthStore();
@@ -108,6 +164,13 @@ const historyStore = useRecordingsHistoryStore();
 const appVersion = ref('1.0.0');
 const userDataPath = ref('');
 const storagePreference = ref('keep');
+
+// Delete all recordings state
+const showDeleteConfirmation = ref(false);
+const deleteConfirmText = ref('');
+const isDeleting = ref(false);
+
+const recordingsCount = computed(() => historyStore.recordings.length);
 
 const storageOptions = [
   { value: 'keep', label: 'Keep locally' },
@@ -132,6 +195,51 @@ onMounted(async () => {
 
 const updateStoragePreference = async (value) => {
   await historyStore.setDefaultStoragePreference(value);
+};
+
+const handleDeleteAll = async () => {
+  if (deleteConfirmText.value !== 'DELETE') return;
+
+  isDeleting.value = true;
+  try {
+    const userId = authStore.user?.id;
+    if (!userId) {
+      $q.notify({
+        type: 'negative',
+        message: 'You must be logged in to delete recordings'
+      });
+      return;
+    }
+
+    const result = await window.electronAPI.history.deleteAll(userId);
+
+    if (result.success) {
+      // Reload the history store to reflect changes
+      await historyStore.loadRecordings();
+
+      showDeleteConfirmation.value = false;
+      deleteConfirmText.value = '';
+
+      $q.notify({
+        type: 'positive',
+        message: `Successfully deleted ${result.deletedCount} recording(s)`,
+        icon: 'check_circle'
+      });
+    } else {
+      $q.notify({
+        type: 'negative',
+        message: result.error || 'Failed to delete recordings'
+      });
+    }
+  } catch (error) {
+    console.error('Error deleting all recordings:', error);
+    $q.notify({
+      type: 'negative',
+      message: 'An error occurred while deleting recordings'
+    });
+  } finally {
+    isDeleting.value = false;
+  }
 };
 
 const handleLogout = async () => {
@@ -248,5 +356,69 @@ const handleLogout = async () => {
 // Override Quasar select styling
 :deep(.q-field--outlined .q-field__control) {
   border-radius: 8px;
+}
+
+// Danger zone styling
+.danger-zone {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #fecaca;
+  background: #fef2f2;
+  margin: 16px -24px -24px -24px;
+  padding: 20px 24px;
+  border-radius: 0 0 12px 12px;
+
+  .danger-label {
+    color: #dc2626;
+    font-weight: 500;
+  }
+}
+
+// Delete confirmation dialog
+.delete-dialog {
+  min-width: 400px;
+  max-width: 500px;
+
+  .dialog-header {
+    text-align: center;
+    padding-bottom: 8px;
+
+    .dialog-title {
+      font-size: 20px;
+      font-weight: 600;
+      margin-top: 16px;
+      color: #1e293b;
+    }
+  }
+
+  .dialog-content {
+    p {
+      margin-bottom: 12px;
+      color: #475569;
+    }
+
+    .warning-text {
+      background: #f0fdf4;
+      border: 1px solid #86efac;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 13px;
+      color: #166534;
+    }
+
+    .confirm-input {
+      margin-top: 20px;
+
+      p {
+        margin-bottom: 8px;
+        font-size: 14px;
+      }
+    }
+  }
+
+  .dialog-actions {
+    padding: 16px 24px;
+    border-top: 1px solid #e2e8f0;
+  }
 }
 </style>
