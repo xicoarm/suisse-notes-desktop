@@ -88,6 +88,7 @@ export default function (/* ctx */) {
         win: {
           target: 'nsis',
           icon: 'src-electron/icons/icon.ico',
+          publisherName: 'Suisse Notes',
           signAndEditExecutable: false  // Skip code signing (no certificate yet)
         },
         nsis: {
