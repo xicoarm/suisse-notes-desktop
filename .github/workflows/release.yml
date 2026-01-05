@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -13,7 +16,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          lfs: true  # Pull LFS files (FFmpeg binaries)
+          lfs: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -24,17 +27,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build and publish to GitHub Releases
+      - name: Build Electron app
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run build
 
-      - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
         with:
-          name: suisse-notes-windows-installer
-          path: |
+          files: |
             dist/electron/Packaged/*.exe
             dist/electron/Packaged/*.exe.blockmap
             dist/electron/Packaged/latest.yml
-          retention-days: 30
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
