@@ -62,17 +62,24 @@ export const useRecordingStore = defineStore('recording', {
         this.chunkIndex = 0;
         this.error = null;
 
+        // Notify main process that recording is starting (for window close protection)
+        await window.electronAPI.recording.setInProgress(true);
+
         // Create session directory
         const result = await window.electronAPI.recording.createSession(this.recordId, '.webm');
 
         if (!result.success) {
-          throw new Error('Failed to create recording session');
+          // Clear recording state on failure
+          await window.electronAPI.recording.setInProgress(false);
+          throw new Error(result.error || 'Failed to create recording session');
         }
 
         return { success: true, recordId: this.recordId };
       } catch (error) {
         this.error = error.message;
         this.status = 'error';
+        // Ensure main process knows recording failed
+        await window.electronAPI.recording.setInProgress(false);
         return { success: false, error: error.message };
       }
     },
@@ -93,45 +100,94 @@ export const useRecordingStore = defineStore('recording', {
       try {
         this.status = 'stopped';
 
+        // Notify main process that recording stopped, now processing
+        await window.electronAPI.recording.setInProgress(false);
+        await window.electronAPI.recording.setProcessing(true);
+
         // Combine all chunks
         const result = await window.electronAPI.recording.combineChunks(this.recordId, '.webm');
 
+        // Clear processing state
+        await window.electronAPI.recording.setProcessing(false);
+
         if (result.success) {
           this.audioFilePath = result.outputPath;
-          return { success: true, filePath: result.outputPath };
+          return { success: true, filePath: result.outputPath, warning: result.warning };
         } else {
           throw new Error(result.error || 'Failed to combine recording chunks');
         }
       } catch (error) {
         this.error = error.message;
         this.status = 'error';
+        // Ensure states are cleared on error
+        await window.electronAPI.recording.setInProgress(false);
+        await window.electronAPI.recording.setProcessing(false);
         return { success: false, error: error.message };
       }
     },
 
     async saveChunk(chunkData) {
-      try {
-        const result = await window.electronAPI.recording.saveChunk(
-          this.recordId,
-          chunkData,
-          this.chunkIndex,
-          '.webm'
-        );
+      const maxRetries = 3;
+      const retryDelays = [1000, 2000, 4000]; // Exponential backoff: 1s, 2s, 4s
 
-        if (result.success) {
-          this.chunkIndex++;
-          return { success: true };
-        } else {
-          throw new Error('Failed to save chunk');
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          const result = await window.electronAPI.recording.saveChunk(
+            this.recordId,
+            chunkData,
+            this.chunkIndex,
+            '.webm'
+          );
+
+          if (result.success) {
+            this.chunkIndex++;
+            return { success: true };
+          } else {
+            throw new Error(result.error || 'Failed to save chunk');
+          }
+        } catch (error) {
+          console.error(`Error saving chunk (attempt ${attempt + 1}/${maxRetries + 1}):`, error);
+
+          // If we have retries left, wait and try again
+          if (attempt < maxRetries) {
+            const delay = retryDelays[attempt];
+            console.log(`Retrying chunk save in ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          } else {
+            // All retries exhausted
+            console.error('All chunk save retries exhausted, chunk may be lost');
+            return { success: false, error: error.message, retriesExhausted: true };
+          }
         }
-      } catch (error) {
-        console.error('Error saving chunk:', error);
-        return { success: false, error: error.message };
       }
+
+      return { success: false, error: 'Unexpected error in saveChunk' };
     },
 
     updateDuration(seconds) {
       this.duration = seconds;
+    },
+
+    // Create session file from current chunks (for auto-split)
+    async createSessionFile() {
+      try {
+        const result = await window.electronAPI.recording.createSessionFile(this.recordId, '.webm');
+        if (result.success) {
+          console.log('Session file created successfully');
+          return { success: true };
+        } else {
+          throw new Error(result.error || 'Failed to create session file');
+        }
+      } catch (error) {
+        console.error('Error creating session file:', error);
+        return { success: false, error: error.message };
+      }
+    },
+
+    // Reset chunk index after auto-split
+    resetChunkIndex() {
+      this.chunkIndex = 0;
+      console.log('Chunk index reset for new session');
     },
 
     updateUploadProgress(progress, bytesUploaded, bytesTotal) {

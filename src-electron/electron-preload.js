@@ -1,5 +1,25 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Timeout wrapper for IPC calls to prevent indefinite blocking
+function withTimeout(promise, timeoutMs, operationName) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs)
+    )
+  ]);
+}
+
+// Default timeouts for different operations
+const IPC_TIMEOUTS = {
+  default: 30000,       // 30 seconds for most operations
+  save: 10000,          // 10 seconds for chunk saves
+  combine: 300000,      // 5 minutes for combining chunks
+  upload: 600000,       // 10 minutes minimum for uploads
+  auth: 30000,          // 30 seconds for auth operations
+  quick: 5000           // 5 seconds for quick operations
+};
+
 // Expose protected methods to renderer process
 contextBridge.exposeInMainWorld('electronAPI', {
   // Configuration (read-only - no user-configurable URLs)
@@ -24,21 +44,65 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Recording (WhisperTranscribe pattern)
   recording: {
     createSession: (id, ext) =>
-      ipcRenderer.invoke('recording:createSession', id, ext),
+      withTimeout(
+        ipcRenderer.invoke('recording:createSession', id, ext),
+        IPC_TIMEOUTS.default,
+        'Create session'
+      ),
     saveChunk: (id, chunkData, chunkIndex, ext) =>
-      ipcRenderer.invoke('recording:saveChunk', id, chunkData, chunkIndex, ext),
+      withTimeout(
+        ipcRenderer.invoke('recording:saveChunk', id, chunkData, chunkIndex, ext),
+        IPC_TIMEOUTS.save,
+        'Save chunk'
+      ),
     createSessionFile: (id, ext) =>
-      ipcRenderer.invoke('recording:createSessionFile', id, ext),
+      withTimeout(
+        ipcRenderer.invoke('recording:createSessionFile', id, ext),
+        IPC_TIMEOUTS.combine,
+        'Create session file'
+      ),
     combineChunks: (id, ext) =>
-      ipcRenderer.invoke('recording:combineChunks', id, ext),
+      withTimeout(
+        ipcRenderer.invoke('recording:combineChunks', id, ext),
+        IPC_TIMEOUTS.combine,
+        'Combine chunks'
+      ),
     checkForChunks: (id, ext) =>
-      ipcRenderer.invoke('recording:checkForChunks', id, ext),
+      withTimeout(
+        ipcRenderer.invoke('recording:checkForChunks', id, ext),
+        IPC_TIMEOUTS.quick,
+        'Check for chunks'
+      ),
     getFilePath: (id, ext) =>
-      ipcRenderer.invoke('recording:getFilePath', id, ext),
+      withTimeout(
+        ipcRenderer.invoke('recording:getFilePath', id, ext),
+        IPC_TIMEOUTS.quick,
+        'Get file path'
+      ),
     deleteRecording: (id) =>
-      ipcRenderer.invoke('recording:deleteRecording', id),
+      withTimeout(
+        ipcRenderer.invoke('recording:deleteRecording', id),
+        IPC_TIMEOUTS.default,
+        'Delete recording'
+      ),
     getFileUrl: (filePath) =>
-      ipcRenderer.invoke('recording:getFileUrl', filePath)
+      withTimeout(
+        ipcRenderer.invoke('recording:getFileUrl', filePath),
+        IPC_TIMEOUTS.quick,
+        'Get file URL'
+      ),
+    // Disk space check before recording
+    checkDiskSpace: () =>
+      withTimeout(
+        ipcRenderer.invoke('recording:checkDiskSpace'),
+        IPC_TIMEOUTS.quick,
+        'Check disk space'
+      ),
+    // Recording state for window close protection
+    setInProgress: (inProgress) =>
+      ipcRenderer.invoke('recording:setInProgress', inProgress),
+    setProcessing: (processing) =>
+      ipcRenderer.invoke('recording:setProcessing', processing)
   },
 
   // History management (all methods require userId for security)
@@ -60,6 +124,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     pause: (recordId) => ipcRenderer.invoke('upload:pause', recordId),
     resume: (recordId) => ipcRenderer.invoke('upload:resume', recordId),
     cancel: (recordId) => ipcRenderer.invoke('upload:cancel', recordId),
+    // Upload queue methods (for offline persistence)
+    getPendingQueue: () => ipcRenderer.invoke('upload:getPendingQueue'),
+    retryPending: () => ipcRenderer.invoke('upload:retryPending'),
+    removeFromQueue: (recordId) => ipcRenderer.invoke('upload:removeFromQueue', recordId),
     onProgress: (callback) => {
       ipcRenderer.on('upload:progress', (event, data) => callback(data));
     },

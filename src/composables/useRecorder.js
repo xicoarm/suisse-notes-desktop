@@ -25,6 +25,10 @@ export function useRecorder() {
   const durationInterval = ref(null);
   const levelInterval = ref(null);
 
+  // Auto-split configuration
+  const MAX_DURATION_SECONDS = 4 * 60 * 60 + 55 * 60; // 4h 55m = 17,700 seconds
+  const isAutoSplitting = ref(false); // Flag to prevent multiple splits
+
   // Microphone selection
   const availableMicrophones = ref([]);
   const selectedMicrophoneId = ref('');
@@ -99,14 +103,54 @@ export function useRecorder() {
     audioLevel.value = 0;
   };
 
+  // Auto-split function - creates session file and resets for continued recording
+  const performAutoSplit = async () => {
+    if (isAutoSplitting.value) return;
+    isAutoSplitting.value = true;
+
+    console.log('Auto-split triggered at 4h 55m, creating session file...');
+
+    try {
+      // 1. Request final data from MediaRecorder to flush current chunk
+      if (mediaRecorder.value && mediaRecorder.value.state === 'recording') {
+        mediaRecorder.value.requestData();
+      }
+
+      // 2. Wait for chunk to be saved
+      await new Promise(r => setTimeout(r, 1000));
+
+      // 3. Create session file from current chunks
+      const result = await recordingStore.createSessionFile();
+      if (!result.success) {
+        console.error('Auto-split: Failed to create session file:', result.error);
+      } else {
+        console.log('Auto-split: Session file created successfully');
+      }
+
+      // 4. Reset chunk index for new session
+      recordingStore.resetChunkIndex();
+
+      console.log('Auto-split complete, continuing recording...');
+    } catch (error) {
+      console.error('Error during auto-split:', error);
+    } finally {
+      isAutoSplitting.value = false;
+    }
+  };
+
   // Duration tracking
   const startDurationTracking = () => {
     const startTime = Date.now();
 
-    durationInterval.value = setInterval(() => {
+    durationInterval.value = setInterval(async () => {
       if (recordingStore.isRecording) {
         const elapsed = Math.floor((Date.now() - startTime) / 1000);
         recordingStore.updateDuration(elapsed);
+
+        // Check for auto-split at 4h 55m
+        if (elapsed >= MAX_DURATION_SECONDS && !isAutoSplitting.value) {
+          await performAutoSplit();
+        }
       }
     }, 1000);
   };

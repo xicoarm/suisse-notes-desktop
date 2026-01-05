@@ -8,6 +8,70 @@ const ffmpeg = require('fluent-ffmpeg');
 const { Upload } = require('tus-js-client');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
+const Sentry = require('@sentry/electron/main');
+
+// === Log Rotation Configuration ===
+// Prevent infinite log file growth
+log.transports.file.maxSize = 5 * 1024 * 1024; // 5MB max per log file
+log.transports.file.format = '[{y}-{m}-{d} {h}:{i}:{s}] [{level}] {text}';
+log.transports.file.archiveLogFn = (oldLogFile) => {
+  // Keep up to 3 archived log files
+  const archivePath = oldLogFile.path + '.old';
+  const fs = require('fs');
+
+  // Remove oldest archive if it exists
+  const archive3 = archivePath + '.3';
+  const archive2 = archivePath + '.2';
+  const archive1 = archivePath + '.1';
+
+  try {
+    if (fs.existsSync(archive3)) fs.unlinkSync(archive3);
+    if (fs.existsSync(archive2)) fs.renameSync(archive2, archive3);
+    if (fs.existsSync(archive1)) fs.renameSync(archive1, archive2);
+    if (fs.existsSync(archivePath)) fs.renameSync(archivePath, archive1);
+    fs.renameSync(oldLogFile.path, archivePath);
+  } catch (e) {
+    console.warn('Log rotation error:', e);
+  }
+};
+
+// Initialize Sentry for crash reporting (must be early)
+Sentry.init({
+  dsn: 'https://185912b1585eb5138079ae189a6d41ec@o4510659364716544.ingest.de.sentry.io/4510659366748240',
+  environment: app.isPackaged ? 'production' : 'development',
+  release: `suisse-notes@${app.getVersion()}`,
+  beforeSend(event) {
+    // Scrub sensitive data from error reports
+    if (event.request?.headers?.authorization) {
+      event.request.headers.authorization = '[REDACTED]';
+    }
+    return event;
+  }
+});
+
+// === Global Error Handlers ===
+// Catch uncaught exceptions in main process
+process.on('uncaughtException', (error) => {
+  log.error('Uncaught Exception:', error);
+  Sentry.captureException(error);
+  // Don't exit immediately - try to keep app running for upload completion
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  log.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  Sentry.captureException(reason instanceof Error ? reason : new Error(String(reason)));
+});
+
+// Handle renderer process crashes
+app.on('render-process-gone', (event, webContents, details) => {
+  log.error('Renderer process gone:', details);
+  Sentry.captureMessage(`Renderer crashed: ${details.reason}`, 'error');
+});
+
+app.on('child-process-gone', (event, details) => {
+  log.error('Child process gone:', details);
+  Sentry.captureMessage(`Child process crashed: ${details.reason}`, 'error');
+});
 
 // Configure auto-updater logging
 autoUpdater.logger = log;
@@ -17,9 +81,14 @@ autoUpdater.logger.transports.file.level = 'info';
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 
-// HARDCODED API URL - Suisse Notes production server
-// No user configuration needed
-const API_BASE_URL = 'https://app.suisse-notes.ch';
+// Environment-aware API configuration
+// Uses config.js for environment detection
+const { getApiUrl, getEnvironmentInfo } = require('./config');
+const API_BASE_URL = getApiUrl();
+log.info('Environment:', getEnvironmentInfo());
+
+// Disk space utilities for recording safety
+const { canStartRecording, shouldForceStopRecording, formatBytes } = require('./disk-utils');
 
 // Configuration store for persistent settings
 const configStore = new Store({
@@ -41,13 +110,410 @@ const historyStore = new Store({
   }
 });
 
-// Set FFmpeg path
+// Upload queue store for offline persistence
+const uploadQueueStore = new Store({
+  name: 'upload-queue',
+  defaults: {
+    pendingUploads: []  // Array of { recordId, filePath, metadata, addedAt, retryCount }
+  }
+});
+
+// Active recording store for crash recovery
+const activeRecordingStore = new Store({
+  name: 'active-recording',
+  defaults: {
+    activeSession: null  // { recordId, startedAt, chunkCount, userId, lastChunkAt }
+  }
+});
+
+// === Active Recording State Management ===
+// Track recording state for crash recovery
+
+function updateActiveRecording(recordId, chunkCount, userId = null) {
+  activeRecordingStore.set('activeSession', {
+    recordId,
+    startedAt: activeRecordingStore.get('activeSession')?.startedAt || new Date().toISOString(),
+    chunkCount,
+    userId,
+    lastChunkAt: new Date().toISOString()
+  });
+}
+
+function clearActiveRecording() {
+  activeRecordingStore.set('activeSession', null);
+}
+
+function getActiveRecording() {
+  return activeRecordingStore.get('activeSession');
+}
+
+// === Upload Queue Management ===
+// Add upload to persistent queue
+function addToUploadQueue(recordId, filePath, metadata) {
+  const queue = uploadQueueStore.get('pendingUploads', []);
+  // Check if already in queue
+  if (!queue.find(u => u.recordId === recordId)) {
+    queue.push({
+      recordId,
+      filePath,
+      metadata,
+      addedAt: new Date().toISOString(),
+      retryCount: 0
+    });
+    uploadQueueStore.set('pendingUploads', queue);
+    log.info('Added to upload queue:', recordId);
+  }
+}
+
+// Remove upload from queue
+function removeFromUploadQueue(recordId) {
+  const queue = uploadQueueStore.get('pendingUploads', []);
+  const newQueue = queue.filter(u => u.recordId !== recordId);
+  uploadQueueStore.set('pendingUploads', newQueue);
+  log.info('Removed from upload queue:', recordId);
+}
+
+// Update retry count in queue
+function updateUploadQueueRetry(recordId) {
+  const queue = uploadQueueStore.get('pendingUploads', []);
+  const item = queue.find(u => u.recordId === recordId);
+  if (item) {
+    item.retryCount = (item.retryCount || 0) + 1;
+    item.lastRetry = new Date().toISOString();
+    uploadQueueStore.set('pendingUploads', queue);
+  }
+}
+
+// === Auto-Recovery for Orphaned Recordings ===
+// Recover recordings that were interrupted by app crash
+
+async function recoverOrphanedRecordings() {
+  try {
+    const recordingsPath = getRecordingsPath();
+    if (!fs.existsSync(recordingsPath)) {
+      log.info('No recordings directory found, skipping recovery');
+      return;
+    }
+
+    // Check if there's an active recording that was interrupted
+    const activeSession = getActiveRecording();
+    if (activeSession) {
+      log.info('Found interrupted recording session:', activeSession.recordId);
+    }
+
+    // Scan for directories with chunks that don't have a combined audio file
+    const dirs = fs.readdirSync(recordingsPath);
+    let recoveredCount = 0;
+
+    for (const dir of dirs) {
+      try {
+        const dirPath = path.join(recordingsPath, dir);
+        const stats = fs.statSync(dirPath);
+
+        if (!stats.isDirectory()) continue;
+
+        const chunksPath = path.join(dirPath, 'chunks');
+        const sessionsPath = path.join(dirPath, 'sessions');
+        const audioPath = path.join(dirPath, 'audio.webm');
+
+        // Skip if already has a combined audio file
+        if (fs.existsSync(audioPath)) continue;
+
+        // Check if there are chunks or sessions to recover
+        const hasChunks = fs.existsSync(chunksPath) &&
+          fs.readdirSync(chunksPath).filter(f => f.startsWith('chunk_')).length > 0;
+        const hasSessions = fs.existsSync(sessionsPath) &&
+          fs.readdirSync(sessionsPath).filter(f => f.endsWith('.webm') && !f.includes('_raw')).length > 0;
+
+        if (!hasChunks && !hasSessions) continue;
+
+        log.info(`Attempting to recover orphaned recording: ${dir}`);
+
+        // Try to combine the chunks
+        const result = await combineChunksForRecovery(dir);
+
+        if (result.success) {
+          recoveredCount++;
+          log.info(`Successfully recovered recording: ${dir} (${result.fileSizeMb}MB)`);
+
+          // Add to history with "recovered" status
+          // We'll use a default userId if we can't determine the original user
+          const recordings = historyStore.get('recordings', []);
+          const existingRecording = recordings.find(r => r.id === dir);
+
+          if (!existingRecording) {
+            // Create a new history entry for the recovered recording
+            const recoveredEntry = {
+              id: dir,
+              userId: activeSession?.userId || 'unknown',
+              createdAt: activeSession?.startedAt || new Date().toISOString(),
+              duration: 0, // Unknown duration
+              fileSize: parseFloat(result.fileSizeMb) * 1024 * 1024,
+              filePath: result.outputPath,
+              uploadStatus: 'pending',
+              storagePreference: 'keep',
+              recovered: true // Mark as recovered
+            };
+            recordings.push(recoveredEntry);
+            historyStore.set('recordings', recordings);
+            log.info(`Added recovered recording to history: ${dir}`);
+          }
+        } else {
+          log.warn(`Could not recover recording ${dir}: ${result.error}`);
+        }
+      } catch (err) {
+        log.error(`Error processing directory ${dir} for recovery:`, err);
+      }
+    }
+
+    // Clear the active recording state after recovery attempt
+    clearActiveRecording();
+
+    if (recoveredCount > 0) {
+      log.info(`Recovery complete: ${recoveredCount} recording(s) recovered`);
+    }
+  } catch (error) {
+    log.error('Error during orphaned recording recovery:', error);
+    Sentry.captureException(error);
+  }
+}
+
+// Internal function for recovery - similar to combineChunks but without IPC
+async function combineChunksForRecovery(recordId) {
+  try {
+    const recordPath = getRecordingPath(recordId);
+    const chunksPath = getChunksPath(recordId);
+    const sessionsPath = getSessionsPath(recordId);
+    const outputPath = path.join(recordPath, 'audio.webm');
+
+    // First try to create session from chunks if they exist
+    if (fs.existsSync(chunksPath)) {
+      const chunks = fs.readdirSync(chunksPath)
+        .filter(f => f.startsWith('chunk_') && f.endsWith('.webm'));
+
+      if (chunks.length > 0) {
+        const result = await createSessionFileInternal(recordId, '.webm');
+        if (!result.success) {
+          log.warn('Could not create session from chunks during recovery:', result.error);
+        }
+      }
+    }
+
+    // Then check for sessions
+    if (fs.existsSync(sessionsPath)) {
+      const sessions = fs.readdirSync(sessionsPath)
+        .filter(f => f.endsWith('.webm') && !f.includes('_raw'));
+
+      if (sessions.length === 1) {
+        fs.copyFileSync(path.join(sessionsPath, sessions[0]), outputPath);
+        await fs.promises.rm(sessionsPath, { recursive: true, force: true });
+        if (fs.existsSync(chunksPath)) {
+          await fs.promises.rm(chunksPath, { recursive: true, force: true });
+        }
+
+        const stats = fs.statSync(outputPath);
+        return {
+          success: true,
+          outputPath,
+          fileSizeMb: (stats.size / (1024 * 1024)).toFixed(2)
+        };
+      } else if (sessions.length > 1) {
+        // Multiple sessions - use FFmpeg concat
+        const sortedSessions = sessions.sort((a, b) => {
+          const tsA = parseInt(a.replace('session_', '').replace('.webm', ''), 10);
+          const tsB = parseInt(b.replace('session_', '').replace('.webm', ''), 10);
+          return tsA - tsB;
+        });
+
+        const concatListPath = path.join(recordPath, 'concat_list.txt');
+        const listContent = sortedSessions.map(f =>
+          `file '${sessionsPath.replace(/\\/g, '/')}/${f}'`
+        ).join('\n');
+        fs.writeFileSync(concatListPath, listContent);
+
+        await new Promise((resolve, reject) => {
+          ffmpeg()
+            .input(concatListPath)
+            .inputOptions(['-f', 'concat', '-safe', '0'])
+            .audioCodec('copy')
+            .output(outputPath)
+            .on('end', resolve)
+            .on('error', reject)
+            .run();
+        });
+
+        fs.unlinkSync(concatListPath);
+        await fs.promises.rm(sessionsPath, { recursive: true, force: true });
+        if (fs.existsSync(chunksPath)) {
+          await fs.promises.rm(chunksPath, { recursive: true, force: true });
+        }
+
+        const stats = fs.statSync(outputPath);
+        return {
+          success: true,
+          outputPath,
+          fileSizeMb: (stats.size / (1024 * 1024)).toFixed(2)
+        };
+      }
+    }
+
+    // Fallback: direct chunk concatenation
+    if (fs.existsSync(chunksPath)) {
+      const chunks = fs.readdirSync(chunksPath)
+        .filter(f => f.startsWith('chunk_') && f.endsWith('.webm'));
+
+      if (chunks.length > 0) {
+        const sortedChunks = sortChunksNumerically(chunks, '.webm');
+        await combineChunksStreaming(chunksPath, sortedChunks, outputPath);
+        await fs.promises.rm(chunksPath, { recursive: true, force: true });
+
+        const stats = fs.statSync(outputPath);
+        if (stats.size < MIN_RECORDING_SIZE) {
+          fs.unlinkSync(outputPath);
+          return { success: false, error: 'Recording too short or empty' };
+        }
+
+        return {
+          success: true,
+          outputPath,
+          fileSizeMb: (stats.size / (1024 * 1024)).toFixed(2)
+        };
+      }
+    }
+
+    return { success: false, error: 'No chunks or sessions found' };
+  } catch (error) {
+    log.error('Error in combineChunksForRecovery:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// === Cleanup Old Orphaned Directories ===
+// Remove directories that are older than 7 days and have no audio file
+
+async function cleanupOldOrphanedDirectories() {
+  try {
+    const recordingsPath = getRecordingsPath();
+    if (!fs.existsSync(recordingsPath)) {
+      return;
+    }
+
+    const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+    const now = Date.now();
+    let cleanedCount = 0;
+
+    const dirs = fs.readdirSync(recordingsPath);
+    for (const dir of dirs) {
+      try {
+        const dirPath = path.join(recordingsPath, dir);
+        const stats = fs.statSync(dirPath);
+
+        if (!stats.isDirectory()) continue;
+
+        // Check if this directory has a combined audio file
+        const audioPath = path.join(dirPath, 'audio.webm');
+        const hasAudioFile = fs.existsSync(audioPath);
+
+        // Check if directory is old enough
+        const isOld = (now - stats.mtimeMs) > MAX_AGE_MS;
+
+        // Only clean up old directories without audio files
+        if (isOld && !hasAudioFile) {
+          // Check if it has chunks or sessions that weren't combined
+          const chunksPath = path.join(dirPath, 'chunks');
+          const sessionsPath = path.join(dirPath, 'sessions');
+          const hasChunks = fs.existsSync(chunksPath);
+          const hasSessions = fs.existsSync(sessionsPath);
+
+          if (hasChunks || hasSessions) {
+            log.info(`Cleaning up old orphaned directory: ${dir} (age: ${Math.round((now - stats.mtimeMs) / (24 * 60 * 60 * 1000))} days)`);
+            await fs.promises.rm(dirPath, { recursive: true, force: true });
+            cleanedCount++;
+          }
+        }
+      } catch (err) {
+        log.error(`Error checking directory ${dir} for cleanup:`, err);
+      }
+    }
+
+    if (cleanedCount > 0) {
+      log.info(`Cleaned up ${cleanedCount} old orphaned directory(ies)`);
+    }
+  } catch (error) {
+    log.error('Error during orphaned directory cleanup:', error);
+  }
+}
+
+// Process pending uploads on app startup
+async function processPendingUploads() {
+  const queue = uploadQueueStore.get('pendingUploads', []);
+  if (queue.length === 0) return;
+
+  log.info(`Found ${queue.length} pending uploads, processing...`);
+
+  // Check if we have auth token
+  const authToken = await getAuthToken();
+  if (!authToken) {
+    log.info('No auth token, skipping pending uploads');
+    return;
+  }
+
+  // Process each pending upload with delay between them
+  for (const upload of queue) {
+    // Skip if too many retries (max 10)
+    if (upload.retryCount >= 10) {
+      log.warn(`Upload ${upload.recordId} exceeded max retries, removing from queue`);
+      removeFromUploadQueue(upload.recordId);
+      continue;
+    }
+
+    // Check if file still exists
+    try {
+      await fs.promises.access(upload.filePath);
+    } catch (e) {
+      log.warn(`File not found for ${upload.recordId}, removing from queue`);
+      removeFromUploadQueue(upload.recordId);
+      continue;
+    }
+
+    log.info(`Retrying upload for ${upload.recordId} (attempt ${upload.retryCount + 1})`);
+    updateUploadQueueRetry(upload.recordId);
+
+    try {
+      const result = await uploadWithRetry(upload.recordId, upload.filePath, upload.metadata, 2);
+      if (result.success) {
+        removeFromUploadQueue(upload.recordId);
+        // Update history status
+        const recordings = historyStore.get('recordings', []);
+        const recording = recordings.find(r => r.id === upload.recordId);
+        if (recording) {
+          recording.uploadStatus = 'uploaded';
+          recording.transcriptionId = result.transcriptionId;
+          recording.audioFileId = result.audioFileId;
+          historyStore.set('recordings', recordings);
+        }
+        log.info(`Successfully uploaded pending recording: ${upload.recordId}`);
+      }
+    } catch (e) {
+      log.error(`Failed to upload ${upload.recordId}:`, e.message);
+    }
+
+    // Wait 5 seconds between uploads to avoid overwhelming the server
+    await new Promise(r => setTimeout(r, 5000));
+  }
+}
+
+// Set FFmpeg path (cross-platform)
 if (app.isPackaged) {
   // Production: Use bundled FFmpeg
-  const ffmpegPath = path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe');
-  const ffprobePath = path.join(process.resourcesPath, 'ffmpeg', 'ffprobe.exe');
+  const isWin = process.platform === 'win32';
+  const ffmpegName = isWin ? 'ffmpeg.exe' : 'ffmpeg';
+  const ffprobeName = isWin ? 'ffprobe.exe' : 'ffprobe';
+  const ffmpegPath = path.join(process.resourcesPath, 'ffmpeg', ffmpegName);
+  const ffprobePath = path.join(process.resourcesPath, 'ffmpeg', ffprobeName);
   ffmpeg.setFfmpegPath(ffmpegPath);
   ffmpeg.setFfprobePath(ffprobePath);
+  log.info('FFmpeg path (production):', ffmpegPath);
 } else {
   // Development: Use @ffmpeg-installer packages
   try {
@@ -67,6 +533,10 @@ const activeUploads = new Map();
 // Track if upload is in progress to prevent window close
 let isUploadInProgress = false;
 let pendingUploadsCount = 0;
+
+// Track recording status for close prevention
+let isRecordingInProgress = false;
+let isProcessingRecording = false;
 
 let mainWindow;
 
@@ -90,6 +560,78 @@ async function ensureDir(dirPath) {
   } catch (error) {
     if (error.code !== 'EEXIST') throw error;
   }
+}
+
+// === Input Validation Helpers ===
+// Prevent path traversal and injection attacks
+
+// Validate UUID format for recordId
+function validateRecordId(recordId) {
+  if (!recordId || typeof recordId !== 'string') {
+    throw new Error('Recording ID is required');
+  }
+  // Allow UUID v4 format or simple alphanumeric IDs with hyphens/underscores
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const simpleIdRegex = /^[a-zA-Z0-9_-]{1,64}$/;
+  if (!uuidRegex.test(recordId) && !simpleIdRegex.test(recordId)) {
+    throw new Error('Invalid recording ID format');
+  }
+  return recordId;
+}
+
+// Validate file extension (whitelist approach)
+function validateExtension(ext) {
+  const allowedExts = ['.webm', '.mp3', '.wav', '.ogg', '.flac', '.m4a', '.mp4', '.aac', '.opus', '.wma', '.amr', '.3gp', '.mov', '.mkv', '.avi'];
+  if (!ext || typeof ext !== 'string') {
+    throw new Error('File extension is required');
+  }
+  const normalizedExt = ext.toLowerCase();
+  if (!allowedExts.includes(normalizedExt)) {
+    throw new Error(`Invalid file extension: ${ext}`);
+  }
+  return normalizedExt;
+}
+
+// Validate file path is within allowed directory (prevents path traversal)
+function validateFilePath(filePath) {
+  if (!filePath || typeof filePath !== 'string') {
+    throw new Error('File path is required');
+  }
+  const resolvedPath = path.resolve(filePath);
+  const userDataPath = app.getPath('userData');
+  const recordingsPath = path.join(userDataPath, 'recordings');
+
+  // Allow paths within userData/recordings directory
+  if (!resolvedPath.startsWith(recordingsPath)) {
+    throw new Error('File path is outside allowed directories');
+  }
+  return resolvedPath;
+}
+
+// Validate userId
+function validateUserId(userId) {
+  if (!userId || typeof userId !== 'string') {
+    throw new Error('User ID is required');
+  }
+  if (userId.length > 128) {
+    throw new Error('User ID too long');
+  }
+  // Prevent injection attacks
+  if (!/^[a-zA-Z0-9_@.-]+$/.test(userId)) {
+    throw new Error('User ID contains invalid characters');
+  }
+  return userId;
+}
+
+// Validate chunk index
+function validateChunkIndex(chunkIndex) {
+  if (typeof chunkIndex !== 'number' || !Number.isInteger(chunkIndex) || chunkIndex < 0) {
+    throw new Error('Invalid chunk index');
+  }
+  if (chunkIndex > 100000) { // Reasonable upper limit
+    throw new Error('Chunk index too large');
+  }
+  return chunkIndex;
 }
 
 // Resolve preload path - use environment variable in dev, or relative path in prod
@@ -127,17 +669,37 @@ function createWindow() {
     mainWindow = null;
   });
 
-  // Prevent close during upload
+  // Prevent close during recording, processing, or upload
   mainWindow.on('close', (e) => {
-    if (isUploadInProgress || pendingUploadsCount > 0) {
+    const shouldPreventClose = isRecordingInProgress ||
+                                isProcessingRecording ||
+                                isUploadInProgress ||
+                                pendingUploadsCount > 0;
+
+    if (shouldPreventClose) {
       e.preventDefault();
+
+      // Determine the appropriate message
+      let title = 'Cannot Close';
+      let message = 'Please wait...';
+
+      if (isRecordingInProgress) {
+        title = 'Recording in Progress';
+        message = 'A recording is in progress. Please stop the recording before closing the app.';
+      } else if (isProcessingRecording) {
+        title = 'Processing Recording';
+        message = 'Your recording is being processed. Please wait for it to complete before closing the app.';
+      } else if (isUploadInProgress || pendingUploadsCount > 0) {
+        title = 'Upload in Progress';
+        message = 'A recording is being uploaded. Please wait for the upload to complete before closing the app.';
+      }
 
       // Show dialog to user
       const { dialog } = require('electron');
       dialog.showMessageBox(mainWindow, {
         type: 'warning',
-        title: 'Upload in Progress',
-        message: 'A recording is being uploaded. Please wait for the upload to complete before closing the app.',
+        title,
+        message,
         buttons: ['OK'],
         defaultId: 0
       });
@@ -177,6 +739,31 @@ app.whenReady().then(() => {
       });
     }, 4 * 60 * 60 * 1000);
   }
+
+  // === Recover Orphaned Recordings ===
+  // Run 5 seconds after startup to recover any crashed recordings
+  setTimeout(() => {
+    recoverOrphanedRecordings().catch(err => {
+      log.error('Error recovering orphaned recordings:', err);
+    });
+  }, 5000);
+
+  // === Cleanup Old Orphaned Directories ===
+  // Run 10 seconds after startup (after recovery) to clean up old orphans
+  setTimeout(() => {
+    cleanupOldOrphanedDirectories().catch(err => {
+      log.error('Error cleaning up orphaned directories:', err);
+    });
+  }, 10000);
+
+  // === Process Pending Uploads ===
+  // Wait 15 seconds after startup to process pending uploads
+  // This gives time for recovery and user login
+  setTimeout(() => {
+    processPendingUploads().catch(err => {
+      log.error('Error processing pending uploads:', err);
+    });
+  }, 15000);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -493,11 +1080,143 @@ function getAudioMetadata(filePath) {
   });
 }
 
+// Helper: Validate chunk sequence is continuous (0, 1, 2, 3...)
+function validateChunkSequence(chunks, ext) {
+  const sorted = sortChunksNumerically(chunks, ext);
+  const missingChunks = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const actualIndex = parseInt(sorted[i].replace('chunk_', '').replace(ext, ''), 10);
+    if (actualIndex !== i) {
+      // Found a gap - record all missing indices
+      for (let missing = i; missing < actualIndex; missing++) {
+        missingChunks.push(missing);
+      }
+    }
+  }
+  return {
+    valid: missingChunks.length === 0,
+    missingChunks,
+    message: missingChunks.length > 0
+      ? `Warning: Missing chunks detected (indices: ${missingChunks.slice(0, 5).join(', ')}${missingChunks.length > 5 ? '...' : ''}). Audio may have gaps.`
+      : ''
+  };
+}
+
+// Helper: Combine chunks using streaming to avoid memory issues with large files
+async function combineChunksStreaming(chunksPath, sortedChunks, outputPath) {
+  return new Promise((resolve, reject) => {
+    const writeStream = fs.createWriteStream(outputPath);
+
+    writeStream.on('finish', () => resolve());
+    writeStream.on('error', (err) => reject(err));
+
+    // Process chunks sequentially to maintain order and avoid memory spikes
+    (async () => {
+      try {
+        for (const chunkFile of sortedChunks) {
+          const chunkPath = path.join(chunksPath, chunkFile);
+          const data = await fs.promises.readFile(chunkPath);
+          // Wait for write to complete before reading next chunk
+          await new Promise((res, rej) => {
+            if (!writeStream.write(data)) {
+              writeStream.once('drain', res);
+            } else {
+              res();
+            }
+          });
+        }
+        writeStream.end();
+      } catch (err) {
+        writeStream.destroy(err);
+        reject(err);
+      }
+    })();
+  });
+}
+
+// Minimum file size for valid recording (1KB)
+const MIN_RECORDING_SIZE = 1024;
+
+// Calculate dynamic upload timeout based on file size
+// Assumes worst-case 100KB/s upload speed with 50% buffer
+function calculateUploadTimeout(fileSizeBytes) {
+  const minTimeout = 600000; // 10 minutes minimum
+  const bytesPerSecond = 100 * 1024; // 100KB/s worst case
+  const estimatedTimeMs = (fileSizeBytes / bytesPerSecond) * 1000;
+  const timeoutWithBuffer = estimatedTimeMs * 1.5; // 50% buffer
+  return Math.max(minTimeout, timeoutWithBuffer);
+}
+
+// FFmpeg operation timeout (5 minutes default)
+const FFMPEG_TIMEOUT_MS = 5 * 60 * 1000;
+
+// Execute FFmpeg command with timeout
+function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operationName = 'FFmpeg') {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      log.warn(`${operationName} operation timed out after ${timeoutMs}ms`);
+      try {
+        ffmpegCommand.kill('SIGKILL');
+      } catch (e) {
+        log.error('Error killing FFmpeg process:', e);
+      }
+      reject(new Error(`${operationName} operation timed out`));
+    }, timeoutMs);
+
+    ffmpegCommand
+      .on('end', () => {
+        clearTimeout(timeoutId);
+        resolve();
+      })
+      .on('error', (err) => {
+        clearTimeout(timeoutId);
+        reject(err);
+      })
+      .run();
+  });
+}
+
+// IPC handler for checking disk space before recording
+ipcMain.handle('recording:checkDiskSpace', async () => {
+  try {
+    const recordingsPath = getRecordingsPath();
+    return await canStartRecording(recordingsPath);
+  } catch (error) {
+    log.error('Error checking disk space:', error);
+    return { canStart: true, freeSpace: 0, freeSpaceMB: 0, message: '' };
+  }
+});
+
+// IPC handlers for tracking recording state (for window close protection)
+ipcMain.handle('recording:setInProgress', (event, inProgress) => {
+  isRecordingInProgress = inProgress;
+  log.info('Recording state updated:', { isRecordingInProgress });
+  return { success: true };
+});
+
+ipcMain.handle('recording:setProcessing', (event, processing) => {
+  isProcessingRecording = processing;
+  log.info('Recording processing state updated:', { isProcessingRecording });
+  return { success: true };
+});
+
 // 1. Create recording session (creates directories)
 ipcMain.handle('recording:createSession', async (event, recordId, ext) => {
   try {
-    const recordPath = getRecordingPath(recordId);
-    const chunksPath = getChunksPath(recordId);
+    // Validate inputs to prevent path traversal attacks
+    const validRecordId = validateRecordId(recordId);
+    const validExt = validateExtension(ext);
+
+    // Check disk space before creating session
+    const recordingsPath = getRecordingsPath();
+    const diskCheck = await canStartRecording(recordingsPath);
+    if (!diskCheck.canStart) {
+      log.warn('Insufficient disk space to start recording:', diskCheck.freeSpaceMB, 'MB available');
+      return { success: false, error: diskCheck.message };
+    }
+
+    const recordPath = getRecordingPath(validRecordId);
+    const chunksPath = getChunksPath(validRecordId);
 
     // Create directories synchronously to ensure they exist
     if (!fs.existsSync(recordPath)) {
@@ -518,8 +1237,13 @@ ipcMain.handle('recording:createSession', async (event, recordId, ext) => {
 // 2. Save recording chunk - SYNCHRONOUS write (WhisperTranscribe pattern)
 ipcMain.handle('recording:saveChunk', async (event, recordId, chunkData, chunkIndex, ext) => {
   try {
-    const recordPath = getRecordingPath(recordId);
-    const chunksPath = getChunksPath(recordId);
+    // Validate inputs to prevent path traversal and injection attacks
+    const validRecordId = validateRecordId(recordId);
+    const validExt = validateExtension(ext);
+    const validChunkIndex = validateChunkIndex(chunkIndex);
+
+    const recordPath = getRecordingPath(validRecordId);
+    const chunksPath = getChunksPath(validRecordId);
 
     // Ensure directories exist (sync)
     if (!fs.existsSync(recordPath)) {
@@ -530,11 +1254,14 @@ ipcMain.handle('recording:saveChunk', async (event, recordId, chunkData, chunkIn
     }
 
     const buffer = Buffer.from(chunkData);
-    const filename = `chunk_${chunkIndex}${ext}`;
+    const filename = `chunk_${validChunkIndex}${validExt}`;
     const chunkPath = path.join(chunksPath, filename);
 
     // CRITICAL: Use SYNCHRONOUS write to ensure chunk is saved before returning
     fs.writeFileSync(chunkPath, buffer);
+
+    // Update active recording state for crash recovery
+    updateActiveRecording(validRecordId, validChunkIndex + 1);
 
     console.log(`Chunk ${chunkIndex} saved (${buffer.length} bytes):`, chunkPath);
     return { success: true, chunkIndex, chunkPath };
@@ -547,9 +1274,12 @@ ipcMain.handle('recording:saveChunk', async (event, recordId, chunkData, chunkIn
 // 3. Create session file - combines current chunks into a session (intermediate step)
 ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
   try {
-    const recordPath = getRecordingPath(recordId);
-    const chunksPath = getChunksPath(recordId);
-    const sessionsPath = getSessionsPath(recordId);
+    // Validate inputs
+    const validRecordId = validateRecordId(recordId);
+    const validExt = validateExtension(ext);
+    const recordPath = getRecordingPath(validRecordId);
+    const chunksPath = getChunksPath(validRecordId);
+    const sessionsPath = getSessionsPath(validRecordId);
 
     // Check if chunks directory exists
     if (!fs.existsSync(chunksPath)) {
@@ -558,13 +1288,19 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
 
     // Get and sort chunks
     const allFiles = fs.readdirSync(chunksPath);
-    const chunks = allFiles.filter(f => f.startsWith('chunk_') && f.endsWith(ext));
+    const chunks = allFiles.filter(f => f.startsWith('chunk_') && f.endsWith(validExt));
 
     if (chunks.length === 0) {
       return { success: false, error: 'No chunks found' };
     }
 
-    const sortedChunks = sortChunksNumerically(chunks, ext);
+    const sortedChunks = sortChunksNumerically(chunks, validExt);
+
+    // Validate chunk sequence
+    const sequenceCheck = validateChunkSequence(chunks, validExt);
+    if (!sequenceCheck.valid) {
+      log.warn('Chunk sequence validation:', sequenceCheck.message);
+    }
 
     // Create sessions directory
     if (!fs.existsSync(sessionsPath)) {
@@ -572,15 +1308,20 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
     }
 
     const timestamp = Date.now();
-    const rawPath = path.join(sessionsPath, `session_${timestamp}_raw${ext}`);
-    const finalPath = path.join(sessionsPath, `session_${timestamp}${ext}`);
+    const rawPath = path.join(sessionsPath, `session_${timestamp}_raw${validExt}`);
+    const finalPath = path.join(sessionsPath, `session_${timestamp}${validExt}`);
 
-    // Read and concatenate all chunks (sync)
-    const buffers = sortedChunks.map(f => fs.readFileSync(path.join(chunksPath, f)));
-    const combined = Buffer.concat(buffers);
-    fs.writeFileSync(rawPath, combined);
+    // Use streaming concatenation to avoid memory issues with large recordings
+    await combineChunksStreaming(chunksPath, sortedChunks, rawPath);
 
-    console.log(`Combined ${sortedChunks.length} chunks into raw session (${combined.length} bytes)`);
+    // Verify raw file was created and has content
+    const rawStats = fs.statSync(rawPath);
+    if (rawStats.size < MIN_RECORDING_SIZE) {
+      fs.unlinkSync(rawPath);
+      return { success: false, error: 'Recording too short or empty' };
+    }
+
+    console.log(`Combined ${sortedChunks.length} chunks into raw session (${rawStats.size} bytes)`);
 
     // Process with FFmpeg (codec copy, fallback to re-encode)
     await new Promise((resolve, reject) => {
@@ -639,24 +1380,27 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
 // 4. Combine recording chunks - final combination with multiple fallbacks
 ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
   try {
-    const recordPath = getRecordingPath(recordId);
-    const chunksPath = getChunksPath(recordId);
-    const sessionsPath = getSessionsPath(recordId);
-    const outputFile = `audio${ext}`;
+    // Validate inputs
+    const validRecordId = validateRecordId(recordId);
+    const validExt = validateExtension(ext);
+
+    const recordPath = getRecordingPath(validRecordId);
+    const chunksPath = getChunksPath(validRecordId);
+    const sessionsPath = getSessionsPath(validRecordId);
+    const outputFile = `audio${validExt}`;
     const outputPath = path.join(recordPath, outputFile);
 
-    console.log('Combining chunks for recording:', recordId);
+    console.log('Combining chunks for recording:', validRecordId);
 
     // Step 1: If there are current chunks, create a session from them first
     if (fs.existsSync(chunksPath)) {
       const chunkFiles = fs.readdirSync(chunksPath)
-        .filter(f => f.startsWith('chunk_') && f.endsWith(ext));
+        .filter(f => f.startsWith('chunk_') && f.endsWith(validExt));
 
       if (chunkFiles.length > 0) {
         console.log(`Found ${chunkFiles.length} chunks, creating session file...`);
-        const sessionResult = await ipcMain.emit('recording:createSessionFile', event, recordId, ext);
-        // Note: We call the handler directly below instead
-        const result = await createSessionFileInternal(recordId, ext);
+        // Note: We call the internal handler directly
+        const result = await createSessionFileInternal(validRecordId, validExt);
         if (!result.success) {
           console.warn('Could not create session from chunks:', result.error);
         }
@@ -666,11 +1410,11 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
     // Step 2: Check for session files
     if (fs.existsSync(sessionsPath)) {
       const sessionFiles = fs.readdirSync(sessionsPath)
-        .filter(f => f.endsWith(ext) && !f.includes('_raw'))
+        .filter(f => f.endsWith(validExt) && !f.includes('_raw'))
         .sort((a, b) => {
           // Sort by timestamp in filename
-          const tsA = parseInt(a.replace('session_', '').replace(ext, ''), 10);
-          const tsB = parseInt(b.replace('session_', '').replace(ext, ''), 10);
+          const tsA = parseInt(a.replace('session_', '').replace(validExt, ''), 10);
+          const tsB = parseInt(b.replace('session_', '').replace(validExt, ''), 10);
           return tsA - tsB;
         });
 
@@ -686,6 +1430,9 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           if (fs.existsSync(chunksPath)) {
             await fs.promises.rm(chunksPath, { recursive: true, force: true });
           }
+
+          // Clear active recording state - successfully combined
+          clearActiveRecording();
 
           const stats = fs.statSync(outputPath);
           return {
@@ -731,6 +1478,9 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           await fs.promises.rm(chunksPath, { recursive: true, force: true });
         }
 
+        // Clear active recording state - successfully combined
+        clearActiveRecording();
+
         const stats = fs.statSync(outputPath);
         return {
           success: true,
@@ -744,27 +1494,47 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
     // Step 3: Fallback - direct chunk concatenation (if no sessions exist)
     if (fs.existsSync(chunksPath)) {
       const chunks = fs.readdirSync(chunksPath)
-        .filter(f => f.startsWith('chunk_') && f.endsWith(ext));
+        .filter(f => f.startsWith('chunk_') && f.endsWith(validExt));
 
       if (chunks.length > 0) {
         console.log(`Fallback: Direct concatenation of ${chunks.length} chunks`);
-        const sortedChunks = sortChunksNumerically(chunks, ext);
-        const buffers = sortedChunks.map(f => fs.readFileSync(path.join(chunksPath, f)));
-        const combined = Buffer.concat(buffers);
-        fs.writeFileSync(outputPath, combined);
+        const sortedChunks = sortChunksNumerically(chunks, validExt);
+
+        // Validate chunk sequence
+        const sequenceCheck = validateChunkSequence(chunks, validExt);
+        if (!sequenceCheck.valid) {
+          log.warn('Chunk sequence validation:', sequenceCheck.message);
+        }
+
+        // Use streaming concatenation to avoid memory issues
+        await combineChunksStreaming(chunksPath, sortedChunks, outputPath);
 
         // Cleanup
         await fs.promises.rm(chunksPath, { recursive: true, force: true });
 
         const stats = fs.statSync(outputPath);
+
+        // Validate file is not empty/too small
+        if (stats.size < MIN_RECORDING_SIZE) {
+          fs.unlinkSync(outputPath);
+          return { success: false, error: 'Recording too short or empty' };
+        }
+
+        // Clear active recording state - successfully combined
+        clearActiveRecording();
+
         return {
           success: true,
           outputPath,
           filename: outputFile,
-          fileSizeMb: (stats.size / (1024 * 1024)).toFixed(2)
+          fileSizeMb: (stats.size / (1024 * 1024)).toFixed(2),
+          warning: sequenceCheck.message || undefined
         };
       }
     }
+
+    // Clear active recording state even on failure (no chunks found)
+    clearActiveRecording();
 
     return { success: false, error: 'No sessions or chunks found to combine' };
   } catch (error) {
@@ -792,6 +1562,12 @@ async function createSessionFileInternal(recordId, ext) {
 
   const sortedChunks = sortChunksNumerically(chunks, ext);
 
+  // Validate chunk sequence
+  const sequenceCheck = validateChunkSequence(chunks, ext);
+  if (!sequenceCheck.valid) {
+    log.warn('Chunk sequence validation (internal):', sequenceCheck.message);
+  }
+
   if (!fs.existsSync(sessionsPath)) {
     fs.mkdirSync(sessionsPath, { recursive: true });
   }
@@ -800,9 +1576,15 @@ async function createSessionFileInternal(recordId, ext) {
   const rawPath = path.join(sessionsPath, `session_${timestamp}_raw${ext}`);
   const finalPath = path.join(sessionsPath, `session_${timestamp}${ext}`);
 
-  const buffers = sortedChunks.map(f => fs.readFileSync(path.join(chunksPath, f)));
-  const combined = Buffer.concat(buffers);
-  fs.writeFileSync(rawPath, combined);
+  // Use streaming concatenation to avoid memory issues with large recordings
+  await combineChunksStreaming(chunksPath, sortedChunks, rawPath);
+
+  // Verify raw file was created and has content
+  const rawStats = fs.statSync(rawPath);
+  if (rawStats.size < MIN_RECORDING_SIZE) {
+    fs.unlinkSync(rawPath);
+    return { success: false, error: 'Recording too short or empty' };
+  }
 
   await new Promise((resolve, reject) => {
     ffmpeg(rawPath)
@@ -1041,7 +1823,7 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
         },
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
-        timeout: 600000
+        timeout: calculateUploadTimeout(fileStats.size)  // Dynamic timeout based on file size
       });
 
       // Stop progress updates
@@ -1102,6 +1884,9 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
 ipcMain.handle('upload:start', async (event, params) => {
   const { recordId, filePath, metadata } = params;
 
+  // Add to persistent upload queue (survives app restart)
+  addToUploadQueue(recordId, filePath, metadata);
+
   // Mark upload as in progress
   isUploadInProgress = true;
   pendingUploadsCount++;
@@ -1113,6 +1898,11 @@ ipcMain.handle('upload:start', async (event, params) => {
     }
 
     const result = await uploadWithRetry(recordId, filePath, metadata);
+
+    // Remove from queue on success
+    if (result.success) {
+      removeFromUploadQueue(recordId);
+    }
 
     // Notify renderer of completion
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1238,6 +2028,27 @@ ipcMain.handle('upload:cancel', async (event, recordId) => {
   return { success: false, error: 'Upload not found' };
 });
 
+// Get pending uploads in queue
+ipcMain.handle('upload:getPendingQueue', async () => {
+  return uploadQueueStore.get('pendingUploads', []);
+});
+
+// Manually trigger pending uploads retry
+ipcMain.handle('upload:retryPending', async () => {
+  try {
+    await processPendingUploads();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Remove a specific item from upload queue
+ipcMain.handle('upload:removeFromQueue', async (event, recordId) => {
+  removeFromUploadQueue(recordId);
+  return { success: true };
+});
+
 // --- Utility ---
 ipcMain.handle('app:getVersion', () => {
   return app.getVersion();
@@ -1279,18 +2090,15 @@ ipcMain.handle('history:getAll', async (event, userId) => {
 // Add recording to history
 ipcMain.handle('history:add', async (event, recording) => {
   try {
-    // CRITICAL: userId is required to prevent cross-account data leaks
-    if (!recording.userId) {
-      console.error('SECURITY: Attempted to add recording without userId');
-      return { success: false, error: 'userId is required' };
-    }
+    // CRITICAL: Validate userId to prevent cross-account data leaks and injection
+    const validUserId = validateUserId(recording.userId);
 
     const recordings = historyStore.get('recordings', []);
 
     // Create history entry with userId
     const historyEntry = {
       id: recording.id,
-      userId: recording.userId,  // CRITICAL: Associate with user
+      userId: validUserId,  // CRITICAL: Associate with validated user
       createdAt: recording.createdAt || new Date().toISOString(),
       duration: recording.duration || 0,
       fileSize: recording.fileSize || 0,
@@ -1314,14 +2122,11 @@ ipcMain.handle('history:add', async (event, recording) => {
 // Update recording in history
 ipcMain.handle('history:update', async (event, id, updates, userId) => {
   try {
-    // CRITICAL: userId is required to prevent cross-account modifications
-    if (!userId) {
-      console.error('SECURITY: Attempted to update recording without userId');
-      return { success: false, error: 'userId is required' };
-    }
+    // CRITICAL: Validate userId to prevent cross-account modifications
+    const validUserId = validateUserId(userId);
 
     const recordings = historyStore.get('recordings', []);
-    const index = recordings.findIndex(r => r.id === id && r.userId === userId);
+    const index = recordings.findIndex(r => r.id === id && r.userId === validUserId);
 
     if (index === -1) {
       return { success: false, error: 'Recording not found' };
@@ -1342,14 +2147,11 @@ ipcMain.handle('history:update', async (event, id, updates, userId) => {
 // Delete recording from history (and optionally delete file)
 ipcMain.handle('history:delete', async (event, id, deleteFile = false, userId) => {
   try {
-    // CRITICAL: userId is required to prevent cross-account deletions
-    if (!userId) {
-      console.error('SECURITY: Attempted to delete recording without userId');
-      return { success: false, error: 'userId is required' };
-    }
+    // CRITICAL: Validate userId to prevent cross-account deletions
+    const validUserId = validateUserId(userId);
 
     const recordings = historyStore.get('recordings', []);
-    const recording = recordings.find(r => r.id === id && r.userId === userId);
+    const recording = recordings.find(r => r.id === id && r.userId === validUserId);
 
     if (!recording) {
       return { success: false, error: 'Recording not found' };
@@ -1369,7 +2171,7 @@ ipcMain.handle('history:delete', async (event, id, deleteFile = false, userId) =
     }
 
     // Remove from history (only the user's recording)
-    const newRecordings = recordings.filter(r => !(r.id === id && r.userId === userId));
+    const newRecordings = recordings.filter(r => !(r.id === id && r.userId === validUserId));
     historyStore.set('recordings', newRecordings);
 
     return { success: true };
@@ -1382,14 +2184,11 @@ ipcMain.handle('history:delete', async (event, id, deleteFile = false, userId) =
 // Delete ALL recordings for a user (irreversible!)
 ipcMain.handle('history:deleteAll', async (event, userId) => {
   try {
-    // CRITICAL: userId is required to prevent cross-account deletions
-    if (!userId) {
-      console.error('SECURITY: Attempted to delete all recordings without userId');
-      return { success: false, error: 'userId is required' };
-    }
+    // CRITICAL: Validate userId to prevent cross-account deletions
+    const validUserId = validateUserId(userId);
 
     const recordings = historyStore.get('recordings', []);
-    const userRecordings = recordings.filter(r => r.userId === userId);
+    const userRecordings = recordings.filter(r => r.userId === validUserId);
 
     let deletedCount = 0;
     let errorCount = 0;
@@ -1411,10 +2210,10 @@ ipcMain.handle('history:deleteAll', async (event, userId) => {
     }
 
     // Remove all user's recordings from history
-    const newRecordings = recordings.filter(r => r.userId !== userId);
+    const newRecordings = recordings.filter(r => r.userId !== validUserId);
     historyStore.set('recordings', newRecordings);
 
-    console.log(`Deleted ${deletedCount} recordings for user ${userId} (${errorCount} errors)`);
+    console.log(`Deleted ${deletedCount} recordings for user ${validUserId} (${errorCount} errors)`);
     return {
       success: true,
       deletedCount,
@@ -1444,18 +2243,25 @@ ipcMain.handle('history:setDefaultStoragePreference', async (event, preference) 
 // Get file URL for playback (returns local-audio:// URL for custom protocol)
 ipcMain.handle('recording:getFileUrl', async (event, filePath) => {
   try {
+    // Validate file path is within allowed recordings directory
+    const validPath = validateFilePath(filePath);
+
     // Check if file exists
-    await fs.promises.access(filePath);
+    await fs.promises.access(validPath);
 
     // Use custom protocol for local audio files
     // Encode the path to handle special characters
-    const encodedPath = encodeURIComponent(filePath);
+    const encodedPath = encodeURIComponent(validPath);
     return {
       success: true,
       url: `local-audio://${encodedPath}`
     };
   } catch (error) {
-    return { success: false, error: 'File not found' };
+    if (error.message.includes('outside allowed')) {
+      log.warn('Security: Attempted to access file outside allowed directories:', filePath);
+      Sentry.captureMessage(`Path traversal attempt: ${filePath}`, 'warning');
+    }
+    return { success: false, error: 'File not found or access denied' };
   }
 });
 
