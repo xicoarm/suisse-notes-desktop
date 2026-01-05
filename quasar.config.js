@@ -87,12 +87,14 @@ export default function (/* ctx */) {
 
         win: {
           target: 'nsis',
+          icon: 'src-electron/icons/icon.ico',
           signAndEditExecutable: false  // Skip code signing (no certificate yet)
         },
         nsis: {
           oneClick: false,
-          allowToChangeInstallationDirectory: true
-          // installerIcon: 'src-electron/icons/icon.ico' // Add custom icon later
+          allowToChangeInstallationDirectory: true,
+          installerIcon: 'src-electron/icons/icon.ico',
+          uninstallerIcon: 'src-electron/icons/icon.ico'
         },
         extraResources: [
           {

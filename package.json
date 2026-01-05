@@ -36,6 +36,7 @@
     "electron-packager": "^17.1.2",
     "eslint": "^8.57.0",
     "eslint-plugin-vue": "^9.22.0",
+    "png2icons": "^2.0.1",
     "sass": "^1.71.1",
     "vite": "^5.1.4"
   },
