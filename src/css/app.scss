@@ -1,0 +1,789 @@
+// Suisse Notes Desktop App - Global Styles
+// Desktop-First Professional UI
+
+// Import Google Fonts
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+// Import variables
+@import './quasar.variables.scss';
+
+// ==================== DESKTOP TYPOGRAPHY SCALE ====================
+// Based on 8px grid, desktop-first sizing
+
+$font-size-xs: 10px;      // Captions, helper text
+$font-size-sm: 11px;      // Labels, small text
+$font-size-base: 12px;    // Body text (desktop standard)
+$font-size-md: 13px;      // Emphasized body
+$font-size-lg: 14px;      // Section headers
+$font-size-xl: 15px;      // Card headers
+$font-size-2xl: 16px;     // Page headers
+$font-size-3xl: 18px;     // Large titles
+$font-size-timer: 32px;   // Timer display
+
+// ==================== SPACING SCALE (8px grid) ====================
+
+$space-1: 4px;
+$space-2: 8px;
+$space-3: 12px;
+$space-4: 16px;
+$space-5: 20px;
+$space-6: 24px;
+$space-7: 28px;
+$space-8: 32px;
+$space-10: 40px;
+$space-12: 48px;
+$space-16: 64px;
+
+// ==================== COMPONENT SIZES ====================
+
+$header-height: 48px;
+$button-height: 36px;
+$button-height-sm: 32px;
+$button-height-lg: 40px;
+$icon-button-size: 32px;
+$input-height: 36px;
+$record-button-size: 80px;
+$card-padding: 24px;
+$card-padding-sm: 20px;
+
+// ==================== RESPONSIVE BREAKPOINTS ====================
+
+$breakpoint-sm: 600px;
+$breakpoint-md: 900px;
+$breakpoint-lg: 1200px;
+$breakpoint-xl: 1600px;
+
+// ==================== BASE STYLES ====================
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: $font-size-base;
+  line-height: 1.6;
+  background-color: $background-light;
+  color: $text-primary;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+// ==================== PAGE CONTAINER ====================
+// Desktop-first: full width with max-width for readability
+
+.q-page {
+  padding: $space-8;
+  max-width: 1200px;
+  margin: 0 auto;
+
+  @media (max-width: $breakpoint-md) {
+    padding: $space-6;
+  }
+
+  @media (max-width: $breakpoint-sm) {
+    padding: $space-4;
+  }
+}
+
+// ==================== TYPOGRAPHY ====================
+
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 600;
+  color: $text-primary;
+  line-height: 1.3;
+}
+
+h1 {
+  font-size: $font-size-3xl;
+  margin-bottom: $space-6;
+}
+
+h2 {
+  font-size: $font-size-2xl;
+  margin-bottom: $space-5;
+}
+
+h3 {
+  font-size: $font-size-xl;
+  margin-bottom: $space-4;
+}
+
+h4 {
+  font-size: $font-size-lg;
+  margin-bottom: $space-3;
+}
+
+.text-subtitle {
+  color: $text-secondary;
+  font-size: $font-size-base;
+  line-height: 1.6;
+}
+
+.text-muted {
+  color: $text-muted;
+  font-size: $font-size-sm;
+}
+
+.text-small {
+  font-size: $font-size-sm;
+}
+
+.text-caption {
+  font-size: $font-size-xs;
+  color: $text-muted;
+}
+
+// ==================== MODERN CARD STYLES ====================
+
+.modern-card {
+  background: $background-card;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
+  border: 1px solid $border-color;
+  padding: $card-padding;
+  transition: all 0.2s ease;
+
+  &:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(0, 0, 0, 0.06);
+  }
+
+  &.no-hover:hover {
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
+  }
+
+  .card-header {
+    font-size: $font-size-xl;
+    font-weight: 600;
+    margin-bottom: $space-6;
+    color: $text-primary;
+  }
+
+  .card-description {
+    font-size: $font-size-base;
+    line-height: 1.6;
+    color: $text-secondary;
+  }
+}
+
+// Card with status border
+.status-card {
+  border-left: 4px solid;
+
+  &.status-pending {
+    border-left-color: $warning;
+  }
+
+  &.status-uploaded {
+    border-left-color: $positive;
+  }
+
+  &.status-failed {
+    border-left-color: $negative;
+  }
+
+  &.status-recording {
+    border-left-color: $negative;
+  }
+}
+
+// ==================== HEADER STYLES ====================
+
+.gradient-header {
+  background: $gradient-header;
+  color: white;
+  height: $header-height;
+
+  .q-toolbar {
+    min-height: $header-height;
+    padding: 0 $space-6;
+  }
+
+  .q-toolbar__title {
+    font-weight: 600;
+    font-size: $font-size-md;
+  }
+}
+
+// ==================== BUTTON STYLES ====================
+
+// Primary gradient button
+.gradient-btn {
+  background: $gradient-primary !important;
+  color: white !important;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  border-radius: 8px;
+  padding: 0 $space-6;
+  height: $button-height;
+  font-size: $font-size-base;
+  min-width: 120px;
+
+  &:hover {
+    opacity: 0.9;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+  }
+}
+
+// Primary button
+.btn-primary {
+  background: $primary !important;
+  color: white !important;
+  font-weight: 500;
+  text-transform: none;
+  border-radius: 8px;
+  height: $button-height;
+  padding: 0 $space-6;
+  font-size: $font-size-base;
+}
+
+// Secondary button
+.btn-secondary {
+  background: white !important;
+  color: $primary !important;
+  border: 1px solid $border-color !important;
+  font-weight: 500;
+  text-transform: none;
+  border-radius: 8px;
+  height: $button-height;
+  padding: 0 $space-6;
+  font-size: $font-size-base;
+
+  &:hover {
+    background: $background-light !important;
+  }
+}
+
+// Danger button
+.btn-danger {
+  background: $negative !important;
+  color: white !important;
+  font-weight: 500;
+  text-transform: none;
+  border-radius: 8px;
+  height: $button-height;
+  padding: 0 $space-6;
+  font-size: $font-size-base;
+}
+
+// ==================== RECORDING STYLES ====================
+
+.recording-container {
+  background: $background-card;
+  border-radius: 12px;
+  padding: $card-padding;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  text-align: center;
+}
+
+.recording-active {
+  animation: pulse-brand 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-brand {
+  0% {
+    box-shadow: 0 0 0 0 rgba($primary, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 20px rgba($primary, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba($primary, 0);
+  }
+}
+
+// Recording button - Desktop sized
+.record-btn {
+  width: $record-button-size;
+  height: $record-button-size;
+  border-radius: 50%;
+  font-size: 40px;
+  transition: all 0.3s ease;
+
+  &.idle {
+    background: $negative !important;
+    color: white !important;
+
+    &:hover {
+      transform: scale(1.05);
+      box-shadow: 0 8px 24px rgba($negative, 0.35);
+    }
+  }
+
+  &.recording {
+    background: $negative !important;
+    color: white !important;
+    animation: pulse-recording 1.5s ease-in-out infinite;
+  }
+
+  &.paused {
+    background: $warning !important;
+    color: white !important;
+  }
+}
+
+@keyframes pulse-recording {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba($negative, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 20px rgba($negative, 0);
+  }
+}
+
+// Timer display - Desktop sized
+.timer-display {
+  font-size: $font-size-timer;
+  font-weight: 500;
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 2px;
+  color: $text-primary;
+
+  &.recording {
+    color: $negative;
+  }
+
+  &.paused {
+    color: $warning;
+  }
+}
+
+// ==================== AUDIO LEVEL METER ====================
+
+.audio-level-meter {
+  height: 8px;
+  background: $border-color;
+  border-radius: 4px;
+  overflow: hidden;
+
+  .level-bar {
+    height: 100%;
+    background: linear-gradient(90deg, $positive, $warning, $negative);
+    transition: width 0.1s ease-out;
+    border-radius: 4px;
+  }
+}
+
+// ==================== STATUS BADGES ====================
+
+.status-badge {
+  padding: $space-2 $space-4;
+  border-radius: 9999px;
+  font-size: $font-size-sm;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+
+  &.pending {
+    background: rgba($warning, 0.1);
+    color: #b45309; // Darker warning
+  }
+
+  &.uploaded {
+    background: rgba($positive, 0.1);
+    color: #16a34a; // Darker positive
+  }
+
+  &.failed {
+    background: rgba($negative, 0.1);
+    color: $negative;
+  }
+
+  &.recording {
+    background: rgba($negative, 0.1);
+    color: $negative;
+  }
+}
+
+// ==================== UPLOAD PROGRESS ====================
+
+.upload-progress {
+  .q-linear-progress {
+    height: 8px;
+    border-radius: 4px;
+  }
+}
+
+// ==================== HISTORY CARD ====================
+
+.history-card {
+  background: $background-card;
+  border-radius: 12px;
+  border: 1px solid $border-color;
+  padding: $space-6;
+  margin-bottom: $space-4;
+  transition: all 0.2s ease;
+
+  &:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  }
+
+  .recording-meta {
+    display: flex;
+    align-items: center;
+    gap: $space-5;
+    color: $text-secondary;
+    font-size: $font-size-sm;
+
+    .meta-item {
+      display: flex;
+      align-items: center;
+      gap: $space-2;
+    }
+  }
+}
+
+// ==================== AUDIO PLAYER ====================
+
+.audio-player {
+  background: $background-light;
+  border-radius: 8px;
+  padding: $space-4 $space-5;
+
+  .player-controls {
+    display: flex;
+    align-items: center;
+    gap: $space-4;
+  }
+
+  .time-display {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: $font-size-sm;
+    color: $text-secondary;
+  }
+
+  .q-slider {
+    flex: 1;
+  }
+}
+
+// ==================== EMPTY STATE ====================
+
+.empty-state {
+  text-align: center;
+  padding: $space-16 $space-8;
+
+  .empty-icon {
+    font-size: 80px;
+    color: $text-muted;
+    margin-bottom: $space-6;
+  }
+
+  .empty-title {
+    font-size: $font-size-2xl;
+    font-weight: 600;
+    color: $text-primary;
+    margin-bottom: $space-3;
+  }
+
+  .empty-subtitle {
+    font-size: $font-size-base;
+    color: $text-secondary;
+    margin-bottom: $space-8;
+  }
+}
+
+// ==================== DIALOG STYLES ====================
+
+.modern-dialog {
+  .q-dialog__inner {
+    padding: $space-8;
+  }
+
+  .q-card {
+    border-radius: 12px;
+    min-width: 480px;
+  }
+
+  .q-card__section--vert {
+    padding: $space-6 $space-8;
+  }
+}
+
+// ==================== FORM INPUTS ====================
+
+.q-field--outlined .q-field__control {
+  border-radius: 8px;
+  min-height: $input-height;
+}
+
+.q-field--outlined.q-field--focused .q-field__control:before {
+  border-color: $primary;
+}
+
+.q-field__label {
+  font-size: $font-size-sm;
+}
+
+.q-field--outlined .q-field__native {
+  font-size: $font-size-base;
+}
+
+// ==================== NAVIGATION TABS ====================
+
+.nav-tabs {
+  .q-tab {
+    text-transform: none;
+    font-weight: 500;
+    letter-spacing: 0;
+    font-size: $font-size-sm;
+    min-width: 100px;
+    padding: 0 $space-5;
+  }
+
+  .q-tab__icon {
+    font-size: 20px;
+  }
+
+  .q-tab--active {
+    color: white;
+  }
+}
+
+// ==================== BRAND LOGO ====================
+
+.brand-logo {
+  display: flex;
+  align-items: center;
+  gap: $space-3;
+  font-weight: 600;
+  font-size: $font-size-md;
+  color: white;
+}
+
+// ==================== SETTINGS PAGE ====================
+
+.settings-section {
+  background: $background-card;
+  border-radius: 12px;
+  border: 1px solid $border-color;
+  padding: $space-6;
+  margin-bottom: $space-5;
+
+  .section-title {
+    font-weight: 600;
+    font-size: $font-size-lg;
+    margin-bottom: $space-5;
+    color: $text-primary;
+  }
+
+  .setting-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: $space-4 0;
+    border-bottom: 1px solid $border-color;
+
+    &:last-child {
+      border-bottom: none;
+    }
+
+    .setting-label {
+      color: $text-secondary;
+      font-size: $font-size-base;
+    }
+
+    .setting-value {
+      color: $text-primary;
+      font-weight: 500;
+      font-size: $font-size-base;
+    }
+  }
+}
+
+// ==================== LOGIN PAGE ====================
+
+.login-container {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: $gradient-header;
+  padding: $space-8;
+}
+
+.login-card {
+  background: $background-card;
+  border-radius: 16px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+  padding: $space-12;
+  width: 100%;
+  max-width: 440px;
+
+  .login-logo {
+    text-align: center;
+    margin-bottom: $space-10;
+
+    .logo-icon {
+      font-size: 56px;
+      color: $primary;
+    }
+
+    h1 {
+      font-size: $font-size-2xl;
+      margin-top: $space-4;
+      margin-bottom: $space-2;
+    }
+
+    p {
+      color: $text-secondary;
+      font-size: $font-size-base;
+    }
+  }
+}
+
+// ==================== UPLOAD ZONE ====================
+
+.upload-zone {
+  min-height: 280px;
+  padding: $space-10 $space-8;
+  border: 2px dashed $border-color;
+  border-radius: 12px;
+  background: rgba($primary, 0.02);
+  transition: all 0.2s ease;
+  cursor: pointer;
+
+  &:hover {
+    border-color: $primary;
+    background: rgba($primary, 0.04);
+  }
+
+  &.drag-over {
+    border-color: $primary;
+    background: rgba($primary, 0.08);
+  }
+
+  .upload-icon {
+    width: 72px;
+    height: 72px;
+    margin: 0 auto $space-6;
+    background: rgba($primary, 0.1);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    .q-icon {
+      font-size: 32px;
+      color: $primary;
+    }
+  }
+
+  .upload-title {
+    font-size: $font-size-xl;
+    font-weight: 600;
+    margin-bottom: $space-3;
+    color: $text-primary;
+  }
+
+  .upload-description {
+    font-size: $font-size-base;
+    color: $text-secondary;
+    margin-bottom: $space-6;
+  }
+
+  .upload-hint {
+    font-size: $font-size-sm;
+    color: $text-muted;
+    margin-top: $space-4;
+  }
+}
+
+// ==================== RECORD PANEL ====================
+
+.record-panel {
+  min-height: 280px;
+  padding: $space-8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+
+  .mic-selector {
+    width: 100%;
+    max-width: 300px;
+    margin-bottom: $space-5;
+
+    .q-select {
+      font-size: $font-size-base;
+    }
+  }
+
+  .system-audio-toggle {
+    padding: $space-4 $space-5;
+    background: $background-light;
+    border-radius: 8px;
+    width: 100%;
+    max-width: 300px;
+    margin-top: $space-4;
+  }
+}
+
+// ==================== TIPS SECTION ====================
+
+.tips-section {
+  background: $background-light;
+  border-radius: 12px;
+  padding: $space-6;
+  margin-top: $space-6;
+
+  .tips-title {
+    font-size: $font-size-base;
+    font-weight: 600;
+    margin-bottom: $space-4;
+    display: flex;
+    align-items: center;
+    gap: $space-2;
+  }
+
+  .tip-item {
+    font-size: $font-size-sm;
+    color: $text-secondary;
+    padding: $space-2 0;
+    display: flex;
+    align-items: flex-start;
+    gap: $space-3;
+
+    .q-icon {
+      color: $primary;
+      margin-top: 2px;
+    }
+  }
+}
+
+// ==================== UTILITY CLASSES ====================
+
+.full-width {
+  width: 100%;
+}
+
+.text-center {
+  text-align: center;
+}
+
+// Margin bottom
+.mb-0 { margin-bottom: 0; }
+.mb-1 { margin-bottom: $space-1; }
+.mb-2 { margin-bottom: $space-2; }
+.mb-3 { margin-bottom: $space-3; }
+.mb-4 { margin-bottom: $space-4; }
+.mb-5 { margin-bottom: $space-5; }
+.mb-6 { margin-bottom: $space-6; }
+.mb-8 { margin-bottom: $space-8; }
+
+// Margin top
+.mt-0 { margin-top: 0; }
+.mt-1 { margin-top: $space-1; }
+.mt-2 { margin-top: $space-2; }
+.mt-3 { margin-top: $space-3; }
+.mt-4 { margin-top: $space-4; }
+.mt-5 { margin-top: $space-5; }
+.mt-6 { margin-top: $space-6; }
+.mt-8 { margin-top: $space-8; }
+
+// Gap utilities
+.gap-2 { gap: $space-2; }
+.gap-3 { gap: $space-3; }
+.gap-4 { gap: $space-4; }
+.gap-5 { gap: $space-5; }
+.gap-6 { gap: $space-6; }

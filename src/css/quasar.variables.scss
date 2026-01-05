@@ -1,0 +1,43 @@
+// Quasar SCSS Variables
+// Suisse Notes Brand Colors
+// --------------------------------------------------
+
+// Primary palette - Indigo/Purple gradient theme
+$primary   : #6366F1;  // Indigo - main brand color
+$secondary : #8B5CF6;  // Purple - secondary/accent
+$accent    : #EC4899;  // Pink - highlights
+
+// Semantic colors
+$positive  : #22C55E;  // Green - success/uploaded
+$negative  : #EF4444;  // Red - error/recording
+$info      : #3B82F6;  // Blue - info
+$warning   : #F59E0B;  // Amber - pending/warning
+
+// Dark theme colors
+$dark      : #1E293B;  // Slate-800
+$dark-page : #0F172A;  // Slate-900
+
+// Background colors
+$background-light : #F8FAFC;  // Slate-50
+$background-card  : #FFFFFF;
+
+// Text colors
+$text-primary   : #1E293B;  // Slate-800
+$text-secondary : #64748B;  // Slate-500
+$text-muted     : #94A3B8;  // Slate-400
+
+// Border colors
+$border-color : #E2E8F0;  // Slate-200
+
+// Gradient definitions
+$gradient-primary: linear-gradient(135deg, $primary 0%, $secondary 100%);
+$gradient-header: linear-gradient(90deg, $primary 0%, $secondary 100%);
+
+// Border radius
+$generic-border-radius: 12px;
+
+// Shadows
+$shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+$shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+$shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+$shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
