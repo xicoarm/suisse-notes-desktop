@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.3.7](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.3.6...v3.3.7) (2026-01-06)
+
+
+### Bug Fixes
+
+* Improve FFmpeg error handling and auto-update config ([ec5f463](https://github.com/xicoarm/suisse-notes-desktop/commit/ec5f463973e68af11b9bf98985de65588c5c542f))
+
 ### [3.3.6](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.3.5...v3.3.6) (2026-01-06)
 
 
