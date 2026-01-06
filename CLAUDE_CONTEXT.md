@@ -380,27 +380,24 @@ publish: {
 
 ### How to Release a New Version
 
+**CI/CD handles releases automatically!** When you push a tag, GitHub Actions builds and publishes the release.
+
 ```bash
 # 1. Bump version (uses standard-version)
 npm run release:patch    # 3.3.4 → 3.3.5 (bug fixes)
 npm run release:minor    # 3.3.4 → 3.4.0 (new features)
 npm run release:major    # 3.3.4 → 4.0.0 (breaking changes)
 
-# 2. Build the app
-npm run build
-
-# 3. Push version bump + git tag
+# 2. Push version bump + git tag
 git push --follow-tags
 
-# 4. Create GitHub Release
-#    - Go to: https://github.com/xicoarm/suisse-notes-desktop/releases
-#    - Click "Draft a new release"
-#    - Select the tag that was just pushed (e.g., v3.3.5)
-#    - Upload artifacts from: dist/electron/Packaged/
-#      - Suisse Notes Setup X.X.X.exe (Windows installer)
-#      - latest.yml (REQUIRED for auto-updater to work)
-#    - Publish the release
+# 3. Done! GitHub Actions will:
+#    - Build the app for Windows
+#    - Create a GitHub Release with the tag
+#    - Upload the installer + latest.yml automatically
 ```
+
+**Note:** You do NOT need to manually build or upload files. The CI/CD pipeline handles everything.
 
 ### What Happens on Client Side
 
@@ -428,3 +425,5 @@ ssh ubuntu@185.79.233.140
 **GitHub Repositories:**
 - Web App: https://github.com/xicoarm/suisse-notes-v2.git
 - Desktop App: https://github.com/xicoarm/suisse-notes-desktop (private)
+
+Private token: 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
