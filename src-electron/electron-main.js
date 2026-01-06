@@ -81,6 +81,9 @@ autoUpdater.logger.transports.file.level = 'info';
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 
+// Note: For private GitHub repos, GH_TOKEN must be set during build
+// electron-builder will automatically include it in app-update.yml
+
 // Environment-aware API configuration
 // Uses config.js for environment detection
 const { getApiUrl, getEnvironmentInfo } = require('./config');
@@ -1461,14 +1464,21 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
         } catch (err) {
           console.warn('FFmpeg concat failed, trying re-encode:', err.message);
           // Fallback: re-encode
-          await ffmpegWithTimeout(
-            ffmpeg()
-              .input(concatListPath)
-              .inputOptions(['-f', 'concat', '-safe', '0'])
-              .output(outputPath),
-            FFMPEG_TIMEOUT_MS,
-            'Concat sessions (re-encode)'
-          );
+          try {
+            await ffmpegWithTimeout(
+              ffmpeg()
+                .input(concatListPath)
+                .inputOptions(['-f', 'concat', '-safe', '0'])
+                .output(outputPath),
+              FFMPEG_TIMEOUT_MS,
+              'Concat sessions (re-encode)'
+            );
+          } catch (reencodeErr) {
+            console.error('Re-encode also failed:', reencodeErr.message);
+            // Clean up concat list before throwing
+            try { fs.unlinkSync(concatListPath); } catch (e) { /* ignore */ }
+            throw new Error(`FFmpeg concat failed: ${reencodeErr.message}`);
+          }
         }
 
         // Cleanup
@@ -1598,12 +1608,19 @@ async function createSessionFileInternal(recordId, ext) {
   } catch (err) {
     console.warn('Codec copy failed, trying re-encode:', err.message);
     // Fallback: re-encode
-    await ffmpegWithTimeout(
-      ffmpeg(rawPath)
-        .output(finalPath),
-      FFMPEG_TIMEOUT_MS,
-      'Create session file (re-encode)'
-    );
+    try {
+      await ffmpegWithTimeout(
+        ffmpeg(rawPath)
+          .output(finalPath),
+        FFMPEG_TIMEOUT_MS,
+        'Create session file (re-encode)'
+      );
+    } catch (reencodeErr) {
+      console.error('Re-encode also failed:', reencodeErr.message);
+      // Clean up raw file before returning error
+      try { fs.unlinkSync(rawPath); } catch (e) { /* ignore */ }
+      return { success: false, error: `FFmpeg processing failed: ${reencodeErr.message}` };
+    }
   }
 
   try {

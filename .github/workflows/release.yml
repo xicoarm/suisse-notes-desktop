@@ -29,7 +29,9 @@ jobs:
 
       - name: Build Electron app
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Use PAT for private repo auto-updates (clients need this to download updates)
+          # Add GH_PAT secret in repo settings with a PAT that has 'repo' scope
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           # Code signing (optional - uncomment and add secrets when certificate is available)
           # CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           # CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
