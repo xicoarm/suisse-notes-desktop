@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.3.12](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.3.11...v3.3.12) (2026-01-06)
+
+
+### Features
+
+* add copyright year to footer ([71e13c0](https://github.com/xicoarm/suisse-notes-desktop/commit/71e13c014acea4519333dafcc8a5c0c15dea376c))
+
 ### [3.3.11](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.3.10...v3.3.11) (2026-01-06)
 
 ### [3.3.10](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.3.9...v3.3.10) (2026-01-06)
