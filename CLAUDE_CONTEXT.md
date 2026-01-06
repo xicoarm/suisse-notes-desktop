@@ -352,13 +352,79 @@ docker restart swiss-german-api
 
 ---
 
-how to access suisse notes web version:
-You have access through ssh. This is the prod envirnoment:
+## Desktop App Release & Auto-Updates
+
+The desktop app uses **electron-updater** with **GitHub Releases** for automatic updates.
+
+### Auto-Update Configuration
+
+Located in `src-electron/electron-main.js`:
+- `autoUpdater.autoDownload = true` — Updates download silently in the background
+- `autoUpdater.autoInstallOnAppQuit = true` — Installs when user closes the app
+- Checks for updates on startup + every 4 hours
+
+### GitHub Release Settings
+
+Located in `quasar.config.js`:
+```javascript
+publish: {
+  provider: 'github',
+  owner: 'xicoarm',
+  repo: 'suisse-notes-desktop',
+  releaseType: 'release',
+  private: true
+}
+```
+
+**GitHub Repo:** https://github.com/xicoarm/suisse-notes-desktop (private)
+
+### How to Release a New Version
+
+```bash
+# 1. Bump version (uses standard-version)
+npm run release:patch    # 3.3.4 → 3.3.5 (bug fixes)
+npm run release:minor    # 3.3.4 → 3.4.0 (new features)
+npm run release:major    # 3.3.4 → 4.0.0 (breaking changes)
+
+# 2. Build the app
+npm run build
+
+# 3. Push version bump + git tag
+git push --follow-tags
+
+# 4. Create GitHub Release
+#    - Go to: https://github.com/xicoarm/suisse-notes-desktop/releases
+#    - Click "Draft a new release"
+#    - Select the tag that was just pushed (e.g., v3.3.5)
+#    - Upload artifacts from: dist/electron/Packaged/
+#      - Suisse Notes Setup X.X.X.exe (Windows installer)
+#      - latest.yml (REQUIRED for auto-updater to work)
+#    - Publish the release
+```
+
+### What Happens on Client Side
+
+1. User opens Suisse Notes desktop app
+2. App checks GitHub Releases for newer version
+3. If found → downloads update silently in background
+4. When user closes the app → update installs automatically
+5. Next launch → running the new version
+
+### Important Notes
+
+- **Private repo:** Requires `GH_TOKEN` environment variable for electron-updater to access releases
+- **latest.yml:** This file MUST be uploaded with each release — it tells the updater what version is available
+- **Code signing:** Windows builds can be signed by setting `CSC_LINK` and `CSC_KEY_PASSWORD` environment variables
+
+---
+
+## Access & Resources
+
+**Web App SSH Access:**
+```bash
 ssh ubuntu@185.79.233.140
+```
 
-=======
-Github:
-https://github.com/xicoarm/suisse-notes-v2.git
-
-
-check claude_context-md. can I tell you my first feature request? 
+**GitHub Repositories:**
+- Web App: https://github.com/xicoarm/suisse-notes-v2.git
+- Desktop App: https://github.com/xicoarm/suisse-notes-desktop (private)
