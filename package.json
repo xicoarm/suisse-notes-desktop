@@ -1,9 +1,9 @@
 {
-  "name": "simple-meeting-recorder",
+  "name": "suisse-notes-desktop",
   "version": "3.3.5",
-  "description": "Simple meeting recorder with audio upload",
-  "productName": "Simple Meeting Recorder",
-  "author": "Your Name",
+  "description": "Desktop app for recording and transcribing meetings",
+  "productName": "Suisse Notes",
+  "author": "Suisse AI Group GmbH",
   "private": true,
   "scripts": {
     "dev": "quasar dev -m electron",
