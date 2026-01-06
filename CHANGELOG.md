@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.3.6](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.3.5...v3.3.6) (2026-01-06)
+
+
+### Bug Fixes
+
+* Update app name to Suisse Notes ([b954b94](https://github.com/xicoarm/suisse-notes-desktop/commit/b954b94872b2958258624aa1af607feb02bfcf66))
+
 ### [3.3.5](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.3.4...v3.3.5) (2026-01-06)
 
 
