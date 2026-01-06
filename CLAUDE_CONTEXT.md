@@ -409,7 +409,10 @@ git push --follow-tags
 
 ### Important Notes
 
-- **Private repo:** Requires `GH_TOKEN` environment variable for electron-updater to access releases
+- **Private repo auto-updates:** Requires `GH_PAT` GitHub Actions secret with a Personal Access Token (PAT) that has `repo` scope. This gets baked into the app at build time.
+  - Add secret at: https://github.com/xicoarm/suisse-notes-desktop/settings/secrets/actions
+  - Secret name: `GH_PAT`
+  - Value: Your PAT with `repo` scope
 - **latest.yml:** This file MUST be uploaded with each release — it tells the updater what version is available
 - **Code signing:** Windows builds can be signed by setting `CSC_LINK` and `CSC_KEY_PASSWORD` environment variables
 
