@@ -1,16 +1,29 @@
 <template>
   <q-layout view="hHh lpR fFf">
-    <q-header elevated class="gradient-header">
+    <q-header
+      elevated
+      class="gradient-header"
+    >
       <q-toolbar class="compact-toolbar">
         <!-- Left Section: Brand Logo -->
         <div class="header-left">
           <div class="brand-logo">
-            <q-icon name="mic" size="sm" />
+            <q-icon
+              name="mic"
+              size="sm"
+            />
             <span>Suisse Notes</span>
           </div>
           <!-- Global Upload Progress Indicator -->
-          <div class="upload-indicator" v-if="recordingStore.hasActiveUpload" @click="goTo('/record')">
-            <q-spinner-dots size="14px" color="white" />
+          <div
+            v-if="recordingStore.hasActiveUpload"
+            class="upload-indicator"
+            @click="goTo('/record')"
+          >
+            <q-spinner-dots
+              size="14px"
+              color="white"
+            />
             <span>Uploading {{ Math.min(recordingStore.activeUploadProgress, 99) }}%</span>
           </div>
         </div>
@@ -25,13 +38,26 @@
             dense
             indicator-color="white"
           >
-            <q-tab name="record" icon="mic" :label="$t('record')" @click="goTo('/record')" />
-            <q-tab name="history" icon="history" :label="$t('history')" @click="goTo('/history')" />
+            <q-tab
+              name="record"
+              icon="mic"
+              :label="$t('record')"
+              @click="goTo('/record')"
+            />
+            <q-tab
+              name="history"
+              icon="history"
+              :label="$t('history')"
+              @click="goTo('/history')"
+            />
           </q-tabs>
         </div>
 
         <!-- Right Section: Action Buttons -->
-        <div class="header-right" v-if="authStore.isAuthenticated">
+        <div
+          v-if="authStore.isAuthenticated"
+          class="header-right"
+        >
           <!-- Language Switcher -->
           <q-btn-dropdown
             flat
@@ -44,10 +70,10 @@
               <q-item
                 v-for="lang in languages"
                 :key="lang.value"
-                clickable
                 v-close-popup
-                @click="setLanguage(lang.value)"
+                clickable
                 :active="currentLang === lang.value"
+                @click="setLanguage(lang.value)"
               >
                 <q-item-section>
                   <q-item-label>{{ lang.label }}</q-item-label>
@@ -89,7 +115,10 @@
             <q-tooltip>{{ $t('signOut') }}</q-tooltip>
           </q-btn>
         </div>
-        <div class="header-right" v-else></div>
+        <div
+          v-else
+          class="header-right"
+        />
       </q-toolbar>
     </q-header>
 
@@ -99,8 +128,13 @@
 
     <q-footer class="app-footer">
       <div class="footer-content">
-        <span>Powered by</span>
-        <a href="https://suisse-ai.ch" target="_blank" rel="noopener" class="footer-link">Suisse AI Group GmbH</a>
+        <span>© 2026</span>
+        <a
+          href="https://suisse-ai.ch"
+          target="_blank"
+          rel="noopener"
+          class="footer-link"
+        >Suisse AI Group GmbH</a>
         <span class="footer-separator">·</span>
         <span class="footer-address">Kirchstrasse 3, 8304 Wallisellen, Schweiz</span>
       </div>
