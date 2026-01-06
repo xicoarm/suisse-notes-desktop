@@ -2,6 +2,8 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.3.8](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.3.7...v3.3.8) (2026-01-06)
+
 ### [3.3.7](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.3.6...v3.3.7) (2026-01-06)
 
 
