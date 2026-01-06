@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.3.9](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.3.8...v3.3.9) (2026-01-06)
+
+
+### Bug Fixes
+
+* Add actual FFmpeg binaries (was placeholder files) ([283bc30](https://github.com/xicoarm/suisse-notes-desktop/commit/283bc30d9e565812229781f98aad97d26b991768))
+
 ### [3.3.8](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.3.7...v3.3.8) (2026-01-06)
 
 ### [3.3.7](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.3.6...v3.3.7) (2026-01-06)
