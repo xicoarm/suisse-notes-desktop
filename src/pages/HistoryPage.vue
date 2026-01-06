@@ -405,13 +405,9 @@ export default {
 }
 
 .recordings-list {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
-
-  @media (max-width: 900px) {
-    grid-template-columns: 1fr;
-  }
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .uploading-card {
@@ -420,8 +416,6 @@ export default {
   border-left: 4px solid #6366F1;
   border-radius: 12px;
   padding: 20px 24px;
-  margin-bottom: 16px;
-  grid-column: 1 / -1;
 
   .uploading-header {
     display: flex;
