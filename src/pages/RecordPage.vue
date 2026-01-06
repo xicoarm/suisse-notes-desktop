@@ -37,7 +37,7 @@
               icon="folder_open"
               :loading="isFileUploading"
               class="upload-btn"
-              @click="selectFileForUpload"
+              @click.stop="selectFileForUpload"
             />
             <div class="drag-drop-hint">
               <q-icon

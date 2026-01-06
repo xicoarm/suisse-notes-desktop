@@ -331,16 +331,15 @@ async function combineChunksForRecovery(recordId) {
         ).join('\n');
         fs.writeFileSync(concatListPath, listContent);
 
-        await new Promise((resolve, reject) => {
+        await ffmpegWithTimeout(
           ffmpeg()
             .input(concatListPath)
             .inputOptions(['-f', 'concat', '-safe', '0'])
             .audioCodec('copy')
-            .output(outputPath)
-            .on('end', resolve)
-            .on('error', reject)
-            .run();
-        });
+            .output(outputPath),
+          FFMPEG_TIMEOUT_MS,
+          'Recovery concat sessions'
+        );
 
         fs.unlinkSync(concatListPath);
         await fs.promises.rm(sessionsPath, { recursive: true, force: true });
@@ -1323,29 +1322,27 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
 
     console.log(`Combined ${sortedChunks.length} chunks into raw session (${rawStats.size} bytes)`);
 
-    // Process with FFmpeg (codec copy, fallback to re-encode)
-    await new Promise((resolve, reject) => {
-      ffmpeg(rawPath)
-        .audioCodec('copy')
-        .output(finalPath)
-        .on('end', () => {
-          console.log('Session file created with codec copy');
-          resolve();
-        })
-        .on('error', (err) => {
-          console.warn('Codec copy failed, trying re-encode:', err.message);
-          // Fallback: re-encode if codec copy fails
-          ffmpeg(rawPath)
-            .output(finalPath)
-            .on('end', () => {
-              console.log('Session file created with re-encode');
-              resolve();
-            })
-            .on('error', reject)
-            .run();
-        })
-        .run();
-    });
+    // Process with FFmpeg (codec copy, fallback to re-encode) - with timeout
+    try {
+      await ffmpegWithTimeout(
+        ffmpeg(rawPath)
+          .audioCodec('copy')
+          .output(finalPath),
+        FFMPEG_TIMEOUT_MS,
+        'Session file (codec copy)'
+      );
+      console.log('Session file created with codec copy');
+    } catch (err) {
+      console.warn('Codec copy failed, trying re-encode:', err.message);
+      // Fallback: re-encode if codec copy fails
+      await ffmpegWithTimeout(
+        ffmpeg(rawPath)
+          .output(finalPath),
+        FFMPEG_TIMEOUT_MS,
+        'Session file (re-encode)'
+      );
+      console.log('Session file created with re-encode');
+    }
 
     // Get duration via ffprobe
     let durationMs = 0;
@@ -1450,26 +1447,29 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
         ).join('\n');
         fs.writeFileSync(concatListPath, listContent);
 
-        await new Promise((resolve, reject) => {
-          ffmpeg()
-            .input(concatListPath)
-            .inputOptions(['-f', 'concat', '-safe', '0'])
-            .audioCodec('copy')
-            .output(outputPath)
-            .on('end', resolve)
-            .on('error', (err) => {
-              console.warn('FFmpeg concat failed, trying re-encode:', err.message);
-              // Fallback: re-encode
-              ffmpeg()
-                .input(concatListPath)
-                .inputOptions(['-f', 'concat', '-safe', '0'])
-                .output(outputPath)
-                .on('end', resolve)
-                .on('error', reject)
-                .run();
-            })
-            .run();
-        });
+        // Use timeout-wrapped FFmpeg with fallback
+        try {
+          await ffmpegWithTimeout(
+            ffmpeg()
+              .input(concatListPath)
+              .inputOptions(['-f', 'concat', '-safe', '0'])
+              .audioCodec('copy')
+              .output(outputPath),
+            FFMPEG_TIMEOUT_MS,
+            'Concat sessions (codec copy)'
+          );
+        } catch (err) {
+          console.warn('FFmpeg concat failed, trying re-encode:', err.message);
+          // Fallback: re-encode
+          await ffmpegWithTimeout(
+            ffmpeg()
+              .input(concatListPath)
+              .inputOptions(['-f', 'concat', '-safe', '0'])
+              .output(outputPath),
+            FFMPEG_TIMEOUT_MS,
+            'Concat sessions (re-encode)'
+          );
+        }
 
         // Cleanup
         fs.unlinkSync(concatListPath);
@@ -1586,20 +1586,25 @@ async function createSessionFileInternal(recordId, ext) {
     return { success: false, error: 'Recording too short or empty' };
   }
 
-  await new Promise((resolve, reject) => {
-    ffmpeg(rawPath)
-      .audioCodec('copy')
-      .output(finalPath)
-      .on('end', resolve)
-      .on('error', (err) => {
-        ffmpeg(rawPath)
-          .output(finalPath)
-          .on('end', resolve)
-          .on('error', reject)
-          .run();
-      })
-      .run();
-  });
+  // Use timeout-wrapped FFmpeg with fallback
+  try {
+    await ffmpegWithTimeout(
+      ffmpeg(rawPath)
+        .audioCodec('copy')
+        .output(finalPath),
+      FFMPEG_TIMEOUT_MS,
+      'Create session file (codec copy)'
+    );
+  } catch (err) {
+    console.warn('Codec copy failed, trying re-encode:', err.message);
+    // Fallback: re-encode
+    await ffmpegWithTimeout(
+      ffmpeg(rawPath)
+        .output(finalPath),
+      FFMPEG_TIMEOUT_MS,
+      'Create session file (re-encode)'
+    );
+  }
 
   try {
     fs.unlinkSync(rawPath);
