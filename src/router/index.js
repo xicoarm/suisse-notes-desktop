@@ -8,7 +8,13 @@ const routes = [
     children: [
       {
         path: '',
-        redirect: '/login'
+        redirect: '/about'
+      },
+      {
+        path: 'about',
+        name: 'about',
+        component: () => import('../pages/AboutPage.vue'),
+        meta: { requiresAuth: false }
       },
       {
         path: 'login',
@@ -26,6 +32,12 @@ const routes = [
         path: 'record',
         name: 'record',
         component: () => import('../pages/RecordPage.vue'),
+        meta: { requiresAuth: true }
+      },
+      {
+        path: 'upload',
+        name: 'upload',
+        component: () => import('../pages/UploadPage.vue'),
         meta: { requiresAuth: true }
       },
       {
@@ -72,6 +84,9 @@ export default function (/* { store, ssrContext } */) {
       next({ name: 'login' });
     } else if ((to.name === 'login' || to.name === 'register') && authStore.isAuthenticated) {
       next({ name: 'record' });
+    } else if (to.name === 'about' && authStore.isAuthenticated) {
+      // Allow authenticated users to visit about page
+      next();
     } else {
       next();
     }

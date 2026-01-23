@@ -3,7 +3,7 @@
 // Configuration for your app
 // https://v2.quasar.dev/quasar-cli-vite/quasar-config-file
 
-export default function (/* ctx */) {
+export default function (ctx) {
   return {
     eslint: {
       warnings: true,
@@ -12,8 +12,10 @@ export default function (/* ctx */) {
 
     boot: [
       'axios',
-      'i18n'
-    ],
+      'i18n',
+      // Load lifecycle boot file only on Capacitor (mobile)
+      ctx.mode.capacitor ? 'lifecycle' : ''
+    ].filter(Boolean),
 
     css: [
       'app.scss'
@@ -64,7 +66,21 @@ export default function (/* ctx */) {
     cordova: {},
 
     capacitor: {
-      hideSplashscreen: true
+      hideSplashscreen: true,
+      // Capacitor CLI version (must be installed)
+      // version: 6,
+      // App identifier for mobile stores (no dashes allowed in Java package names)
+      appId: 'ch.suissenotes.app',
+      appName: 'Suisse Notes',
+      // iOS-specific settings
+      ios: {
+        // Enable background audio recording
+        appendUserAgent: 'SuisseNotes-iOS'
+      },
+      // Android-specific settings
+      android: {
+        appendUserAgent: 'SuisseNotes-Android'
+      }
     },
 
     electron: {

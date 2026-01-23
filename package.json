@@ -7,7 +7,14 @@
   "private": true,
   "scripts": {
     "dev": "quasar dev -m electron",
+    "dev:ios": "quasar dev -m capacitor -T ios",
+    "dev:android": "quasar dev -m capacitor -T android",
     "build": "quasar build -m electron",
+    "build:ios": "quasar build -m capacitor -T ios",
+    "build:android": "quasar build -m capacitor -T android",
+    "cap:sync": "cd src-capacitor && npx cap sync",
+    "cap:open:ios": "cd src-capacitor && npx cap open ios",
+    "cap:open:android": "cd src-capacitor && npx cap open android",
     "lint": "eslint --ext .js,.vue ./src",
     "lint:fix": "eslint --ext .js,.vue ./src --fix",
     "prepare": "husky",
@@ -25,6 +32,13 @@
     ]
   },
   "dependencies": {
+    "@capacitor/app": "^8.0.0",
+    "@capacitor/cli": "^8.0.1",
+    "@capacitor/core": "^8.0.1",
+    "@capacitor/device": "^8.0.0",
+    "@capacitor/filesystem": "^8.1.0",
+    "@capacitor/network": "^8.0.0",
+    "@capacitor/preferences": "^8.0.0",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@ffprobe-installer/ffprobe": "^2.1.2",
     "@quasar/extras": "^1.16.9",

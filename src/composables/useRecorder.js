@@ -1,8 +1,20 @@
 import { ref, onUnmounted, onMounted } from 'vue';
 import { useRecordingStore } from '../stores/recording';
 import { useSystemAudio } from './useSystemAudio';
+import { isElectron, isCapacitor, isMobile } from '../utils/platform';
 
+/**
+ * Platform-aware recorder composable
+ * Uses MediaRecorder on desktop (Electron) and native plugins on mobile (Capacitor)
+ */
 export function useRecorder() {
+  // On mobile, delegate to native recorder
+  if (isMobile()) {
+    const { useNativeRecorder } = require('./useRecorder.native');
+    return useNativeRecorder();
+  }
+
+  // Desktop implementation follows
   const recordingStore = useRecordingStore();
 
   // System audio composable

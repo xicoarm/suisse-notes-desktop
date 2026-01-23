@@ -394,39 +394,4 @@ git push --follow-tags
 # 3. Done! GitHub Actions will:
 #    - Build the app for Windows
 #    - Create a GitHub Release with the tag
-#    - Upload the installer + latest.yml automatically
-```
-
-**Note:** You do NOT need to manually build or upload files. The CI/CD pipeline handles everything.
-
-### What Happens on Client Side
-
-1. User opens Suisse Notes desktop app
-2. App checks GitHub Releases for newer version
-3. If found → downloads update silently in background
-4. When user closes the app → update installs automatically
-5. Next launch → running the new version
-
-### Important Notes
-
-- **Private repo auto-updates:** Requires `GH_PAT` GitHub Actions secret with a Personal Access Token (PAT) that has `repo` scope. This gets baked into the app at build time.
-  - Add secret at: https://github.com/xicoarm/suisse-notes-desktop/settings/secrets/actions
-  - Secret name: `GH_PAT`
-  - Value: Your PAT with `repo` scope
-- **latest.yml:** This file MUST be uploaded with each release — it tells the updater what version is available
-- **Code signing:** Windows builds can be signed by setting `CSC_LINK` and `CSC_KEY_PASSWORD` environment variables
-
----
-
-## Access & Resources
-
-**Web App SSH Access:**
-```bash
-ssh ubuntu@185.79.233.140
-```
-
-**GitHub Repositories:**
-- Web App: https://github.com/xicoarm/suisse-notes-v2.git
-- Desktop App: https://github.com/xicoarm/suisse-notes-desktop (private)
-
-Private token: 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
+#    - Upload the installer + latest.yml auPrivate token: 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

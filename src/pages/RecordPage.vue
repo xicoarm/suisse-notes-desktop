@@ -1,64 +1,16 @@
 <template>
   <q-page class="record-page">
     <div class="record-container">
-      <!-- IDLE STATE: Two-column layout -->
+      <!-- Mode Tab Switcher -->
+      <ModeTabSwitcher />
+
+      <!-- IDLE STATE: Recording form -->
       <div
         v-if="recordingStore.status === 'idle' && !recordingStore.isUploaded"
         class="idle-layout"
       >
-        <!-- Left Column: Upload File -->
-        <div
-          class="upload-column modern-card no-hover clickable"
-          :class="{ 'drag-over': isDragOver }"
-          @click="selectFileForUpload"
-          @dragover.prevent="onDragOver"
-          @dragleave.prevent="onDragLeave"
-          @drop.prevent="onDrop"
-        >
-          <div class="upload-content">
-            <div
-              class="upload-icon-wrapper"
-              :class="{ 'drag-active': isDragOver }"
-            >
-              <q-icon
-                :name="isDragOver ? 'file_download' : 'cloud_upload'"
-                :size="isDragOver ? '40px' : '36px'"
-                :color="isDragOver ? 'primary' : 'grey-6'"
-              />
-            </div>
-            <h3>{{ isDragOver ? $t('dropHere') : $t('uploadFile') }}</h3>
-            <p class="column-desc">
-              {{ $t('uploadDesc') }}
-            </p>
-            <q-btn
-              unelevated
-              color="secondary"
-              :label="$t('selectFile')"
-              icon="folder_open"
-              :loading="isFileUploading"
-              class="upload-btn"
-              @click.stop="selectFileForUpload"
-            />
-            <div class="drag-drop-hint">
-              <q-icon
-                name="mouse"
-                size="12px"
-              />
-              <span>{{ $t('dragDropHint') }}</span>
-            </div>
-            <div class="supported-formats">
-              MP3, MP4, WAV, M4A, WEBM, OGG, FLAC
-            </div>
-          </div>
-        </div>
-
-        <!-- Divider -->
-        <div class="columns-divider">
-          <span>or</span>
-        </div>
-
-        <!-- Right Column: Start Recording -->
-        <div class="record-column modern-card no-hover">
+        <!-- Record Card -->
+        <div class="record-card modern-card no-hover">
           <div class="column-header">
             <q-icon
               name="mic"
@@ -167,6 +119,16 @@
             </div>
           </div>
         </div>
+
+        <!-- Transcription Options -->
+        <TranscriptionOptions
+          :title="transcriptionStore.sessionTitle"
+          :session-vocabulary="transcriptionStore.sessionVocabulary"
+          :global-vocabulary="transcriptionStore.globalVocabulary"
+          @update:title="updateTitle"
+          @add-word="addSessionWord"
+          @remove-word="removeSessionWord"
+        />
       </div>
 
       <!-- RECORDING/PAUSED STATE: Full-width recording card -->
@@ -270,7 +232,7 @@
 
         <!-- Uploading state -->
         <div
-          v-else-if="isAutoUploading"
+          v-else-if="isAutoUploading || recordingStore.isUploading"
           class="upload-content"
         >
           <div class="upload-progress-section">
@@ -429,6 +391,49 @@
                 </div>
               </q-btn>
             </div>
+
+            <!-- Copy Link Button -->
+            <div class="copy-link-section">
+              <q-btn
+                flat
+                color="primary"
+                :label="$t('copyLink')"
+                icon="content_copy"
+                size="sm"
+                class="copy-link-btn"
+                @click="copyTranscriptUrl"
+              />
+              <span class="copy-hint">{{ $t('copyLinkHint') }}</span>
+            </div>
+          </div>
+
+          <!-- URL Display -->
+          <div
+            v-if="currentAudioFileId"
+            class="url-display-section"
+          >
+            <div class="url-label">
+              <q-icon
+                name="link"
+                size="xs"
+                color="grey-6"
+              />
+              <span>{{ $t('transcriptUrlLabel') }}</span>
+            </div>
+            <div class="url-value">
+              <code>https://app.suisse-notes.ch/meeting/audio/{{ currentAudioFileId }}</code>
+              <q-btn
+                flat
+                round
+                dense
+                icon="content_copy"
+                size="xs"
+                color="primary"
+                @click="copyTranscriptUrl"
+              >
+                <q-tooltip>{{ $t('copyLink') }}</q-tooltip>
+              </q-btn>
+            </div>
           </div>
 
           <!-- Secondary info -->
@@ -441,7 +446,10 @@
               />
               <span>{{ $t('uploadComplete') }}</span>
             </div>
-            <div class="success-meta">
+            <div
+              v-if="finalDuration > 0"
+              class="success-meta"
+            >
               <q-icon
                 name="schedule"
                 size="sm"
@@ -483,12 +491,12 @@
             size="sm"
             color="primary"
           />
-          <span>Tips for better recordings</span>
+          <span>{{ $t('tipsTitle') }}</span>
         </div>
         <ul class="tips-list">
-          <li>Use a proper external microphone for best audio quality and speaker differentiation</li>
-          <li>Position the microphone close to the speakers</li>
-          <li>Recording will be automatically uploaded when you stop</li>
+          <li>{{ $t('tip1') }}</li>
+          <li>{{ $t('tip2') }}</li>
+          <li>{{ $t('tip3') }}</li>
         </ul>
         <div class="tips-contact">
           <q-icon
@@ -496,7 +504,7 @@
             size="xs"
             color="grey-6"
           />
-          <span>Need help choosing a microphone? Contact us at <a href="mailto:info@suisse-voice.ch">info@suisse-voice.ch</a></span>
+          <span>{{ $t('tipsContact') }} <a href="mailto:info@suisse-notes.ch">info@suisse-notes.ch</a></span>
         </div>
       </div>
     </div>
@@ -516,7 +524,10 @@ import { useRouter } from 'vue-router';
 import { useQuasar } from 'quasar';
 import { useRecordingStore } from '../stores/recording';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
+import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
 import { useRecorder } from '../composables/useRecorder';
+import ModeTabSwitcher from '../components/ModeTabSwitcher.vue';
+import TranscriptionOptions from '../components/TranscriptionOptions.vue';
 import RecordingControls from '../components/RecordingControls.vue';
 import AudioLevelMeter from '../components/AudioLevelMeter.vue';
 import StorageOptionDialog from '../components/StorageOptionDialog.vue';
@@ -525,6 +536,7 @@ const router = useRouter();
 const $q = useQuasar();
 const recordingStore = useRecordingStore();
 const historyStore = useRecordingsHistoryStore();
+const transcriptionStore = useTranscriptionSettingsStore();
 
 const {
   audioLevel,
@@ -564,42 +576,11 @@ const uploadError = ref(null);
 const retryAttempt = ref(0);
 const currentFilePath = ref('');
 const currentFileSize = ref(0);
-const currentAudioFileId = ref(null);
-const isFileUploading = ref(false);
-const finalDuration = ref(0);  // Store duration before it gets reset
+const transcriptUrl = ref('');
 
-// Drag and drop state
-const isDragOver = ref(false);
-
-const onDragOver = () => {
-  isDragOver.value = true;
-};
-
-const onDragLeave = () => {
-  isDragOver.value = false;
-};
-
-const onDrop = async (event) => {
-  isDragOver.value = false;
-
-  const files = event.dataTransfer?.files;
-  if (!files || files.length === 0) return;
-
-  const file = files[0];
-  const validExtensions = ['mp3', 'mp4', 'wav', 'm4a', 'webm', 'ogg', 'flac', 'aac', 'mov', 'm4v', 'mpeg', 'mpga', 'opus', 'oga', 'wma', 'amr', '3gp', 'avi', 'mkv'];
-  const ext = file.name.split('.').pop()?.toLowerCase();
-
-  if (!ext || !validExtensions.includes(ext)) {
-    $q.notify({
-      type: 'negative',
-      message: 'Unsupported file format'
-    });
-    return;
-  }
-
-  // Use the file path from the dropped file
-  await handleDroppedFile(file);
-};
+// Use computed to access store values (for reactivity and persistence across navigation)
+const currentAudioFileId = computed(() => recordingStore.audioFileId);
+const finalDuration = computed(() => recordingStore.finalDuration);
 
 const statusText = computed(() => {
   if (isProcessing.value) return 'Processing...';
@@ -630,6 +611,7 @@ const statusClass = computed(() => {
 const showUploadSection = computed(() => {
   return isProcessing.value ||
          isAutoUploading.value ||
+         recordingStore.isUploading ||
          uploadError.value ||
          recordingStore.isUploaded;
 });
@@ -656,12 +638,10 @@ const uploadHeaderText = computed(() => {
   return 'Upload';
 });
 
-// Show actual upload progress
 const displayProgress = computed(() => {
   return recordingStore.uploadProgress;
 });
 
-// Format final duration for display
 const formattedFinalDuration = computed(() => {
   const seconds = finalDuration.value;
   const hours = Math.floor(seconds / 3600);
@@ -688,8 +668,20 @@ onMounted(async () => {
   await loadMicrophones();
   await loadSystemAudioState();
 
+  // Load transcription settings
+  await transcriptionStore.loadGlobalSettings();
+
   if (!historyStore.loaded) {
     await historyStore.loadRecordings();
+  }
+
+  // Restore UI state from store (for navigation back during upload)
+  if (recordingStore.status === 'uploading') {
+    isAutoUploading.value = true;
+    isProcessing.value = false;
+  } else if (recordingStore.status === 'uploaded') {
+    isAutoUploading.value = false;
+    isProcessing.value = false;
   }
 
   // Set up upload listeners
@@ -754,8 +746,8 @@ const handleResume = () => {
 };
 
 const handleStop = async () => {
-  // Save duration before stopping (it might get affected during stop process)
-  finalDuration.value = recordingStore.duration;
+  // Save duration before stopping
+  recordingStore.setFinalDuration(recordingStore.duration);
 
   // Start processing
   isProcessing.value = true;
@@ -800,12 +792,17 @@ const startAutoUpload = async () => {
     finalDuration: finalDuration.value
   });
 
+  // Get transcription options
+  const options = transcriptionStore.transcriptionOptions;
+
   try {
     const result = await window.electronAPI.upload.start({
       recordId: recordingStore.recordId,
       filePath: currentFilePath.value,
       metadata: {
-        duration: finalDuration.value.toString()
+        duration: finalDuration.value.toString(),
+        title: options.title,
+        customVocabulary: options.customVocabulary
       }
     });
 
@@ -813,8 +810,7 @@ const startAutoUpload = async () => {
     retryAttempt.value = 0;
 
     if (result.success) {
-      recordingStore.setUploaded();
-      currentAudioFileId.value = result.audioFileId;
+      recordingStore.setUploaded(result.audioFileId);
 
       // Add to history
       await historyStore.addRecording({
@@ -834,6 +830,9 @@ const startAutoUpload = async () => {
         await window.electronAPI.recording.deleteRecording(recordingStore.recordId);
         await historyStore.updateRecording(recordingStore.recordId, { filePath: null });
       }
+
+      // Reset session after successful upload
+      transcriptionStore.resetSession();
 
       $q.notify({
         type: 'positive',
@@ -857,7 +856,7 @@ const handleUploadError = async (errorMessage) => {
     createdAt: new Date().toISOString(),
     duration: finalDuration.value,
     fileSize: currentFileSize.value,
-    filePath: currentFilePath.value, // Always keep file path for retry
+    filePath: currentFilePath.value,
     uploadStatus: 'failed',
     storagePreference: currentStoragePreference.value,
     uploadError: errorMessage
@@ -895,8 +894,6 @@ const handleNewRecording = () => {
   retryAttempt.value = 0;
   currentFilePath.value = '';
   currentFileSize.value = 0;
-  currentAudioFileId.value = null;
-  finalDuration.value = 0;
 };
 
 // Start new recording while upload continues in background
@@ -911,8 +908,6 @@ const startNewWhileUploading = () => {
   retryAttempt.value = 0;
   currentFilePath.value = '';
   currentFileSize.value = 0;
-  currentAudioFileId.value = null;
-  finalDuration.value = 0;
 
   // Reset store for new recording (background upload continues)
   recordingStore.recordId = null;
@@ -924,6 +919,8 @@ const startNewWhileUploading = () => {
   recordingStore.bytesUploaded = 0;
   recordingStore.bytesTotal = 0;
   recordingStore.error = null;
+  recordingStore.audioFileId = null;
+  recordingStore.finalDuration = 0;
 };
 
 // Cancel the current upload
@@ -955,29 +952,36 @@ const cancelUpload = async () => {
   }
 };
 
+const generateTranscriptUrl = async () => {
+  if (!currentAudioFileId.value) return '';
+
+  let url = `https://app.suisse-notes.ch/meeting/audio/${currentAudioFileId.value}`;
+
+  // Try to get a web session token for seamless login
+  try {
+    const result = await window.electronAPI.auth.createWebSession();
+    if (result.success && result.sessionToken) {
+      url += `?session=${encodeURIComponent(result.sessionToken)}`;
+      console.log('Web session created successfully');
+    } else {
+      console.warn('Failed to create web session:', result.error);
+    }
+  } catch (error) {
+    console.warn('Could not create web session:', error);
+  }
+
+  return url;
+};
+
 const openInSuisseNotes = async () => {
   if (currentAudioFileId.value) {
-    let url = `https://app.suisse-notes.ch/meeting/audio/${currentAudioFileId.value}`;
+    // Generate fresh URL (session tokens are one-time use)
+    const url = await generateTranscriptUrl();
 
-    // Try to get a web session token for seamless login
-    try {
-      const result = await window.electronAPI.auth.createWebSession();
-      if (result.success && result.sessionToken) {
-        url += `?session=${encodeURIComponent(result.sessionToken)}`;
-        console.log('Web session created successfully');
-      } else {
-        console.warn('Failed to create web session:', result.error);
-        $q.notify({
-          type: 'warning',
-          message: 'Could not create session. You may need to log in on the web.',
-          timeout: 3000
-        });
-      }
-    } catch (error) {
-      console.warn('Could not create web session:', error);
+    if (!url.includes('session=')) {
       $q.notify({
         type: 'warning',
-        message: 'Session error. You may need to log in on the web.',
+        message: 'Could not create session. You may need to log in on the web.',
         timeout: 3000
       });
     }
@@ -986,194 +990,45 @@ const openInSuisseNotes = async () => {
   }
 };
 
+const copyTranscriptUrl = async () => {
+  if (currentAudioFileId.value) {
+    // Generate fresh URL for copying
+    const url = await generateTranscriptUrl();
+    transcriptUrl.value = url;
+
+    try {
+      await navigator.clipboard.writeText(url);
+      $q.notify({
+        type: 'positive',
+        message: 'Link copied to clipboard',
+        timeout: 2000
+      });
+    } catch (error) {
+      console.error('Failed to copy URL:', error);
+      $q.notify({
+        type: 'negative',
+        message: 'Failed to copy link',
+        timeout: 2000
+      });
+    }
+  }
+};
+
 const goToHistory = () => {
   router.push('/history');
 };
 
-// Handle dropped file
-const handleDroppedFile = async (file) => {
-  try {
-    // In Electron, dropped files have a path property
-    const filePath = file.path;
-    if (!filePath) {
-      $q.notify({
-        type: 'negative',
-        message: 'Could not get file path'
-      });
-      return;
-    }
-
-    // Get file info from main process
-    const result = await window.electronAPI.dialog.getDroppedFilePath(filePath);
-
-    if (!result.success) {
-      $q.notify({
-        type: 'negative',
-        message: result.error || 'Could not process file'
-      });
-      return;
-    }
-
-    // Start upload process (same as selectFileForUpload)
-    isFileUploading.value = true;
-    isProcessing.value = true;
-    uploadError.value = null;
-    retryAttempt.value = 0;
-
-    const recordId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    recordingStore.recordId = recordId;
-
-    currentFilePath.value = result.filePath;
-    currentFileSize.value = result.fileSize;
-    finalDuration.value = result.duration || 0;
-
-    isProcessing.value = false;
-    isAutoUploading.value = true;
-    recordingStore.setUploading();
-
-    const uploadResult = await window.electronAPI.upload.start({
-      recordId: recordId,
-      filePath: result.filePath,
-      metadata: {
-        duration: result.duration ? result.duration.toString() : '0',
-        originalFilename: result.filename
-      }
-    });
-
-    isAutoUploading.value = false;
-    isFileUploading.value = false;
-    retryAttempt.value = 0;
-
-    if (uploadResult.success) {
-      recordingStore.setUploaded();
-      currentAudioFileId.value = uploadResult.audioFileId;
-
-      await historyStore.addRecording({
-        id: recordId,
-        createdAt: new Date().toISOString(),
-        duration: result.duration || 0,
-        fileSize: result.fileSize,
-        filePath: null,
-        uploadStatus: 'uploaded',
-        storagePreference: null,
-        transcriptionId: uploadResult.transcriptionId,
-        audioFileId: uploadResult.audioFileId
-      });
-
-      $q.notify({
-        type: 'positive',
-        message: 'File uploaded successfully'
-      });
-    } else {
-      isFileUploading.value = false;
-      uploadError.value = uploadResult.error;
-
-      $q.notify({
-        type: 'negative',
-        message: uploadResult.error || 'Upload failed'
-      });
-    }
-  } catch (error) {
-    isProcessing.value = false;
-    isAutoUploading.value = false;
-    isFileUploading.value = false;
-    uploadError.value = error.message;
-
-    $q.notify({
-      type: 'negative',
-      message: error.message || 'Error uploading file'
-    });
-  }
+// Transcription options handlers
+const updateTitle = (value) => {
+  transcriptionStore.setSessionOptions({ title: value });
 };
 
-const selectFileForUpload = async () => {
-  try {
-    // Open file dialog
-    const result = await window.electronAPI.dialog.openFile({
-      filters: [
-        {
-          name: 'Audio/Video Files',
-          extensions: ['mp3', 'mp4', 'wav', 'm4a', 'webm', 'ogg', 'flac', 'aac', 'mov', 'm4v', 'mpeg', 'mpga', 'opus', 'oga', 'wma', 'amr', '3gp', 'avi', 'mkv']
-        }
-      ]
-    });
+const addSessionWord = (word) => {
+  transcriptionStore.addSessionWord(word);
+};
 
-    if (!result.success || !result.filePath) {
-      return; // User cancelled
-    }
-
-    isFileUploading.value = true;
-    isProcessing.value = true;
-    uploadError.value = null;
-    retryAttempt.value = 0;
-
-    // Generate a record ID for this upload
-    const recordId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    recordingStore.recordId = recordId;
-
-    currentFilePath.value = result.filePath;
-    currentFileSize.value = result.fileSize;
-    finalDuration.value = result.duration || 0;
-
-    // Processing done, start upload
-    isProcessing.value = false;
-    isAutoUploading.value = true;
-    recordingStore.setUploading();
-
-    const uploadResult = await window.electronAPI.upload.start({
-      recordId: recordId,
-      filePath: result.filePath,
-      metadata: {
-        duration: result.duration ? result.duration.toString() : '0',
-        originalFilename: result.filename
-      }
-    });
-
-    isAutoUploading.value = false;
-    isFileUploading.value = false;
-    retryAttempt.value = 0;
-
-    if (uploadResult.success) {
-      recordingStore.setUploaded();
-      currentAudioFileId.value = uploadResult.audioFileId;
-
-      // Add to history (file uploads don't get stored locally, so no filePath)
-      await historyStore.addRecording({
-        id: recordId,
-        createdAt: new Date().toISOString(),
-        duration: result.duration || 0,
-        fileSize: result.fileSize,
-        filePath: null, // Not stored locally
-        uploadStatus: 'uploaded',
-        storagePreference: null, // N/A for file uploads - no local file to manage
-        transcriptionId: uploadResult.transcriptionId,
-        audioFileId: uploadResult.audioFileId
-      });
-
-      $q.notify({
-        type: 'positive',
-        message: 'File uploaded successfully'
-      });
-    } else {
-      isFileUploading.value = false;
-      uploadError.value = uploadResult.error;
-
-      $q.notify({
-        type: 'negative',
-        message: uploadResult.error || 'Upload failed'
-      });
-    }
-  } catch (error) {
-    isProcessing.value = false;
-    isAutoUploading.value = false;
-    isFileUploading.value = false;
-    uploadError.value = error.message;
-
-    $q.notify({
-      type: 'negative',
-      message: error.message || 'Error uploading file'
-    });
-  }
+const removeSessionWord = (word) => {
+  transcriptionStore.removeSessionWord(word);
 };
 </script>
 
@@ -1183,149 +1038,20 @@ const selectFileForUpload = async () => {
 }
 
 .record-container {
-  max-width: 100%;
+  max-width: 600px;
   margin: 0 auto;
 }
 
-// Two-column idle layout
 .idle-layout {
   display: flex;
-  gap: 24px;
-  align-items: flex-start;
-  margin-bottom: 36px;
-
-  // Responsive: stack vertically on small screens
-  @media (max-width: 900px) {
-    flex-direction: column;
-    gap: 20px;
-  }
+  flex-direction: column;
 }
 
-.upload-column {
-  flex: 1;
+.record-card {
   padding: 40px 36px;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  min-width: 0;
-  min-height: 300px;
-  transition: all 0.2s ease;
-  border: 2.5px dashed #94a3b8;
   border-radius: 16px;
-  cursor: pointer;
-  background: linear-gradient(135deg, rgba(241, 245, 249, 0.5) 0%, rgba(248, 250, 252, 0.8) 100%);
-
-  &:hover {
-    border-color: #64748b;
-    background: linear-gradient(135deg, rgba(241, 245, 249, 0.8) 0%, rgba(248, 250, 252, 1) 100%);
-  }
-
-  &.drag-over {
-    background: linear-gradient(135deg, rgba(99, 102, 241, 0.12) 0%, rgba(139, 92, 246, 0.06) 100%);
-    border: 3px dashed #6366F1;
-    animation: border-pulse 0.8s ease-in-out infinite;
-  }
-
-  @media (max-width: 900px) {
-    min-height: 240px;
-    padding: 32px 28px;
-  }
-}
-
-@keyframes border-pulse {
-  0%, 100% {
-    border-color: #6366F1;
-  }
-  50% {
-    border-color: #818cf8;
-  }
-}
-
-.record-column {
-  flex: 1;
-  padding: 40px 36px;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 300px;
-
-  @media (max-width: 900px) {
-    min-height: auto;
-    padding: 32px 28px;
-  }
-}
-
-.upload-content {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-
-  h3 {
-    font-size: 14px;
-    font-weight: 600;
-    margin: 16px 0 10px 0;
-    color: #1e293b;
-
-    @media (max-width: 900px) {
-      font-size: 13px;
-      margin: 12px 0 8px 0;
-    }
-  }
-}
-
-.upload-icon-wrapper {
-  width: 72px;
-  height: 72px;
-  border-radius: 50%;
-  background: #f1f5f9;
-  border: 2px dashed #e2e8f0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s ease;
-
-  &.drag-active {
-    background: linear-gradient(135deg, rgba(99, 102, 241, 0.15) 0%, rgba(139, 92, 246, 0.1) 100%);
-    border-color: #6366F1;
-    transform: scale(1.1);
-    animation: bounce-down 0.6s ease-in-out infinite;
-  }
-
-  @media (max-width: 900px) {
-    width: 64px;
-    height: 64px;
-  }
-}
-
-@keyframes bounce-down {
-  0%, 100% {
-    transform: scale(1.1) translateY(0);
-  }
-  50% {
-    transform: scale(1.1) translateY(4px);
-  }
-}
-
-.upload-btn {
-  margin-top: 16px;
-  margin-bottom: 12px;
-  height: 34px;
-  padding: 0 20px;
-  font-size: 12px;
-}
-
-.drag-drop-hint {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  font-size: 10px;
-  color: #94a3b8;
-  margin-bottom: 14px;
-  padding: 6px 12px;
-  background: rgba(148, 163, 184, 0.1);
-  border-radius: 12px;
 }
 
 .column-header {
@@ -1335,42 +1061,11 @@ const selectFileForUpload = async () => {
   margin-bottom: 28px;
 
   h3 {
-    font-size: 14px;
+    font-size: 16px;
     font-weight: 600;
     margin: 0;
     color: #1e293b;
-
-    @media (max-width: 900px) {
-      font-size: 13px;
-    }
   }
-}
-
-.column-desc {
-  font-size: 11px;
-  color: #64748b;
-  margin: 0 0 16px 0;
-  line-height: 1.5;
-
-  @media (max-width: 900px) {
-    font-size: 11px;
-    margin: 0 0 14px 0;
-  }
-}
-
-.supported-formats {
-  font-size: 10px;
-  color: #94a3b8;
-  text-align: center;
-}
-
-.columns-divider {
-  display: flex;
-  align-items: center;
-  padding: 0 8px;
-  color: #94a3b8;
-  font-size: 14px;
-  font-weight: 500;
 }
 
 .record-button-section {
@@ -1385,7 +1080,7 @@ const selectFileForUpload = async () => {
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: 12px;
     color: #64748b;
     margin-bottom: 10px;
   }
@@ -1395,13 +1090,13 @@ const selectFileForUpload = async () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 240px;
+  max-width: 300px;
   display: inline-block;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .system-audio-section {
-  min-height: 70px; // Reserve space to prevent layout shift
+  min-height: 70px;
   padding: 16px 18px;
   background: #f8fafc;
   border-radius: 10px;
@@ -1626,6 +1321,11 @@ const selectFileForUpload = async () => {
   }
 }
 
+.gradient-btn {
+  background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%) !important;
+  color: white !important;
+}
+
 .upload-success {
   .transcript-cta {
     text-align: center;
@@ -1731,6 +1431,59 @@ const selectFileForUpload = async () => {
         transform: translateX(6px);
       }
     }
+
+    .copy-link-section {
+      margin-top: 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+
+      .copy-link-btn {
+        font-size: 12px;
+      }
+
+      .copy-hint {
+        font-size: 10px;
+        color: #94a3b8;
+      }
+    }
+  }
+
+  .url-display-section {
+    margin-bottom: 24px;
+    padding: 16px 20px;
+    background: #f8fafc;
+    border-radius: 10px;
+    border: 1px solid #e2e8f0;
+
+    .url-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: #64748b;
+      margin-bottom: 8px;
+    }
+
+    .url-value {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      justify-content: space-between;
+
+      code {
+        flex: 1;
+        font-size: 11px;
+        color: #6366F1;
+        background: white;
+        padding: 8px 12px;
+        border-radius: 6px;
+        border: 1px solid #e2e8f0;
+        word-break: break-all;
+        font-family: 'JetBrains Mono', monospace;
+      }
+    }
   }
 
   .success-secondary {
@@ -1778,7 +1531,7 @@ const selectFileForUpload = async () => {
 
 .mic-select {
   :deep(.q-field__control) {
-    border-radius: 6px;
+    border-radius: 8px;
     min-height: 36px;
   }
 
@@ -1794,7 +1547,7 @@ const selectFileForUpload = async () => {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 12px;
+    font-size: 13px;
   }
 }
 
@@ -1809,7 +1562,7 @@ const selectFileForUpload = async () => {
 
 .tips-card {
   padding: 28px 32px;
-  margin-bottom: 0;
+  margin-top: 20px;
   background: #f8fafc;
   border: none;
   border-radius: 16px;
@@ -1859,5 +1612,4 @@ const selectFileForUpload = async () => {
     }
   }
 }
-
 </style>

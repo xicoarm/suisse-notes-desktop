@@ -9,8 +9,19 @@ node_modules/
 # Build output
 /dist
 /src-cordova
-/src-capacitor
 /src-electron/dist
+
+# Capacitor - commit native projects but not dependencies/builds
+/src-capacitor/node_modules
+/src-capacitor/android/.gradle
+/src-capacitor/android/app/build
+/src-capacitor/android/build
+/src-capacitor/android/capacitor-cordova-android-plugins/build
+/src-capacitor/android/local.properties
+/src-capacitor/ios/App/Pods
+/src-capacitor/ios/App/App.xcworkspace/xcuserdata
+/src-capacitor/ios/App/DerivedData
+/src-capacitor/www
 
 # Local env files
 .env.local

@@ -3,26 +3,51 @@
     <div class="settings-container">
       <div class="page-header">
         <h1>Settings</h1>
-        <p class="text-subtitle">Manage your app preferences</p>
+        <p class="text-subtitle">
+          Manage your app preferences
+        </p>
       </div>
 
       <!-- Account Section -->
-      <div class="settings-section" v-if="authStore.isAuthenticated">
-        <div class="section-title">Account</div>
+      <div
+        v-if="authStore.isAuthenticated"
+        class="settings-section"
+      >
+        <div class="section-title">
+          Account
+        </div>
 
         <div class="setting-row">
-          <div class="setting-label">Signed in as</div>
-          <div class="setting-value">{{ authStore.user?.email }}</div>
+          <div class="setting-label">
+            Signed in as
+          </div>
+          <div class="setting-value">
+            {{ authStore.user?.email }}
+          </div>
         </div>
 
-        <div class="setting-row" v-if="authStore.user?.name">
-          <div class="setting-label">Name</div>
-          <div class="setting-value">{{ authStore.user?.name }}</div>
+        <div
+          v-if="authStore.user?.name"
+          class="setting-row"
+        >
+          <div class="setting-label">
+            Name
+          </div>
+          <div class="setting-value">
+            {{ authStore.user?.name }}
+          </div>
         </div>
 
-        <div class="setting-row" v-if="authStore.user?.organizationName">
-          <div class="setting-label">Organization</div>
-          <div class="setting-value">{{ authStore.user.organizationName }}</div>
+        <div
+          v-if="authStore.user?.organizationName"
+          class="setting-row"
+        >
+          <div class="setting-label">
+            Organization
+          </div>
+          <div class="setting-value">
+            {{ authStore.user.organizationName }}
+          </div>
         </div>
 
         <div class="section-actions">
@@ -31,20 +56,26 @@
             color="negative"
             label="Sign Out"
             icon="logout"
-            @click="handleLogout"
             class="btn-danger"
+            @click="handleLogout"
           />
         </div>
       </div>
 
       <!-- Storage Preferences Section -->
       <div class="settings-section">
-        <div class="section-title">Storage</div>
+        <div class="section-title">
+          Storage
+        </div>
 
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">Default storage preference</div>
-            <div class="setting-description">Choose what happens to recordings after upload</div>
+            <div class="setting-label">
+              Default storage preference
+            </div>
+            <div class="setting-description">
+              Choose what happens to recordings after upload
+            </div>
           </div>
           <q-select
             v-model="storagePreference"
@@ -59,38 +90,85 @@
         </div>
 
         <div class="setting-row">
-          <div class="setting-label">Data location</div>
-          <div class="setting-value path-value">{{ userDataPath }}</div>
+          <div class="setting-label">
+            Data location
+          </div>
+          <div class="setting-value path-value">
+            {{ userDataPath }}
+          </div>
         </div>
 
         <div class="setting-row danger-zone">
           <div class="setting-info">
-            <div class="setting-label danger-label">Delete all recordings</div>
-            <div class="setting-description">Permanently delete all local recordings. This cannot be undone.</div>
+            <div class="setting-label danger-label">
+              Delete all recordings
+            </div>
+            <div class="setting-description">
+              Permanently delete all local recordings. This cannot be undone.
+            </div>
           </div>
           <q-btn
             flat
             color="negative"
             label="Delete All"
             icon="delete_forever"
-            @click="showDeleteConfirmation = true"
             :loading="isDeleting"
+            @click="showDeleteConfirmation = true"
+          />
+        </div>
+      </div>
+
+      <!-- Transcription Section -->
+      <div class="settings-section">
+        <div class="section-title">
+          {{ $t('transcriptionOptions') }}
+        </div>
+
+        <div class="setting-row vocabulary-setting">
+          <div class="setting-info">
+            <div class="setting-label">
+              {{ $t('globalVocabulary') }}
+            </div>
+            <div class="setting-description">
+              {{ $t('globalVocabularyDesc') }}
+            </div>
+          </div>
+        </div>
+
+        <div class="vocabulary-container">
+          <CustomVocabularyInput
+            :session-words="globalVocabulary"
+            :global-words="[]"
+            :show-help="false"
+            @add-word="addGlobalWord"
+            @remove-word="removeGlobalWord"
           />
         </div>
       </div>
 
       <!-- Delete Confirmation Dialog -->
-      <q-dialog v-model="showDeleteConfirmation" persistent>
+      <q-dialog
+        v-model="showDeleteConfirmation"
+        persistent
+      >
         <q-card class="delete-dialog">
           <q-card-section class="dialog-header">
-            <q-icon name="warning" color="negative" size="48px" />
-            <div class="dialog-title">Delete All Recordings?</div>
+            <q-icon
+              name="warning"
+              color="negative"
+              size="48px"
+            />
+            <div class="dialog-title">
+              Delete All Recordings?
+            </div>
           </q-card-section>
 
           <q-card-section class="dialog-content">
             <p><strong>This action is irreversible.</strong></p>
             <p>All {{ recordingsCount }} local recording(s) will be permanently deleted from this device.</p>
-            <p class="warning-text">Recordings that have been uploaded to Suisse Notes will still be available in the web app.</p>
+            <p class="warning-text">
+              Recordings that have been uploaded to Suisse Notes will still be available in the web app.
+            </p>
 
             <div class="confirm-input">
               <p>Type <strong>DELETE</strong> to confirm:</p>
@@ -104,8 +182,16 @@
             </div>
           </q-card-section>
 
-          <q-card-actions align="right" class="dialog-actions">
-            <q-btn flat label="Cancel" color="primary" v-close-popup />
+          <q-card-actions
+            align="right"
+            class="dialog-actions"
+          >
+            <q-btn
+              v-close-popup
+              flat
+              label="Cancel"
+              color="primary"
+            />
             <q-btn
               flat
               label="Delete All Recordings"
@@ -120,16 +206,26 @@
 
       <!-- About Section -->
       <div class="settings-section">
-        <div class="section-title">About</div>
-
-        <div class="setting-row">
-          <div class="setting-label">App version</div>
-          <div class="setting-value">{{ appVersion }}</div>
+        <div class="section-title">
+          About
         </div>
 
         <div class="setting-row">
-          <div class="setting-label">Connected server</div>
-          <div class="setting-value">{{ configStore.apiUrl }}</div>
+          <div class="setting-label">
+            App version
+          </div>
+          <div class="setting-value">
+            {{ appVersion }}
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-label">
+            Connected server
+          </div>
+          <div class="setting-value">
+            {{ configStore.apiUrl }}
+          </div>
         </div>
       </div>
 
@@ -154,12 +250,15 @@ import { useQuasar } from 'quasar';
 import { useConfigStore } from '../stores/config';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
+import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
+import CustomVocabularyInput from '../components/CustomVocabularyInput.vue';
 
 const $q = useQuasar();
 const router = useRouter();
 const configStore = useConfigStore();
 const authStore = useAuthStore();
 const historyStore = useRecordingsHistoryStore();
+const transcriptionStore = useTranscriptionSettingsStore();
 
 const appVersion = ref('1.0.0');
 const userDataPath = ref('');
@@ -177,6 +276,16 @@ const storageOptions = [
   { value: 'delete_after_upload', label: 'Delete after upload' }
 ];
 
+const globalVocabulary = computed(() => transcriptionStore.globalVocabulary);
+
+const addGlobalWord = (word) => {
+  transcriptionStore.addGlobalWord(word);
+};
+
+const removeGlobalWord = (word) => {
+  transcriptionStore.removeGlobalWord(word);
+};
+
 onMounted(async () => {
   // Get app info
   try {
@@ -191,6 +300,9 @@ onMounted(async () => {
     await historyStore.loadRecordings();
   }
   storagePreference.value = historyStore.defaultStoragePreference;
+
+  // Load transcription settings
+  await transcriptionStore.loadGlobalSettings();
 });
 
 const updateStoragePreference = async (value) => {
@@ -347,6 +459,16 @@ const handleLogout = async () => {
   :deep(.q-field__native) {
     font-size: 14px;
   }
+}
+
+.vocabulary-setting {
+  border-bottom: none !important;
+  padding-bottom: 8px !important;
+}
+
+.vocabulary-container {
+  padding: 0 0 16px 0;
+  border-bottom: 1px solid #e2e8f0;
 }
 
 .back-section {

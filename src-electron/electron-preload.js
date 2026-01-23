@@ -24,7 +24,9 @@ const IPC_TIMEOUTS = {
 contextBridge.exposeInMainWorld('electronAPI', {
   // Configuration (read-only - no user-configurable URLs)
   config: {
-    get: () => ipcRenderer.invoke('config:get')
+    get: () => ipcRenderer.invoke('config:get'),
+    getTranscriptionSettings: () => ipcRenderer.invoke('config:getTranscriptionSettings'),
+    setTranscriptionSettings: (settings) => ipcRenderer.invoke('config:setTranscriptionSettings', settings)
   },
 
   // Authentication (simplified - no URL parameter, uses hardcoded backend)

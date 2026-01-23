@@ -644,7 +644,7 @@ const preloadPath = process.env.QUASAR_ELECTRON_PRELOAD
 // Create the main window
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1200,
+    width: 1020,
     height: 800,
     minWidth: 800,
     minHeight: 600,
@@ -2424,4 +2424,18 @@ ipcMain.handle('window:toggleFullscreen', () => {
 
 ipcMain.handle('window:isFullscreen', () => {
   return mainWindow ? mainWindow.isFullScreen() : false;
+});
+
+// --- Transcription Settings ---
+
+ipcMain.handle('config:getTranscriptionSettings', () => {
+  return configStore.get('transcriptionSettings', {
+    vocabulary: [],
+    defaultSpeakerCount: null
+  });
+});
+
+ipcMain.handle('config:setTranscriptionSettings', (event, settings) => {
+  configStore.set('transcriptionSettings', settings);
+  return { success: true };
 });

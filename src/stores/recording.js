@@ -1,5 +1,10 @@
 import { defineStore } from 'pinia';
 import { v4 as uuidv4 } from 'uuid';
+import { isElectron, isCapacitor, isMobile, PlatformConstants } from '../utils/platform';
+import * as storage from '../services/storage';
+import { createChunkIntegrity, createRecordingIntegrity, addChunkToRecordingIntegrity } from '../services/integrity';
+import { startStorageMonitor, stopStorageMonitor, checkStorageBeforeRecording } from '../services/storageMonitor';
+import { setLifecycleCallbacks, clearLifecycleCallbacks } from '../boot/lifecycle';
 
 export const useRecordingStore = defineStore('recording', {
   state: () => ({
@@ -13,6 +18,9 @@ export const useRecordingStore = defineStore('recording', {
     bytesUploaded: 0,
     bytesTotal: 0,
     error: null,
+    // Uploaded file info (persists for navigation)
+    audioFileId: null,
+    finalDuration: 0,
     // Upload metadata for display in other pages
     uploadMetadata: {
       createdAt: null,
@@ -27,7 +35,21 @@ export const useRecordingStore = defineStore('recording', {
       bytesUploaded: 0,
       bytesTotal: 0,
       metadata: null
-    }
+    },
+    // File locking for upload safety (V6 fix)
+    lockedFiles: new Set(),
+    // Chunk integrity tracking (V7 fix)
+    integrity: null,
+    // Storage status (V1 fix)
+    storageStatus: {
+      status: 'ok',
+      freeMB: -1,
+      warning: null
+    },
+    // Mobile-specific state
+    appInBackground: false,
+    networkConnected: true,
+    batteryLevel: 100
   }),
 
   getters: {
@@ -49,37 +71,130 @@ export const useRecordingStore = defineStore('recording', {
       const minutes = Math.floor((state.duration % 3600) / 60);
       const seconds = state.duration % 60;
       return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-    }
+    },
+    // Check if a file is locked for upload
+    isFileLocked: (state) => (recordId) => state.lockedFiles.has(recordId),
+    // Check if storage is low
+    hasLowStorage: (state) => state.storageStatus.status === 'low' || state.storageStatus.status === 'critical',
+    // Check if app can safely record
+    canRecord: (state) => state.storageStatus.status !== 'critical' && !state.appInBackground
   },
 
   actions: {
+    // Initialize lifecycle callbacks for mobile
+    initializeLifecycle() {
+      if (isMobile()) {
+        setLifecycleCallbacks({
+          onBackground: async () => {
+            this.appInBackground = true;
+            // Save current state when going to background
+            if (this.status === 'recording') {
+              await this.flushCurrentState();
+            }
+          },
+          onForeground: async () => {
+            this.appInBackground = false;
+            // Check for recovery needs when coming back
+            await this.checkRecoveryState();
+          },
+          onOnline: async (connectionType) => {
+            this.networkConnected = true;
+            // Resume pending uploads when back online
+            // TODO: Integrate with upload queue
+          },
+          onOffline: async () => {
+            this.networkConnected = false;
+          },
+          onLowBattery: async (batteryPercent) => {
+            this.batteryLevel = batteryPercent;
+            // Warning notification could be triggered here
+          },
+          onCriticalBattery: async (batteryPercent) => {
+            this.batteryLevel = batteryPercent;
+            // Emergency stop at critical battery
+            if (this.status === 'recording') {
+              console.warn('Critical battery - emergency stop');
+              await this.emergencyStop('Critical battery level');
+            }
+          }
+        });
+      }
+    },
+
+    // Clean up lifecycle callbacks
+    cleanupLifecycle() {
+      if (isMobile()) {
+        clearLifecycleCallbacks();
+      }
+    },
+
     async startRecording() {
       try {
+        // Check storage before starting (V1 fix)
+        const storageCheck = await checkStorageBeforeRecording();
+        this.storageStatus = {
+          status: storageCheck.status,
+          freeMB: storageCheck.freeMB,
+          warning: storageCheck.message
+        };
+
+        if (!storageCheck.canStart) {
+          throw new Error(storageCheck.message || 'Insufficient storage to start recording');
+        }
+
         this.recordId = uuidv4();
         this.status = 'recording';
         this.startTime = Date.now();
         this.duration = 0;
         this.chunkIndex = 0;
         this.error = null;
+        this.integrity = createRecordingIntegrity(this.recordId);
 
-        // Notify main process that recording is starting (for window close protection)
-        await window.electronAPI.recording.setInProgress(true);
+        if (isElectron()) {
+          // Electron: use preload API
+          await window.electronAPI.recording.setInProgress(true);
 
-        // Create session directory
-        const result = await window.electronAPI.recording.createSession(this.recordId, '.webm');
+          const result = await window.electronAPI.recording.createSession(this.recordId, '.webm');
 
-        if (!result.success) {
-          // Clear recording state on failure
-          await window.electronAPI.recording.setInProgress(false);
-          throw new Error(result.error || 'Failed to create recording session');
+          if (!result.success) {
+            await window.electronAPI.recording.setInProgress(false);
+            throw new Error(result.error || 'Failed to create recording session');
+          }
+        } else if (isCapacitor()) {
+          // Capacitor: use storage service to create directory
+          await storage.createDirectory(`recordings/${this.recordId}/chunks`);
+
+          // Initialize metadata
+          await storage.saveMetadata(this.recordId, {
+            id: this.recordId,
+            startTime: this.startTime,
+            status: 'recording',
+            chunks: [],
+            platform: 'mobile'
+          });
         }
 
-        return { success: true, recordId: this.recordId };
+        // Start storage monitoring during recording (V1 fix)
+        await startStorageMonitor({
+          onLow: (freeMB) => {
+            this.storageStatus = { status: 'low', freeMB, warning: `Low storage: ${freeMB}MB remaining` };
+          },
+          onCritical: async (freeMB) => {
+            this.storageStatus = { status: 'critical', freeMB, warning: `Critical storage: ${freeMB}MB remaining` };
+            await this.emergencyStop('Storage full');
+          },
+          onRecovered: (freeMB) => {
+            this.storageStatus = { status: 'ok', freeMB, warning: null };
+          }
+        });
+
+        return { success: true, recordId: this.recordId, storageWarning: storageCheck.message };
       } catch (error) {
         this.error = error.message;
         this.status = 'error';
-        // Ensure main process knows recording failed
-        await window.electronAPI.recording.setInProgress(false);
+        if (isElectron()) {
+          await window.electronAPI.recording.setInProgress(false);
+        }
         return { success: false, error: error.message };
       }
     },
@@ -99,47 +214,123 @@ export const useRecordingStore = defineStore('recording', {
     async stopRecording() {
       try {
         this.status = 'stopped';
+        stopStorageMonitor();
 
-        // Notify main process that recording stopped, now processing
-        await window.electronAPI.recording.setInProgress(false);
-        await window.electronAPI.recording.setProcessing(true);
+        if (isElectron()) {
+          // Electron: use preload API
+          await window.electronAPI.recording.setInProgress(false);
+          await window.electronAPI.recording.setProcessing(true);
 
-        // Combine all chunks
-        const result = await window.electronAPI.recording.combineChunks(this.recordId, '.webm');
+          const result = await window.electronAPI.recording.combineChunks(this.recordId, '.webm');
 
-        // Clear processing state
-        await window.electronAPI.recording.setProcessing(false);
+          await window.electronAPI.recording.setProcessing(false);
 
-        if (result.success) {
-          this.audioFilePath = result.outputPath;
-          return { success: true, filePath: result.outputPath, warning: result.warning };
-        } else {
-          throw new Error(result.error || 'Failed to combine recording chunks');
+          if (result.success) {
+            this.audioFilePath = result.outputPath;
+            return { success: true, filePath: result.outputPath, warning: result.warning };
+          } else {
+            throw new Error(result.error || 'Failed to combine recording chunks');
+          }
+        } else if (isCapacitor()) {
+          // Capacitor: combine chunks using native method or concatenation
+          // For now, mark as ready for upload (chunks will be combined by native code)
+          const result = await this.combineChunksNative();
+          if (result.success) {
+            this.audioFilePath = result.outputPath;
+            return { success: true, filePath: result.outputPath };
+          } else {
+            throw new Error(result.error || 'Failed to combine recording chunks');
+          }
         }
+
+        return { success: false, error: 'Unsupported platform' };
       } catch (error) {
         this.error = error.message;
         this.status = 'error';
-        // Ensure states are cleared on error
-        await window.electronAPI.recording.setInProgress(false);
-        await window.electronAPI.recording.setProcessing(false);
+        if (isElectron()) {
+          await window.electronAPI.recording.setInProgress(false);
+          await window.electronAPI.recording.setProcessing(false);
+        }
         return { success: false, error: error.message };
       }
     },
 
+    // Emergency stop for critical situations (battery, storage)
+    async emergencyStop(reason) {
+      console.warn('Emergency stop triggered:', reason);
+      try {
+        // Save current chunk immediately
+        await this.flushCurrentState();
+        // Stop recording
+        this.status = 'stopped';
+        this.error = `Recording stopped: ${reason}`;
+        stopStorageMonitor();
+
+        if (isElectron()) {
+          await window.electronAPI.recording.setInProgress(false);
+        }
+      } catch (error) {
+        console.error('Error during emergency stop:', error);
+      }
+    },
+
+    // Flush current state for recovery
+    async flushCurrentState() {
+      // Save integrity metadata
+      if (this.integrity && isCapacitor()) {
+        await storage.saveMetadata(this.recordId, {
+          id: this.recordId,
+          startTime: this.startTime,
+          duration: this.duration,
+          chunkIndex: this.chunkIndex,
+          status: this.status,
+          integrity: this.integrity,
+          platform: 'mobile',
+          lastUpdated: Date.now()
+        });
+      }
+    },
+
+    // Check for recordings that need recovery
+    async checkRecoveryState() {
+      // TODO: Implement recovery check for orphaned recordings
+      // This would scan for recordings with status 'recording' that weren't properly closed
+    },
+
     async saveChunk(chunkData) {
       const maxRetries = 3;
-      const retryDelays = [1000, 2000, 4000]; // Exponential backoff: 1s, 2s, 4s
+      const retryDelays = [1000, 2000, 4000];
+
+      // Create chunk integrity before saving (V7 fix)
+      const chunkIntegrity = createChunkIntegrity(this.chunkIndex, chunkData);
 
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-          const result = await window.electronAPI.recording.saveChunk(
-            this.recordId,
-            chunkData,
-            this.chunkIndex,
-            '.webm'
-          );
+          let result;
+
+          if (isElectron()) {
+            result = await window.electronAPI.recording.saveChunk(
+              this.recordId,
+              chunkData,
+              this.chunkIndex,
+              '.webm'
+            );
+          } else if (isCapacitor()) {
+            result = await storage.saveChunk(
+              this.recordId,
+              chunkData,
+              this.chunkIndex,
+              '.m4a' // Mobile uses m4a format
+            );
+          } else {
+            throw new Error('Unsupported platform');
+          }
 
           if (result.success) {
+            // Track integrity
+            if (this.integrity) {
+              this.integrity = addChunkToRecordingIntegrity(this.integrity, chunkIntegrity);
+            }
             this.chunkIndex++;
             return { success: true };
           } else {
@@ -148,13 +339,11 @@ export const useRecordingStore = defineStore('recording', {
         } catch (error) {
           console.error(`Error saving chunk (attempt ${attempt + 1}/${maxRetries + 1}):`, error);
 
-          // If we have retries left, wait and try again
           if (attempt < maxRetries) {
             const delay = retryDelays[attempt];
             console.log(`Retrying chunk save in ${delay}ms...`);
             await new Promise(resolve => setTimeout(resolve, delay));
           } else {
-            // All retries exhausted
             console.error('All chunk save retries exhausted, chunk may be lost');
             return { success: false, error: error.message, retriesExhausted: true };
           }
@@ -164,6 +353,36 @@ export const useRecordingStore = defineStore('recording', {
       return { success: false, error: 'Unexpected error in saveChunk' };
     },
 
+    // Combine chunks on mobile (native implementation)
+    async combineChunksNative() {
+      if (!isCapacitor()) {
+        return { success: false, error: 'Not on mobile platform' };
+      }
+
+      try {
+        // For mobile, we'll call a native plugin to combine chunks
+        // This will use AVFoundation on iOS or MediaMuxer on Android
+        // For now, return the path to the chunks directory
+        const outputPath = `recordings/${this.recordId}/combined.m4a`;
+
+        // TODO: Call native audio combination plugin
+        // const result = await Plugins.AudioCombiner.combine({
+        //   recordId: this.recordId,
+        //   outputPath
+        // });
+
+        // For MVP, we can upload chunks individually or rely on server-side combination
+        return {
+          success: true,
+          outputPath,
+          usesChunkedUpload: true
+        };
+      } catch (error) {
+        console.error('Error combining chunks on mobile:', error);
+        return { success: false, error: error.message };
+      }
+    },
+
     updateDuration(seconds) {
       this.duration = seconds;
     },
@@ -171,13 +390,20 @@ export const useRecordingStore = defineStore('recording', {
     // Create session file from current chunks (for auto-split)
     async createSessionFile() {
       try {
-        const result = await window.electronAPI.recording.createSessionFile(this.recordId, '.webm');
-        if (result.success) {
-          console.log('Session file created successfully');
+        if (isElectron()) {
+          const result = await window.electronAPI.recording.createSessionFile(this.recordId, '.webm');
+          if (result.success) {
+            console.log('Session file created successfully');
+            return { success: true };
+          } else {
+            throw new Error(result.error || 'Failed to create session file');
+          }
+        } else if (isCapacitor()) {
+          // On mobile, save current state for recovery
+          await this.flushCurrentState();
           return { success: true };
-        } else {
-          throw new Error(result.error || 'Failed to create session file');
         }
+        return { success: false, error: 'Unsupported platform' };
       } catch (error) {
         console.error('Error creating session file:', error);
         return { success: false, error: error.message };
@@ -187,7 +413,24 @@ export const useRecordingStore = defineStore('recording', {
     // Reset chunk index after auto-split
     resetChunkIndex() {
       this.chunkIndex = 0;
+      // Reset integrity for new session
+      if (this.recordId) {
+        this.integrity = createRecordingIntegrity(this.recordId);
+      }
       console.log('Chunk index reset for new session');
+    },
+
+    // File locking for upload safety (V6 fix)
+    lockForUpload(recordId) {
+      this.lockedFiles.add(recordId);
+    },
+
+    unlockFile(recordId) {
+      this.lockedFiles.delete(recordId);
+    },
+
+    canDelete(recordId) {
+      return !this.lockedFiles.has(recordId);
     },
 
     updateUploadProgress(progress, bytesUploaded, bytesTotal) {
@@ -204,9 +447,16 @@ export const useRecordingStore = defineStore('recording', {
       if (metadata.finalDuration !== undefined) this.uploadMetadata.finalDuration = metadata.finalDuration;
     },
 
-    setUploaded() {
+    setUploaded(audioFileId = null) {
       this.status = 'uploaded';
       this.uploadProgress = 100;
+      if (audioFileId) {
+        this.audioFileId = audioFileId;
+      }
+    },
+
+    setFinalDuration(duration) {
+      this.finalDuration = duration;
     },
 
     setError(error) {
@@ -258,10 +508,18 @@ export const useRecordingStore = defineStore('recording', {
       this.bytesUploaded = 0;
       this.bytesTotal = 0;
       this.error = null;
+      this.audioFileId = null;
+      this.finalDuration = 0;
       this.uploadMetadata = {
         createdAt: null,
         fileSize: 0,
         finalDuration: 0
+      };
+      this.integrity = null;
+      this.storageStatus = {
+        status: 'ok',
+        freeMB: -1,
+        warning: null
       };
     }
   }
