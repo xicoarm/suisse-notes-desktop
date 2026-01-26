@@ -176,9 +176,7 @@ jobs:
       - name: Sync Capacitor
         run: npm run cap:sync
 
-      - name: Install CocoaPods dependencies
-        working-directory: src-capacitor/ios/App
-        run: pod install --repo-update
+      # Note: This project uses Swift Package Manager (SPM), not CocoaPods
 
       - name: Install Fastlane dependencies
         working-directory: src-capacitor/ios/App
@@ -209,7 +207,7 @@ jobs:
         if: env.APP_STORE_CONNECT_API_KEY_ID == ''
         working-directory: src-capacitor/ios/App
         run: |
-          xcodebuild -workspace App.xcworkspace \
+          xcodebuild -project App.xcodeproj \
             -scheme App \
             -configuration Release \
             -archivePath build/App.xcarchive \
