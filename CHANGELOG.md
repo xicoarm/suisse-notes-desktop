@@ -1,3 +1,10 @@
+## [3.4.7](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.6...v3.4.7) (2026-01-26)
+
+
+### Bug Fixes
+
+* **ci:** iOS uses SPM not CocoaPods, fix xcodebuild command ([fa105ac](https://github.com/xicoarm/suisse-notes-desktop/commit/fa105acd27cafde7b133906eaaa9e453f7f30ec4))
+
 ## [3.4.6](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.5...v3.4.6) (2026-01-26)
 
 
