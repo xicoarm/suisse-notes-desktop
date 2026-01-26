@@ -755,12 +755,16 @@ const preloadPath = process.env.QUASAR_ELECTRON_PRELOAD
 
 // Create the main window
 function createWindow() {
+  // Set window icon (for Windows taskbar and title bar)
+  const iconPath = path.join(__dirname, 'icons', process.platform === 'win32' ? 'icon.ico' : 'icon.png');
+
   mainWindow = new BrowserWindow({
     width: 1020,
     height: 800,
     minWidth: 800,
     minHeight: 600,
     resizable: true,
+    icon: iconPath,
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
