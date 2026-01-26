@@ -115,8 +115,8 @@ export default function (ctx) {
           signAndEditExecutable: !!process.env.CSC_LINK
         },
         nsis: {
-          oneClick: false,
-          allowToChangeInstallationDirectory: true,
+          oneClick: true,  // Silent auto-updates (no wizard prompts)
+          allowToChangeInstallationDirectory: false,  // Required for oneClick
           createDesktopShortcut: true,
           createStartMenuShortcut: true,
           shortcutName: 'Suisse Notes',
