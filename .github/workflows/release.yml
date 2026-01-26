@@ -122,10 +122,16 @@ jobs:
 
       - name: Download FFmpeg for macOS
         run: |
-          brew install p7zip
-          curl -L "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/7.1/universal" -o ffmpeg.7z
-          7z x ffmpeg.7z -oresources/ffmpeg/darwin
+          mkdir -p resources/ffmpeg/darwin
+          # Use ffmpeg.martin-riedl.de for reliable static ffmpeg builds
+          curl -L "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip" -o ffmpeg-arm64.zip
+          curl -L "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffmpeg.zip" -o ffmpeg-amd64.zip
+          unzip -o ffmpeg-arm64.zip -d ffmpeg-arm64
+          unzip -o ffmpeg-amd64.zip -d ffmpeg-amd64
+          # Create universal binary using lipo
+          lipo -create -output resources/ffmpeg/darwin/ffmpeg ffmpeg-arm64/ffmpeg ffmpeg-amd64/ffmpeg
           chmod +x resources/ffmpeg/darwin/ffmpeg
+          rm -rf ffmpeg-arm64 ffmpeg-amd64 ffmpeg-arm64.zip ffmpeg-amd64.zip
 
       - name: Install dependencies
         run: npm ci
