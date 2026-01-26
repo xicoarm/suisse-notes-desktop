@@ -77,13 +77,16 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Build web assets
-        run: npm run build:android
+      - name: Build web assets for Capacitor
+        run: quasar build -m capacitor -T android --skip-pkg
         env:
           NODE_ENV: production
 
       - name: Sync Capacitor
         run: npm run cap:sync
+
+      - name: Make gradlew executable
+        run: chmod +x src-capacitor/android/gradlew
 
       - name: Decode Android keystore
         if: env.ANDROID_KEYSTORE != ''
@@ -124,6 +127,7 @@ jobs:
         if: env.PLAY_STORE_JSON_KEY == ''
         working-directory: src-capacitor/android
         run: |
+          chmod +x ./gradlew
           ./gradlew assembleRelease
 
       - name: Upload Android artifacts
@@ -164,8 +168,8 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Build web assets
-        run: npm run build:ios
+      - name: Build web assets for Capacitor
+        run: quasar build -m capacitor -T ios --skip-pkg
         env:
           NODE_ENV: production
 
@@ -174,7 +178,7 @@ jobs:
 
       - name: Install CocoaPods dependencies
         working-directory: src-capacitor/ios/App
-        run: pod install
+        run: pod install --repo-update
 
       - name: Install Fastlane dependencies
         working-directory: src-capacitor/ios/App
