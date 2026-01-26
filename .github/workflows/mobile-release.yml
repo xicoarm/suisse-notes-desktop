@@ -78,7 +78,7 @@ jobs:
         run: npm ci
 
       - name: Build web assets for Capacitor
-        run: quasar build -m capacitor -T android --skip-pkg
+        run: npx quasar build -m capacitor -T android --skip-pkg
         env:
           NODE_ENV: production
 
@@ -169,7 +169,7 @@ jobs:
         run: npm ci
 
       - name: Build web assets for Capacitor
-        run: quasar build -m capacitor -T ios --skip-pkg
+        run: npx quasar build -m capacitor -T ios --skip-pkg
         env:
           NODE_ENV: production
 
