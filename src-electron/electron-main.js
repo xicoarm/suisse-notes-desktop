@@ -762,7 +762,9 @@ const preloadPath = process.env.QUASAR_ELECTRON_PRELOAD
 // Create the main window
 function createWindow() {
   // Set window icon (for Windows taskbar and title bar)
+  // Use nativeImage to load from asar archive
   const iconPath = path.join(__dirname, 'icons', process.platform === 'win32' ? 'icon.ico' : 'icon.png');
+  const appIcon = nativeImage.createFromPath(iconPath);
 
   mainWindow = new BrowserWindow({
     width: 1020,
@@ -770,7 +772,7 @@ function createWindow() {
     minWidth: 800,
     minHeight: 600,
     resizable: true,
-    icon: iconPath,
+    icon: appIcon.isEmpty() ? undefined : appIcon,
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,

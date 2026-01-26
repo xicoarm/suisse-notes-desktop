@@ -160,6 +160,10 @@ export default function (ctx) {
             to: 'ffmpeg',
             filter: ['**/*']
           }
+        ],
+        // Extract icons from asar so they can be loaded natively for taskbar/tray
+        asarUnpack: [
+          '**/icons/**'
         ]
       }
     },
