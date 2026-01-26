@@ -1,3 +1,10 @@
+## [3.4.6](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.5...v3.4.6) (2026-01-26)
+
+
+### Bug Fixes
+
+* **ci:** use npx quasar instead of global quasar command ([afc3b1e](https://github.com/xicoarm/suisse-notes-desktop/commit/afc3b1ed6a5e5b9dd70bbb521517f1a90790246b))
+
 ## [3.4.5](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.4...v3.4.5) (2026-01-26)
 
 
