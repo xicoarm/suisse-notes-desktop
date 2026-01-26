@@ -1,3 +1,10 @@
+## [3.4.4](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.3...v3.4.4) (2026-01-26)
+
+
+### Bug Fixes
+
+* **ci:** update FFmpeg download URL for macOS build ([146397c](https://github.com/xicoarm/suisse-notes-desktop/commit/146397ce7776fc0421983b4e402d06b49303e321))
+
 ## [3.4.3](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.2...v3.4.3) (2026-01-26)
 
 
