@@ -1,3 +1,10 @@
+## [3.4.11](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.10...v3.4.11) (2026-01-26)
+
+
+### Bug Fixes
+
+* silent auto-updates and correct Windows app name ([1d8e6b3](https://github.com/xicoarm/suisse-notes-desktop/commit/1d8e6b389405ce4e37b591e8287870e44d64b421))
+
 ## [3.4.10](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.9...v3.4.10) (2026-01-26)
 
 
