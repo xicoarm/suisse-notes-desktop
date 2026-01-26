@@ -1,3 +1,10 @@
+## [3.4.3](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.2...v3.4.3) (2026-01-26)
+
+
+### Bug Fixes
+
+* **ci:** upgrade Node.js to v22 for Capacitor CLI compatibility ([21f8e42](https://github.com/xicoarm/suisse-notes-desktop/commit/21f8e4287ee2128e079cb010c4de90a3df2eb44d))
+
 # Changelog
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
