@@ -1,3 +1,14 @@
+# Changelog
+
+All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
+
+### [3.4.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.0...v3.4.1) (2026-01-26)
+
+
+### Bug Fixes
+
+* security hardening and auto-update for public repo ([44db673](https://github.com/xicoarm/suisse-notes-desktop/commit/44db67329247e9a2ca3462ccfb991d632b709060))
+
 # [3.4.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.3.12...v3.4.0) (2026-01-26)
 
 
