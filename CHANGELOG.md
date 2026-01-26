@@ -1,3 +1,10 @@
+## [3.4.13](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.12...v3.4.13) (2026-01-26)
+
+
+### Bug Fixes
+
+* enable oneClick installer for silent auto-updates ([c6ff0b9](https://github.com/xicoarm/suisse-notes-desktop/commit/c6ff0b904b6a421fd77b2c2caae9042e9e85caf0))
+
 ## [3.4.12](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.11...v3.4.12) (2026-01-26)
 
 
