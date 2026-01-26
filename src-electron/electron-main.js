@@ -80,6 +80,12 @@ autoUpdater.logger.transports.file.level = 'info';
 // Silent auto-update settings
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
+autoUpdater.allowDowngrade = false;
+
+// Note: Code signing is not yet configured. Existing users who installed a build
+// with publisherName set will see a signature verification error and be prompted
+// to manually download the latest version. New builds don't set publisherName,
+// so future auto-updates will work without signatures.
 
 // Note: For private GitHub repos, GH_TOKEN must be set during build
 // electron-builder will automatically include it in app-update.yml
@@ -1013,6 +1019,29 @@ autoUpdater.on('update-downloaded', (info) => {
 
 autoUpdater.on('error', (err) => {
   log.error('Auto-update error:', err);
+
+  // Detect signature verification failure (common when app is not code-signed)
+  const errMsg = err.message || err.toString();
+  if (errMsg.includes('not signed') || errMsg.includes('signature') || errMsg.includes('publisherNames')) {
+    log.warn('Update failed due to signature verification. App needs code signing or manual reinstall.');
+
+    // Show dialog to user explaining they need to manually update
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const { dialog, shell } = require('electron');
+      dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: 'Update Available',
+        message: 'A new version is available but cannot be installed automatically.',
+        detail: 'Please download the latest version from our website to get the newest features and fixes. After this one-time reinstall, future updates will work automatically.',
+        buttons: ['Download Now', 'Later'],
+        defaultId: 0
+      }).then(result => {
+        if (result.response === 0) {
+          shell.openExternal('https://github.com/xicoarm/suisse-notes-desktop/releases/latest');
+        }
+      });
+    }
+  }
 });
 
 // Quit when all windows are closed

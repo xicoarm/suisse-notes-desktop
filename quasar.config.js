@@ -105,7 +105,9 @@ export default function (ctx) {
         win: {
           target: 'nsis',
           icon: 'src-electron/icons/icon.ico',
-          publisherName: 'Suisse Notes',
+          // Only set publisherName when code signing is available
+          // Without this, electron-updater won't require signature verification
+          ...(process.env.CSC_LINK ? { publisherName: 'Suisse Notes' } : {}),
           // Code signing - enable when certificate is available
           // Set environment variables in CI/CD:
           //   CSC_LINK: path to .pfx certificate file
