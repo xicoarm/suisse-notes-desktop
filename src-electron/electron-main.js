@@ -835,6 +835,12 @@ function createWindow() {
 
 // App ready
 app.whenReady().then(() => {
+  // Set the App User Model ID for Windows notifications
+  // This ensures notifications show "Suisse Notes" instead of "electron.app.electron"
+  if (process.platform === 'win32') {
+    app.setAppUserModelId('com.suisse-notes.desktop');
+  }
+
   // Remove the default menu bar (File, Edit, View, etc.)
   Menu.setApplicationMenu(null);
 
@@ -939,14 +945,14 @@ app.whenReady().then(() => {
   // === Auto-Update: Check for updates silently ===
   // Only check in production (packaged app)
   if (app.isPackaged) {
-    // Check for updates on startup
-    autoUpdater.checkForUpdatesAndNotify().catch(err => {
+    // Check for updates on startup (silent - no notification)
+    autoUpdater.checkForUpdates().catch(err => {
       log.error('Auto-update check failed:', err);
     });
 
     // Re-check every 4 hours while app is running
     setInterval(() => {
-      autoUpdater.checkForUpdatesAndNotify().catch(err => {
+      autoUpdater.checkForUpdates().catch(err => {
         log.error('Periodic auto-update check failed:', err);
       });
     }, 4 * 60 * 60 * 1000);
