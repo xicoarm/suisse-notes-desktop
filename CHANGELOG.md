@@ -1,3 +1,10 @@
+## [3.4.12](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.11...v3.4.12) (2026-01-26)
+
+
+### Bug Fixes
+
+* use nativeImage for window icon to work in packaged app ([11992f3](https://github.com/xicoarm/suisse-notes-desktop/commit/11992f314b20c478f9d582904fd86261364f12b0))
+
 ## [3.4.11](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.10...v3.4.11) (2026-01-26)
 
 
