@@ -76,6 +76,7 @@ app.on('child-process-gone', (event, details) => {
 // Configure auto-updater logging
 autoUpdater.logger = log;
 autoUpdater.logger.transports.file.level = 'info';
+log.info('Auto-updater initialized - silent background updates enabled');
 
 // Silent auto-update settings
 autoUpdater.autoDownload = true;
