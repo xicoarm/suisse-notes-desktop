@@ -1,3 +1,10 @@
+## [3.4.8](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.7...v3.4.8) (2026-01-26)
+
+
+### Bug Fixes
+
+* **android:** set JVM target to 17 for Java/Kotlin compatibility ([9f07591](https://github.com/xicoarm/suisse-notes-desktop/commit/9f07591ac57a4f60eb38ce1ff27901ecda06b6ed))
+
 ## [3.4.7](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.6...v3.4.7) (2026-01-26)
 
 
