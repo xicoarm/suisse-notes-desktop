@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.4.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.1...v3.4.2) (2026-01-26)
+
+
+### Bug Fixes
+
+* add window icon for Windows taskbar ([4e2de63](https://github.com/xicoarm/suisse-notes-desktop/commit/4e2de6377e5686bb865429e85ac70851116c8d3b))
+
 ### [3.4.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.0...v3.4.1) (2026-01-26)
 
 
