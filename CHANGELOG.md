@@ -1,3 +1,11 @@
+# [3.4.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.3.12...v3.4.0) (2026-01-26)
+
+
+### Features
+
+* add Android/Capacitor support and Play Store release ([6d3db80](https://github.com/xicoarm/suisse-notes-desktop/commit/6d3db803d8cfad99edaf37da72e61129f976c90d))
+* redesign UI with separate Record/Upload pages and modern header ([a8396a3](https://github.com/xicoarm/suisse-notes-desktop/commit/a8396a3590b683c06ff1e8f3507f798d76b3a5c0))
+
 # Changelog
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
