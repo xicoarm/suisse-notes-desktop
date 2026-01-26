@@ -1012,52 +1012,10 @@ const formatBytes = (bytes) => {
 const generateTranscriptUrl = async () => {
   if (!currentAudioFileId.value) return '';
 
-  let url = `https://app.suisse-notes.ch/meeting/audio/${currentAudioFileId.value}`;
-
-  // Try to get a web session token for seamless login
-  if (isElectron()) {
-    try {
-      const result = await window.electronAPI.auth.createWebSession();
-      if (result.success && result.sessionToken) {
-        url += `?session=${encodeURIComponent(result.sessionToken)}`;
-      }
-    } catch (error) {
-      console.warn('Could not create web session:', error);
-    }
-  } else if (isCapacitor()) {
-    // On mobile, call the API to create a web session token
-    try {
-      const { getApiUrlSync } = await import('../services/api');
-      const apiUrl = getApiUrlSync();
-      console.log('Creating web session, API URL:', apiUrl, 'Token:', authStore.token ? 'present' : 'missing');
-
-      const response = await fetch(`${apiUrl}/api/auth/desktop/create-web-session`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${authStore.token}`
-        }
-      });
-
-      console.log('Web session response status:', response.status);
-
-      if (response.ok) {
-        const data = await response.json();
-        console.log('Web session response data:', data);
-        if (data.success && data.sessionToken) {
-          url += `?session=${encodeURIComponent(data.sessionToken)}`;
-          console.log('URL with session:', url);
-        }
-      } else {
-        const errorText = await response.text();
-        console.warn('Web session request failed:', response.status, errorText);
-      }
-    } catch (error) {
-      console.warn('Could not create web session for mobile:', error);
-    }
-  }
-
-  return url;
+  // Security: Session tokens are not included in URLs to prevent leakage
+  // via browser history, referrer headers, and server logs.
+  // Users will need to log in separately on the web app.
+  return `https://app.suisse-notes.ch/meeting/audio/${currentAudioFileId.value}`;
 };
 
 const openInSuisseNotes = async () => {
@@ -1137,9 +1095,9 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  if (isElectron() && window.electronAPI?.upload?.removeAllListeners) {
-    window.electronAPI.upload.removeAllListeners();
-  }
+  // Note: We do NOT call removeAllListeners() here because MainLayout has a global
+  // upload progress listener that must persist across page navigation.
+  // The global listener in MainLayout handles the header progress indicator.
 
   // Reset the store when leaving UploadPage after a successful upload
   // This prevents RecordPage from showing the upload success message

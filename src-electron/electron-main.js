@@ -829,13 +829,24 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
 
   // Register custom protocol for serving local audio files
+  // Security: Only allow access to files within the recordings directory
   protocol.registerFileProtocol('local-audio', (request, callback) => {
     // Extract and decode the file path from the URL
     const url = request.url.replace('local-audio://', '');
     const filePath = decodeURIComponent(url);
 
+    // Validate that the path is within the allowed recordings directory
+    const recordingsPath = path.join(app.getPath('userData'), 'recordings');
+    const resolvedPath = path.resolve(filePath);
+
+    if (!resolvedPath.startsWith(recordingsPath)) {
+      log.warn('local-audio protocol: Blocked access to path outside recordings directory:', resolvedPath);
+      callback({ error: -10 }); // net::ERR_ACCESS_DENIED
+      return;
+    }
+
     // Return the file
-    callback({ path: filePath });
+    callback({ path: resolvedPath });
   });
 
   createWindow();
@@ -2456,8 +2467,33 @@ ipcMain.handle('app:getUserDataPath', () => {
 });
 
 // Open external URL in default browser
+// Security: Only allow specific trusted domains to prevent malicious URL opening
+const ALLOWED_EXTERNAL_DOMAINS = ['app.suisse-notes.ch', 'suisse-notes.ch', 'suisse-ai.ch'];
+
 ipcMain.handle('shell:openExternal', async (event, url) => {
   try {
+    const urlObj = new URL(url);
+
+    // Allow mailto: links
+    if (urlObj.protocol === 'mailto:') {
+      await shell.openExternal(url);
+      return { success: true };
+    }
+
+    // Only allow https: protocol
+    if (urlObj.protocol !== 'https:') {
+      throw new Error('Only HTTPS URLs are allowed');
+    }
+
+    // Validate against allowed domains
+    const isAllowed = ALLOWED_EXTERNAL_DOMAINS.some(domain =>
+      urlObj.hostname === domain || urlObj.hostname.endsWith('.' + domain)
+    );
+
+    if (!isAllowed) {
+      throw new Error('Domain not allowed');
+    }
+
     await shell.openExternal(url);
     return { success: true };
   } catch (error) {

@@ -98,8 +98,8 @@ export default function (ctx) {
           provider: 'github',
           owner: 'xicoarm',
           repo: 'suisse-notes-desktop',
-          releaseType: 'release',
-          private: true
+          releaseType: 'release'
+          // Note: private: false is the default for public repos
         },
 
         win: {
