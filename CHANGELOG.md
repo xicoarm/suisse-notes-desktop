@@ -1,3 +1,10 @@
+## [3.4.5](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.4...v3.4.5) (2026-01-26)
+
+
+### Bug Fixes
+
+* **ci:** fix Android and iOS mobile builds ([8235068](https://github.com/xicoarm/suisse-notes-desktop/commit/8235068900b998acc8d2c8333db023e96d69d8e7))
+
 ## [3.4.4](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.3...v3.4.4) (2026-01-26)
 
 
