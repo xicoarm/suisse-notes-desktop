@@ -2,14 +2,60 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
 
 permissions:
   contents: write
+  issues: write
+  pull-requests: write
 
 jobs:
+  # =============================================================================
+  # Semantic Release - Determines if a new version should be released
+  # =============================================================================
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      new_release: ${{ steps.semantic.outputs.new_release_published }}
+      version: ${{ steps.semantic.outputs.new_release_version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Semantic Release
+        id: semantic
+        uses: cycjimmy/semantic-release-action@v4
+        with:
+          semantic_version: 24
+          extra_plugins: |
+            @semantic-release/changelog@6
+            @semantic-release/git@10
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release info
+        if: steps.semantic.outputs.new_release_published == 'true'
+        run: |
+          echo "New release published: v${{ steps.semantic.outputs.new_release_version }}"
+
+  # =============================================================================
+  # Windows Build - Only runs if semantic-release created a new version
+  # =============================================================================
   build-windows:
+    needs: release
+    if: needs.release.outputs.new_release == 'true'
     runs-on: windows-latest
 
     steps:
@@ -17,6 +63,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           lfs: true
+          ref: main
+          fetch-depth: 0
+
+      - name: Pull latest changes (version bump)
+        run: git pull origin main
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -29,10 +80,8 @@ jobs:
 
       - name: Build Electron app
         env:
-          # Use PAT for private repo auto-updates (clients need this to download updates)
-          # Add GH_PAT secret in repo settings with a PAT that has 'repo' scope
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          # Code signing (optional - uncomment and add secrets when certificate is available)
+          # Code signing (uncomment when certificate is available)
           # CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           # CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
         run: npm run build
@@ -46,62 +95,68 @@ jobs:
             dist/electron/Packaged/*.exe.blockmap
             dist/electron/Packaged/latest.yml
 
-  # ============================================================================
-  # macOS Build (DISABLED - uncomment when ready)
-  #
-  # To enable macOS builds:
-  # 1. Add resources/ffmpeg/darwin/ffmpeg binary (download from https://ffmpeg.org/download.html)
-  # 2. Add src-electron/icons/icon.icns (convert from PNG using iconutil or online tool)
-  # 3. Uncomment the build-macos job below
-  # 4. Change release job 'needs' to: [build-windows, build-macos]
-  # 5. Uncomment the macOS artifact download and file entries in release job
-  #
-  # For code signing (recommended for distribution):
-  # - Get Apple Developer account ($99/year)
-  # - Create Developer ID Application certificate
-  # - Add secrets: MAC_CSC_LINK, MAC_CSC_KEY_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD
-  # ============================================================================
+  # =============================================================================
+  # macOS Build - Only runs if semantic-release created a new version
+  # =============================================================================
+  build-macos:
+    needs: release
+    if: needs.release.outputs.new_release == 'true'
+    runs-on: macos-latest
 
-  # build-macos:
-  #   runs-on: macos-latest
-  #
-  #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@v4
-  #       with:
-  #         lfs: true
-  #
-  #     - name: Setup Node.js
-  #       uses: actions/setup-node@v4
-  #       with:
-  #         node-version: '20'
-  #         cache: 'npm'
-  #
-  #     - name: Install dependencies
-  #       run: npm ci
-  #
-  #     - name: Build Electron app for macOS
-  #       env:
-  #         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #         # Code signing (uncomment when Apple Developer certificate is available)
-  #         # CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-  #         # CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-  #         # APPLE_ID: ${{ secrets.APPLE_ID }}
-  #         # APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-  #       run: npm run build
-  #
-  #     - name: Upload macOS artifacts
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: macos-build
-  #         path: |
-  #           dist/electron/Packaged/*.dmg
-  #           dist/electron/Packaged/*.dmg.blockmap
-  #           dist/electron/Packaged/*.zip
-  #           dist/electron/Packaged/latest-mac.yml
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          ref: main
+          fetch-depth: 0
 
-  release:
-    needs: [build-windows]  # Add build-macos when enabled
+      - name: Pull latest changes (version bump)
+        run: git pull origin main
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Download FFmpeg for macOS
+        run: |
+          brew install p7zip
+          curl -L "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/7.1/universal" -o ffmpeg.7z
+          7z x ffmpeg.7z -oresources/ffmpeg/darwin
+          chmod +x resources/ffmpeg/darwin/ffmpeg
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Electron app for macOS
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          # Code signing (uncomment when Apple Developer certificate is available)
+          # CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          # CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run build
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: |
+            dist/electron/Packaged/*.dmg
+            dist/electron/Packaged/*.dmg.blockmap
+            dist/electron/Packaged/*.zip
+            dist/electron/Packaged/latest-mac.yml
+
+  # =============================================================================
+  # Upload to GitHub Release - Adds build artifacts to the release
+  # =============================================================================
+  upload-release-assets:
+    needs: [release, build-windows, build-macos]
+    if: needs.release.outputs.new_release == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -111,21 +166,18 @@ jobs:
           name: windows-build
           path: artifacts/windows
 
-      # Uncomment when macOS build is enabled:
-      # - name: Download macOS artifacts
-      #   uses: actions/download-artifact@v4
-      #   with:
-      #     name: macos-build
-      #     path: artifacts/macos
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
         with:
+          name: macos-build
+          path: artifacts/macos
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.release.outputs.version }}
           files: |
             artifacts/windows/*
-          # Add when macOS is enabled:
-          #   artifacts/macos/*
-          draft: false
-          prerelease: false
+            artifacts/macos/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

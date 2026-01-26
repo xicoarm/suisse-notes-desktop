@@ -293,8 +293,66 @@ export const useRecordingStore = defineStore('recording', {
 
     // Check for recordings that need recovery
     async checkRecoveryState() {
-      // TODO: Implement recovery check for orphaned recordings
-      // This would scan for recordings with status 'recording' that weren't properly closed
+      try {
+        if (isElectron()) {
+          // Electron: Check for interrupted recordings via main process
+          // The main process already handles this on startup - see electron-main.js recoverInterruptedRecordings
+          console.log('Recovery check: Electron handles recovery on startup');
+          return { success: true, recovered: false };
+        } else if (isCapacitor()) {
+          // Capacitor: Scan for recordings with 'recording' status that weren't closed properly
+          const listResult = await storage.listFiles('recordings');
+
+          if (!listResult.success || !listResult.files) {
+            console.log('No recordings directory or empty');
+            return { success: true, recovered: false };
+          }
+
+          for (const recordId of listResult.files) {
+            // Skip current active recording
+            if (recordId === this.recordId) continue;
+
+            // Try to load metadata
+            try {
+              const metaResult = await storage.loadMetadata(recordId);
+              if (!metaResult.success || !metaResult.metadata) continue;
+
+              const metadata = metaResult.metadata;
+
+              // Check if this recording was interrupted (still in 'recording' status)
+              if (metadata.status === 'recording') {
+                console.warn('Found orphaned recording:', recordId);
+
+                // Check if there are chunks
+                const chunksResult = await storage.listFiles(`recordings/${recordId}/chunks`);
+                const chunkCount = chunksResult.success ? (chunksResult.files?.length || 0) : 0;
+
+                if (chunkCount > 0) {
+                  console.log('Orphaned recording has', chunkCount, 'chunks - marking as recoverable');
+
+                  // Update metadata to mark as recoverable
+                  await storage.saveMetadata(recordId, {
+                    ...metadata,
+                    status: 'interrupted',
+                    recoverable: true,
+                    chunkCount,
+                    lastUpdated: Date.now()
+                  });
+                }
+              }
+            } catch (e) {
+              console.error('Error checking orphaned recording:', recordId, e);
+            }
+          }
+
+          return { success: true, recovered: false };
+        }
+
+        return { success: true, recovered: false };
+      } catch (error) {
+        console.error('Error in checkRecoveryState:', error);
+        return { success: false, error: error.message };
+      }
     },
 
     async saveChunk(chunkData) {

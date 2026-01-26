@@ -787,3 +787,37 @@ h4 {
 .gap-4 { gap: $space-4; }
 .gap-5 { gap: $space-5; }
 .gap-6 { gap: $space-6; }
+
+// ==================== MOBILE UTILITIES ====================
+
+// Hide on mobile
+.hide-mobile {
+  @media (max-width: $breakpoint-sm) {
+    display: none !important;
+  }
+}
+
+// Show only on mobile
+.show-mobile {
+  display: none !important;
+
+  @media (max-width: $breakpoint-sm) {
+    display: block !important;
+  }
+}
+
+// Mobile-specific padding adjustments
+.mobile-padding {
+  @media (max-width: $breakpoint-sm) {
+    padding: $space-4 !important;
+  }
+}
+
+// Safe area padding for iOS notch/home indicator
+.safe-area-top {
+  padding-top: env(safe-area-inset-top);
+}
+
+.safe-area-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
+}

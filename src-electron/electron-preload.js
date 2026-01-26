@@ -40,7 +40,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     clearToken: () => ipcRenderer.invoke('auth:clearToken'),
     saveUserInfo: (userInfo) => ipcRenderer.invoke('auth:saveUserInfo', userInfo),
     getUserInfo: () => ipcRenderer.invoke('auth:getUserInfo'),
-    createWebSession: () => ipcRenderer.invoke('auth:createWebSession')
+    createWebSession: () => ipcRenderer.invoke('auth:createWebSession'),
+    // Listen for auth expired events from main process
+    onExpired: (callback) => {
+      ipcRenderer.on('auth:expired', (event, data) => callback(data));
+    },
+    removeExpiredListener: () => {
+      ipcRenderer.removeAllListeners('auth:expired');
+    }
   },
 
   // Recording (WhisperTranscribe pattern)
@@ -104,7 +111,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setInProgress: (inProgress) =>
       ipcRenderer.invoke('recording:setInProgress', inProgress),
     setProcessing: (processing) =>
-      ipcRenderer.invoke('recording:setProcessing', processing)
+      ipcRenderer.invoke('recording:setProcessing', processing),
+    // Metadata
+    saveMetadata: (recordId, metadata) =>
+      ipcRenderer.invoke('recording:saveMetadata', recordId, metadata),
+    loadMetadata: (recordId) =>
+      ipcRenderer.invoke('recording:loadMetadata', recordId)
   },
 
   // History management (all methods require userId for security)
@@ -184,6 +196,34 @@ contextBridge.exposeInMainWorld('electronAPI', {
     isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
     toggleFullscreen: () => ipcRenderer.invoke('window:toggleFullscreen'),
     isFullscreen: () => ipcRenderer.invoke('window:isFullscreen')
+  },
+
+  // P0 Data Loss Fix: System events (power/suspend handling)
+  system: {
+    // Listen for system suspend (laptop lid close, sleep)
+    onSuspend: (callback) => {
+      ipcRenderer.on('recording:suspend', (event, data) => callback(data));
+    },
+    // Listen for system resume (wake from sleep)
+    onResume: (callback) => {
+      ipcRenderer.on('recording:resume', (event, data) => callback(data));
+    },
+    // Listen for screen lock/unlock
+    onScreenLocked: (callback) => {
+      ipcRenderer.on('system:screen-locked', (event) => callback());
+    },
+    onScreenUnlocked: (callback) => {
+      ipcRenderer.on('system:screen-unlocked', (event) => callback());
+    },
+    // Remove all system listeners
+    removeAllListeners: () => {
+      ipcRenderer.removeAllListeners('recording:suspend');
+      ipcRenderer.removeAllListeners('recording:resume');
+      ipcRenderer.removeAllListeners('system:screen-locked');
+      ipcRenderer.removeAllListeners('system:screen-unlocked');
+    },
+    // Get recordings path
+    getRecordingsPath: () => ipcRenderer.invoke('system:getRecordingsPath')
   }
 });
 

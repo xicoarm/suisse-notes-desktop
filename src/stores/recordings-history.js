@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia';
 import { useAuthStore } from './auth';
+import { useRecordingStore } from './recording';
+import { isElectron } from '../utils/platform';
 
 export const useRecordingsHistoryStore = defineStore('recordings-history', {
   state: () => ({
@@ -43,8 +45,16 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
     },
 
     // Load recordings from electron store (filtered by current user)
+    // Only works on Electron - mobile uses server-side history
     async loadRecordings() {
       if (this.loading) return;
+
+      // Only load from electronAPI on desktop
+      if (!isElectron()) {
+        this.recordings = [];
+        this.loaded = true;
+        return;
+      }
 
       try {
         this.loading = true;
@@ -163,7 +173,7 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
     },
 
     // Mark recording as uploaded (and optionally delete file)
-    async markAsUploaded(id, transcriptionId = null, audioFileId = null) {
+    async markAsUploaded(id, transcriptionId = null, audioFileId = null, canDelete = true) {
       const recording = this.recordings.find(r => r.id === id);
 
       const updates = {
@@ -174,14 +184,24 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
 
       await this.updateRecording(id, updates);
 
-      // If storage preference is delete_after_upload, delete the file
+      // P0 Data Loss Fix: Check file locking before deletion
+      // If storage preference is delete_after_upload, delete the file ONLY if safe
       if (recording && recording.storagePreference === 'delete_after_upload') {
-        try {
-          await window.electronAPI.recording.deleteRecording(id);
-          // Update file path to indicate deletion
-          await this.updateRecording(id, { filePath: null });
-        } catch (e) {
-          console.warn('Could not delete file after upload:', e);
+        const recordingStore = useRecordingStore();
+
+        // Only delete if canDelete flag is true AND file is not locked
+        if (canDelete && recordingStore.canDelete(id)) {
+          try {
+            await window.electronAPI.recording.deleteRecording(id);
+            // Update file path to indicate deletion
+            await this.updateRecording(id, { filePath: null });
+            // Unlock file after successful deletion
+            recordingStore.unlockFile(id);
+          } catch (e) {
+            console.warn('Could not delete file after upload:', e);
+          }
+        } else {
+          console.warn('File not deleted: upload not verified or file is locked');
         }
       }
     },
@@ -223,43 +243,60 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
       return `${minutes}:${secs.toString().padStart(2, '0')}`;
     },
 
-    // Format date for display
-    formatDate(dateString) {
-      if (!dateString) return '';
+    // Format date for display - returns structured data for i18n
+    formatDateData(dateString) {
+      if (!dateString) return { type: 'empty', time: '', formatted: '' };
 
       const date = new Date(dateString);
       const now = new Date();
       const diff = now - date;
+      const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
       // Today
       if (date.toDateString() === now.toDateString()) {
-        return `Today at ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+        return { type: 'today', time };
       }
 
       // Yesterday
       const yesterday = new Date(now);
       yesterday.setDate(yesterday.getDate() - 1);
       if (date.toDateString() === yesterday.toDateString()) {
-        return `Yesterday at ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+        return { type: 'yesterday', time };
       }
 
       // Within last 7 days
       if (diff < 7 * 24 * 60 * 60 * 1000) {
-        return date.toLocaleDateString([], {
-          weekday: 'long',
-          hour: '2-digit',
-          minute: '2-digit'
-        });
+        return {
+          type: 'weekday',
+          time,
+          formatted: date.toLocaleDateString([], {
+            weekday: 'long',
+            hour: '2-digit',
+            minute: '2-digit'
+          })
+        };
       }
 
       // Older
-      return date.toLocaleDateString([], {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      });
+      return {
+        type: 'older',
+        time,
+        formatted: date.toLocaleDateString([], {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        })
+      };
+    },
+
+    // Legacy format date for display (backwards compatibility)
+    formatDate(dateString) {
+      const data = this.formatDateData(dateString);
+      if (data.type === 'today') return `Today at ${data.time}`;
+      if (data.type === 'yesterday') return `Yesterday at ${data.time}`;
+      return data.formatted || '';
     }
   }
 });

@@ -4,20 +4,30 @@
       <!-- Mode Tab Switcher -->
       <ModeTabSwitcher />
 
-      <!-- IDLE STATE: Upload form -->
+      <!-- IDLE STATE: Upload form (no file selected yet) -->
       <div
-        v-if="!isProcessing && !isUploading && !isUploaded && !uploadError"
+        v-if="!hasSelectedFile && !isProcessing && !isUploading && !isUploaded && !uploadError"
         class="idle-layout"
       >
         <!-- Upload Card -->
         <div
           class="upload-card modern-card no-hover clickable"
-          :class="{ 'drag-over': isDragOver }"
-          @click="selectFileForUpload"
-          @dragover.prevent="onDragOver"
-          @dragleave.prevent="onDragLeave"
-          @drop.prevent="onDrop"
+          :class="{ 'drag-over': isDragOver && !isMobile }"
+          @click="handleCardClick"
+          @dragover.prevent="!isMobile && onDragOver($event)"
+          @dragleave.prevent="!isMobile && onDragLeave($event)"
+          @drop.prevent="!isMobile && onDrop($event)"
         >
+          <!-- Hidden file input for mobile - covers entire card -->
+          <input
+            v-if="isMobile"
+            ref="mobileCardFileInput"
+            type="file"
+            accept="audio/*,video/*,.mp3,.mp4,.wav,.m4a,.webm,.ogg,.flac,.aac,.mov"
+            class="mobile-card-file-input"
+            @click="() => console.log('File input clicked!')"
+            @change="handleMobileFileSelect"
+          >
           <div class="upload-content">
             <div
               class="upload-icon-wrapper"
@@ -33,7 +43,10 @@
             <p class="upload-desc">
               {{ $t('uploadDesc') }}
             </p>
+
+            <!-- Desktop: Regular button -->
             <q-btn
+              v-if="!isMobile"
               unelevated
               color="primary"
               :label="$t('selectFile')"
@@ -42,12 +55,50 @@
               class="upload-btn"
               @click.stop="selectFileForUpload"
             />
-            <div class="drag-drop-hint">
+
+            <!-- Mobile: Use label wrapping actual file input for reliable file picking -->
+            <label
+              v-else
+              class="mobile-file-input-wrapper"
+            >
+              <input
+                ref="mobileFileInput"
+                type="file"
+                accept="audio/*,video/*,.mp3,.mp4,.wav,.m4a,.webm,.ogg,.flac,.aac,.mov"
+                class="mobile-file-input"
+                @change="handleMobileFileSelect"
+              >
+              <span class="mobile-file-btn">
+                <q-icon
+                  name="folder_open"
+                  size="18px"
+                  class="q-mr-sm"
+                />
+                {{ $t('selectFile') }}
+              </span>
+            </label>
+
+            <!-- Desktop: Drag & drop hint -->
+            <div
+              v-if="!isMobile"
+              class="drag-drop-hint"
+            >
               <q-icon
                 name="mouse"
                 size="14px"
               />
               <span>{{ $t('dragDropHint') }}</span>
+            </div>
+            <!-- Mobile: Tap hint -->
+            <div
+              v-else
+              class="tap-hint"
+            >
+              <q-icon
+                name="touch_app"
+                size="14px"
+              />
+              <span>{{ $t('tapToSelect') }}</span>
             </div>
             <div class="supported-formats">
               MP3, MP4, WAV, M4A, WEBM, OGG, FLAC, AAC, MOV
@@ -56,6 +107,85 @@
         </div>
 
         <!-- Transcription Options -->
+        <TranscriptionOptions
+          :title="transcriptionStore.sessionTitle"
+          :session-vocabulary="transcriptionStore.sessionVocabulary"
+          :global-vocabulary="transcriptionStore.globalVocabulary"
+          @update:title="updateTitle"
+          @add-word="addSessionWord"
+          @remove-word="removeSessionWord"
+        />
+      </div>
+
+      <!-- FILE PREVIEW STATE: Show file info before upload -->
+      <div
+        v-if="hasSelectedFile && !isProcessing && !isUploading && !isUploaded && !uploadError"
+        class="file-preview-layout"
+      >
+        <div class="file-preview-card modern-card no-hover">
+          <div class="preview-header">
+            <q-icon
+              name="audio_file"
+              size="md"
+              color="primary"
+            />
+            <span>{{ $t('fileSelected') || 'File Selected' }}</span>
+          </div>
+
+          <div class="file-info">
+            <div class="file-icon">
+              <q-icon
+                name="music_note"
+                size="48px"
+                color="primary"
+              />
+            </div>
+            <div class="file-details">
+              <div class="file-name">
+                {{ currentFilename }}
+              </div>
+              <div class="file-meta">
+                <span class="file-size">
+                  <q-icon
+                    name="storage"
+                    size="14px"
+                  />
+                  {{ formattedFileSize }}
+                </span>
+                <span
+                  v-if="formattedDuration"
+                  class="file-duration"
+                >
+                  <q-icon
+                    name="schedule"
+                    size="14px"
+                  />
+                  {{ formattedDuration }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="preview-actions">
+            <q-btn
+              unelevated
+              color="primary"
+              :label="$t('startUpload') || 'Start Upload'"
+              icon="cloud_upload"
+              class="start-upload-btn"
+              @click="confirmAndStartUpload"
+            />
+            <q-btn
+              flat
+              color="grey-7"
+              :label="$t('changeFile') || 'Change File'"
+              icon="folder_open"
+              @click="clearFileSelection"
+            />
+          </div>
+        </div>
+
+        <!-- Transcription Options (also shown in preview state) -->
         <TranscriptionOptions
           :title="transcriptionStore.sessionTitle"
           :session-vocabulary="transcriptionStore.sessionVocabulary"
@@ -137,6 +267,17 @@
               <span>Upload complete, waiting for server response...</span>
             </div>
           </div>
+          <div class="upload-actions">
+            <q-btn
+              flat
+              color="grey-7"
+              :label="$t('cancelUpload') || 'Cancel Upload'"
+              icon="close"
+              :loading="isCancelling"
+              :disable="displayProgress >= 100"
+              @click="cancelCurrentUpload"
+            />
+          </div>
         </div>
 
         <!-- Upload Error state -->
@@ -180,6 +321,32 @@
           v-else-if="isUploaded"
           class="upload-success"
         >
+          <!-- Top Section: New Upload Button + File Info (prominent) -->
+          <div class="success-top-actions">
+            <q-btn
+              unelevated
+              color="primary"
+              :label="$t('uploadAnother')"
+              icon="cloud_upload"
+              class="new-upload-btn"
+              @click="handleReset"
+            />
+            <div
+              v-if="currentFilename"
+              class="file-info-badge"
+            >
+              <q-icon
+                name="audio_file"
+                size="18px"
+              />
+              <span class="filename">{{ currentFilename }}</span>
+              <span
+                v-if="formattedFileSize"
+                class="filesize"
+              >({{ formattedFileSize }})</span>
+            </div>
+          </div>
+
           <!-- Main CTA: View Transcript -->
           <div
             v-if="currentAudioFileId"
@@ -283,14 +450,6 @@
 
           <div class="success-actions">
             <q-btn
-              outline
-              color="primary"
-              label="Upload Another"
-              icon="cloud_upload"
-              class="secondary-action-btn"
-              @click="handleReset"
-            />
-            <q-btn
               flat
               color="grey-7"
               :label="$t('viewHistory')"
@@ -312,14 +471,53 @@ import { useQuasar } from 'quasar';
 import { useRecordingStore } from '../stores/recording';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
+import { useAuthStore } from '../stores/auth';
+import { isElectron, isCapacitor, isMobile as isMobilePlatform } from '../utils/platform';
+import { pickAudioFile } from '../services/filePicker';
+import { uploadWithVerification, cancelUpload as cancelMobileUpload } from '../services/upload';
+import { getApiUrlSync } from '../services/api';
 import ModeTabSwitcher from '../components/ModeTabSwitcher.vue';
 import TranscriptionOptions from '../components/TranscriptionOptions.vue';
+
+// Make isMobile reactive to handle Capacitor initialization timing
+const isMobileState = ref(isMobilePlatform());
+
+// Check again after delays in case Capacitor initializes late
+setTimeout(() => {
+  const newValue = isMobilePlatform();
+  if (newValue !== isMobileState.value) {
+    console.log('isMobile updated:', newValue);
+    isMobileState.value = newValue;
+  }
+}, 100);
+setTimeout(() => {
+  const newValue = isMobilePlatform();
+  if (newValue !== isMobileState.value) {
+    console.log('isMobile updated (500ms):', newValue);
+    isMobileState.value = newValue;
+  }
+}, 500);
+
+// Log initial state
+console.log('isMobile initial:', isMobileState.value, 'Capacitor:', typeof window !== 'undefined' ? !!window.Capacitor : false);
+
+// Use computed for proper Vue reactivity tracking in template
+const isMobile = computed(() => isMobileState.value);
+
+// Debug: handle card click
+const handleCardClick = (event) => {
+  console.log('Card clicked! isMobile:', isMobile.value, 'target:', event.target.tagName);
+  if (!isMobile.value) {
+    selectFileForUpload();
+  }
+};
 
 const router = useRouter();
 const $q = useQuasar();
 const recordingStore = useRecordingStore();
 const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
+const authStore = useAuthStore();
 
 // State
 const isDragOver = ref(false);
@@ -328,6 +526,7 @@ const isProcessing = ref(false);
 const isUploading = ref(false);
 const isUploaded = ref(false);
 const isRetrying = ref(false);
+const isCancelling = ref(false);
 const uploadError = ref(null);
 const retryAttempt = ref(0);
 const currentFilePath = ref('');
@@ -335,11 +534,34 @@ const currentFileSize = ref(0);
 const currentFilename = ref('');
 const currentDuration = ref(0);
 
+// File preview state (before upload starts)
+const hasSelectedFile = ref(false);
+const selectedFile = ref(null); // For mobile - stores the File object
+
 const currentAudioFileId = computed(() => recordingStore.audioFileId);
 const displayProgress = computed(() => recordingStore.uploadProgress);
 
 const showUploadSection = computed(() => {
   return isProcessing.value || isUploading.value || uploadError.value || isUploaded.value;
+});
+
+// Format file size for display
+const formattedFileSize = computed(() => {
+  const bytes = currentFileSize.value;
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+});
+
+// Format duration for display
+const formattedDuration = computed(() => {
+  const seconds = currentDuration.value;
+  if (!seconds) return null;
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
 });
 
 const progressIcon = computed(() => {
@@ -415,7 +637,8 @@ const handleDroppedFile = async (file) => {
       return;
     }
 
-    await startUpload(result.filePath, result.fileSize, result.filename, result.duration);
+    // Set preview state instead of auto-upload
+    setFilePreview(result.filePath, result.fileSize, result.filename, result.duration, null);
   } catch (error) {
     $q.notify({
       type: 'negative',
@@ -424,28 +647,99 @@ const handleDroppedFile = async (file) => {
   }
 };
 
-const selectFileForUpload = async () => {
-  try {
-    const result = await window.electronAPI.dialog.openFile({
-      filters: [
-        {
-          name: 'Audio/Video Files',
-          extensions: ['mp3', 'mp4', 'wav', 'm4a', 'webm', 'ogg', 'flac', 'aac', 'mov', 'm4v', 'mpeg', 'mpga', 'opus', 'oga', 'wma', 'amr', '3gp', 'avi', 'mkv']
-        }
-      ]
-    });
+// Handle file selection from mobile file input
+const handleMobileFileSelect = async (event) => {
+  console.log('handleMobileFileSelect called', event);
+  const file = event.target.files?.[0];
+  console.log('Selected file:', file);
+  if (!file) return;
 
-    if (!result.success || !result.filePath) {
-      return; // User cancelled
+  isFileLoading.value = true;
+  try {
+    // Set preview state instead of auto-upload
+    setFilePreview(null, file.size, file.name, null, file);
+  } catch (error) {
+    $q.notify({
+      type: 'negative',
+      message: error.message || 'Error processing file'
+    });
+  } finally {
+    isFileLoading.value = false;
+    // Reset the input so the same file can be selected again
+    event.target.value = '';
+  }
+};
+
+const selectFileForUpload = async () => {
+  isFileLoading.value = true;
+  try {
+    const result = await pickAudioFile();
+
+    if (!result.success || result.cancelled) {
+      isFileLoading.value = false;
+      return; // User cancelled or unsupported platform
     }
 
-    await startUpload(result.filePath, result.fileSize, result.filename, result.duration);
+    if (result.error) {
+      $q.notify({
+        type: 'negative',
+        message: result.error
+      });
+      isFileLoading.value = false;
+      return;
+    }
+
+    // Set preview state instead of auto-upload
+    if (isCapacitor() && result.file) {
+      setFilePreview(null, result.fileSize, result.filename, null, result.file);
+    } else {
+      setFilePreview(result.filePath, result.fileSize, result.filename, result.duration, null);
+    }
   } catch (error) {
     $q.notify({
       type: 'negative',
       message: error.message || 'Error selecting file'
     });
+  } finally {
+    isFileLoading.value = false;
   }
+};
+
+// Set file preview state (called after file selection)
+const setFilePreview = (filePath, fileSize, filename, duration, file) => {
+  currentFilePath.value = filePath || '';
+  currentFileSize.value = fileSize || 0;
+  currentFilename.value = filename || '';
+  currentDuration.value = duration || 0;
+  selectedFile.value = file; // For mobile
+  hasSelectedFile.value = true;
+};
+
+// Clear file selection and go back to idle
+const clearFileSelection = () => {
+  hasSelectedFile.value = false;
+  selectedFile.value = null;
+  currentFilePath.value = '';
+  currentFileSize.value = 0;
+  currentFilename.value = '';
+  currentDuration.value = 0;
+};
+
+// User confirms and starts the upload
+const confirmAndStartUpload = async () => {
+  if (!hasSelectedFile.value) return;
+
+  if (selectedFile.value) {
+    // Mobile upload
+    await startMobileUpload(selectedFile.value, currentFileSize.value, currentFilename.value);
+  } else if (currentFilePath.value) {
+    // Desktop upload
+    await startUpload(currentFilePath.value, currentFileSize.value, currentFilename.value, currentDuration.value);
+  }
+
+  // Clear preview state after starting upload
+  hasSelectedFile.value = false;
+  selectedFile.value = null;
 };
 
 const startUpload = async (filePath, fileSize, filename, duration) => {
@@ -471,7 +765,7 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
   recordingStore.setUploading();
 
   try {
-    const uploadResult = await window.electronAPI.upload.start({
+    let uploadResult = await window.electronAPI.upload.start({
       recordId: recordId,
       filePath: filePath,
       metadata: {
@@ -481,6 +775,27 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
         customVocabulary: options.customVocabulary
       }
     });
+
+    // Handle token expiration - attempt refresh and retry
+    if (!uploadResult.success && uploadResult.status === 401) {
+      console.log('Token expired, attempting refresh...');
+      const refreshResult = await authStore.handleAuthError();
+      if (refreshResult.success) {
+        console.log('Token refreshed, retrying upload...');
+        uploadResult = await window.electronAPI.upload.start({
+          recordId: recordId,
+          filePath: filePath,
+          metadata: {
+            duration: duration ? duration.toString() : '0',
+            originalFilename: filename,
+            title: options.title,
+            customVocabulary: options.customVocabulary
+          }
+        });
+      } else if (refreshResult.shouldLogout) {
+        uploadResult = { success: false, error: 'Session expired. Please log in again.' };
+      }
+    }
 
     isUploading.value = false;
     isFileLoading.value = false;
@@ -527,16 +842,142 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
   }
 };
 
+// Mobile upload using File object (Capacitor)
+const startMobileUpload = async (file, fileSize, filename) => {
+  isFileLoading.value = true;
+  isProcessing.value = true;
+  uploadError.value = null;
+  retryAttempt.value = 0;
+
+  const recordId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  recordingStore.recordId = recordId;
+
+  currentFileSize.value = fileSize;
+  currentFilename.value = filename;
+  currentDuration.value = 0;
+  recordingStore.setFinalDuration(0);
+
+  // Get transcription options
+  const options = transcriptionStore.transcriptionOptions;
+
+  isProcessing.value = false;
+  isUploading.value = true;
+  recordingStore.setUploading();
+
+  try {
+    const uploadResult = await uploadWithVerification({
+      file: file,
+      recordId: recordId,
+      apiUrl: getApiUrlSync(),
+      authToken: authStore.token,
+      metadata: {
+        duration: '0',
+        originalFilename: filename,
+        title: options.title,
+        customVocabulary: options.customVocabulary
+      },
+      onProgress: (p) => recordingStore.updateUploadProgress(p, 0, 0),
+      getAuthStore: () => authStore // Enable token refresh
+    });
+
+    isUploading.value = false;
+    isFileLoading.value = false;
+    retryAttempt.value = 0;
+
+    if (uploadResult.success) {
+      isUploaded.value = true;
+      recordingStore.setUploaded(uploadResult.audioFileId);
+
+      await historyStore.addRecording({
+        id: recordId,
+        createdAt: new Date().toISOString(),
+        duration: 0,
+        fileSize: fileSize,
+        filePath: null,
+        uploadStatus: 'uploaded',
+        storagePreference: null,
+        transcriptionId: uploadResult.transcriptionId,
+        audioFileId: uploadResult.audioFileId
+      });
+
+      // Reset session after successful upload
+      transcriptionStore.resetSession();
+
+      $q.notify({
+        type: 'positive',
+        message: 'File uploaded successfully'
+      });
+    } else {
+      uploadError.value = uploadResult.error;
+      $q.notify({
+        type: 'negative',
+        message: uploadResult.error || 'Upload failed'
+      });
+    }
+  } catch (error) {
+    isUploading.value = false;
+    isFileLoading.value = false;
+    uploadError.value = error.message;
+    $q.notify({
+      type: 'negative',
+      message: error.message || 'Error uploading file'
+    });
+  }
+};
+
 const retryUpload = async () => {
-  if (!currentFilePath.value) return;
+  if (!currentFilePath.value && !selectedFile.value) return;
 
   isRetrying.value = true;
   uploadError.value = null;
 
   try {
-    await startUpload(currentFilePath.value, currentFileSize.value, currentFilename.value, currentDuration.value);
+    if (selectedFile.value) {
+      await startMobileUpload(selectedFile.value, currentFileSize.value, currentFilename.value);
+    } else {
+      await startUpload(currentFilePath.value, currentFileSize.value, currentFilename.value, currentDuration.value);
+    }
   } finally {
     isRetrying.value = false;
+  }
+};
+
+const cancelCurrentUpload = async () => {
+  if (!isUploading.value) return;
+
+  isCancelling.value = true;
+
+  try {
+    let result = { success: false };
+
+    if (isElectron() && window.electronAPI?.upload?.cancel) {
+      // Desktop: Use Electron IPC to cancel
+      result = await window.electronAPI.upload.cancel(recordingStore.recordId);
+    } else if (isCapacitor()) {
+      // Mobile: Use the upload service cancel function
+      result = await cancelMobileUpload(recordingStore.recordId);
+    }
+
+    if (result.success || result.cancelled) {
+      $q.notify({
+        type: 'info',
+        message: 'Upload cancelled'
+      });
+      handleReset();
+    } else {
+      $q.notify({
+        type: 'warning',
+        message: 'Could not cancel upload'
+      });
+    }
+  } catch (error) {
+    console.error('Error cancelling upload:', error);
+    $q.notify({
+      type: 'negative',
+      message: 'Error cancelling upload'
+    });
+  } finally {
+    isCancelling.value = false;
   }
 };
 
@@ -545,12 +986,15 @@ const handleReset = () => {
   isProcessing.value = false;
   isUploading.value = false;
   isUploaded.value = false;
+  isCancelling.value = false;
   uploadError.value = null;
   retryAttempt.value = 0;
   currentFilePath.value = '';
   currentFileSize.value = 0;
   currentFilename.value = '';
   currentDuration.value = 0;
+  hasSelectedFile.value = false;
+  selectedFile.value = null;
 };
 
 const formatBytes = (bytes) => {
@@ -570,13 +1014,47 @@ const generateTranscriptUrl = async () => {
 
   let url = `https://app.suisse-notes.ch/meeting/audio/${currentAudioFileId.value}`;
 
-  try {
-    const result = await window.electronAPI.auth.createWebSession();
-    if (result.success && result.sessionToken) {
-      url += `?session=${encodeURIComponent(result.sessionToken)}`;
+  // Try to get a web session token for seamless login
+  if (isElectron()) {
+    try {
+      const result = await window.electronAPI.auth.createWebSession();
+      if (result.success && result.sessionToken) {
+        url += `?session=${encodeURIComponent(result.sessionToken)}`;
+      }
+    } catch (error) {
+      console.warn('Could not create web session:', error);
     }
-  } catch (error) {
-    console.warn('Could not create web session:', error);
+  } else if (isCapacitor()) {
+    // On mobile, call the API to create a web session token
+    try {
+      const { getApiUrlSync } = await import('../services/api');
+      const apiUrl = getApiUrlSync();
+      console.log('Creating web session, API URL:', apiUrl, 'Token:', authStore.token ? 'present' : 'missing');
+
+      const response = await fetch(`${apiUrl}/api/auth/desktop/create-web-session`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authStore.token}`
+        }
+      });
+
+      console.log('Web session response status:', response.status);
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log('Web session response data:', data);
+        if (data.success && data.sessionToken) {
+          url += `?session=${encodeURIComponent(data.sessionToken)}`;
+          console.log('URL with session:', url);
+        }
+      } else {
+        const errorText = await response.text();
+        console.warn('Web session request failed:', response.status, errorText);
+      }
+    } catch (error) {
+      console.warn('Could not create web session for mobile:', error);
+    }
   }
 
   return url;
@@ -585,7 +1063,14 @@ const generateTranscriptUrl = async () => {
 const openInSuisseNotes = async () => {
   if (currentAudioFileId.value) {
     const url = await generateTranscriptUrl();
-    window.electronAPI.shell.openExternal(url);
+
+    if (isElectron()) {
+      window.electronAPI.shell.openExternal(url);
+    } else if (isCapacitor()) {
+      // On mobile, open in system browser using Capacitor Browser plugin
+      const { Browser } = await import('@capacitor/browser');
+      await Browser.open({ url });
+    }
   }
 };
 
@@ -635,28 +1120,42 @@ onMounted(async () => {
     await historyStore.loadRecordings();
   }
 
-  // Set up upload listeners
-  window.electronAPI.upload.onProgress((data) => {
-    if (data.recordId === recordingStore.recordId) {
-      recordingStore.updateUploadProgress(data.progress, data.bytesUploaded, data.bytesTotal);
-    }
-  });
+  // Electron-only listeners
+  if (isElectron() && window.electronAPI?.upload) {
+    window.electronAPI.upload.onProgress((data) => {
+      if (data.recordId === recordingStore.recordId) {
+        recordingStore.updateUploadProgress(data.progress, data.bytesUploaded, data.bytesTotal);
+      }
+    });
 
-  window.electronAPI.upload.onRetry((data) => {
-    if (data.recordId === recordingStore.recordId) {
-      retryAttempt.value = data.attempt;
-    }
-  });
+    window.electronAPI.upload.onRetry((data) => {
+      if (data.recordId === recordingStore.recordId) {
+        retryAttempt.value = data.attempt;
+      }
+    });
+  }
 });
 
 onUnmounted(() => {
-  window.electronAPI.upload.removeAllListeners();
+  if (isElectron() && window.electronAPI?.upload?.removeAllListeners) {
+    window.electronAPI.upload.removeAllListeners();
+  }
+
+  // Reset the store when leaving UploadPage after a successful upload
+  // This prevents RecordPage from showing the upload success message
+  if (isUploaded.value) {
+    recordingStore.reset();
+  }
 });
 </script>
 
 <style lang="scss" scoped>
 .upload-page {
   padding: 40px 48px;
+
+  @media (max-width: 600px) {
+    padding: 16px;
+  }
 }
 
 .upload-container {
@@ -669,6 +1168,113 @@ onUnmounted(() => {
   flex-direction: column;
 }
 
+// File Preview State Styles
+.file-preview-layout {
+  display: flex;
+  flex-direction: column;
+}
+
+.file-preview-card {
+  padding: 32px;
+  margin-bottom: 24px;
+
+  @media (max-width: 600px) {
+    padding: 20px 16px;
+  }
+
+  .preview-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid #e2e8f0;
+    font-weight: 600;
+    font-size: 15px;
+    color: #334155;
+  }
+
+  .file-info {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 20px;
+    background: #f8fafc;
+    border-radius: 12px;
+    margin-bottom: 24px;
+
+    @media (max-width: 600px) {
+      flex-direction: column;
+      text-align: center;
+      gap: 12px;
+    }
+
+    .file-icon {
+      flex-shrink: 0;
+      width: 72px;
+      height: 72px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(139, 92, 246, 0.05) 100%);
+      border-radius: 12px;
+    }
+
+    .file-details {
+      flex: 1;
+      min-width: 0;
+
+      .file-name {
+        font-size: 16px;
+        font-weight: 600;
+        color: #1e293b;
+        margin-bottom: 8px;
+        word-break: break-word;
+      }
+
+      .file-meta {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+
+        @media (max-width: 600px) {
+          justify-content: center;
+        }
+
+        .file-size, .file-duration {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          font-size: 13px;
+          color: #64748b;
+        }
+      }
+    }
+  }
+
+  .preview-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+
+    @media (max-width: 600px) {
+      flex-direction: column;
+    }
+
+    .start-upload-btn {
+      height: 48px;
+      padding: 0 32px;
+      font-size: 15px;
+      font-weight: 600;
+      border-radius: 24px;
+
+      @media (max-width: 600px) {
+        width: 100%;
+      }
+    }
+  }
+}
+
 .upload-card {
   padding: 48px 40px;
   display: flex;
@@ -679,6 +1285,11 @@ onUnmounted(() => {
   border-radius: 16px;
   cursor: pointer;
   background: linear-gradient(135deg, rgba(241, 245, 249, 0.5) 0%, rgba(248, 250, 252, 0.8) 100%);
+  position: relative;
+
+  @media (max-width: 600px) {
+    padding: 24px 16px;
+  }
 
   &:hover {
     border-color: #64748b;
@@ -689,6 +1300,18 @@ onUnmounted(() => {
     background: linear-gradient(135deg, rgba(99, 102, 241, 0.12) 0%, rgba(139, 92, 246, 0.06) 100%);
     border: 3px dashed #6366F1;
     animation: border-pulse 0.8s ease-in-out infinite;
+  }
+
+  // Mobile: File input that covers entire card for tap-to-select
+  .mobile-card-file-input {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    cursor: pointer;
+    z-index: 5;
   }
 }
 
@@ -760,6 +1383,47 @@ onUnmounted(() => {
   border-radius: 8px;
 }
 
+// Mobile file input styling - IMPORTANT: Don't use display:none as it breaks file picking on mobile WebViews
+.mobile-file-input-wrapper {
+  display: inline-block;
+  margin-bottom: 16px;
+  cursor: pointer;
+  position: relative;
+
+  .mobile-file-input {
+    // Use opacity and position instead of display:none for mobile compatibility
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    cursor: pointer;
+    // Ensure it's clickable
+    z-index: 10;
+  }
+
+  .mobile-file-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 44px;
+    padding: 0 32px;
+    font-size: 14px;
+    font-weight: 500;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
+    color: white;
+    transition: all 0.2s ease;
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+
+    &:active {
+      transform: scale(0.98);
+      box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
+    }
+  }
+}
+
 .drag-drop-hint {
   display: flex;
   align-items: center;
@@ -770,6 +1434,19 @@ onUnmounted(() => {
   margin-bottom: 12px;
   padding: 6px 14px;
   background: rgba(148, 163, 184, 0.1);
+  border-radius: 12px;
+}
+
+.tap-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 12px;
+  padding: 8px 16px;
+  background: rgba(99, 102, 241, 0.08);
   border-radius: 12px;
 }
 
@@ -833,6 +1510,14 @@ onUnmounted(() => {
     }
   }
 
+  .upload-actions {
+    display: flex;
+    justify-content: center;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid #e2e8f0;
+  }
+
   .error-state {
     display: flex;
     align-items: center;
@@ -872,6 +1557,78 @@ onUnmounted(() => {
 }
 
 .upload-success {
+  .success-top-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 24px;
+    padding: 16px 20px;
+    background: #f8fafc;
+    border-radius: 12px;
+    border: 1px solid #e2e8f0;
+    overflow: hidden;
+
+    @media (max-width: 600px) {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 12px;
+    }
+
+    .new-upload-btn {
+      height: 44px;
+      padding: 0 24px;
+      font-size: 14px;
+      font-weight: 600;
+      border-radius: 10px;
+      flex-shrink: 0;
+
+      @media (max-width: 600px) {
+        width: 100%;
+      }
+    }
+
+    .file-info-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      background: white;
+      border-radius: 8px;
+      border: 1px solid #e2e8f0;
+      font-size: 13px;
+      color: #334155;
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
+
+      @media (max-width: 600px) {
+        justify-content: center;
+      }
+
+      .q-icon {
+        flex-shrink: 0;
+      }
+
+      .filename {
+        font-weight: 500;
+        max-width: clamp(100px, 30vw, 300px);
+        min-width: 0;
+        flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .filesize {
+        color: #64748b;
+        font-size: 12px;
+        flex-shrink: 0;
+        white-space: nowrap;
+      }
+    }
+  }
+
   .transcript-cta {
     text-align: center;
     padding: 48px 40px;

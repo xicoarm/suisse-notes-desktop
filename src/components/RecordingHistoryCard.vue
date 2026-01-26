@@ -11,23 +11,42 @@
 
         <div class="recording-meta">
           <div class="meta-item">
-            <q-icon name="schedule" size="xs" />
+            <q-icon
+              name="schedule"
+              size="xs"
+            />
             <span>{{ formattedDuration }}</span>
           </div>
-          <div class="meta-item" v-if="recording.fileSize">
-            <q-icon name="save" size="xs" />
+          <div
+            v-if="recording.fileSize"
+            class="meta-item"
+          >
+            <q-icon
+              name="save"
+              size="xs"
+            />
             <span>{{ formattedSize }}</span>
           </div>
-          <div class="meta-item" v-if="recording.storagePreference === 'delete_after_upload'">
-            <q-icon name="auto_delete" size="xs" />
-            <span>Auto-delete</span>
+          <div
+            v-if="recording.storagePreference === 'delete_after_upload'"
+            class="meta-item"
+          >
+            <q-icon
+              name="auto_delete"
+              size="xs"
+            />
+            <span>{{ $t('autoDelete') }}</span>
           </div>
         </div>
       </div>
 
       <div class="card-actions">
         <!-- Uploading spinner -->
-        <q-spinner-dots v-if="uploading" color="primary" size="24px" />
+        <q-spinner-dots
+          v-if="uploading"
+          color="primary"
+          size="24px"
+        />
 
         <q-btn
           v-else-if="recording.uploadStatus === 'pending' && recording.filePath"
@@ -38,7 +57,7 @@
           size="sm"
           @click="$emit('upload', recording)"
         >
-          <q-tooltip>Upload</q-tooltip>
+          <q-tooltip>{{ $t('upload') }}</q-tooltip>
         </q-btn>
 
         <q-btn
@@ -50,20 +69,20 @@
           size="sm"
           @click="$emit('retry', recording)"
         >
-          <q-tooltip>Retry Upload</q-tooltip>
+          <q-tooltip>{{ $t('retryUpload') }}</q-tooltip>
         </q-btn>
 
         <q-btn
+          v-if="recording.filePath && !uploading"
           flat
           round
           :icon="expanded ? 'expand_less' : 'expand_more'"
           color="grey-7"
           size="sm"
-          @click="expanded = !expanded"
-          v-if="recording.filePath && !uploading"
           :disable="uploading"
+          @click="expanded = !expanded"
         >
-          <q-tooltip>{{ expanded ? 'Hide' : 'Play' }}</q-tooltip>
+          <q-tooltip>{{ expanded ? $t('hide') : $t('play') }}</q-tooltip>
         </q-btn>
 
         <q-btn
@@ -72,16 +91,19 @@
           icon="delete_outline"
           color="grey-7"
           size="sm"
-          @click="onDelete"
           :disable="uploading"
+          @click="onDelete"
         >
-          <q-tooltip>Delete</q-tooltip>
+          <q-tooltip>{{ $t('delete') }}</q-tooltip>
         </q-btn>
       </div>
     </div>
 
     <q-slide-transition>
-      <div v-if="expanded && recording.filePath" class="card-player">
+      <div
+        v-if="expanded && recording.filePath"
+        class="card-player"
+      >
         <AudioPlayback :file-path="recording.filePath" />
       </div>
     </q-slide-transition>
@@ -90,25 +112,32 @@
     <q-dialog v-model="showDeleteDialog">
       <q-card class="delete-dialog">
         <q-card-section>
-          <div class="text-h6">Delete Recording?</div>
+          <div class="text-h6">
+            {{ $t('deleteRecordingTitle') }}
+          </div>
           <div class="text-grey-7 q-mt-sm">
-            This will remove the recording from your history.
+            {{ $t('deleteRecordingMessage') }}
           </div>
         </q-card-section>
 
         <q-card-section v-if="recording.filePath">
           <q-checkbox
             v-model="deleteFile"
-            label="Also delete the audio file from disk"
+            :label="$t('deleteFileAlso')"
             color="negative"
           />
         </q-card-section>
 
         <q-card-actions align="right">
-          <q-btn flat label="Cancel" color="grey-7" v-close-popup />
+          <q-btn
+            v-close-popup
+            flat
+            :label="$t('cancel')"
+            color="grey-7"
+          />
           <q-btn
             flat
-            label="Delete"
+            :label="$t('delete')"
             color="negative"
             @click="confirmDelete"
           />
@@ -120,6 +149,7 @@
 
 <script>
 import { ref, computed } from 'vue';
+import { useI18n } from 'vue-i18n';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import AudioPlayback from './AudioPlayback.vue';
 
@@ -144,15 +174,23 @@ export default {
   emits: ['upload', 'retry', 'deleted'],
 
   setup(props, { emit }) {
+    const { t } = useI18n();
     const historyStore = useRecordingsHistoryStore();
 
     const expanded = ref(false);
     const showDeleteDialog = ref(false);
     const deleteFile = ref(true);
 
-    const formattedDate = computed(() =>
-      historyStore.formatDate(props.recording.createdAt)
-    );
+    const formattedDate = computed(() => {
+      const data = historyStore.formatDateData(props.recording.createdAt);
+      if (data.type === 'today') {
+        return t('dateToday', { time: data.time });
+      }
+      if (data.type === 'yesterday') {
+        return t('dateYesterday', { time: data.time });
+      }
+      return data.formatted || '';
+    });
 
     const formattedDuration = computed(() =>
       historyStore.formatDuration(props.recording.duration)
@@ -167,13 +205,14 @@ export default {
     );
 
     const statusLabel = computed(() => {
-      if (props.uploading) return 'Uploading';
-      const labels = {
-        pending: 'Pending',
-        uploaded: 'Uploaded',
-        failed: 'Failed'
+      if (props.uploading) return t('statusUploading');
+      const statusKeys = {
+        pending: 'statusPending',
+        uploaded: 'statusUploaded',
+        failed: 'statusFailed'
       };
-      return labels[props.recording.uploadStatus] || 'Unknown';
+      const key = statusKeys[props.recording.uploadStatus];
+      return key ? t(key) : 'Unknown';
     });
 
     const onDelete = () => {

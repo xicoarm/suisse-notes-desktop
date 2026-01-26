@@ -1,0 +1,29 @@
+{
+  "appId": "ch.suissenotes.app",
+  "appName": "Suisse Notes",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "App": {
+      "launchShowDuration": 0
+    },
+    "SplashScreen": {
+      "launchShowDuration": 0
+    },
+    "StatusBar": {
+      "style": "LIGHT",
+      "backgroundColor": "#6366F1",
+      "overlaysWebView": false
+    }
+  },
+  "ios": {
+    "backgroundColor": "#6366F1",
+    "preferredContentMode": "mobile"
+  },
+  "android": {
+    "backgroundColor": "#6366F1"
+  }
+}

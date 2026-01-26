@@ -8,6 +8,7 @@ const messages = {
     uploadDesc: 'Have an existing recording? Upload it for transcription.',
     selectFile: 'Select File',
     dragDropHint: 'or drag & drop a file here',
+    tapToSelect: 'Tap to select a file',
     recordNew: 'Record New',
     microphone: 'Microphone',
     systemAudio: 'System Audio',
@@ -40,9 +41,33 @@ const messages = {
     maximize: 'Maximize Window',
     restore: 'Restore Window',
 
-    // History
+    // History Page
+    historyTitle: 'Recording History',
+    historySubtitle: 'View and manage your past recordings',
     noRecordings: 'No recordings yet',
     startRecording: 'Start your first recording',
+    statsTotal: 'Total',
+    statsUploaded: 'Uploaded',
+    statsPending: 'Pending',
+    statsFailed: 'Failed',
+    loadingRecordings: 'Loading recordings...',
+    uploadingNewRecording: 'Uploading new recording...',
+    deleteRecordingTitle: 'Delete Recording?',
+    deleteRecordingMessage: 'This will remove the recording from your history.',
+    deleteFileAlso: 'Also delete the audio file from disk',
+    upload: 'Upload',
+    retryUpload: 'Retry Upload',
+    play: 'Play',
+    hide: 'Hide',
+    noLocalFile: 'No local file available',
+    streamFromServer: 'Stream from server',
+    dateToday: 'Today at {time}',
+    dateYesterday: 'Yesterday at {time}',
+    statusUploading: 'Uploading',
+    statusPending: 'Pending',
+    statusUploaded: 'Uploaded',
+    statusFailed: 'Failed',
+    autoDelete: 'Auto-delete',
 
     // Common
     cancel: 'Cancel',
@@ -52,6 +77,8 @@ const messages = {
     retry: 'Retry',
     viewHistory: 'View History',
     newRecording: 'New Recording',
+    uploadAnother: 'Upload Another',
+    cancelUpload: 'Cancel Upload',
     openInSuisseNotes: 'Open in Suisse Notes',
     transcriptReady: 'Your transcript is ready!',
     transcriptCta: 'Click below to view your transcript, summaries, and action items',
@@ -71,6 +98,12 @@ const messages = {
     // Mode Tab Switcher
     recordAudio: 'Record',
     uploadFileTab: 'Upload File',
+    stopRecordingFirst: 'Please stop the current recording before switching tabs',
+
+    // File Preview (Upload Page)
+    fileSelected: 'File Selected',
+    startUpload: 'Start Upload',
+    changeFile: 'Change File',
 
     // Transcription Options
     transcriptionOptions: 'Transcription Options',
@@ -83,8 +116,13 @@ const messages = {
     addWord: 'Add word',
     removeWord: 'Remove',
 
+    // Legal
+    privacyPolicy: 'Privacy Policy',
+    termsOfService: 'Terms of Service',
+    impressum: 'Impressum',
+
     // About Page
-    aboutHeroSubtitle: 'Intelligent meeting transcription with AI-powered summaries, action items, and insights. Optimized for Swiss German and all Swiss dialects.',
+    aboutHeroSubtitle: 'Intelligent meeting transcription with AI-powered summaries, action items, and insights. Highest data protection standards, hosted in Switzerland. Optimized for Swiss German and all Swiss dialects.',
     aboutFeaturesTitle: 'What Suisse Notes Can Do',
     aboutFeatureSwissTitle: 'Swiss German Support',
     aboutFeatureSwissDesc: 'Industry-leading accuracy for all Swiss dialects alongside High German, French, Italian, and English.',
@@ -105,7 +143,26 @@ const messages = {
     aboutMadeInSwitzerland: 'Made in Switzerland',
     aboutCompanyDesc: 'We are a Swiss AI company focused on building intelligent business tools with privacy and security at the core.',
     aboutGetStarted: 'Get Started',
-    aboutStartRecording: 'Start Recording'
+    aboutStartRecording: 'Start Recording',
+
+    // Login Page
+    signInToStart: 'Sign in to start recording',
+    email: 'Email',
+    password: 'Password',
+    emailRequired: 'Email is required',
+    passwordRequired: 'Password is required',
+    signIn: 'Sign In',
+    noAccount: "Don't have an account?",
+    createAccount: 'Create Account',
+    forgotPassword: 'Forgot Password?',
+    appDescription: 'Recording app for Suisse Notes platform',
+    // Register page
+    backToLogin: 'Back to Login',
+    createYourAccount: 'Create your account',
+    alreadyHaveAccount: 'Already have an account?',
+    fullName: 'Full Name',
+    nameRequired: 'Name is required',
+    passwordMinLength: 'Password must be at least 8 characters'
   },
   de: {
     // Record Page
@@ -114,6 +171,7 @@ const messages = {
     uploadDesc: 'Haben Sie eine bestehende Aufnahme? Laden Sie sie zur Transkription hoch.',
     selectFile: 'Datei auswählen',
     dragDropHint: 'oder Datei hierher ziehen',
+    tapToSelect: 'Tippen um Datei auszuwählen',
     recordNew: 'Neue Aufnahme',
     microphone: 'Mikrofon',
     systemAudio: 'Systemaudio',
@@ -146,9 +204,33 @@ const messages = {
     maximize: 'Fenster maximieren',
     restore: 'Fenster wiederherstellen',
 
-    // History
+    // History Page
+    historyTitle: 'Aufnahmeverlauf',
+    historySubtitle: 'Frühere Aufnahmen anzeigen und verwalten',
     noRecordings: 'Noch keine Aufnahmen',
     startRecording: 'Starten Sie Ihre erste Aufnahme',
+    statsTotal: 'Gesamt',
+    statsUploaded: 'Hochgeladen',
+    statsPending: 'Ausstehend',
+    statsFailed: 'Fehlgeschlagen',
+    loadingRecordings: 'Aufnahmen werden geladen...',
+    uploadingNewRecording: 'Neue Aufnahme wird hochgeladen...',
+    deleteRecordingTitle: 'Aufnahme löschen?',
+    deleteRecordingMessage: 'Die Aufnahme wird aus dem Verlauf entfernt.',
+    deleteFileAlso: 'Audiodatei auch von der Festplatte löschen',
+    upload: 'Hochladen',
+    retryUpload: 'Erneut hochladen',
+    play: 'Abspielen',
+    hide: 'Ausblenden',
+    noLocalFile: 'Keine lokale Datei verfügbar',
+    streamFromServer: 'Vom Server streamen',
+    dateToday: 'Heute um {time}',
+    dateYesterday: 'Gestern um {time}',
+    statusUploading: 'Wird hochgeladen',
+    statusPending: 'Ausstehend',
+    statusUploaded: 'Hochgeladen',
+    statusFailed: 'Fehlgeschlagen',
+    autoDelete: 'Auto-Löschen',
 
     // Common
     cancel: 'Abbrechen',
@@ -158,6 +240,8 @@ const messages = {
     retry: 'Erneut versuchen',
     viewHistory: 'Verlauf anzeigen',
     newRecording: 'Neue Aufnahme',
+    uploadAnother: 'Weitere Datei hochladen',
+    cancelUpload: 'Upload abbrechen',
     openInSuisseNotes: 'In Suisse Notes öffnen',
     transcriptReady: 'Ihr Transkript ist bereit!',
     transcriptCta: 'Klicken Sie unten, um Ihr Transkript, Zusammenfassungen und Aktionspunkte anzuzeigen',
@@ -177,6 +261,12 @@ const messages = {
     // Mode Tab Switcher
     recordAudio: 'Aufnehmen',
     uploadFileTab: 'Datei hochladen',
+    stopRecordingFirst: 'Bitte stoppen Sie die aktuelle Aufnahme, bevor Sie den Tab wechseln',
+
+    // File Preview (Upload Page)
+    fileSelected: 'Datei ausgewählt',
+    startUpload: 'Upload starten',
+    changeFile: 'Datei ändern',
 
     // Transcription Options
     transcriptionOptions: 'Transkriptionsoptionen',
@@ -189,8 +279,13 @@ const messages = {
     addWord: 'Wort hinzufügen',
     removeWord: 'Entfernen',
 
+    // Legal
+    privacyPolicy: 'Datenschutz',
+    termsOfService: 'AGB',
+    impressum: 'Impressum',
+
     // About Page
-    aboutHeroSubtitle: 'Intelligente Meeting-Transkription mit KI-gestützten Zusammenfassungen, Aktionspunkten und Erkenntnissen. Optimiert für Schweizerdeutsch und alle Schweizer Dialekte.',
+    aboutHeroSubtitle: 'Intelligente Meeting-Transkription mit KI-gestützten Zusammenfassungen, Aktionspunkten und Erkenntnissen. Höchste Datenschutzstandards, gehostet in der Schweiz. Optimiert für Schweizerdeutsch und alle Schweizer Dialekte.',
     aboutFeaturesTitle: 'Was Suisse Notes kann',
     aboutFeatureSwissTitle: 'Schweizerdeutsch',
     aboutFeatureSwissDesc: 'Branchenführende Genauigkeit für alle Schweizer Dialekte sowie Hochdeutsch, Französisch, Italienisch und Englisch.',
@@ -211,7 +306,26 @@ const messages = {
     aboutMadeInSwitzerland: 'Made in Switzerland',
     aboutCompanyDesc: 'Wir sind ein Schweizer KI-Unternehmen, das sich auf die Entwicklung intelligenter Business-Tools mit Datenschutz und Sicherheit im Fokus konzentriert.',
     aboutGetStarted: 'Loslegen',
-    aboutStartRecording: 'Aufnahme starten'
+    aboutStartRecording: 'Aufnahme starten',
+
+    // Login Page
+    signInToStart: 'Anmelden, um die Aufnahme zu starten',
+    email: 'E-Mail',
+    password: 'Passwort',
+    emailRequired: 'E-Mail ist erforderlich',
+    passwordRequired: 'Passwort ist erforderlich',
+    signIn: 'Anmelden',
+    noAccount: 'Noch kein Konto?',
+    createAccount: 'Konto erstellen',
+    forgotPassword: 'Passwort vergessen?',
+    appDescription: 'Aufnahme-App für die Suisse Notes Plattform',
+    // Register page
+    backToLogin: 'Zurück zur Anmeldung',
+    createYourAccount: 'Erstellen Sie Ihr Konto',
+    alreadyHaveAccount: 'Bereits ein Konto?',
+    fullName: 'Vollständiger Name',
+    nameRequired: 'Name ist erforderlich',
+    passwordMinLength: 'Passwort muss mindestens 8 Zeichen lang sein'
   },
   fr: {
     // Record Page
@@ -220,6 +334,7 @@ const messages = {
     uploadDesc: 'Vous avez un enregistrement existant? Téléchargez-le pour la transcription.',
     selectFile: 'Sélectionner un fichier',
     dragDropHint: 'ou glissez-déposez un fichier ici',
+    tapToSelect: 'Appuyez pour sélectionner',
     recordNew: 'Nouvel enregistrement',
     microphone: 'Microphone',
     systemAudio: 'Audio système',
@@ -252,9 +367,33 @@ const messages = {
     maximize: 'Maximiser la fenêtre',
     restore: 'Restaurer la fenêtre',
 
-    // History
+    // History Page
+    historyTitle: 'Historique des enregistrements',
+    historySubtitle: 'Afficher et gérer vos enregistrements passés',
     noRecordings: "Pas encore d'enregistrements",
     startRecording: 'Commencez votre premier enregistrement',
+    statsTotal: 'Total',
+    statsUploaded: 'Téléchargés',
+    statsPending: 'En attente',
+    statsFailed: 'Échoués',
+    loadingRecordings: 'Chargement des enregistrements...',
+    uploadingNewRecording: 'Téléchargement du nouvel enregistrement...',
+    deleteRecordingTitle: "Supprimer l'enregistrement?",
+    deleteRecordingMessage: "L'enregistrement sera supprimé de l'historique.",
+    deleteFileAlso: 'Supprimer également le fichier audio du disque',
+    upload: 'Télécharger',
+    retryUpload: 'Réessayer le téléchargement',
+    play: 'Lire',
+    hide: 'Masquer',
+    noLocalFile: 'Aucun fichier local disponible',
+    streamFromServer: 'Diffuser depuis le serveur',
+    dateToday: "Aujourd'hui à {time}",
+    dateYesterday: 'Hier à {time}',
+    statusUploading: 'Téléchargement',
+    statusPending: 'En attente',
+    statusUploaded: 'Téléchargé',
+    statusFailed: 'Échoué',
+    autoDelete: 'Suppression auto',
 
     // Common
     cancel: 'Annuler',
@@ -264,6 +403,8 @@ const messages = {
     retry: 'Réessayer',
     viewHistory: "Voir l'historique",
     newRecording: 'Nouvel enregistrement',
+    uploadAnother: 'Télécharger un autre fichier',
+    cancelUpload: 'Annuler le téléchargement',
     openInSuisseNotes: 'Ouvrir dans Suisse Notes',
     transcriptReady: 'Votre transcription est prête!',
     transcriptCta: 'Cliquez ci-dessous pour voir votre transcription, résumés et points d\'action',
@@ -283,6 +424,12 @@ const messages = {
     // Mode Tab Switcher
     recordAudio: 'Enregistrer',
     uploadFileTab: 'Télécharger un fichier',
+    stopRecordingFirst: "Veuillez arrêter l'enregistrement en cours avant de changer d'onglet",
+
+    // File Preview (Upload Page)
+    fileSelected: 'Fichier sélectionné',
+    startUpload: 'Démarrer le téléchargement',
+    changeFile: 'Changer de fichier',
 
     // Transcription Options
     transcriptionOptions: 'Options de transcription',
@@ -295,8 +442,13 @@ const messages = {
     addWord: 'Ajouter un mot',
     removeWord: 'Supprimer',
 
+    // Legal
+    privacyPolicy: 'Confidentialité',
+    termsOfService: 'CGV',
+    impressum: 'Mentions légales',
+
     // About Page
-    aboutHeroSubtitle: 'Transcription intelligente de réunions avec résumés, points d\'action et insights alimentés par l\'IA. Optimisé pour le suisse allemand et tous les dialectes suisses.',
+    aboutHeroSubtitle: 'Transcription intelligente de réunions avec résumés, points d\'action et insights alimentés par l\'IA. Normes de protection des données les plus élevées, hébergé en Suisse. Optimisé pour le suisse allemand et tous les dialectes suisses.',
     aboutFeaturesTitle: 'Ce que Suisse Notes peut faire',
     aboutFeatureSwissTitle: 'Suisse Allemand',
     aboutFeatureSwissDesc: 'Précision de pointe pour tous les dialectes suisses ainsi que l\'allemand standard, le français, l\'italien et l\'anglais.',
@@ -317,7 +469,26 @@ const messages = {
     aboutMadeInSwitzerland: 'Fabriqué en Suisse',
     aboutCompanyDesc: 'Nous sommes une entreprise suisse d\'IA axée sur la création d\'outils métier intelligents avec la confidentialité et la sécurité au cœur.',
     aboutGetStarted: 'Commencer',
-    aboutStartRecording: 'Démarrer l\'enregistrement'
+    aboutStartRecording: 'Démarrer l\'enregistrement',
+
+    // Login Page
+    signInToStart: 'Connectez-vous pour commencer l\'enregistrement',
+    email: 'Email',
+    password: 'Mot de passe',
+    emailRequired: 'L\'email est requis',
+    passwordRequired: 'Le mot de passe est requis',
+    signIn: 'Se connecter',
+    noAccount: 'Pas encore de compte?',
+    createAccount: 'Créer un compte',
+    forgotPassword: 'Mot de passe oublié?',
+    appDescription: 'Application d\'enregistrement pour la plateforme Suisse Notes',
+    // Register page
+    backToLogin: 'Retour à la connexion',
+    createYourAccount: 'Créez votre compte',
+    alreadyHaveAccount: 'Vous avez déjà un compte?',
+    fullName: 'Nom complet',
+    nameRequired: 'Le nom est requis',
+    passwordMinLength: 'Le mot de passe doit contenir au moins 8 caractères'
   },
   it: {
     // Record Page
@@ -326,6 +497,7 @@ const messages = {
     uploadDesc: 'Hai una registrazione esistente? Caricala per la trascrizione.',
     selectFile: 'Seleziona file',
     dragDropHint: 'oppure trascina un file qui',
+    tapToSelect: 'Tocca per selezionare',
     recordNew: 'Nuova registrazione',
     microphone: 'Microfono',
     systemAudio: 'Audio di sistema',
@@ -358,9 +530,33 @@ const messages = {
     maximize: 'Massimizza finestra',
     restore: 'Ripristina finestra',
 
-    // History
+    // History Page
+    historyTitle: 'Cronologia registrazioni',
+    historySubtitle: 'Visualizza e gestisci le tue registrazioni passate',
     noRecordings: 'Nessuna registrazione',
     startRecording: 'Inizia la tua prima registrazione',
+    statsTotal: 'Totale',
+    statsUploaded: 'Caricati',
+    statsPending: 'In attesa',
+    statsFailed: 'Falliti',
+    loadingRecordings: 'Caricamento registrazioni...',
+    uploadingNewRecording: 'Caricamento nuova registrazione...',
+    deleteRecordingTitle: 'Eliminare la registrazione?',
+    deleteRecordingMessage: 'La registrazione verrà rimossa dalla cronologia.',
+    deleteFileAlso: 'Elimina anche il file audio dal disco',
+    upload: 'Carica',
+    retryUpload: 'Riprova caricamento',
+    play: 'Riproduci',
+    hide: 'Nascondi',
+    noLocalFile: 'Nessun file locale disponibile',
+    streamFromServer: 'Riproduci dal server',
+    dateToday: 'Oggi alle {time}',
+    dateYesterday: 'Ieri alle {time}',
+    statusUploading: 'Caricamento',
+    statusPending: 'In attesa',
+    statusUploaded: 'Caricato',
+    statusFailed: 'Fallito',
+    autoDelete: 'Auto-elimina',
 
     // Common
     cancel: 'Annulla',
@@ -370,6 +566,8 @@ const messages = {
     retry: 'Riprova',
     viewHistory: 'Vedi cronologia',
     newRecording: 'Nuova registrazione',
+    uploadAnother: 'Carica un altro file',
+    cancelUpload: 'Annulla caricamento',
     openInSuisseNotes: 'Apri in Suisse Notes',
     transcriptReady: 'La tua trascrizione è pronta!',
     transcriptCta: 'Clicca sotto per vedere la trascrizione, i riassunti e i punti d\'azione',
@@ -389,6 +587,12 @@ const messages = {
     // Mode Tab Switcher
     recordAudio: 'Registra',
     uploadFileTab: 'Carica file',
+    stopRecordingFirst: 'Ferma la registrazione corrente prima di cambiare scheda',
+
+    // File Preview (Upload Page)
+    fileSelected: 'File selezionato',
+    startUpload: 'Avvia caricamento',
+    changeFile: 'Cambia file',
 
     // Transcription Options
     transcriptionOptions: 'Opzioni di trascrizione',
@@ -401,8 +605,13 @@ const messages = {
     addWord: 'Aggiungi parola',
     removeWord: 'Rimuovi',
 
+    // Legal
+    privacyPolicy: 'Privacy',
+    termsOfService: 'Termini di servizio',
+    impressum: 'Impressum',
+
     // About Page
-    aboutHeroSubtitle: 'Trascrizione intelligente delle riunioni con riassunti, azioni e insight basati sull\'IA. Ottimizzato per lo svizzero tedesco e tutti i dialetti svizzeri.',
+    aboutHeroSubtitle: 'Trascrizione intelligente delle riunioni con riassunti, azioni e insight basati sull\'IA. Standard di protezione dati più elevati, ospitato in Svizzera. Ottimizzato per lo svizzero tedesco e tutti i dialetti svizzeri.',
     aboutFeaturesTitle: 'Cosa può fare Suisse Notes',
     aboutFeatureSwissTitle: 'Svizzero Tedesco',
     aboutFeatureSwissDesc: 'Precisione leader del settore per tutti i dialetti svizzeri oltre a tedesco standard, francese, italiano e inglese.',
@@ -423,7 +632,26 @@ const messages = {
     aboutMadeInSwitzerland: 'Made in Switzerland',
     aboutCompanyDesc: 'Siamo un\'azienda svizzera di IA focalizzata sulla creazione di strumenti business intelligenti con privacy e sicurezza al centro.',
     aboutGetStarted: 'Inizia',
-    aboutStartRecording: 'Inizia Registrazione'
+    aboutStartRecording: 'Inizia Registrazione',
+
+    // Login Page
+    signInToStart: 'Accedi per iniziare a registrare',
+    email: 'Email',
+    password: 'Password',
+    emailRequired: 'L\'email è obbligatoria',
+    passwordRequired: 'La password è obbligatoria',
+    signIn: 'Accedi',
+    noAccount: 'Non hai un account?',
+    createAccount: 'Crea account',
+    forgotPassword: 'Password dimenticata?',
+    appDescription: 'App di registrazione per la piattaforma Suisse Notes',
+    // Register page
+    backToLogin: 'Torna al login',
+    createYourAccount: 'Crea il tuo account',
+    alreadyHaveAccount: 'Hai già un account?',
+    fullName: 'Nome completo',
+    nameRequired: 'Il nome è obbligatorio',
+    passwordMinLength: 'La password deve contenere almeno 8 caratteri'
   }
 };
 

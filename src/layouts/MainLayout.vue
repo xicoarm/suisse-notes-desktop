@@ -1,6 +1,10 @@
 <template>
   <q-layout view="hHh lpR fFf">
-    <q-header class="modern-header">
+    <!-- Desktop Header: Only show when authenticated AND on desktop (mobile uses bottom nav only) -->
+    <q-header
+      v-if="authStore.isAuthenticated && !isMobile()"
+      class="modern-header"
+    >
       <q-toolbar class="header-toolbar">
         <!-- Left Section: Brand Logo -->
         <div class="header-left">
@@ -8,18 +12,30 @@
             class="brand-logo"
             @click="goTo('/about')"
           >
-            <div class="logo-icon">
-              <q-icon
-                name="mic"
-                size="18px"
-              />
-            </div>
+            <img
+              src="../assets/logo.png"
+              alt="Suisse Notes"
+              class="logo-image"
+            >
             <span class="logo-text">Suisse Notes</span>
+          </div>
+
+          <!-- Global Recording Indicator -->
+          <div
+            v-if="recordingStore.isRecording || recordingStore.isPaused"
+            class="recording-indicator"
+            @click="goTo('/record')"
+          >
+            <span
+              class="recording-dot"
+              :class="{ paused: recordingStore.isPaused }"
+            />
+            <span>{{ recordingStore.formattedDuration }}</span>
           </div>
 
           <!-- Global Upload Progress Indicator -->
           <div
-            v-if="recordingStore.hasActiveUpload"
+            v-if="recordingStore.hasActiveUpload && !recordingStore.isRecording && !recordingStore.isPaused"
             class="upload-indicator"
             @click="goTo('/record')"
           >
@@ -31,10 +47,10 @@
           </div>
         </div>
 
-        <!-- Center Section: Pill Navigation -->
+        <!-- Center Section: Pill Navigation (hidden on mobile) -->
         <div class="header-center">
           <nav
-            v-if="authStore.isAuthenticated"
+            v-if="authStore.isAuthenticated && !isMobile()"
             class="pill-nav"
           >
             <button
@@ -166,7 +182,9 @@
                   <q-item-section>{{ $t('settings') }}</q-item-section>
                 </q-item>
 
+                <!-- Only show maximize option on desktop -->
                 <q-item
+                  v-if="isElectron()"
                   v-close-popup
                   clickable
                   @click="toggleMaximize"
@@ -181,7 +199,7 @@
                   <q-item-section>{{ isMaximized ? $t('restore') : $t('maximize') }}</q-item-section>
                 </q-item>
 
-                <q-separator />
+                <q-separator v-if="isElectron()" />
 
                 <q-item
                   v-close-popup
@@ -206,11 +224,28 @@
       </q-toolbar>
     </q-header>
 
+    <!-- Mobile Recording Indicator (floating) -->
+    <div
+      v-if="isMobile() && authStore.isAuthenticated && (recordingStore.isRecording || recordingStore.isPaused)"
+      class="mobile-recording-indicator"
+      @click="goTo('/record')"
+    >
+      <span
+        class="recording-dot"
+        :class="{ paused: recordingStore.isPaused }"
+      />
+      <span>{{ recordingStore.formattedDuration }}</span>
+    </div>
+
     <q-page-container>
       <router-view />
     </q-page-container>
 
-    <q-footer class="app-footer">
+    <!-- Desktop Footer (hidden on mobile) -->
+    <q-footer
+      v-if="!isMobile()"
+      class="app-footer"
+    >
       <div class="footer-content">
         <span>© 2026</span>
         <a
@@ -223,17 +258,53 @@
         <span class="footer-address">Kirchstrasse 3, 8304 Wallisellen, Schweiz</span>
       </div>
     </q-footer>
+
+    <!-- Mobile Bottom Navigation -->
+    <q-footer
+      v-if="isMobile() && authStore.isAuthenticated"
+      class="mobile-bottom-nav"
+    >
+      <q-tabs
+        v-model="currentTab"
+        class="mobile-nav-tabs"
+        switch-indicator
+      >
+        <q-tab
+          name="about"
+          icon="home"
+          @click="goTo('/about')"
+        />
+        <q-tab
+          name="record"
+          icon="mic"
+          @click="goTo('/record')"
+        />
+        <q-tab
+          name="history"
+          icon="history"
+          @click="goTo('/history')"
+        />
+        <q-tab
+          name="settings"
+          icon="settings"
+          @click="goTo('/settings')"
+        />
+      </q-tabs>
+    </q-footer>
   </q-layout>
 </template>
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
+import { useQuasar } from 'quasar';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingStore } from '../stores/recording';
 import { useRouter, useRoute } from 'vue-router';
+import { isElectron, isMobile } from '../utils/platform';
 
 const { locale } = useI18n();
+const $q = useQuasar();
 const authStore = useAuthStore();
 const recordingStore = useRecordingStore();
 const router = useRouter();
@@ -296,6 +367,8 @@ watch(() => route.path, (path) => {
     currentTab.value = 'upload';
   } else if (path.includes('/about')) {
     currentTab.value = 'about';
+  } else if (path.includes('/settings')) {
+    currentTab.value = 'settings';
   }
 }, { immediate: true });
 
@@ -312,20 +385,61 @@ const handleLogout = async () => {
 onMounted(() => {
   checkMaximizeState();
 
-  window.electronAPI.upload.onProgress((data) => {
-    // Update current upload
-    if (data.recordId === recordingStore.recordId) {
-      recordingStore.updateUploadProgress(data.progress, data.bytesUploaded, data.bytesTotal);
-    }
-    // Update background upload
-    if (recordingStore.backgroundUpload.active && data.recordId === recordingStore.backgroundUpload.recordId) {
-      recordingStore.updateBackgroundUploadProgress(data.recordId, data.progress, data.bytesUploaded, data.bytesTotal);
-    }
-  });
+  // Set up upload listeners (Electron only)
+  if (isElectron() && window.electronAPI?.upload) {
+    window.electronAPI.upload.onProgress((data) => {
+      // Update current upload
+      if (data.recordId === recordingStore.recordId) {
+        recordingStore.updateUploadProgress(data.progress, data.bytesUploaded, data.bytesTotal);
+      }
+      // Update background upload
+      if (recordingStore.backgroundUpload.active && data.recordId === recordingStore.backgroundUpload.recordId) {
+        recordingStore.updateBackgroundUploadProgress(data.recordId, data.progress, data.bytesUploaded, data.bytesTotal);
+      }
+    });
+  }
+
+  // Set up auth expired listener (Electron only) - Auto-logout on expiration
+  if (isElectron() && window.electronAPI?.auth?.onExpired) {
+    window.electronAPI.auth.onExpired(async (data) => {
+      console.warn('Auth expired, auto-logging out:', data);
+
+      // Check if recording is in progress - warn but still need to logout
+      const hasActiveRecording = recordingStore.isRecording || recordingStore.isPaused;
+
+      if (hasActiveRecording) {
+        // Recording is active - show warning but recording is saved locally
+        $q.notify({
+          type: 'warning',
+          message: 'Session expired. Your recording is saved locally and can be uploaded after logging in again.',
+          timeout: 8000
+        });
+      }
+
+      // Auto-logout and redirect to login
+      await authStore.forceLogout(data.message || 'Your session has expired.');
+      router.push('/login');
+    });
+  }
+
+  // Listen for forceLogout events from auth store
+  window.addEventListener('auth:forceLogout', handleForceLogout);
 });
 
+// Handler for force logout - defined outside onMounted so it's accessible in onUnmounted
+const handleForceLogout = async (event) => {
+  console.warn('Force logout triggered:', event.detail?.message);
+  router.push('/login');
+};
+
 onUnmounted(() => {
-  window.electronAPI.upload.removeAllListeners();
+  if (isElectron() && window.electronAPI?.upload?.removeAllListeners) {
+    window.electronAPI.upload.removeAllListeners();
+  }
+  if (isElectron() && window.electronAPI?.auth?.removeExpiredListener) {
+    window.electronAPI.auth.removeExpiredListener();
+  }
+  window.removeEventListener('auth:forceLogout', handleForceLogout);
 });
 </script>
 
@@ -336,6 +450,8 @@ onUnmounted(() => {
   -webkit-backdrop-filter: blur(12px);
   border-bottom: 1px solid rgba(226, 232, 240, 0.8);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  // Safe area padding for mobile status bar (desktop header)
+  padding-top: env(safe-area-inset-top, 0);
 }
 
 .header-toolbar {
@@ -382,15 +498,11 @@ onUnmounted(() => {
     background: rgba(99, 102, 241, 0.08);
   }
 
-  .logo-icon {
+  .logo-image {
     width: 32px;
     height: 32px;
-    background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
     border-radius: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: white;
+    object-fit: contain;
   }
 
   .logo-text {
@@ -570,6 +682,50 @@ onUnmounted(() => {
   }
 }
 
+// Recording Indicator
+.recording-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ef4444;
+  cursor: pointer;
+  transition: all 0.2s;
+
+  &:hover {
+    background: rgba(239, 68, 68, 0.15);
+  }
+
+  .recording-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #ef4444;
+    animation: pulse-recording 1.5s ease-in-out infinite;
+
+    &.paused {
+      background: #f59e0b;
+      animation: none;
+    }
+  }
+}
+
+@keyframes pulse-recording {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.85);
+  }
+}
+
 // Upload Indicator
 .upload-indicator {
   display: flex;
@@ -626,5 +782,98 @@ onUnmounted(() => {
 
 .footer-address {
   color: #94a3b8;
+}
+
+// Mobile header adjustments
+@media (max-width: 600px) {
+  .header-toolbar {
+    min-height: 48px;
+    padding: 0 12px;
+  }
+
+  .logo-text {
+    display: none; // Icon only on mobile
+  }
+
+  .lang-current span {
+    display: none; // Icon only
+  }
+
+  .expand-icon {
+    display: none;
+  }
+
+  .header-left {
+    gap: 8px;
+  }
+
+  .header-right {
+    gap: 8px;
+  }
+
+  .upload-indicator {
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+}
+
+// Mobile Recording Indicator (floating)
+.mobile-recording-indicator {
+  position: fixed;
+  top: env(safe-area-inset-top, 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: rgba(239, 68, 68, 0.95);
+  border-radius: 20px;
+  font-size: 14px;
+  font-weight: 600;
+  color: white;
+  cursor: pointer;
+  z-index: 9999;
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+
+  .recording-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: white;
+    animation: pulse-recording 1.5s ease-in-out infinite;
+
+    &.paused {
+      background: #fcd34d;
+      animation: none;
+    }
+  }
+}
+
+// Mobile bottom navigation
+.mobile-bottom-nav {
+  background: white;
+  border-top: 1px solid #e2e8f0;
+  // Safe area padding for mobile home indicator
+  padding-bottom: env(safe-area-inset-bottom, 0);
+
+  .mobile-nav-tabs {
+    :deep(.q-tab) {
+      min-height: 56px;
+      color: #64748b;
+
+      &.q-tab--active {
+        color: #6366F1;
+      }
+    }
+
+    :deep(.q-tab__icon) {
+      font-size: 24px;
+    }
+
+    :deep(.q-tabs__content) {
+      justify-content: space-around;
+    }
+  }
 }
 </style>

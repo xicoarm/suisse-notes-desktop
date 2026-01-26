@@ -23,6 +23,30 @@ node_modules/
 /src-capacitor/ios/App/DerivedData
 /src-capacitor/www
 
+# Android signing (never commit these)
+/src-capacitor/android/keystore.properties
+/src-capacitor/android/*.keystore
+/src-capacitor/android/*.jks
+/src-capacitor/android/play-store-key.json
+/src-capacitor/android/app/release.keystore
+
+# iOS signing
+/src-capacitor/ios/App/fastlane/report.xml
+/src-capacitor/ios/App/fastlane/Preview.html
+/src-capacitor/ios/App/fastlane/screenshots
+/src-capacitor/ios/App/fastlane/test_output
+
+# Fastlane
+/src-capacitor/android/fastlane/report.xml
+/src-capacitor/android/fastlane/Preview.html
+/src-capacitor/ios/App/build
+*.ipa
+*.dSYM.zip
+
+# Ruby
+Gemfile.lock
+.bundle
+
 # Local env files
 .env.local
 .env.*.local
@@ -49,3 +73,7 @@ Thumbs.db
 
 # Claude AI context file (local development notes)
 CLAUDE_CONTEXT.md
+
+# Android keystore
+*.keystore
+keystore.properties

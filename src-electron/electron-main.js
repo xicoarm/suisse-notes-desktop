@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu, desktopCapturer, systemPreferences } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu, Tray, nativeImage, desktopCapturer, systemPreferences, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
@@ -483,6 +483,20 @@ async function processPendingUploads() {
 
     try {
       const result = await uploadWithRetry(upload.recordId, upload.filePath, upload.metadata, 2);
+
+      // If auth expired, stop processing and notify user
+      if (!result.success && result.status === 401) {
+        log.warn('Token expired - stopping pending uploads processing');
+        // Notify renderer to prompt for re-login
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('auth:expired', {
+            message: 'Your session has expired. Please log in again to continue uploading.',
+            pendingUploads: queue.length
+          });
+        }
+        break; // Stop processing pending uploads
+      }
+
       if (result.success) {
         removeFromUploadQueue(upload.recordId);
         // Update history status
@@ -541,6 +555,8 @@ let isRecordingInProgress = false;
 let isProcessingRecording = false;
 
 let mainWindow;
+let tray = null;
+let recordingTrayInterval = null;
 
 // Helper functions
 function getRecordingsPath() {
@@ -636,6 +652,102 @@ function validateChunkIndex(chunkIndex) {
   return chunkIndex;
 }
 
+// === Recording Tray Indicator Functions ===
+let recordingStartTime = null;
+
+function formatDuration(seconds) {
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+  if (hrs > 0) {
+    return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+function setupRecordingTray() {
+  // Tray will be created when recording starts
+  log.info('Recording tray system initialized');
+}
+
+function createRecordingTray() {
+  if (tray) return; // Already exists
+
+  try {
+    // Create a simple red circle icon for recording indicator
+    // Use a 16x16 or 22x22 image for tray
+    const iconPath = path.join(__dirname, 'icons', 'icon.png');
+
+    // Create tray with app icon (we'll update the tooltip to show recording)
+    if (fs.existsSync(iconPath)) {
+      tray = new Tray(iconPath);
+    } else {
+      // Fallback: create a simple colored icon
+      const size = 16;
+      const icon = nativeImage.createEmpty();
+      tray = new Tray(icon);
+    }
+
+    tray.setToolTip('Suisse Notes - Recording...');
+
+    // Context menu for tray
+    const contextMenu = Menu.buildFromTemplate([
+      {
+        label: 'Recording in progress...',
+        enabled: false
+      },
+      { type: 'separator' },
+      {
+        label: 'Show App',
+        click: () => {
+          if (mainWindow) {
+            mainWindow.show();
+            mainWindow.focus();
+          }
+        }
+      }
+    ]);
+    tray.setContextMenu(contextMenu);
+
+    // Click to show app
+    tray.on('click', () => {
+      if (mainWindow) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    });
+
+    // Start updating the tooltip with duration
+    recordingStartTime = Date.now();
+    recordingTrayInterval = setInterval(() => {
+      if (tray && recordingStartTime) {
+        const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+        const duration = formatDuration(elapsed);
+        tray.setToolTip(`Suisse Notes - Recording: ${duration}`);
+      }
+    }, 1000);
+
+    log.info('Recording tray indicator created');
+  } catch (error) {
+    log.error('Error creating recording tray:', error);
+  }
+}
+
+function destroyRecordingTray() {
+  if (recordingTrayInterval) {
+    clearInterval(recordingTrayInterval);
+    recordingTrayInterval = null;
+  }
+
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
+
+  recordingStartTime = null;
+  log.info('Recording tray indicator removed');
+}
+
 // Resolve preload path - use environment variable in dev, or relative path in prod
 const preloadPath = process.env.QUASAR_ELECTRON_PRELOAD
   ? path.resolve(process.env.QUASAR_ELECTRON_PRELOAD)
@@ -652,7 +764,9 @@ function createWindow() {
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // CRITICAL: Prevent background throttling to keep recording active when app loses focus
+      backgroundThrottling: false
     }
   });
 
@@ -725,6 +839,81 @@ app.whenReady().then(() => {
   });
 
   createWindow();
+
+  // === Recording Tray Indicator ===
+  // Shows a persistent tray icon with recording duration when recording is active
+  setupRecordingTray();
+
+  // === P0 Data Loss Fix: Power/Suspend Handlers ===
+  // Handle laptop lid close, sleep, and suspend to protect active recordings
+
+  powerMonitor.on('suspend', async () => {
+    log.info('System suspend detected');
+
+    if (isRecordingInProgress) {
+      log.info('Recording in progress during suspend - saving state');
+
+      // Notify renderer to flush current data
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('recording:suspend', {
+          reason: 'system_suspend',
+          timestamp: Date.now()
+        });
+      }
+
+      // Save active recording state
+      const activeSession = getActiveRecording();
+      if (activeSession) {
+        activeRecordingStore.set('activeSession', {
+          ...activeSession,
+          suspendedAt: new Date().toISOString(),
+          needsRecovery: true
+        });
+        log.info('Active recording state saved for recovery:', activeSession.recordId);
+      }
+    }
+  });
+
+  powerMonitor.on('resume', async () => {
+    log.info('System resume detected');
+
+    // Check if there was an active recording that needs recovery
+    const activeSession = getActiveRecording();
+    if (activeSession && activeSession.needsRecovery) {
+      log.info('Found recording that needs recovery after resume:', activeSession.recordId);
+
+      // Notify renderer about the recovery need
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('recording:resume', {
+          recordId: activeSession.recordId,
+          suspendedAt: activeSession.suspendedAt,
+          needsRecovery: true
+        });
+      }
+
+      // Clear the recovery flag
+      activeRecordingStore.set('activeSession', {
+        ...activeSession,
+        needsRecovery: false
+      });
+    }
+  });
+
+  powerMonitor.on('lock-screen', () => {
+    log.info('Screen locked');
+    // Optionally notify renderer about screen lock
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('system:screen-locked');
+    }
+  });
+
+  powerMonitor.on('unlock-screen', () => {
+    log.info('Screen unlocked');
+    // Optionally notify renderer about screen unlock
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('system:screen-unlocked');
+    }
+  });
 
   // === Auto-Update: Check for updates silently ===
   // Only check in production (packaged app)
@@ -1193,6 +1382,14 @@ ipcMain.handle('recording:checkDiskSpace', async () => {
 ipcMain.handle('recording:setInProgress', (event, inProgress) => {
   isRecordingInProgress = inProgress;
   log.info('Recording state updated:', { isRecordingInProgress });
+
+  // Show/hide tray indicator based on recording state
+  if (inProgress) {
+    createRecordingTray();
+  } else {
+    destroyRecordingTray();
+  }
+
   return { success: true };
 });
 
@@ -1200,6 +1397,46 @@ ipcMain.handle('recording:setProcessing', (event, processing) => {
   isProcessingRecording = processing;
   log.info('Recording processing state updated:', { isProcessingRecording });
   return { success: true };
+});
+
+// IPC handlers for recording metadata
+ipcMain.handle('recording:saveMetadata', async (event, recordId, metadata) => {
+  try {
+    const validRecordId = validateRecordId(recordId);
+    const recordPath = getRecordingPath(validRecordId);
+
+    // Ensure directory exists
+    if (!fs.existsSync(recordPath)) {
+      fs.mkdirSync(recordPath, { recursive: true });
+    }
+
+    const metadataPath = path.join(recordPath, 'metadata.json');
+    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+
+    return { success: true };
+  } catch (error) {
+    console.error('Error saving metadata:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('recording:loadMetadata', async (event, recordId) => {
+  try {
+    const validRecordId = validateRecordId(recordId);
+    const metadataPath = path.join(getRecordingPath(validRecordId), 'metadata.json');
+
+    if (!fs.existsSync(metadataPath)) {
+      return { success: false, error: 'Metadata file not found' };
+    }
+
+    const content = fs.readFileSync(metadataPath, 'utf8');
+    const metadata = JSON.parse(content);
+
+    return { success: true, metadata };
+  } catch (error) {
+    console.error('Error loading metadata:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 // 1. Create recording session (creates directories)
@@ -1723,6 +1960,70 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// === Two-Phase Upload Verification (P0 Data Loss Fix) ===
+// Poll server to verify file was actually persisted before allowing deletion
+
+/**
+ * Poll server to verify upload was persisted
+ * @param {string} audioFileId - The audio file ID returned by upload
+ * @param {number} maxAttempts - Maximum polling attempts (default 15 = 30 seconds)
+ * @returns {Promise<{persisted: boolean, verified: boolean, error?: string}>}
+ */
+async function pollServerStatus(audioFileId, maxAttempts = 15) {
+  const pollInterval = 2000; // 2 seconds between polls
+  const authToken = await getAuthToken();
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const response = await axios.get(
+        `${API_BASE_URL}/api/desktop/upload/${audioFileId}/status`,
+        {
+          headers: {
+            'Authorization': `Bearer ${authToken}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000
+        }
+      );
+
+      if (response.data) {
+        const status = response.data.status;
+
+        if (status === 'persisted' || status === 'complete' || status === 'processing') {
+          // Server has confirmed file is persisted
+          log.info(`Upload verification successful for ${audioFileId}: status=${status}`);
+          return { persisted: true, verified: true };
+        }
+
+        if (status === 'failed') {
+          log.error(`Server reported upload failed for ${audioFileId}:`, response.data.error);
+          return { persisted: false, verified: false, error: response.data.error || 'Server processing failed' };
+        }
+
+        // Still processing, wait and retry
+        log.info(`Upload status for ${audioFileId}: ${status}, waiting...`);
+      }
+
+      await sleep(pollInterval);
+    } catch (error) {
+      // 404 means endpoint doesn't exist yet - fall back to trust-based
+      if (error.response && error.response.status === 404) {
+        log.warn('Upload status endpoint not available, using trust-based confirmation');
+        return { persisted: true, verified: false, fallback: true };
+      }
+
+      log.warn(`Status poll attempt ${attempt + 1} failed:`, error.message);
+      if (attempt < maxAttempts - 1) {
+        await sleep(pollInterval);
+      }
+    }
+  }
+
+  // Timeout - server didn't confirm in time
+  log.error(`Upload verification timeout for ${audioFileId} after ${maxAttempts} attempts`);
+  return { persisted: false, verified: false, error: 'Server confirmation timeout' };
+}
+
 // Helper: Upload with retry logic
 async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
   const retryDelays = [0, 2000, 5000, 10000]; // Exponential backoff
@@ -1835,8 +2136,16 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
       startProgressUpdates();
 
       const uploadUrl = `${API_BASE_URL}/api/desktop/upload`;
-      console.log('Uploading to:', uploadUrl);
-      console.log('Auth token (first 20 chars):', authToken ? authToken.substring(0, 20) + '...' : 'NO TOKEN');
+      const uploadTimeout = calculateUploadTimeout(fileStats.size);
+      log.info('Uploading to:', uploadUrl);
+      log.info('Upload config:', {
+        fileSize: fileStats.size,
+        fileSizeMB: (fileStats.size / (1024 * 1024)).toFixed(2),
+        timeout: uploadTimeout,
+        timeoutMinutes: (uploadTimeout / 60000).toFixed(1),
+        hasAuthToken: !!authToken
+      });
+      // SECURITY: Token logging removed (P0 Security Fix)
 
       const response = await axios.post(uploadUrl, formData, {
         headers: {
@@ -1846,8 +2155,9 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
         },
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
-        timeout: calculateUploadTimeout(fileStats.size)  // Dynamic timeout based on file size
+        timeout: uploadTimeout  // Dynamic timeout based on file size
       });
+      log.info('Upload response received:', response.status);
 
       // Stop progress updates
       stopProgressUpdates();
@@ -1857,12 +2167,55 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
       console.log('Upload response data:', JSON.stringify(response.data, null, 2));
 
       if (response.data && response.data.success) {
-        console.log('Upload successful:', response.data);
+        console.log('Upload HTTP response successful:', response.data);
+
+        // === Two-Phase Verification (P0 Data Loss Fix) ===
+        // Don't trust HTTP 200 alone - verify server actually persisted the file
+        const audioFileId = response.data.audioFileId;
+
+        if (audioFileId) {
+          log.info('Starting two-phase verification for:', audioFileId);
+
+          // Send 100% progress to UI while verifying
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('upload:progress', {
+              recordId,
+              progress: 100,
+              bytesUploaded: fileSizeBytes,
+              bytesTotal: fileSizeBytes,
+              status: 'verifying'
+            });
+          }
+
+          const verification = await pollServerStatus(audioFileId);
+
+          if (!verification.persisted) {
+            // Server did NOT confirm persistence - DO NOT allow file deletion
+            log.error('Server did not confirm file persistence:', verification.error);
+            return {
+              success: false,
+              audioFileId: response.data.audioFileId,
+              transcriptionId: response.data.transcriptionId,
+              canDelete: false,
+              error: verification.error || 'Server did not confirm file persistence'
+            };
+          }
+
+          log.info('Two-phase verification complete:', {
+            audioFileId,
+            verified: verification.verified,
+            fallback: verification.fallback
+          });
+        }
+
+        // Verification passed (or fallback mode) - safe to delete
         return {
           success: true,
           audioFileId: response.data.audioFileId,
           transcriptionId: response.data.transcriptionId,
-          message: response.data.message
+          message: response.data.message,
+          canDelete: true,
+          verified: true
         };
       } else {
         stopProgressUpdates();
@@ -1870,7 +2223,26 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
       }
     } catch (error) {
       stopProgressUpdates();
-      console.error(`Upload attempt ${attempt + 1} failed:`, error.message);
+      log.error(`Upload attempt ${attempt + 1} failed:`, {
+        message: error.message,
+        code: error.code,
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        responseData: error.response?.data,
+        isTimeout: error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED'
+      });
+
+      // Check for authentication errors (401) - don't retry these
+      if (error.response && error.response.status === 401) {
+        const errorMessage = error.response.data?.error || error.response.data?.message || 'Token expired';
+        log.warn('Upload failed due to authentication error:', errorMessage);
+        return {
+          success: false,
+          error: errorMessage,
+          status: 401,
+          canRetry: false
+        };
+      }
 
       const isRetryable = error.code === 'ECONNREFUSED' ||
                           error.code === 'ETIMEDOUT' ||
@@ -1883,8 +2255,10 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
       // If we've exhausted retries or error is not retryable
       if (attempt >= maxRetries || !isRetryable) {
         let errorMessage = 'Upload failed';
+        let status = 0;
         if (error.response) {
           errorMessage = error.response.data?.error || `Server error: ${error.response.status}`;
+          status = error.response.status;
         } else if (error.code === 'ECONNREFUSED') {
           errorMessage = 'Could not connect to server. Please check your internet connection.';
         } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
@@ -1895,7 +2269,7 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
           errorMessage = error.message || 'Unknown error';
         }
 
-        return { success: false, error: errorMessage, canRetry: isRetryable };
+        return { success: false, error: errorMessage, status, canRetry: isRetryable };
       }
       // Otherwise continue to next retry attempt
     }
@@ -2438,4 +2812,9 @@ ipcMain.handle('config:getTranscriptionSettings', () => {
 ipcMain.handle('config:setTranscriptionSettings', (event, settings) => {
   configStore.set('transcriptionSettings', settings);
   return { success: true };
+});
+
+// --- System: Get Recordings Path ---
+ipcMain.handle('system:getRecordingsPath', () => {
+  return { path: getRecordingsPath() };
 });

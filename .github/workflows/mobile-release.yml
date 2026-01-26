@@ -1,0 +1,221 @@
+name: Mobile Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'src-capacitor/**'
+      - 'package.json'
+      - 'quasar.config.js'
+
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to build'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - android
+          - ios
+
+jobs:
+  # =============================================================================
+  # Check if mobile release should run
+  # =============================================================================
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - name: Check if triggered by semantic-release
+        id: check
+        run: |
+          # Skip if this is a release commit from semantic-release
+          if [[ "${{ github.event.head_commit.message }}" == *"[skip ci]"* ]]; then
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          fi
+
+  # =============================================================================
+  # Android Build & Deploy to Play Store
+  # =============================================================================
+  android:
+    needs: check
+    if: |
+      needs.check.outputs.should_run == 'true' &&
+      (github.event_name == 'push' || github.event.inputs.platform == 'both' || github.event.inputs.platform == 'android')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: true
+          working-directory: src-capacitor/android
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build web assets
+        run: npm run build:android
+        env:
+          NODE_ENV: production
+
+      - name: Sync Capacitor
+        run: npm run cap:sync
+
+      - name: Decode Android keystore
+        if: env.ANDROID_KEYSTORE != ''
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        run: |
+          echo "$ANDROID_KEYSTORE" | base64 --decode > src-capacitor/android/app/release.keystore
+
+      - name: Create keystore.properties
+        if: env.ANDROID_KEYSTORE_PASSWORD != ''
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          cat > src-capacitor/android/keystore.properties << EOF
+          storeFile=release.keystore
+          storePassword=$ANDROID_KEYSTORE_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
+          keyPassword=$ANDROID_KEY_PASSWORD
+          EOF
+
+      - name: Install Fastlane dependencies
+        working-directory: src-capacitor/android
+        run: bundle install
+
+      - name: Deploy to Play Store (Internal)
+        if: env.PLAY_STORE_JSON_KEY != ''
+        working-directory: src-capacitor/android
+        env:
+          PLAY_STORE_JSON_KEY: ${{ secrets.PLAY_STORE_JSON_KEY }}
+        run: |
+          echo "$PLAY_STORE_JSON_KEY" > play-store-key.json
+          bundle exec fastlane internal
+          rm play-store-key.json
+
+      - name: Build APK (without Play Store deploy)
+        if: env.PLAY_STORE_JSON_KEY == ''
+        working-directory: src-capacitor/android
+        run: |
+          ./gradlew assembleRelease
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build
+          path: |
+            src-capacitor/android/app/build/outputs/apk/**/*.apk
+            src-capacitor/android/app/build/outputs/bundle/**/*.aab
+
+  # =============================================================================
+  # iOS Build & Deploy to TestFlight
+  # =============================================================================
+  ios:
+    needs: check
+    if: |
+      needs.check.outputs.should_run == 'true' &&
+      (github.event_name == 'push' || github.event.inputs.platform == 'both' || github.event.inputs.platform == 'ios')
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: true
+          working-directory: src-capacitor/ios/App
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build web assets
+        run: npm run build:ios
+        env:
+          NODE_ENV: production
+
+      - name: Sync Capacitor
+        run: npm run cap:sync
+
+      - name: Install CocoaPods dependencies
+        working-directory: src-capacitor/ios/App
+        run: pod install
+
+      - name: Install Fastlane dependencies
+        working-directory: src-capacitor/ios/App
+        run: bundle install
+
+      - name: Setup App Store Connect API Key
+        if: env.APP_STORE_CONNECT_API_KEY_ID != ''
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$APP_STORE_CONNECT_API_KEY_CONTENT" > ~/.appstoreconnect/private_keys/AuthKey_$APP_STORE_CONNECT_API_KEY_ID.p8
+
+      - name: Deploy to TestFlight
+        if: env.APP_STORE_CONNECT_API_KEY_ID != ''
+        working-directory: src-capacitor/ios/App
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+        run: bundle exec fastlane beta
+
+      - name: Build IPA (without TestFlight deploy)
+        if: env.APP_STORE_CONNECT_API_KEY_ID == ''
+        working-directory: src-capacitor/ios/App
+        run: |
+          xcodebuild -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -archivePath build/App.xcarchive \
+            archive \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Upload iOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build
+          path: |
+            src-capacitor/ios/App/build/**/*.ipa
+            src-capacitor/ios/App/build/**/*.xcarchive

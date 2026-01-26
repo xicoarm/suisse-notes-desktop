@@ -170,8 +170,11 @@
           </div>
         </div>
 
-        <!-- Calendar Connection CTA -->
-        <div class="calendar-cta">
+        <!-- Calendar Connection CTA - Only for authenticated users -->
+        <div
+          v-if="authStore.isAuthenticated"
+          class="calendar-cta"
+        >
           <q-btn
             outline
             color="primary"
@@ -226,16 +229,61 @@
           </div>
         </div>
       </section>
+
+      <!-- Legal Section -->
+      <section class="legal-section">
+        <div class="legal-links">
+          <a
+            href="#"
+            @click.prevent="openLegalLink('https://suisse-notes.ch/privacy')"
+          >
+            <q-icon
+              name="privacy_tip"
+              size="14px"
+            />
+            {{ $t('privacyPolicy') }}
+          </a>
+          <span class="divider">|</span>
+          <a
+            href="#"
+            @click.prevent="openLegalLink('https://suisse-notes.ch/terms')"
+          >
+            <q-icon
+              name="description"
+              size="14px"
+            />
+            {{ $t('termsOfService') }}
+          </a>
+          <span class="divider">|</span>
+          <a
+            href="#"
+            @click.prevent="openLegalLink('https://suisse-notes.ch/impressum')"
+          >
+            <q-icon
+              name="info"
+              size="14px"
+            />
+            {{ $t('impressum') }}
+          </a>
+        </div>
+        <p class="copyright">
+          © {{ currentYear }} Suisse AI Group GmbH. All rights reserved.
+        </p>
+      </section>
     </div>
   </q-page>
 </template>
 
 <script setup>
+import { computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
+import { isElectron, isCapacitor } from '../utils/platform';
 
 const router = useRouter();
 const authStore = useAuthStore();
+
+const currentYear = computed(() => new Date().getFullYear());
 
 const goToLogin = () => {
   router.push('/login');
@@ -250,18 +298,34 @@ const goToUpload = () => {
 };
 
 const openCalendarSettings = async () => {
-  let url = 'https://app.suisse-notes.ch/settings/integrations';
+  const url = 'https://app.suisse-notes.ch/settings/integrations';
 
-  try {
-    const result = await window.electronAPI.auth.createWebSession();
-    if (result.success && result.sessionToken) {
-      url += `?session=${encodeURIComponent(result.sessionToken)}`;
+  if (isElectron()) {
+    let finalUrl = url;
+    try {
+      const result = await window.electronAPI.auth.createWebSession();
+      if (result.success && result.sessionToken) {
+        finalUrl += `?session=${encodeURIComponent(result.sessionToken)}`;
+      }
+    } catch (error) {
+      console.warn('Could not create web session:', error);
     }
-  } catch (error) {
-    console.warn('Could not create web session:', error);
+    window.electronAPI.shell.openExternal(finalUrl);
+  } else if (isCapacitor()) {
+    const { Browser } = await import('@capacitor/browser');
+    await Browser.open({ url });
   }
+};
 
-  window.electronAPI.shell.openExternal(url);
+const openLegalLink = async (url) => {
+  if (isElectron()) {
+    window.electronAPI.shell.openExternal(url);
+  } else if (isCapacitor()) {
+    const { Browser } = await import('@capacitor/browser');
+    await Browser.open({ url });
+  } else {
+    window.open(url, '_blank');
+  }
 };
 </script>
 
@@ -270,6 +334,10 @@ const openCalendarSettings = async () => {
   padding: 40px 48px;
   background: linear-gradient(180deg, #fafbff 0%, #ffffff 100%);
   min-height: 100%;
+
+  @media (max-width: 600px) {
+    padding: 20px 16px;
+  }
 }
 
 .about-container {
@@ -414,6 +482,14 @@ const openCalendarSettings = async () => {
   &:hover {
     border-color: #c7d2fe;
     box-shadow: 0 4px 12px rgba(99, 102, 241, 0.08);
+  }
+
+  // Center content on mobile (single column layout)
+  @media (max-width: 600px) {
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
   }
 
   h3 {
@@ -618,6 +694,57 @@ const openCalendarSettings = async () => {
       text-decoration: underline;
     }
   }
+}
+
+// Legal Section
+.legal-section {
+  padding: 24px 0 16px;
+  text-align: center;
+  border-top: 1px solid #e2e8f0;
+  margin-top: 16px;
+}
+
+.legal-links {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+
+  a {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: #64748b;
+    text-decoration: none;
+    transition: color 0.2s ease;
+
+    &:hover {
+      color: #6366F1;
+    }
+  }
+
+  .divider {
+    color: #cbd5e1;
+    font-size: 12px;
+
+    @media (max-width: 400px) {
+      display: none;
+    }
+  }
+
+  @media (max-width: 400px) {
+    flex-direction: column;
+    gap: 8px;
+  }
+}
+
+.copyright {
+  font-size: 11px;
+  color: #94a3b8;
+  margin: 0;
 }
 
 </style>

@@ -1,0 +1,9 @@
+# Appfile for Suisse Notes Android
+# Documentation: https://docs.fastlane.tools/advanced/#appfile
+
+# App identifier (package name)
+package_name("ch.suissenotes.app")
+
+# Path to service account JSON key file
+# This should be generated from Google Play Console > Setup > API access
+json_key_file("play-store-key.json")

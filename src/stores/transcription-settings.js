@@ -1,4 +1,15 @@
 import { defineStore } from 'pinia';
+import { isElectron, isCapacitor } from '../utils/platform';
+
+// Capacitor Preferences (lazy loaded)
+let Preferences = null;
+
+const initPreferences = async () => {
+  if (isCapacitor() && !Preferences) {
+    const module = await import('@capacitor/preferences');
+    Preferences = module.Preferences;
+  }
+};
 
 export const useTranscriptionSettingsStore = defineStore('transcription-settings', {
   state: () => ({
@@ -38,15 +49,27 @@ export const useTranscriptionSettingsStore = defineStore('transcription-settings
   },
 
   actions: {
-    // Load global settings from electron store
+    // Load global settings from storage
     async loadGlobalSettings() {
       if (this.loaded) return;
 
       try {
-        const settings = await window.electronAPI.config.getTranscriptionSettings();
-        if (settings) {
-          this.globalVocabulary = settings.vocabulary || [];
-          this.defaultSpeakerCount = settings.defaultSpeakerCount ?? null;
+        if (isElectron() && window.electronAPI?.config?.getTranscriptionSettings) {
+          const settings = await window.electronAPI.config.getTranscriptionSettings();
+          if (settings) {
+            this.globalVocabulary = settings.vocabulary || [];
+            this.defaultSpeakerCount = settings.defaultSpeakerCount ?? null;
+          }
+        } else if (isCapacitor()) {
+          await initPreferences();
+          if (Preferences) {
+            const { value } = await Preferences.get({ key: 'transcription_settings' });
+            if (value) {
+              const settings = JSON.parse(value);
+              this.globalVocabulary = settings.vocabulary || [];
+              this.defaultSpeakerCount = settings.defaultSpeakerCount ?? null;
+            }
+          }
         }
         this.loaded = true;
       } catch (error) {
@@ -55,13 +78,22 @@ export const useTranscriptionSettingsStore = defineStore('transcription-settings
       }
     },
 
-    // Save global settings to electron store
+    // Save global settings to storage
     async saveGlobalSettings() {
       try {
-        await window.electronAPI.config.setTranscriptionSettings({
+        const settings = {
           vocabulary: this.globalVocabulary,
           defaultSpeakerCount: this.defaultSpeakerCount
-        });
+        };
+
+        if (isElectron() && window.electronAPI?.config?.setTranscriptionSettings) {
+          await window.electronAPI.config.setTranscriptionSettings(settings);
+        } else if (isCapacitor()) {
+          await initPreferences();
+          if (Preferences) {
+            await Preferences.set({ key: 'transcription_settings', value: JSON.stringify(settings) });
+          }
+        }
       } catch (error) {
         console.error('Error saving transcription settings:', error);
       }

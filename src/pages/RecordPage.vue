@@ -1,12 +1,12 @@
 <template>
   <q-page class="record-page">
     <div class="record-container">
-      <!-- Mode Tab Switcher -->
-      <ModeTabSwitcher />
+      <!-- Mode Tab Switcher (hidden when recording/paused/processing/uploading) -->
+      <ModeTabSwitcher :hidden="isRecordingActive" />
 
       <!-- IDLE STATE: Recording form -->
       <div
-        v-if="recordingStore.status === 'idle' && !recordingStore.isUploaded"
+        v-if="recordingStore.status === 'idle' && !isUploadedFromRecording"
         class="idle-layout"
       >
         <!-- Record Card -->
@@ -74,8 +74,11 @@
             </q-select>
           </div>
 
-          <!-- System Audio Toggle -->
-          <div class="system-audio-section">
+          <!-- System Audio Toggle - Desktop Only -->
+          <div
+            v-if="isElectron()"
+            class="system-audio-section"
+          >
             <div class="system-audio-row">
               <div class="system-audio-info">
                 <q-icon
@@ -133,7 +136,7 @@
 
       <!-- RECORDING/PAUSED STATE: Full-width recording card -->
       <div
-        v-if="(recordingStore.isRecording || recordingStore.isPaused) && !recordingStore.isUploaded"
+        v-if="(recordingStore.isRecording || recordingStore.isPaused) && !isUploadedFromRecording"
         class="recording-card modern-card no-hover"
       >
         <!-- Header -->
@@ -168,6 +171,25 @@
             @resume="handleResume"
             @stop="handleStop"
           />
+        </div>
+
+        <!-- P0 Data Loss Fix: Silence Warning Display -->
+        <div
+          v-if="silenceWarning"
+          class="warning-section"
+        >
+          <q-banner
+            class="warning-banner"
+            rounded
+          >
+            <template #avatar>
+              <q-icon
+                name="mic_off"
+                color="warning"
+              />
+            </template>
+            {{ silenceWarning }}
+          </q-banner>
         </div>
 
         <!-- Error Display -->
@@ -347,7 +369,29 @@
           v-else-if="recordingStore.isUploaded"
           class="upload-success"
         >
-          <!-- Main CTA: View Transcript (the primary focus) -->
+          <!-- Top Section: New Recording Button + Duration (prominent) -->
+          <div class="success-top-actions">
+            <q-btn
+              unelevated
+              color="primary"
+              :label="$t('newRecording')"
+              icon="mic"
+              class="new-recording-btn"
+              @click="handleNewRecording"
+            />
+            <div
+              v-if="finalDuration > 0"
+              class="duration-badge"
+            >
+              <q-icon
+                name="schedule"
+                size="18px"
+              />
+              <span>{{ formattedFinalDuration }}</span>
+            </div>
+          </div>
+
+          <!-- Main CTA: View Transcript -->
           <div
             v-if="currentAudioFileId"
             class="transcript-cta"
@@ -355,7 +399,7 @@
             <div class="cta-icon">
               <q-icon
                 name="check_circle"
-                size="80px"
+                size="64px"
                 color="positive"
               />
             </div>
@@ -392,42 +436,14 @@
               </q-btn>
             </div>
 
-            <!-- Copy Link Button -->
-            <div class="copy-link-section">
-              <q-btn
-                flat
-                color="primary"
-                :label="$t('copyLink')"
-                icon="content_copy"
-                size="sm"
-                class="copy-link-btn"
-                @click="copyTranscriptUrl"
-              />
-              <span class="copy-hint">{{ $t('copyLinkHint') }}</span>
-            </div>
-          </div>
-
-          <!-- URL Display -->
-          <div
-            v-if="currentAudioFileId"
-            class="url-display-section"
-          >
-            <div class="url-label">
-              <q-icon
-                name="link"
-                size="xs"
-                color="grey-6"
-              />
-              <span>{{ $t('transcriptUrlLabel') }}</span>
-            </div>
-            <div class="url-value">
+            <!-- URL Display with Copy -->
+            <div class="url-compact">
               <code>https://app.suisse-notes.ch/meeting/audio/{{ currentAudioFileId }}</code>
               <q-btn
                 flat
-                round
                 dense
                 icon="content_copy"
-                size="xs"
+                size="sm"
                 color="primary"
                 @click="copyTranscriptUrl"
               >
@@ -436,44 +452,14 @@
             </div>
           </div>
 
-          <!-- Secondary info -->
-          <div class="success-secondary">
-            <div class="success-badge">
-              <q-icon
-                name="check_circle"
-                size="sm"
-                color="positive"
-              />
-              <span>{{ $t('uploadComplete') }}</span>
-            </div>
-            <div
-              v-if="finalDuration > 0"
-              class="success-meta"
-            >
-              <q-icon
-                name="schedule"
-                size="sm"
-                color="grey-6"
-              />
-              <span>{{ formattedFinalDuration }}</span>
-            </div>
-          </div>
-
-          <div class="success-actions">
-            <q-btn
-              outline
-              color="primary"
-              :label="$t('newRecording')"
-              icon="mic"
-              class="secondary-action-btn"
-              @click="handleNewRecording"
-            />
+          <!-- Bottom: View History link -->
+          <div class="success-bottom">
             <q-btn
               flat
               color="grey-7"
               :label="$t('viewHistory')"
               icon="history"
-              class="secondary-action-btn"
+              size="sm"
               @click="goToHistory"
             />
           </div>
@@ -526,6 +512,10 @@ import { useRecordingStore } from '../stores/recording';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
 import { useRecorder } from '../composables/useRecorder';
+import { isElectron, isCapacitor } from '../utils/platform';
+import { uploadWithVerification } from '../services/upload';
+import { getApiUrlSync } from '../services/api';
+import { useAuthStore } from '../stores/auth';
 import ModeTabSwitcher from '../components/ModeTabSwitcher.vue';
 import TranscriptionOptions from '../components/TranscriptionOptions.vue';
 import RecordingControls from '../components/RecordingControls.vue';
@@ -537,6 +527,7 @@ const $q = useQuasar();
 const recordingStore = useRecordingStore();
 const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
+const authStore = useAuthStore();
 
 const {
   audioLevel,
@@ -545,6 +536,8 @@ const {
   loadingMicrophones,
   systemAudioEnabled,
   systemAudioPermissionStatus,
+  // P0 Data Loss Fix: Silence detection warning
+  silenceWarning,
   setSystemAudioEnabled,
   loadMicrophones,
   loadSystemAudioState,
@@ -608,12 +601,32 @@ const statusClass = computed(() => {
   return '';
 });
 
+// Check if current upload state is from a file upload (UploadPage), not a recording
+const isFromFileUpload = computed(() => {
+  return recordingStore.recordId && recordingStore.recordId.startsWith('file_');
+});
+
+// Only true if uploaded AND it was from a recording (not a file upload)
+const isUploadedFromRecording = computed(() => {
+  return recordingStore.isUploaded && !isFromFileUpload.value;
+});
+
 const showUploadSection = computed(() => {
+  // Don't show upload section if the uploaded state is from a file upload (UploadPage)
   return isProcessing.value ||
          isAutoUploading.value ||
          recordingStore.isUploading ||
          uploadError.value ||
-         recordingStore.isUploaded;
+         isUploadedFromRecording.value;
+});
+
+// Hide tab switcher when recording is in progress
+const isRecordingActive = computed(() => {
+  return recordingStore.isRecording ||
+         recordingStore.isPaused ||
+         isProcessing.value ||
+         isAutoUploading.value ||
+         recordingStore.isUploading;
 });
 
 const uploadIcon = computed(() => {
@@ -664,14 +677,19 @@ const formatBytes = (bytes) => {
 
 // Load history store and set up listeners on mount
 onMounted(async () => {
-  // Load available microphones and system audio state
+  // Load available microphones on all platforms (desktop and mobile)
+  // This enables selection of Bluetooth headsets, wired mics, etc. on mobile
   await loadMicrophones();
-  await loadSystemAudioState();
+
+  // Load system audio state (desktop only - mobile doesn't support system audio capture)
+  if (isElectron()) {
+    await loadSystemAudioState();
+  }
 
   // Load transcription settings
   await transcriptionStore.loadGlobalSettings();
 
-  if (!historyStore.loaded) {
+  if (isElectron() && !historyStore.loaded) {
     await historyStore.loadRecordings();
   }
 
@@ -680,26 +698,37 @@ onMounted(async () => {
     isAutoUploading.value = true;
     isProcessing.value = false;
   } else if (recordingStore.status === 'uploaded') {
-    isAutoUploading.value = false;
-    isProcessing.value = false;
+    // Check if this was a file upload from UploadPage (recordId starts with 'file_')
+    // If so, reset the store - we don't want to show UploadPage's success here
+    if (recordingStore.recordId && recordingStore.recordId.startsWith('file_')) {
+      recordingStore.reset();
+    } else {
+      // This was a recording upload - restore the UI state
+      isAutoUploading.value = false;
+      isProcessing.value = false;
+    }
   }
 
-  // Set up upload listeners
-  window.electronAPI.upload.onProgress((data) => {
-    if (data.recordId === recordingStore.recordId) {
-      recordingStore.updateUploadProgress(data.progress, data.bytesUploaded, data.bytesTotal);
-    }
-  });
+  // Set up upload listeners (Electron only)
+  if (isElectron() && window.electronAPI?.upload) {
+    window.electronAPI.upload.onProgress((data) => {
+      if (data.recordId === recordingStore.recordId) {
+        recordingStore.updateUploadProgress(data.progress, data.bytesUploaded, data.bytesTotal);
+      }
+    });
 
-  window.electronAPI.upload.onRetry((data) => {
-    if (data.recordId === recordingStore.recordId) {
-      retryAttempt.value = data.attempt;
-    }
-  });
+    window.electronAPI.upload.onRetry((data) => {
+      if (data.recordId === recordingStore.recordId) {
+        retryAttempt.value = data.attempt;
+      }
+    });
+  }
 });
 
 onUnmounted(() => {
-  window.electronAPI.upload.removeAllListeners();
+  if (isElectron() && window.electronAPI?.upload?.removeAllListeners) {
+    window.electronAPI.upload.removeAllListeners();
+  }
 });
 
 const handleStartClick = async () => {
@@ -758,11 +787,28 @@ const handleStop = async () => {
     const result = await stopRecording();
 
     if (result.success) {
-      // Get file info
-      const fileInfo = await window.electronAPI.recording.getFilePath(recordingStore.recordId, '.webm');
-      if (fileInfo.success) {
-        currentFilePath.value = fileInfo.filePath;
-        currentFileSize.value = fileInfo.fileSize;
+      // Show recovery notification if recording was recovered after interruption
+      if (result.recovered) {
+        $q.notify({
+          type: 'warning',
+          message: result.warning || 'Recording recovered after interruption. Some audio at the end may be missing.',
+          timeout: 8000
+        });
+      }
+
+      // Get file info - platform specific
+      if (isElectron()) {
+        const fileInfo = await window.electronAPI.recording.getFilePath(recordingStore.recordId, '.webm');
+        if (fileInfo.success) {
+          currentFilePath.value = fileInfo.filePath;
+          currentFileSize.value = fileInfo.fileSize;
+        }
+      } else if (isCapacitor()) {
+        // On mobile, the file path and size come from the stop result
+        if (result.filePath) {
+          currentFilePath.value = result.filePath;
+          currentFileSize.value = result.fileSize || 0;
+        }
       }
 
       // Processing done, start auto-upload
@@ -770,10 +816,20 @@ const handleStop = async () => {
       await startAutoUpload();
     } else {
       isProcessing.value = false;
-      $q.notify({
-        type: 'negative',
-        message: result.error || 'Failed to save recording'
-      });
+
+      // Show more detailed error for partial recovery
+      if (result.partialRecovery) {
+        $q.notify({
+          type: 'warning',
+          message: 'Recording was interrupted. Your audio chunks are saved locally but could not be combined. Please contact support.',
+          timeout: 10000
+        });
+      } else {
+        $q.notify({
+          type: 'negative',
+          message: result.error || 'Failed to save recording'
+        });
+      }
     }
   } catch (error) {
     isProcessing.value = false;
@@ -792,19 +848,64 @@ const startAutoUpload = async () => {
     finalDuration: finalDuration.value
   });
 
+  // P0 Data Loss Fix: Lock file before upload to prevent deletion during upload
+  recordingStore.lockForUpload(recordingStore.recordId);
+
   // Get transcription options
   const options = transcriptionStore.transcriptionOptions;
 
   try {
-    const result = await window.electronAPI.upload.start({
-      recordId: recordingStore.recordId,
-      filePath: currentFilePath.value,
-      metadata: {
-        duration: finalDuration.value.toString(),
-        title: options.title,
-        customVocabulary: options.customVocabulary
+    let result;
+
+    if (isElectron()) {
+      // Desktop: Use Electron's upload mechanism
+      result = await window.electronAPI.upload.start({
+        recordId: recordingStore.recordId,
+        filePath: currentFilePath.value,
+        metadata: {
+          duration: finalDuration.value.toString(),
+          title: options.title,
+          customVocabulary: options.customVocabulary
+        }
+      });
+
+      // Handle token expiration - attempt refresh and retry
+      if (!result.success && result.status === 401) {
+        console.log('Token expired, attempting refresh...');
+        const refreshResult = await authStore.handleAuthError();
+        if (refreshResult.success) {
+          console.log('Token refreshed, retrying upload...');
+          result = await window.electronAPI.upload.start({
+            recordId: recordingStore.recordId,
+            filePath: currentFilePath.value,
+            metadata: {
+              duration: finalDuration.value.toString(),
+              title: options.title,
+              customVocabulary: options.customVocabulary
+            }
+          });
+        } else if (refreshResult.shouldLogout) {
+          result = { success: false, error: 'Session expired. Please log in again.' };
+        }
       }
-    });
+    } else if (isCapacitor()) {
+      // Mobile: Use uploadWithVerification from services/upload.js
+      result = await uploadWithVerification({
+        filePath: currentFilePath.value,
+        recordId: recordingStore.recordId,
+        apiUrl: getApiUrlSync(),
+        authToken: authStore.token,
+        metadata: {
+          duration: finalDuration.value.toString(),
+          title: options.title,
+          customVocabulary: options.customVocabulary
+        },
+        onProgress: (p) => recordingStore.updateUploadProgress(p, 0, 0),
+        getAuthStore: () => authStore // Enable token refresh
+      });
+    } else {
+      throw new Error('Unsupported platform');
+    }
 
     isAutoUploading.value = false;
     retryAttempt.value = 0;
@@ -825,11 +926,27 @@ const startAutoUpload = async () => {
         audioFileId: result.audioFileId
       });
 
-      // ONLY delete file after SUCCESSFUL upload if user chose "delete after upload"
+      // P0 Data Loss Fix: Only delete if upload was verified AND canDelete returns true
+      // Check result.canDelete which comes from two-phase verification
       if (currentStoragePreference.value === 'delete_after_upload') {
-        await window.electronAPI.recording.deleteRecording(recordingStore.recordId);
-        await historyStore.updateRecording(recordingStore.recordId, { filePath: null });
+        if (result.canDelete && recordingStore.canDelete(recordingStore.recordId)) {
+          if (isElectron()) {
+            await window.electronAPI.recording.deleteRecording(recordingStore.recordId);
+          }
+          // On mobile, file deletion is handled by the storage service
+          await historyStore.updateRecording(recordingStore.recordId, { filePath: null });
+        } else {
+          console.warn('File not deleted: upload not verified or file is locked');
+          $q.notify({
+            type: 'warning',
+            message: 'Recording uploaded but file kept locally for safety',
+            timeout: 5000
+          });
+        }
       }
+
+      // P0 Data Loss Fix: Unlock file after successful upload
+      recordingStore.unlockFile(recordingStore.recordId);
 
       // Reset session after successful upload
       transcriptionStore.resetSession();
@@ -839,6 +956,7 @@ const startAutoUpload = async () => {
         message: 'Recording uploaded successfully'
       });
     } else {
+      // P0 Data Loss Fix: Keep file locked on failure - will be unlocked on retry or explicit delete
       handleUploadError(result.error);
     }
   } catch (error) {
@@ -926,9 +1044,11 @@ const startNewWhileUploading = () => {
 // Cancel the current upload
 const cancelUpload = async () => {
   try {
-    if (recordingStore.recordId) {
+    if (recordingStore.recordId && isElectron()) {
       await window.electronAPI.upload.cancel(recordingStore.recordId);
     }
+    // On mobile, upload cancellation is handled by aborting the XHR request
+    // For now, we just reset the UI state
 
     // Reset UI state
     isProcessing.value = false;
@@ -957,18 +1077,21 @@ const generateTranscriptUrl = async () => {
 
   let url = `https://app.suisse-notes.ch/meeting/audio/${currentAudioFileId.value}`;
 
-  // Try to get a web session token for seamless login
-  try {
-    const result = await window.electronAPI.auth.createWebSession();
-    if (result.success && result.sessionToken) {
-      url += `?session=${encodeURIComponent(result.sessionToken)}`;
-      console.log('Web session created successfully');
-    } else {
-      console.warn('Failed to create web session:', result.error);
+  // Try to get a web session token for seamless login (Electron only)
+  if (isElectron()) {
+    try {
+      const result = await window.electronAPI.auth.createWebSession();
+      if (result.success && result.sessionToken) {
+        url += `?session=${encodeURIComponent(result.sessionToken)}`;
+        console.log('Web session created successfully');
+      } else {
+        console.warn('Failed to create web session:', result.error);
+      }
+    } catch (error) {
+      console.warn('Could not create web session:', error);
     }
-  } catch (error) {
-    console.warn('Could not create web session:', error);
   }
+  // On mobile, user will need to log in manually in the browser
 
   return url;
 };
@@ -978,15 +1101,20 @@ const openInSuisseNotes = async () => {
     // Generate fresh URL (session tokens are one-time use)
     const url = await generateTranscriptUrl();
 
-    if (!url.includes('session=')) {
-      $q.notify({
-        type: 'warning',
-        message: 'Could not create session. You may need to log in on the web.',
-        timeout: 3000
-      });
+    if (isElectron()) {
+      if (!url.includes('session=')) {
+        $q.notify({
+          type: 'warning',
+          message: 'Could not create session. You may need to log in on the web.',
+          timeout: 3000
+        });
+      }
+      window.electronAPI.shell.openExternal(url);
+    } else if (isCapacitor()) {
+      // On mobile, open in system browser using Capacitor Browser plugin
+      const { Browser } = await import('@capacitor/browser');
+      await Browser.open({ url });
     }
-
-    window.electronAPI.shell.openExternal(url);
   }
 };
 
@@ -1035,6 +1163,10 @@ const removeSessionWord = (word) => {
 <style lang="scss" scoped>
 .record-page {
   padding: 40px 48px;
+
+  @media (max-width: 600px) {
+    padding: 16px;
+  }
 }
 
 .record-container {
@@ -1052,6 +1184,10 @@ const removeSessionWord = (word) => {
   display: flex;
   flex-direction: column;
   border-radius: 16px;
+
+  @media (max-width: 600px) {
+    padding: 24px 16px;
+  }
 }
 
 .column-header {
@@ -1159,6 +1295,10 @@ const removeSessionWord = (word) => {
   padding: 40px;
   margin-bottom: 32px;
   border-radius: 16px;
+
+  @media (max-width: 600px) {
+    padding: 24px 16px;
+  }
 }
 
 .card-header {
@@ -1197,6 +1337,16 @@ const removeSessionWord = (word) => {
   text-align: center;
 }
 
+.warning-section {
+  margin-top: 24px;
+
+  .warning-banner {
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.2);
+    color: #92400e;
+  }
+}
+
 .error-section {
   margin-top: 24px;
 
@@ -1210,6 +1360,10 @@ const removeSessionWord = (word) => {
   padding: 36px 40px;
   margin-bottom: 32px;
   border-radius: 16px;
+
+  @media (max-width: 600px) {
+    padding: 20px 16px;
+  }
 }
 
 .upload-header {
@@ -1486,46 +1640,59 @@ const removeSessionWord = (word) => {
     }
   }
 
-  .success-secondary {
+  .success-top-actions {
     display: flex;
     justify-content: center;
     align-items: center;
-    gap: 12px;
+    gap: 16px;
     margin-bottom: 24px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #e2e8f0;
 
-    .success-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 8px 16px;
-      background: rgba(34, 197, 94, 0.1);
-      border-radius: 16px;
-      font-size: 13px;
-      color: #16a34a;
-      font-weight: 500;
+    .new-recording-btn {
+      height: 44px;
+      padding: 0 24px;
+      font-size: 14px;
+      font-weight: 600;
+      border-radius: 22px;
     }
 
-    .success-meta {
+    .duration-badge {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      padding: 8px 16px;
+      padding: 10px 16px;
       background: #f1f5f9;
-      border-radius: 16px;
-      font-size: 13px;
-      color: #64748b;
+      border-radius: 20px;
+      font-size: 14px;
+      color: #475569;
+      font-weight: 500;
     }
   }
 
-  .success-actions {
+  .url-compact {
     display: flex;
+    align-items: center;
     justify-content: center;
-    gap: 12px;
+    gap: 8px;
+    margin-top: 16px;
+    padding: 8px 12px;
+    background: #f8fafc;
+    border-radius: 8px;
+    font-size: 12px;
 
-    .secondary-action-btn {
-      height: 36px;
-      font-size: 13px;
+    code {
+      color: #64748b;
+      font-family: 'JetBrains Mono', monospace;
+      word-break: break-all;
     }
+  }
+
+  .success-bottom {
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid #e2e8f0;
+    text-align: center;
   }
 }
 

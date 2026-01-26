@@ -1,24 +1,30 @@
 <template>
-  <div class="mode-tab-switcher">
+  <div
+    v-if="!hidden"
+    class="mode-tab-switcher"
+  >
     <q-tabs
       :model-value="currentMode"
       class="mode-tabs"
+      :class="{ 'tabs-disabled': disabled }"
       inline-label
       no-caps
       indicator-color="primary"
-      @update:model-value="switchMode"
+      @update:model-value="handleSwitchMode"
     >
       <q-tab
         name="record"
         icon="mic"
         :label="$t('recordAudio')"
         class="mode-tab"
+        :disable="disabled"
       />
       <q-tab
         name="upload"
         icon="cloud_upload"
         :label="$t('uploadFileTab')"
         class="mode-tab"
+        :disable="disabled"
       />
     </q-tabs>
   </div>
@@ -28,6 +34,17 @@
 import { computed } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 
+const props = defineProps({
+  disabled: {
+    type: Boolean,
+    default: false
+  },
+  hidden: {
+    type: Boolean,
+    default: false
+  }
+});
+
 const router = useRouter();
 const route = useRoute();
 
@@ -35,6 +52,14 @@ const currentMode = computed(() => {
   if (route.path.includes('/upload')) return 'upload';
   return 'record';
 });
+
+const handleSwitchMode = (mode) => {
+  if (props.disabled) {
+    // Note: Disabled tabs shouldn't be clickable, but just in case
+    return;
+  }
+  switchMode(mode);
+};
 
 const switchMode = (mode) => {
   if (mode === 'upload') {
@@ -56,6 +81,16 @@ const switchMode = (mode) => {
   padding: 4px;
   max-width: 380px;
 
+  @media (max-width: 600px) {
+    max-width: 100%;
+    width: 100%;
+  }
+
+  &.tabs-disabled {
+    opacity: 0.5;
+    pointer-events: none;
+  }
+
   :deep(.q-tabs__content) {
     gap: 4px;
   }
@@ -69,6 +104,11 @@ const switchMode = (mode) => {
     color: #64748b;
     transition: all 0.2s ease;
 
+    @media (max-width: 600px) {
+      padding: 0 12px;
+      font-size: 12px;
+    }
+
     &.q-tab--active {
       background: white;
       color: #6366F1;
@@ -77,6 +117,11 @@ const switchMode = (mode) => {
 
     &:not(.q-tab--active):hover {
       background: rgba(255, 255, 255, 0.5);
+    }
+
+    &.disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
     }
   }
 

@@ -1,86 +1,135 @@
 <template>
-  <q-page class="register-container">
-    <div class="register-card">
-      <!-- Logo Section -->
-      <div class="register-logo">
-        <q-icon name="mic" class="logo-icon" />
-        <h1>Suisse Notes</h1>
-        <p>Create your account</p>
-      </div>
+  <q-page class="register-page">
+    <!-- Back to login link -->
+    <div class="top-bar">
+      <router-link
+        to="/login"
+        class="back-link"
+      >
+        <q-icon
+          name="arrow_back"
+          size="18px"
+        />
+        <span>{{ $t('backToLogin') }}</span>
+      </router-link>
+    </div>
 
-      <!-- Register Form -->
-      <q-form @submit="handleRegister" class="register-form">
-        <q-input
-          v-model="name"
-          label="Full Name"
-          outlined
-          :rules="[val => !!val || 'Name is required']"
-          autocomplete="name"
-          class="q-mb-md"
-        >
-          <template #prepend>
-            <q-icon name="person" color="grey-6" />
-          </template>
-        </q-input>
-
-        <q-input
-          v-model="email"
-          label="Email"
-          type="email"
-          outlined
-          :rules="[
-            val => !!val || 'Email is required',
-            val => isValidEmail(val) || 'Please enter a valid email'
-          ]"
-          autocomplete="email"
-          class="q-mb-md"
-        >
-          <template #prepend>
-            <q-icon name="email" color="grey-6" />
-          </template>
-        </q-input>
-
-        <q-input
-          v-model="password"
-          label="Password"
-          type="password"
-          outlined
-          :rules="[
-            val => !!val || 'Password is required',
-            val => val.length >= 8 || 'Password must be at least 8 characters'
-          ]"
-          autocomplete="new-password"
-          class="q-mb-md"
-        >
-          <template #prepend>
-            <q-icon name="lock" color="grey-6" />
-          </template>
-        </q-input>
-
-        <!-- Error Banner -->
-        <div class="error-banner q-mb-md" v-if="authStore.error">
-          <q-icon name="error_outline" color="negative" />
-          <span>{{ authStore.error }}</span>
-          <q-btn flat round size="sm" icon="close" color="grey-7" @click="authStore.clearError()" />
+    <div class="register-container">
+      <div class="register-card">
+        <!-- Logo Section -->
+        <div class="register-logo">
+          <q-icon
+            name="mic"
+            class="logo-icon"
+          />
+          <h1>Suisse Notes</h1>
+          <p>{{ $t('createYourAccount') }}</p>
         </div>
 
-        <q-btn
-          type="submit"
-          unelevated
-          class="gradient-btn full-width"
-          size="lg"
-          :loading="authStore.loading"
+        <!-- Register Form -->
+        <q-form
+          class="register-form"
+          @submit="handleRegister"
         >
-          Create Account
-        </q-btn>
-      </q-form>
+          <q-input
+            v-model="name"
+            label="Full Name"
+            outlined
+            :rules="[val => !!val || 'Name is required']"
+            autocomplete="name"
+            class="q-mb-md"
+          >
+            <template #prepend>
+              <q-icon
+                name="person"
+                color="grey-6"
+              />
+            </template>
+          </q-input>
 
-      <!-- Login Link -->
-      <div class="register-footer">
-        <p>
-          Already have an account?
-          <router-link to="/login" class="login-link">Sign in</router-link>
-        </p>
+          <q-input
+            v-model="email"
+            label="Email"
+            type="email"
+            outlined
+            :rules="[
+              val => !!val || 'Email is required',
+              val => isValidEmail(val) || 'Please enter a valid email'
+            ]"
+            autocomplete="email"
+            class="q-mb-md"
+          >
+            <template #prepend>
+              <q-icon
+                name="email"
+                color="grey-6"
+              />
+            </template>
+          </q-input>
+
+          <q-input
+            v-model="password"
+            label="Password"
+            type="password"
+            outlined
+            :rules="[
+              val => !!val || 'Password is required',
+              val => val.length >= 8 || 'Password must be at least 8 characters'
+            ]"
+            autocomplete="new-password"
+            class="q-mb-md"
+          >
+            <template #prepend>
+              <q-icon
+                name="lock"
+                color="grey-6"
+              />
+            </template>
+          </q-input>
+
+          <!-- Error Banner -->
+          <div
+            v-if="authStore.error"
+            class="error-banner q-mb-md"
+          >
+            <q-icon
+              name="error_outline"
+              color="negative"
+            />
+            <span>{{ authStore.error }}</span>
+            <q-btn
+              flat
+              round
+              size="sm"
+              icon="close"
+              color="grey-7"
+              @click="authStore.clearError()"
+            />
+          </div>
+
+          <q-btn
+            type="submit"
+            unelevated
+            class="gradient-btn full-width"
+            size="lg"
+            :loading="authStore.loading"
+          >
+            Create Account
+          </q-btn>
+        </q-form>
+
+        <!-- Login Link -->
+        <div class="register-footer">
+          <p>
+            {{ $t('alreadyHaveAccount') }}
+            <router-link
+              to="/login"
+              class="login-link"
+            >
+              {{ $t('signIn') }}
+            </router-link>
+          </p>
+        </div>
       </div>
     </div>
   </q-page>
@@ -89,7 +138,10 @@
 <script setup>
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
+import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '../stores/auth';
+
+const { t } = useI18n();
 
 const router = useRouter();
 const authStore = useAuthStore();
@@ -117,49 +169,88 @@ const handleRegister = async () => {
 </script>
 
 <style lang="scss" scoped>
-.register-container {
+.register-page {
   min-height: 100vh;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
+  // Status bar is handled by @capacitor/status-bar plugin with overlaysWebView: false
+  // Only need safe-area for bottom home indicator on iOS
+  padding-bottom: env(safe-area-inset-bottom, 0);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.top-bar {
+  flex-shrink: 0;
+  padding: 12px 20px;
+}
+
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: white;
+  text-decoration: none;
+  transition: all 0.2s ease;
+  backdrop-filter: blur(4px);
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.25);
+  }
+}
+
+.register-container {
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
-  padding: 24px;
+  padding: 16px;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .register-card {
   background: white;
   border-radius: 16px;
   box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-  padding: 40px;
+  padding: 32px 28px;
   width: 100%;
-  max-width: 400px;
+  max-width: 380px;
+  max-height: 100%;
 }
 
 .register-logo {
   text-align: center;
-  margin-bottom: 32px;
+  margin-bottom: 24px;
 
   .logo-icon {
-    font-size: 48px;
+    font-size: 40px;
     color: #6366F1;
   }
 
   h1 {
-    font-size: 24px;
+    font-size: 22px;
     font-weight: 700;
-    margin: 12px 0 4px 0;
+    margin: 8px 0 4px 0;
     color: #1e293b;
   }
 
   p {
     color: #64748b;
-    font-size: 14px;
+    font-size: 13px;
     margin: 0;
   }
 }
 
 .register-form {
-  margin-bottom: 24px;
+  margin-bottom: 20px;
 }
 
 .error-banner {
@@ -207,5 +298,76 @@ const handleRegister = async () => {
 
 :deep(.q-field--outlined.q-field--focused .q-field__control:before) {
   border-color: #6366F1;
+}
+
+// Mobile adjustments
+@media (max-width: 600px) {
+  .top-bar {
+    padding: 8px 16px;
+  }
+
+  .back-link {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  .register-container {
+    padding: 8px 16px;
+  }
+
+  .register-card {
+    padding: 20px 16px;
+    border-radius: 12px;
+  }
+
+  .register-logo {
+    margin-bottom: 16px;
+
+    .logo-icon {
+      font-size: 32px;
+    }
+
+    h1 {
+      font-size: 18px;
+    }
+
+    p {
+      font-size: 11px;
+    }
+  }
+
+  .register-form {
+    margin-bottom: 16px;
+
+    :deep(.q-field) {
+      margin-bottom: 10px !important;
+    }
+  }
+
+  .register-footer {
+    padding-top: 12px;
+
+    p {
+      font-size: 13px;
+    }
+  }
+}
+
+@media (max-height: 600px) {
+  .register-logo {
+    margin-bottom: 12px;
+
+    .logo-icon {
+      font-size: 28px;
+    }
+
+    h1 {
+      font-size: 16px;
+    }
+  }
+
+  .register-form {
+    margin-bottom: 12px;
+  }
 }
 </style>

@@ -1,0 +1,12 @@
+# Appfile for Suisse Notes iOS
+# Documentation: https://docs.fastlane.tools/advanced/#appfile
+
+# App identifier (bundle ID)
+app_identifier("ch.suissenotes.app")
+
+# Apple Developer Portal team
+# Uncomment and set your team ID
+# team_id("YOUR_TEAM_ID")
+
+# App Store Connect team (if different from Developer Portal)
+# itc_team_id("YOUR_ITC_TEAM_ID")

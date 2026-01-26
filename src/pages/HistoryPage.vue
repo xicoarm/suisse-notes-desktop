@@ -1,14 +1,22 @@
 <template>
   <q-page class="history-page">
     <div class="page-header">
-      <h1>Recording History</h1>
-      <p class="text-subtitle">View and manage your past recordings</p>
+      <h1>{{ $t('historyTitle') }}</h1>
+      <p class="text-subtitle">
+        {{ $t('historySubtitle') }}
+      </p>
     </div>
 
     <!-- Upload Progress Banner -->
-    <div class="upload-progress-banner" v-if="uploadingRecordingId">
+    <div
+      v-if="uploadingRecordingId"
+      class="upload-progress-banner"
+    >
       <div class="progress-content">
-        <q-spinner-dots color="white" size="20px" />
+        <q-spinner-dots
+          color="white"
+          size="20px"
+        />
         <span>{{ uploadStatusText }}</span>
       </div>
       <div class="progress-bar-container">
@@ -22,55 +30,84 @@
     </div>
 
     <!-- Stats summary -->
-    <div class="stats-row" v-if="historyStore.recordingCount > 0">
+    <div
+      v-if="historyStore.recordingCount > 0"
+      class="stats-row"
+    >
       <div class="stat-item">
         <span class="stat-value">{{ historyStore.recordingCount }}</span>
-        <span class="stat-label">Total</span>
+        <span class="stat-label">{{ $t('statsTotal') }}</span>
       </div>
       <div class="stat-item">
         <span class="stat-value text-positive">{{ historyStore.uploadedRecordings.length }}</span>
-        <span class="stat-label">Uploaded</span>
+        <span class="stat-label">{{ $t('statsUploaded') }}</span>
       </div>
       <div class="stat-item">
         <span class="stat-value text-warning">{{ historyStore.pendingRecordings.length }}</span>
-        <span class="stat-label">Pending</span>
+        <span class="stat-label">{{ $t('statsPending') }}</span>
       </div>
-      <div class="stat-item" v-if="historyStore.failedRecordings.length > 0">
+      <div
+        v-if="historyStore.failedRecordings.length > 0"
+        class="stat-item"
+      >
         <span class="stat-value text-negative">{{ historyStore.failedRecordings.length }}</span>
-        <span class="stat-label">Failed</span>
+        <span class="stat-label">{{ $t('statsFailed') }}</span>
       </div>
     </div>
 
     <!-- Loading state -->
-    <div class="loading-state" v-if="historyStore.loading">
-      <q-spinner-dots color="primary" size="40px" />
-      <p>Loading recordings...</p>
+    <div
+      v-if="historyStore.loading"
+      class="loading-state"
+    >
+      <q-spinner-dots
+        color="primary"
+        size="40px"
+      />
+      <p>{{ $t('loadingRecordings') }}</p>
     </div>
 
     <!-- Empty state -->
-    <div class="empty-state" v-else-if="historyStore.recordingCount === 0">
-      <q-icon name="mic_none" class="empty-icon" />
-      <div class="empty-title">No recordings yet</div>
+    <div
+      v-else-if="historyStore.recordingCount === 0"
+      class="empty-state"
+    >
+      <q-icon
+        name="mic_none"
+        class="empty-icon"
+      />
+      <div class="empty-title">
+        {{ $t('noRecordings') }}
+      </div>
       <div class="empty-subtitle">
-        Start recording to see your history here
+        {{ $t('startRecording') }}
       </div>
       <q-btn
         unelevated
         class="gradient-btn q-mt-md"
-        label="Start Recording"
+        :label="$t('aboutStartRecording')"
         icon="mic"
         @click="goToRecord"
       />
     </div>
 
     <!-- Recordings list -->
-    <div class="recordings-list" v-else>
+    <div
+      v-else
+      class="recordings-list"
+    >
       <!-- Active Upload Card (from current recording session) -->
-      <div class="uploading-card" v-if="recordingStore.hasActiveUpload">
+      <div
+        v-if="recordingStore.hasActiveUpload"
+        class="uploading-card"
+      >
         <div class="uploading-header">
           <div class="uploading-info">
-            <q-spinner-dots size="16px" color="primary" />
-            <span class="uploading-title">Uploading new recording...</span>
+            <q-spinner-dots
+              size="16px"
+              color="primary"
+            />
+            <span class="uploading-title">{{ $t('uploadingNewRecording') }}</span>
           </div>
           <span class="uploading-progress">{{ Math.min(recordingStore.activeUploadProgress, 99) }}%</span>
         </div>
@@ -83,10 +120,10 @@
         />
         <div class="uploading-meta">
           <span v-if="recordingStore.backgroundUpload.active && recordingStore.backgroundUpload.metadata">
-            Duration: {{ formatDuration(recordingStore.backgroundUpload.metadata.finalDuration) }}
+            {{ formatDuration(recordingStore.backgroundUpload.metadata.finalDuration) }}
           </span>
           <span v-else-if="recordingStore.uploadMetadata.finalDuration">
-            Duration: {{ formatDuration(recordingStore.uploadMetadata.finalDuration) }}
+            {{ formatDuration(recordingStore.uploadMetadata.finalDuration) }}
           </span>
         </div>
       </div>
@@ -111,6 +148,7 @@ import { useQuasar } from 'quasar';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingStore } from '../stores/recording';
+import { isElectron } from '../utils/platform';
 import RecordingHistoryCard from '../components/RecordingHistoryCard.vue';
 
 export default {
@@ -175,14 +213,35 @@ export default {
       uploadProgress.value = 0;
       retryAttempt.value = 0;
 
+      // P0 Data Loss Fix: Lock file before upload to prevent deletion during upload
+      recordingStore.lockForUpload(recording.id);
+
       try {
-        const result = await window.electronAPI.upload.start({
+        let result = await window.electronAPI.upload.start({
           recordId: recording.id,
           filePath: recording.filePath,
           metadata: {
             duration: recording.duration
           }
         });
+
+        // Handle token expiration - attempt refresh and retry
+        if (!result.success && result.status === 401) {
+          console.log('Token expired, attempting refresh...');
+          const refreshResult = await authStore.handleAuthError();
+          if (refreshResult.success) {
+            console.log('Token refreshed, retrying upload...');
+            result = await window.electronAPI.upload.start({
+              recordId: recording.id,
+              filePath: recording.filePath,
+              metadata: {
+                duration: recording.duration
+              }
+            });
+          } else if (refreshResult.shouldLogout) {
+            result = { success: false, error: 'Session expired. Please log in again.' };
+          }
+        }
 
         if (result.success) {
           // Update history entry
@@ -193,13 +252,19 @@ export default {
             uploadError: null
           });
 
-          // Handle delete after upload preference
+          // P0 Data Loss Fix: Handle delete after upload with lock check
           if (recording.storagePreference === 'delete_after_upload') {
-            try {
-              await window.electronAPI.recording.deleteRecording(recording.id);
-              await historyStore.updateRecording(recording.id, { filePath: null });
-            } catch (e) {
-              console.warn('Could not delete file after upload:', e);
+            // Only delete if result.canDelete is true AND file is not locked
+            if (result.canDelete && recordingStore.canDelete(recording.id)) {
+              try {
+                await window.electronAPI.recording.deleteRecording(recording.id);
+                await historyStore.updateRecording(recording.id, { filePath: null });
+                recordingStore.unlockFile(recording.id);
+              } catch (e) {
+                console.warn('Could not delete file after upload:', e);
+              }
+            } else {
+              console.warn('File not deleted: upload not verified or file is locked');
             }
           }
 
@@ -213,6 +278,9 @@ export default {
             uploadError: result.error
           });
 
+          // P0 Data Loss Fix: Keep file locked on failure - user can retry
+          // Don't unlock so file stays protected
+
           $q.notify({
             type: 'negative',
             message: result.error || 'Upload failed',
@@ -224,6 +292,8 @@ export default {
           uploadStatus: 'failed',
           uploadError: error.message
         });
+
+        // P0 Data Loss Fix: Keep file locked on failure - user can retry
 
         $q.notify({
           type: 'negative',
@@ -249,30 +319,34 @@ export default {
         await historyStore.loadRecordings();
       }
 
-      // Set up upload progress listeners
-      window.electronAPI.upload.onProgress((data) => {
-        // Update local upload (re-uploading from history)
-        if (data.recordId === uploadingRecordingId.value) {
-          uploadProgress.value = data.progress;
-        }
-        // Update recording store for current/background uploads
-        if (data.recordId === recordingStore.recordId) {
-          recordingStore.updateUploadProgress(data.progress, data.bytesUploaded, data.bytesTotal);
-        }
-        if (recordingStore.backgroundUpload.active && data.recordId === recordingStore.backgroundUpload.recordId) {
-          recordingStore.updateBackgroundUploadProgress(data.recordId, data.progress, data.bytesUploaded, data.bytesTotal);
-        }
-      });
+      // Electron-only: Set up upload progress listeners
+      if (isElectron() && window.electronAPI?.upload) {
+        window.electronAPI.upload.onProgress((data) => {
+          // Update local upload (re-uploading from history)
+          if (data.recordId === uploadingRecordingId.value) {
+            uploadProgress.value = data.progress;
+          }
+          // Update recording store for current/background uploads
+          if (data.recordId === recordingStore.recordId) {
+            recordingStore.updateUploadProgress(data.progress, data.bytesUploaded, data.bytesTotal);
+          }
+          if (recordingStore.backgroundUpload.active && data.recordId === recordingStore.backgroundUpload.recordId) {
+            recordingStore.updateBackgroundUploadProgress(data.recordId, data.progress, data.bytesUploaded, data.bytesTotal);
+          }
+        });
 
-      window.electronAPI.upload.onRetry((data) => {
-        if (data.recordId === uploadingRecordingId.value) {
-          retryAttempt.value = data.attempt;
-        }
-      });
+        window.electronAPI.upload.onRetry((data) => {
+          if (data.recordId === uploadingRecordingId.value) {
+            retryAttempt.value = data.attempt;
+          }
+        });
+      }
     });
 
     onUnmounted(() => {
-      window.electronAPI.upload.removeAllListeners();
+      if (isElectron() && window.electronAPI?.upload?.removeAllListeners) {
+        window.electronAPI.upload.removeAllListeners();
+      }
     });
 
     return {
@@ -296,6 +370,10 @@ export default {
   padding: 32px;
   max-width: 1200px;
   margin: 0 auto;
+
+  @media (max-width: 600px) {
+    padding: 16px;
+  }
 }
 
 .page-header {
@@ -344,11 +422,23 @@ export default {
   background: white;
   border-radius: 12px;
   border: 1px solid #e2e8f0;
+
+  @media (max-width: 600px) {
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: space-around;
+    padding: 16px;
+  }
 }
 
 .stat-item {
   display: flex;
   flex-direction: column;
+
+  @media (max-width: 600px) {
+    min-width: 80px;
+    text-align: center;
+  }
 
   .stat-value {
     font-size: 24px;

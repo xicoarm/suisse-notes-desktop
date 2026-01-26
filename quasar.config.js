@@ -91,6 +91,7 @@ export default function (ctx) {
       builder: {
         appId: 'com.suisse-notes.desktop',
         productName: 'Suisse Notes',
+        icon: 'src-electron/icons/icon',
 
         // GitHub Releases for auto-updates
         publish: {
@@ -114,8 +115,12 @@ export default function (ctx) {
         nsis: {
           oneClick: false,
           allowToChangeInstallationDirectory: true,
+          createDesktopShortcut: true,
+          createStartMenuShortcut: true,
+          shortcutName: 'Suisse Notes',
           installerIcon: 'src-electron/icons/icon.ico',
-          uninstallerIcon: 'src-electron/icons/icon.ico'
+          uninstallerIcon: 'src-electron/icons/icon.ico',
+          installerHeaderIcon: 'src-electron/icons/icon.ico'
         },
         mac: {
           target: [

@@ -1,5 +1,6 @@
 import { createRouter, createMemoryHistory, createWebHistory, createWebHashHistory } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
+import { isMobile } from '../utils/platform';
 
 const routes = [
   {
@@ -8,7 +9,11 @@ const routes = [
     children: [
       {
         path: '',
-        redirect: '/about'
+        redirect: () => {
+          // Mobile: go to login first (or record if authenticated)
+          // Desktop: go to about page
+          return isMobile() ? '/login' : '/about';
+        }
       },
       {
         path: 'about',

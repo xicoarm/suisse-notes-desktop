@@ -395,3 +395,6 @@ git push --follow-tags
 #    - Build the app for Windows
 #    - Create a GitHub Release with the tag
 #    - Upload the installer + latest.yml auPrivate token: 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
+
+
+Every change and every implementation that we are doing should have an effect on all four platforms, which are the desktop Windows version, the desktop Mac iOS version, the mobile Android version, and the mobile iOS version. And it is crucial that we always consider everything we implement to make it adaptable for all of these platforms, and if needed, do individual solutions or individual code so we can really support all of the four platforms equally.
