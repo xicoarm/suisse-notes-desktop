@@ -1,3 +1,10 @@
+## [3.4.10](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.9...v3.4.10) (2026-01-26)
+
+
+### Bug Fixes
+
+* **android:** align Java and Kotlin JVM targets to version 21 ([ec3c297](https://github.com/xicoarm/suisse-notes-desktop/commit/ec3c297c0379213cb2468f2be5c729c9e51e39c3))
+
 ## [3.4.9](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.8...v3.4.9) (2026-01-26)
 
 
