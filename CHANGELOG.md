@@ -1,3 +1,10 @@
+## [3.4.9](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.8...v3.4.9) (2026-01-26)
+
+
+### Bug Fixes
+
+* handle auto-update signature verification for unsigned builds ([14e0980](https://github.com/xicoarm/suisse-notes-desktop/commit/14e0980431fe5d50e53907be2ed979f967d9736e))
+
 ## [3.4.8](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.7...v3.4.8) (2026-01-26)
 
 
