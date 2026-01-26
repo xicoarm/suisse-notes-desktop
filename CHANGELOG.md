@@ -1,3 +1,10 @@
+## [3.4.14](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.13...v3.4.14) (2026-01-26)
+
+
+### Bug Fixes
+
+* test release for auto-update verification ([b18ed40](https://github.com/xicoarm/suisse-notes-desktop/commit/b18ed40be55d3f84ea7907e22cba64b4ffa35c6d))
+
 ## [3.4.13](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.12...v3.4.13) (2026-01-26)
 
 
