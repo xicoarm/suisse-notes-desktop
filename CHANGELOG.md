@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.1...v3.7.2) (2026-01-27)
+
+
+### Bug Fixes
+
+* switch from semantic-release to tag-based releases ([5b3577b](https://github.com/xicoarm/suisse-notes-desktop/commit/5b3577bcbadc254136c424bbd1ef2f6792a11647))
+
 ### [3.7.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.0...v3.7.1) (2026-01-27)
 
 
