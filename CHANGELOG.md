@@ -1,3 +1,10 @@
+# [3.5.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.14...v3.5.0) (2026-01-27)
+
+
+### Features
+
+* implement free minutes feature for transcription limits ([ba4e700](https://github.com/xicoarm/suisse-notes-desktop/commit/ba4e70095af61d4f13c00b7ad9ae7c405060e1cf))
+
 ## [3.4.14](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.13...v3.4.14) (2026-01-26)
 
 
