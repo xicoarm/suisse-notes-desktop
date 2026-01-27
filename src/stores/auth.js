@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { isElectron, isCapacitor } from '../utils/platform';
 import { getApiUrlSync, API_ENDPOINTS } from '../services/api';
+import { useMinutesStore } from './minutes';
 
 // Capacitor Preferences (lazy loaded)
 let Preferences = null;
@@ -22,20 +23,78 @@ const TOKEN_REFRESH_MARGIN = 5 * 60 * 1000; // Refresh 5 minutes before expiry
 const TOKEN_CHECK_INTERVAL = 60 * 1000; // Check every minute
 const RECORDING_KEEP_ALIVE_INTERVAL = 30 * 60 * 1000; // Refresh every 30 min while recording
 
+// Mobile device info cache for analytics
+let cachedDeviceInfo = null;
+
+const getMobileDeviceInfo = async () => {
+  if (cachedDeviceInfo) return cachedDeviceInfo;
+  try {
+    const { Device } = await import('@capacitor/device');
+    const { App } = await import('@capacitor/app');
+    const [deviceInfo, appInfo] = await Promise.all([Device.getId(), App.getInfo()]);
+    cachedDeviceInfo = {
+      deviceId: deviceInfo.identifier || `mobile_${Date.now()}`,
+      platform: window.Capacitor?.getPlatform?.() || 'unknown',
+      appVersion: appInfo.version || 'unknown'
+    };
+  } catch {
+    cachedDeviceInfo = {
+      deviceId: `mobile_${Date.now()}`,
+      platform: window.Capacitor?.getPlatform?.() || 'unknown',
+      appVersion: 'unknown'
+    };
+  }
+  return cachedDeviceInfo;
+};
+
+// Auth analytics - Non-blocking, fail-silent
+const trackAuthEvent = (eventType, { userId, userEmail, errorReason, errorCode } = {}) => {
+  getMobileDeviceInfo().then(info => {
+    const maskedEmail = userEmail
+      ? `${userEmail[0]}***${userEmail.includes('@') ? '@' + userEmail.split('@')[1] : ''}`
+      : null;
+
+    fetch(`${getApiUrlSync()}/api/analytics/auth-event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        eventType,
+        ...info,
+        userId,
+        userEmail: maskedEmail,
+        timestamp: new Date().toISOString(),
+        errorReason,
+        errorCode
+      })
+    }).catch(() => {}); // Fail silently
+  });
+};
+
 // Mobile auth helpers
 const mobileAuth = {
   async login(username, password) {
     const apiUrl = getApiUrlSync();
     try {
+      const deviceInfo = await getMobileDeviceInfo();
       const response = await fetch(`${apiUrl}/api/auth/desktop`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: username, password })
+        body: JSON.stringify({
+          email: username,
+          password,
+          deviceId: deviceInfo.deviceId,
+          platform: deviceInfo.platform,
+          appVersion: deviceInfo.appVersion
+        })
       });
 
       const data = await response.json();
 
       if (response.ok && data.token) {
+        trackAuthEvent('login_success', {
+          userId: data.user?.id,
+          userEmail: username
+        });
         return {
           success: true,
           token: data.token,
@@ -43,32 +102,54 @@ const mobileAuth = {
         };
       }
 
-      return { success: false, error: data.error || data.message || 'Login failed' };
+      const errorMsg = data.error || data.message || 'Login failed';
+      trackAuthEvent('login_failed', {
+        userEmail: username,
+        errorReason: errorMsg
+      });
+      return { success: false, error: errorMsg };
     } catch (error) {
       console.error('Login network error:', error);
       // Provide more helpful error message for network issues
+      let errorMsg;
       if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
-        return {
-          success: false,
-          error: 'Unable to connect to server. Please check your internet connection and try again.'
-        };
+        errorMsg = 'Unable to connect to server. Please check your internet connection and try again.';
+      } else {
+        errorMsg = error.message || 'Network error during login';
       }
-      return { success: false, error: error.message || 'Network error during login' };
+      trackAuthEvent('login_failed', {
+        userEmail: username,
+        errorReason: errorMsg,
+        errorCode: error.name
+      });
+      return { success: false, error: errorMsg };
     }
   },
 
   async register(email, password, name) {
     const apiUrl = getApiUrlSync();
     try {
+      const deviceInfo = await getMobileDeviceInfo();
       const response = await fetch(`${apiUrl}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, name })
+        body: JSON.stringify({
+          email,
+          password,
+          name,
+          deviceId: deviceInfo.deviceId,
+          platform: deviceInfo.platform,
+          appVersion: deviceInfo.appVersion
+        })
       });
 
       const data = await response.json();
 
       if (response.ok && data.token) {
+        trackAuthEvent('registration_success', {
+          userId: data.user?.id,
+          userEmail: email
+        });
         return {
           success: true,
           token: data.token,
@@ -76,17 +157,27 @@ const mobileAuth = {
         };
       }
 
-      return { success: false, error: data.error || data.message || 'Registration failed' };
+      const errorMsg = data.error || data.message || 'Registration failed';
+      trackAuthEvent('registration_failed', {
+        userEmail: email,
+        errorReason: errorMsg
+      });
+      return { success: false, error: errorMsg };
     } catch (error) {
       console.error('Registration network error:', error);
       // Provide more helpful error message for network issues
+      let errorMsg;
       if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
-        return {
-          success: false,
-          error: 'Unable to connect to server. Please check your internet connection and try again.'
-        };
+        errorMsg = 'Unable to connect to server. Please check your internet connection and try again.';
+      } else {
+        errorMsg = error.message || 'Network error during registration';
       }
-      return { success: false, error: error.message || 'Network error during registration' };
+      trackAuthEvent('registration_failed', {
+        userEmail: email,
+        errorReason: errorMsg,
+        errorCode: error.name
+      });
+      return { success: false, error: errorMsg };
     }
   },
 
@@ -169,6 +260,12 @@ export const useAuthStore = defineStore('auth', {
           // Start proactive token refresh
           this.startTokenRefreshTimer();
 
+          // Fetch user's minutes balance
+          const minutesStore = useMinutesStore();
+          minutesStore.fetchMinutes(result.token).catch(err => {
+            console.warn('Failed to fetch minutes on login:', err);
+          });
+
           return { success: true };
         } else {
           this.error = result.error || 'Login failed';
@@ -201,6 +298,12 @@ export const useAuthStore = defineStore('auth', {
           // Start proactive token refresh
           this.startTokenRefreshTimer();
 
+          // Fetch user's minutes balance (new users get 60 free minutes)
+          const minutesStore = useMinutesStore();
+          minutesStore.fetchMinutes(result.token).catch(err => {
+            console.warn('Failed to fetch minutes on register:', err);
+          });
+
           return { success: true };
         } else {
           this.error = result.error || 'Registration failed';
@@ -218,6 +321,11 @@ export const useAuthStore = defineStore('auth', {
       // Stop token refresh timer
       this.stopTokenRefreshTimer();
 
+      // Track logout event (mobile only - desktop tracks in clearToken handler)
+      if (isCapacitor()) {
+        trackAuthEvent('logout', { userId: this.user?.id, userEmail: this.user?.email });
+      }
+
       try {
         const auth = getAuth();
         await auth.clearToken();
@@ -231,6 +339,10 @@ export const useAuthStore = defineStore('auth', {
         const historyStore = useRecordingsHistoryStore();
         historyStore.reset();
       }
+
+      // Clear minutes store
+      const minutesStore = useMinutesStore();
+      minutesStore.reset();
 
       this.user = null;
       this.token = null;
@@ -251,6 +363,12 @@ export const useAuthStore = defineStore('auth', {
 
           // Start proactive token refresh for existing session
           this.startTokenRefreshTimer();
+
+          // Fetch user's minutes balance
+          const minutesStore = useMinutesStore();
+          minutesStore.fetchMinutes(token).catch(err => {
+            console.warn('Failed to fetch minutes on session restore:', err);
+          });
         } else if (token) {
           console.warn('Token found but no user info - requiring re-login');
           await auth.clearToken();
@@ -508,6 +626,10 @@ export const useAuthStore = defineStore('auth', {
         const historyStore = useRecordingsHistoryStore();
         historyStore.reset();
       }
+
+      // Clear minutes store
+      const minutesStore = useMinutesStore();
+      minutesStore.reset();
 
       this.user = null;
       this.token = null;

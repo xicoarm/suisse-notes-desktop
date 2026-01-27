@@ -240,11 +240,21 @@ async function emergencyPauseForSilence(recordingStore) {
   }
 }
 
+// Minutes limit tracking state
+let minutesLimitSeconds = null;
+let limitWarningShown = false;
+const LIMIT_WARNING_SECONDS = 300; // 5 minutes warning before limit
+
 /**
- * Start duration tracking
+ * Start duration tracking with optional minutes limit
+ * @param {Object} recordingStore - Recording store instance
+ * @param {Object} isAutoSplitting - Auto-splitting ref
+ * @param {number|null} maxSeconds - Maximum recording seconds (from user's minutes balance)
  */
-function startDurationTracking(recordingStore, isAutoSplitting) {
+function startDurationTracking(recordingStore, isAutoSplitting, maxSeconds = null) {
   const startTime = Date.now();
+  minutesLimitSeconds = maxSeconds;
+  limitWarningShown = false;
 
   durationInterval = setInterval(async () => {
     if (recordingStore.isRecording) {
@@ -252,6 +262,26 @@ function startDurationTracking(recordingStore, isAutoSplitting) {
       recordingStore.updateDuration(elapsed);
       emit('durationChange', elapsed);
 
+      // Check minutes limit (if set)
+      if (minutesLimitSeconds !== null && minutesLimitSeconds > 0) {
+        const remaining = minutesLimitSeconds - elapsed;
+
+        // Warning at 5 minutes (or less) before limit
+        if (remaining <= LIMIT_WARNING_SECONDS && remaining > 0 && !limitWarningShown) {
+          limitWarningShown = true;
+          const minutesRemaining = Math.ceil(remaining / 60);
+          emit('limitWarning', minutesRemaining);
+        }
+
+        // Auto-stop when limit reached
+        if (remaining <= 0) {
+          console.log('Minutes limit reached, auto-stopping recording');
+          emit('limitReached');
+          return; // Stop the interval, let the caller handle stopping
+        }
+      }
+
+      // Original auto-split logic for max file duration
       if (elapsed >= MAX_DURATION_SECONDS && !isAutoSplitting.value) {
         await performAutoSplit(recordingStore, isAutoSplitting);
       }
@@ -267,6 +297,17 @@ function stopDurationTracking() {
     clearInterval(durationInterval);
     durationInterval = null;
   }
+  // Reset limit state
+  minutesLimitSeconds = null;
+  limitWarningShown = false;
+}
+
+/**
+ * Get the current minutes limit in seconds
+ * @returns {number|null} The limit in seconds, or null if no limit
+ */
+export function getMinutesLimitSeconds() {
+  return minutesLimitSeconds;
 }
 
 /**
@@ -359,6 +400,15 @@ function stopAuthKeepAlive() {
 
 /**
  * Start recording
+ * @param {Object} options - Recording options
+ * @param {Object} options.recordingStore - Recording store instance
+ * @param {Object} options.authStore - Auth store instance
+ * @param {string} options.deviceId - Microphone device ID
+ * @param {boolean} options.systemAudioEnabled - Whether system audio is enabled
+ * @param {Function} options.captureSystemAudio - Function to capture system audio
+ * @param {Function} options.stopSystemAudio - Function to stop system audio
+ * @param {Object} options.isAutoSplitting - Ref for auto-splitting state
+ * @param {number|null} options.maxRecordingSeconds - Maximum recording duration in seconds (minutes limit)
  */
 export async function startRecording(options = {}) {
   const {
@@ -368,7 +418,8 @@ export async function startRecording(options = {}) {
     systemAudioEnabled,
     captureSystemAudio,
     stopSystemAudio,
-    isAutoSplitting
+    isAutoSplitting,
+    maxRecordingSeconds = null
   } = options;
 
   try {
@@ -463,7 +514,7 @@ export async function startRecording(options = {}) {
 
     // Start monitoring
     startLevelMonitoring(stream, recordingStore);
-    startDurationTracking(recordingStore, isAutoSplitting);
+    startDurationTracking(recordingStore, isAutoSplitting, maxRecordingSeconds);
 
     // Show notification on Android
     await showRecordingNotification();
@@ -518,8 +569,11 @@ export function pauseRecording(recordingStore) {
 
 /**
  * Resume recording
+ * @param {Object} recordingStore - Recording store instance
+ * @param {Object} isAutoSplitting - Ref for auto-splitting state
+ * @param {number|null} maxRecordingSeconds - Maximum recording duration in seconds (minutes limit)
  */
-export function resumeRecording(recordingStore, isAutoSplitting) {
+export function resumeRecording(recordingStore, isAutoSplitting, maxRecordingSeconds = null) {
   if (mediaRecorder && mediaRecorder.state === 'paused') {
     mediaRecorder.resume();
     recordingStore.resumeRecording();
@@ -527,12 +581,43 @@ export function resumeRecording(recordingStore, isAutoSplitting) {
     const currentDuration = recordingStore.duration;
     const resumeTime = Date.now();
 
-    durationInterval = setInterval(() => {
+    // Update limit if provided, otherwise keep existing
+    if (maxRecordingSeconds !== null) {
+      minutesLimitSeconds = maxRecordingSeconds;
+    }
+    // Reset warning flag on resume in case we paused after warning
+    limitWarningShown = false;
+
+    durationInterval = setInterval(async () => {
       if (recordingStore.isRecording) {
         const elapsed = Math.floor((Date.now() - resumeTime) / 1000);
         const newDuration = currentDuration + elapsed;
         recordingStore.updateDuration(newDuration);
         emit('durationChange', newDuration);
+
+        // Check minutes limit (if set)
+        if (minutesLimitSeconds !== null && minutesLimitSeconds > 0) {
+          const remaining = minutesLimitSeconds - newDuration;
+
+          // Warning at 5 minutes (or less) before limit
+          if (remaining <= LIMIT_WARNING_SECONDS && remaining > 0 && !limitWarningShown) {
+            limitWarningShown = true;
+            const minutesRemaining = Math.ceil(remaining / 60);
+            emit('limitWarning', minutesRemaining);
+          }
+
+          // Auto-stop when limit reached
+          if (remaining <= 0) {
+            console.log('Minutes limit reached, auto-stopping recording');
+            emit('limitReached');
+            return;
+          }
+        }
+
+        // Original auto-split logic
+        if (newDuration >= MAX_DURATION_SECONDS && !isAutoSplitting.value) {
+          await performAutoSplit(recordingStore, isAutoSplitting);
+        }
       }
     }, 1000);
 

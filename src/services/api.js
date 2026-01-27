@@ -44,7 +44,17 @@ export const API_ENDPOINTS = {
 
   // User
   userProfile: '/api/user/profile',
-  userSettings: '/api/user/settings'
+  userSettings: '/api/user/settings',
+
+  // Minutes
+  userMinutes: '/api/user/minutes',
+  consumeMinutes: '/api/user/minutes/consume',
+
+  // Sales
+  salesInquiry: '/api/sales/inquiry',
+
+  // Analytics
+  authAnalytics: '/api/analytics/auth-event'
 };
 
 /**
@@ -232,6 +242,66 @@ export const authenticatedRequest = async (endpoint, token, options = {}) => {
       'Authorization': `Bearer ${token}`
     }
   });
+};
+
+/**
+ * Get user's remaining minutes
+ * @param {string} token - Authentication token
+ * @returns {Promise<{freeMinutes: number, bonusMinutes: number, usedMinutes: number, remainingMinutes: number}>}
+ */
+export const getUserMinutes = async (token) => {
+  const response = await authenticatedRequest(API_ENDPOINTS.userMinutes, token);
+  if (!response.ok) {
+    const data = await response.json();
+    throw new Error(data.error || 'Failed to fetch minutes');
+  }
+  return response.json();
+};
+
+/**
+ * Consume minutes after transcription
+ * @param {string} token - Authentication token
+ * @param {string} audioFileId - Audio file ID
+ * @param {number} durationSeconds - Duration in seconds
+ * @returns {Promise<{success: boolean, remainingMinutes: number}>}
+ */
+export const consumeMinutes = async (token, audioFileId, durationSeconds) => {
+  const response = await authenticatedRequest(API_ENDPOINTS.consumeMinutes, token, {
+    method: 'POST',
+    body: JSON.stringify({ audioFileId, durationSeconds })
+  });
+  if (!response.ok) {
+    const data = await response.json();
+    throw new Error(data.error || 'Failed to consume minutes');
+  }
+  return response.json();
+};
+
+/**
+ * Submit a sales inquiry
+ * @param {Object} inquiry - Inquiry data
+ * @param {string} inquiry.email - User email
+ * @param {string} inquiry.organizationName - Organization name
+ * @param {number} inquiry.minutesNeeded - Minutes needed per month
+ * @param {string} [inquiry.message] - Optional message
+ * @param {string} [token] - Optional auth token
+ * @returns {Promise<{success: boolean, inquiryId: string}>}
+ */
+export const submitSalesInquiry = async (inquiry, token = null) => {
+  const options = {
+    method: 'POST',
+    body: JSON.stringify(inquiry)
+  };
+
+  const response = token
+    ? await authenticatedRequest(API_ENDPOINTS.salesInquiry, token, options)
+    : await apiRequest(API_ENDPOINTS.salesInquiry, options);
+
+  if (!response.ok) {
+    const data = await response.json();
+    throw new Error(data.error || 'Failed to submit inquiry');
+  }
+  return response.json();
 };
 
 // Export environments for external use

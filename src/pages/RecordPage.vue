@@ -20,6 +20,30 @@
             <h3>{{ $t('recordNew') }}</h3>
           </div>
 
+          <!-- Minutes Remaining Display -->
+          <div
+            v-if="minutesStore.lastFetchedAt"
+            class="minutes-display"
+          >
+            <q-chip
+              :color="minutesStore.hasMinutesRemaining ? 'primary' : 'negative'"
+              text-color="white"
+              icon="schedule"
+              size="sm"
+            >
+              {{ minutesStore.hasMinutesRemaining ? formattedRemainingMinutes + ' remaining' : 'No minutes remaining' }}
+            </q-chip>
+            <q-btn
+              v-if="!minutesStore.hasMinutesRemaining"
+              flat
+              dense
+              color="primary"
+              label="Get More"
+              size="sm"
+              @click="showContactSalesDialog = true; contactSalesReason = 'no_minutes'"
+            />
+          </div>
+
           <!-- Recording Button -->
           <div class="record-button-section">
             <RecordingControls
@@ -501,16 +525,25 @@
       @confirm="onStorageOptionConfirm"
       @cancel="onStorageOptionCancel"
     />
+
+    <!-- Contact Sales Dialog (minutes limit) -->
+    <ContactSalesDialog
+      v-model="showContactSalesDialog"
+      :reason="contactSalesReason"
+      @submitted="onSalesInquirySubmitted"
+      @close="showContactSalesDialog = false"
+    />
   </q-page>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useQuasar } from 'quasar';
 import { useRecordingStore } from '../stores/recording';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
+import { useMinutesStore } from '../stores/minutes';
 import { useRecorder } from '../composables/useRecorder';
 import { isElectron, isCapacitor } from '../utils/platform';
 import { uploadWithVerification } from '../services/upload';
@@ -521,12 +554,14 @@ import TranscriptionOptions from '../components/TranscriptionOptions.vue';
 import RecordingControls from '../components/RecordingControls.vue';
 import AudioLevelMeter from '../components/AudioLevelMeter.vue';
 import StorageOptionDialog from '../components/StorageOptionDialog.vue';
+import ContactSalesDialog from '../components/ContactSalesDialog.vue';
 
 const router = useRouter();
 const $q = useQuasar();
 const recordingStore = useRecordingStore();
 const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
+const minutesStore = useMinutesStore();
 const authStore = useAuthStore();
 
 const {
@@ -538,6 +573,9 @@ const {
   systemAudioPermissionStatus,
   // P0 Data Loss Fix: Silence detection warning
   silenceWarning,
+  // Minutes limit tracking
+  minutesLimitWarning,
+  minutesLimitReached,
   setSystemAudioEnabled,
   loadMicrophones,
   loadSystemAudioState,
@@ -561,6 +599,8 @@ const showMacPermissionNotice = computed(() => {
 });
 
 const showStorageDialog = ref(false);
+const showContactSalesDialog = ref(false);
+const contactSalesReason = ref('limit_reached');
 const currentStoragePreference = ref('keep');
 const isProcessing = ref(false);
 const isAutoUploading = ref(false);
@@ -570,6 +610,49 @@ const retryAttempt = ref(0);
 const currentFilePath = ref('');
 const currentFileSize = ref(0);
 const transcriptUrl = ref('');
+
+// Watch for minutes limit warning
+watch(minutesLimitWarning, (minutesRemaining) => {
+  if (minutesRemaining !== null && minutesRemaining > 0) {
+    $q.notify({
+      type: 'warning',
+      message: `Only ${minutesRemaining} minute${minutesRemaining > 1 ? 's' : ''} of recording time remaining`,
+      icon: 'schedule',
+      timeout: 5000
+    });
+  }
+});
+
+// Watch for minutes limit reached - auto-stop recording
+watch(minutesLimitReached, async (reached) => {
+  if (reached && (recordingStore.isRecording || recordingStore.isPaused)) {
+    // Show notification
+    $q.notify({
+      type: 'warning',
+      message: 'Recording time limit reached. Saving your recording...',
+      icon: 'schedule',
+      timeout: 3000
+    });
+
+    // Stop the recording
+    await handleStop();
+
+    // Show contact sales dialog after stopping
+    contactSalesReason.value = 'limit_reached';
+    showContactSalesDialog.value = true;
+  }
+});
+
+// Format remaining minutes for display
+const formattedRemainingMinutes = computed(() => {
+  const minutes = minutesStore.remainingMinutes;
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60);
+    const mins = Math.round(minutes % 60);
+    return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+  }
+  return `${Math.round(minutes)}m`;
+});
 
 // Use computed to access store values (for reactivity and persistence across navigation)
 const currentAudioFileId = computed(() => recordingStore.audioFileId);
@@ -736,6 +819,24 @@ const handleStartClick = async () => {
   uploadError.value = null;
   retryAttempt.value = 0;
 
+  // Check if user has minutes remaining
+  if (!minutesStore.hasMinutesRemaining) {
+    // Show contact sales dialog instead of starting recording
+    contactSalesReason.value = 'no_minutes';
+    showContactSalesDialog.value = true;
+    return;
+  }
+
+  // Show low minutes warning if less than 5 minutes
+  if (minutesStore.remainingMinutes < 5) {
+    $q.notify({
+      type: 'warning',
+      message: `You have only ${Math.round(minutesStore.remainingMinutes)} minute${minutesStore.remainingMinutes >= 2 ? 's' : ''} of recording time left`,
+      icon: 'schedule',
+      timeout: 4000
+    });
+  }
+
   // Check if we should show storage dialog
   const savedPreference = historyStore.defaultStoragePreference;
 
@@ -745,6 +846,11 @@ const handleStartClick = async () => {
   } else {
     showStorageDialog.value = true;
   }
+};
+
+const onSalesInquirySubmitted = () => {
+  // Inquiry submitted successfully - dialog will close automatically
+  console.log('Sales inquiry submitted');
 };
 
 const onStorageOptionConfirm = async ({ storagePreference }) => {
@@ -950,6 +1056,14 @@ const startAutoUpload = async () => {
 
       // Reset session after successful upload
       transcriptionStore.resetSession();
+
+      // Refresh minutes balance (server will deduct after transcription)
+      // Use a slight delay to allow server to process
+      setTimeout(() => {
+        minutesStore.fetchMinutes(authStore.token, true).catch(err => {
+          console.warn('Failed to refresh minutes after upload:', err);
+        });
+      }, 5000);
 
       $q.notify({
         type: 'positive',
@@ -1202,6 +1316,17 @@ const removeSessionWord = (word) => {
     margin: 0;
     color: #1e293b;
   }
+}
+
+.minutes-display {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  background: #f8fafc;
+  border-radius: 10px;
 }
 
 .record-button-section {
