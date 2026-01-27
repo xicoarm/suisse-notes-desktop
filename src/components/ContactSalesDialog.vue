@@ -27,26 +27,26 @@
         >
           <q-input
             v-model="form.organizationName"
-            label="Organization Name"
+            :label="$t('organizationName')"
             outlined
             dense
-            :rules="[val => !!val || 'Organization name is required']"
+            :rules="[val => !!val || $t('organizationName')]"
             class="q-mb-md"
           />
 
           <q-input
             v-model.number="form.minutesNeeded"
-            label="Minutes needed per month"
+            :label="$t('minutesNeededPerMonth')"
             type="number"
             outlined
             dense
-            :rules="[val => val > 0 || 'Please enter a valid number']"
+            :rules="[val => val > 0 || $t('minutesNeededPerMonth')]"
             class="q-mb-md"
           />
 
           <q-input
             v-model="form.message"
-            label="Message (optional)"
+            :label="$t('messageOptional')"
             type="textarea"
             outlined
             dense
@@ -61,7 +61,7 @@
             size="xs"
             color="primary"
           />
-          <span>Our team will contact you at <strong>{{ userEmail }}</strong> within 24 hours.</span>
+          <span v-html="$t('contactInfoText', { email: `<strong>${userEmail}</strong>` })" />
         </div>
       </q-card-section>
 
@@ -71,13 +71,13 @@
       >
         <q-btn
           flat
-          label="Maybe Later"
+          :label="$t('maybeLater')"
           color="grey-7"
           @click="onClose"
         />
         <q-btn
           unelevated
-          label="Contact Sales"
+          :label="$t('contactSalesBtn')"
           class="gradient-btn"
           :loading="submitting"
           :disable="!isFormValid"
@@ -91,6 +91,7 @@
 <script>
 import { ref, computed, watch } from 'vue';
 import { useQuasar } from 'quasar';
+import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '../stores/auth';
 import { submitSalesInquiry } from '../services/api';
 
@@ -113,6 +114,7 @@ export default {
 
   setup(props, { emit }) {
     const $q = useQuasar();
+    const { t } = useI18n();
     const authStore = useAuthStore();
 
     const dialogVisible = ref(props.modelValue);
@@ -129,22 +131,22 @@ export default {
     const title = computed(() => {
       switch (props.reason) {
         case 'no_minutes':
-          return 'No Minutes Remaining';
+          return t('noMinutesRemaining');
         case 'request_more':
-          return 'Request More Minutes';
+          return t('getMoreMinutes');
         default:
-          return "You've Used All Your Free Minutes";
+          return t('contactSalesTitle');
       }
     });
 
     const subtitle = computed(() => {
       switch (props.reason) {
         case 'no_minutes':
-          return 'You need more minutes to start recording. Contact our sales team to continue.';
+          return t('contactSalesNoMinutes');
         case 'request_more':
-          return 'Fill out the form below and our team will get back to you.';
+          return t('contactSalesRequestMore');
         default:
-          return 'Your recording has been saved. Contact our sales team to get more transcription minutes.';
+          return t('contactSalesLimitReached');
       }
     });
 
@@ -179,7 +181,7 @@ export default {
 
         $q.notify({
           type: 'positive',
-          message: 'Your inquiry has been submitted. We will contact you soon.',
+          message: t('inquirySubmitted'),
           timeout: 5000
         });
 

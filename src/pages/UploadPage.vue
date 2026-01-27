@@ -461,6 +461,13 @@
         </div>
       </div>
     </div>
+
+    <!-- Contact Sales Dialog (minutes limit) -->
+    <ContactSalesDialog
+      v-model="showContactSalesDialog"
+      :reason="contactSalesReason"
+      @close="showContactSalesDialog = false"
+    />
   </q-page>
 </template>
 
@@ -468,9 +475,11 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useQuasar } from 'quasar';
+import { useI18n } from 'vue-i18n';
 import { useRecordingStore } from '../stores/recording';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
+import { useMinutesStore } from '../stores/minutes';
 import { useAuthStore } from '../stores/auth';
 import { isElectron, isCapacitor, isMobile as isMobilePlatform } from '../utils/platform';
 import { pickAudioFile } from '../services/filePicker';
@@ -478,6 +487,7 @@ import { uploadWithVerification, cancelUpload as cancelMobileUpload } from '../s
 import { getApiUrlSync } from '../services/api';
 import ModeTabSwitcher from '../components/ModeTabSwitcher.vue';
 import TranscriptionOptions from '../components/TranscriptionOptions.vue';
+import ContactSalesDialog from '../components/ContactSalesDialog.vue';
 
 // Make isMobile reactive to handle Capacitor initialization timing
 const isMobileState = ref(isMobilePlatform());
@@ -514,10 +524,16 @@ const handleCardClick = (event) => {
 
 const router = useRouter();
 const $q = useQuasar();
+const { t } = useI18n();
 const recordingStore = useRecordingStore();
 const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
+const minutesStore = useMinutesStore();
 const authStore = useAuthStore();
+
+// Contact sales dialog state
+const showContactSalesDialog = ref(false);
+const contactSalesReason = ref('no_minutes');
 
 // State
 const isDragOver = ref(false);
@@ -729,6 +745,33 @@ const clearFileSelection = () => {
 const confirmAndStartUpload = async () => {
   if (!hasSelectedFile.value) return;
 
+  // Check if user has minutes remaining
+  if (!minutesStore.hasMinutesRemaining) {
+    // Show contact sales dialog
+    contactSalesReason.value = 'no_minutes';
+    showContactSalesDialog.value = true;
+    return;
+  }
+
+  // If we have duration info, check if user has enough minutes
+  if (currentDuration.value > 0) {
+    const durationMinutes = currentDuration.value / 60;
+    if (durationMinutes > minutesStore.remainingMinutes) {
+      // File is longer than remaining minutes
+      $q.notify({
+        type: 'warning',
+        message: t('fileTooLong', {
+          duration: Math.ceil(durationMinutes),
+          remaining: Math.round(minutesStore.remainingMinutes)
+        }),
+        timeout: 5000
+      });
+      contactSalesReason.value = 'no_minutes';
+      showContactSalesDialog.value = true;
+      return;
+    }
+  }
+
   if (selectedFile.value) {
     // Mobile upload
     await startMobileUpload(selectedFile.value, currentFileSize.value, currentFilename.value);
@@ -820,6 +863,13 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
       // Reset session after successful upload
       transcriptionStore.resetSession();
 
+      // Refresh minutes balance (server will deduct after transcription)
+      setTimeout(() => {
+        minutesStore.fetchMinutes(authStore.token, true).catch(err => {
+          console.warn('Failed to refresh minutes after upload:', err);
+        });
+      }, 5000);
+
       $q.notify({
         type: 'positive',
         message: 'File uploaded successfully'
@@ -902,6 +952,13 @@ const startMobileUpload = async (file, fileSize, filename) => {
 
       // Reset session after successful upload
       transcriptionStore.resetSession();
+
+      // Refresh minutes balance (server will deduct after transcription)
+      setTimeout(() => {
+        minutesStore.fetchMinutes(authStore.token, true).catch(err => {
+          console.warn('Failed to refresh minutes after upload:', err);
+        });
+      }, 5000);
 
       $q.notify({
         type: 'positive',

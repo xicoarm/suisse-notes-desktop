@@ -89,6 +89,21 @@
         <!-- Right Section: Language + User Menu -->
         <div class="header-right">
           <template v-if="authStore.isAuthenticated">
+            <!-- Trial Credits / Minutes Display -->
+            <div
+              v-if="!minutesStore.loading"
+              class="minutes-chip"
+              :class="{ 'low-minutes': minutesStore.remainingMinutes <= 10, 'no-minutes': minutesStore.remainingMinutes <= 0 }"
+              @click="goTo('/record')"
+            >
+              <q-icon
+                name="schedule"
+                size="14px"
+              />
+              <span class="minutes-label">{{ $t('trialCredits') }}:</span>
+              <span class="minutes-value">{{ formattedRemainingTime }}</span>
+            </div>
+
             <!-- Language Switcher - Compact Dropdown -->
             <q-btn-dropdown
               flat
@@ -237,6 +252,20 @@
       <span>{{ recordingStore.formattedDuration }}</span>
     </div>
 
+    <!-- Mobile Minutes Indicator (floating, only when not recording) -->
+    <div
+      v-if="isMobile() && authStore.isAuthenticated && !recordingStore.isRecording && !recordingStore.isPaused && !minutesStore.loading"
+      class="mobile-minutes-indicator"
+      :class="{ 'low-minutes': minutesStore.remainingMinutes <= 10, 'no-minutes': minutesStore.remainingMinutes <= 0 }"
+      @click="goTo('/record')"
+    >
+      <q-icon
+        name="schedule"
+        size="14px"
+      />
+      <span>{{ $t('trialCredits') }}: {{ formattedRemainingTime }}</span>
+    </div>
+
     <q-page-container>
       <router-view />
     </q-page-container>
@@ -300,18 +329,37 @@ import { useI18n } from 'vue-i18n';
 import { useQuasar } from 'quasar';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingStore } from '../stores/recording';
+import { useMinutesStore } from '../stores/minutes';
 import { useRouter, useRoute } from 'vue-router';
 import { isElectron, isMobile } from '../utils/platform';
 
-const { locale } = useI18n();
+const { locale, t } = useI18n();
 const $q = useQuasar();
 const authStore = useAuthStore();
 const recordingStore = useRecordingStore();
+const minutesStore = useMinutesStore();
 const router = useRouter();
 const route = useRoute();
 
 const currentTab = ref('record');
 const isMaximized = ref(false);
+
+// Formatted remaining time for display
+const formattedRemainingTime = computed(() => {
+  const totalMinutes = minutesStore.remainingMinutes;
+
+  if (totalMinutes <= 0) {
+    return t('noMinutesRemaining');
+  }
+
+  if (totalMinutes >= 60) {
+    const hours = Math.floor(totalMinutes / 60);
+    const mins = Math.round(totalMinutes % 60);
+    return t('hoursRemaining', { hours, minutes: mins });
+  }
+
+  return t('minutesRemaining', { minutes: Math.round(totalMinutes) });
+});
 
 // Language switcher
 const languages = [
@@ -628,6 +676,54 @@ onUnmounted(() => {
   }
 }
 
+// Minutes Chip
+.minutes-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.15);
+  border-radius: 8px;
+  font-size: 12px;
+  color: #6366F1;
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  &:hover {
+    background: rgba(99, 102, 241, 0.12);
+  }
+
+  .minutes-label {
+    font-weight: 500;
+    color: #64748b;
+  }
+
+  .minutes-value {
+    font-weight: 600;
+  }
+
+  &.low-minutes {
+    background: rgba(245, 158, 11, 0.1);
+    border-color: rgba(245, 158, 11, 0.3);
+    color: #d97706;
+
+    .minutes-label {
+      color: #92400e;
+    }
+  }
+
+  &.no-minutes {
+    background: rgba(239, 68, 68, 0.1);
+    border-color: rgba(239, 68, 68, 0.3);
+    color: #dc2626;
+
+    .minutes-label {
+      color: #991b1b;
+    }
+  }
+}
+
 // User Menu
 .user-menu {
   padding: 0;
@@ -815,6 +911,14 @@ onUnmounted(() => {
     padding: 4px 8px;
     font-size: 11px;
   }
+
+  .minutes-chip {
+    padding: 4px 8px;
+
+    .minutes-label {
+      display: none;
+    }
+  }
 }
 
 // Mobile Recording Indicator (floating)
@@ -847,6 +951,41 @@ onUnmounted(() => {
       background: #fcd34d;
       animation: none;
     }
+  }
+}
+
+// Mobile Minutes Indicator
+.mobile-minutes-indicator {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 8px) + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #6366F1;
+  cursor: pointer;
+  z-index: 9998;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+
+  &.low-minutes {
+    background: rgba(255, 251, 235, 0.95);
+    border-color: rgba(245, 158, 11, 0.3);
+    color: #d97706;
+  }
+
+  &.no-minutes {
+    background: rgba(254, 242, 242, 0.95);
+    border-color: rgba(239, 68, 68, 0.3);
+    color: #dc2626;
   }
 }
 

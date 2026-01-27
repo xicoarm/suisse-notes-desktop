@@ -31,14 +31,14 @@
               icon="schedule"
               size="sm"
             >
-              {{ minutesStore.hasMinutesRemaining ? formattedRemainingMinutes + ' remaining' : 'No minutes remaining' }}
+              {{ minutesStore.hasMinutesRemaining ? $t('trialCredits') + ': ' + formattedRemainingMinutes : $t('noMinutesRemaining') }}
             </q-chip>
             <q-btn
               v-if="!minutesStore.hasMinutesRemaining"
               flat
               dense
               color="primary"
-              label="Get More"
+              :label="$t('getMoreMinutes')"
               size="sm"
               @click="showContactSalesDialog = true; contactSalesReason = 'no_minutes'"
             />
@@ -540,6 +540,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useQuasar } from 'quasar';
+import { useI18n } from 'vue-i18n';
 import { useRecordingStore } from '../stores/recording';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
@@ -558,6 +559,7 @@ import ContactSalesDialog from '../components/ContactSalesDialog.vue';
 
 const router = useRouter();
 const $q = useQuasar();
+const { t } = useI18n();
 const recordingStore = useRecordingStore();
 const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
@@ -616,7 +618,7 @@ watch(minutesLimitWarning, (minutesRemaining) => {
   if (minutesRemaining !== null && minutesRemaining > 0) {
     $q.notify({
       type: 'warning',
-      message: `Only ${minutesRemaining} minute${minutesRemaining > 1 ? 's' : ''} of recording time remaining`,
+      message: t('minutesLimitWarning', { minutes: minutesRemaining }),
       icon: 'schedule',
       timeout: 5000
     });
@@ -629,7 +631,7 @@ watch(minutesLimitReached, async (reached) => {
     // Show notification
     $q.notify({
       type: 'warning',
-      message: 'Recording time limit reached. Saving your recording...',
+      message: t('minutesLimitReached'),
       icon: 'schedule',
       timeout: 3000
     });
@@ -649,9 +651,9 @@ const formattedRemainingMinutes = computed(() => {
   if (minutes >= 60) {
     const hours = Math.floor(minutes / 60);
     const mins = Math.round(minutes % 60);
-    return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+    return t('hoursRemaining', { hours, minutes: mins });
   }
-  return `${Math.round(minutes)}m`;
+  return t('minutesRemaining', { minutes: Math.round(minutes) });
 });
 
 // Use computed to access store values (for reactivity and persistence across navigation)
@@ -831,7 +833,7 @@ const handleStartClick = async () => {
   if (minutesStore.remainingMinutes < 5) {
     $q.notify({
       type: 'warning',
-      message: `You have only ${Math.round(minutesStore.remainingMinutes)} minute${minutesStore.remainingMinutes >= 2 ? 's' : ''} of recording time left`,
+      message: t('minutesLimitWarning', { minutes: Math.round(minutesStore.remainingMinutes) }),
       icon: 'schedule',
       timeout: 4000
     });

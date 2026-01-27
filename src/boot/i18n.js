@@ -162,7 +162,30 @@ const messages = {
     alreadyHaveAccount: 'Already have an account?',
     fullName: 'Full Name',
     nameRequired: 'Name is required',
-    passwordMinLength: 'Password must be at least 8 characters'
+    passwordMinLength: 'Password must be at least 8 characters',
+
+    // Minutes / Trial Credits
+    trialCredits: 'Trial Credits',
+    minutesRemaining: '{minutes} remaining',
+    hoursRemaining: '{hours}h {minutes}m remaining',
+    noMinutesRemaining: 'No credits remaining',
+    getMoreMinutes: 'Get More',
+    minutesLimitWarning: 'Only {minutes} minute(s) of recording time left',
+    minutesLimitReached: 'Recording time limit reached. Saving your recording...',
+    insufficientMinutes: 'Insufficient credits for this file',
+    fileTooLong: 'This file is {duration} min, but you only have {remaining} min remaining',
+    contactSalesTitle: 'Trial Credits Used',
+    contactSalesSubtitle: 'Contact our sales team to continue using Suisse Notes',
+    contactSalesNoMinutes: 'You need more credits to start recording. Contact our sales team to continue.',
+    contactSalesLimitReached: 'Your recording has been saved. Contact our sales team to get more transcription credits.',
+    contactSalesRequestMore: 'Fill out the form below and our team will get back to you.',
+    organizationName: 'Organization Name',
+    minutesNeededPerMonth: 'Minutes needed per month',
+    messageOptional: 'Message (optional)',
+    contactSalesBtn: 'Contact Sales',
+    maybeLater: 'Maybe Later',
+    inquirySubmitted: 'Your inquiry has been submitted. We will contact you soon.',
+    contactInfoText: 'Our team will contact you at {email} within 24 hours.'
   },
   de: {
     // Record Page
@@ -325,7 +348,30 @@ const messages = {
     alreadyHaveAccount: 'Bereits ein Konto?',
     fullName: 'Vollständiger Name',
     nameRequired: 'Name ist erforderlich',
-    passwordMinLength: 'Passwort muss mindestens 8 Zeichen lang sein'
+    passwordMinLength: 'Passwort muss mindestens 8 Zeichen lang sein',
+
+    // Minutes / Trial Credits
+    trialCredits: 'Testguthaben',
+    minutesRemaining: '{minutes} verbleibend',
+    hoursRemaining: '{hours} Std. {minutes} Min. verbleibend',
+    noMinutesRemaining: 'Kein Guthaben mehr',
+    getMoreMinutes: 'Mehr erhalten',
+    minutesLimitWarning: 'Nur noch {minutes} Minute(n) Aufnahmezeit',
+    minutesLimitReached: 'Zeitlimit erreicht. Aufnahme wird gespeichert...',
+    insufficientMinutes: 'Unzureichendes Guthaben für diese Datei',
+    fileTooLong: 'Diese Datei ist {duration} Min., aber Sie haben nur noch {remaining} Min.',
+    contactSalesTitle: 'Testguthaben aufgebraucht',
+    contactSalesSubtitle: 'Kontaktieren Sie unser Vertriebsteam, um Suisse Notes weiter zu nutzen',
+    contactSalesNoMinutes: 'Sie benötigen mehr Guthaben, um die Aufnahme zu starten. Kontaktieren Sie unser Vertriebsteam.',
+    contactSalesLimitReached: 'Ihre Aufnahme wurde gespeichert. Kontaktieren Sie unser Vertriebsteam für mehr Transkriptionsguthaben.',
+    contactSalesRequestMore: 'Füllen Sie das Formular aus und unser Team wird sich bei Ihnen melden.',
+    organizationName: 'Firmenname',
+    minutesNeededPerMonth: 'Benötigte Minuten pro Monat',
+    messageOptional: 'Nachricht (optional)',
+    contactSalesBtn: 'Vertrieb kontaktieren',
+    maybeLater: 'Vielleicht später',
+    inquirySubmitted: 'Ihre Anfrage wurde übermittelt. Wir werden Sie in Kürze kontaktieren.',
+    contactInfoText: 'Unser Team wird Sie unter {email} innerhalb von 24 Stunden kontaktieren.'
   },
   fr: {
     // Record Page
@@ -488,7 +534,30 @@ const messages = {
     alreadyHaveAccount: 'Vous avez déjà un compte?',
     fullName: 'Nom complet',
     nameRequired: 'Le nom est requis',
-    passwordMinLength: 'Le mot de passe doit contenir au moins 8 caractères'
+    passwordMinLength: 'Le mot de passe doit contenir au moins 8 caractères',
+
+    // Minutes / Trial Credits
+    trialCredits: 'Crédits d\'essai',
+    minutesRemaining: '{minutes} restantes',
+    hoursRemaining: '{hours}h {minutes}m restantes',
+    noMinutesRemaining: 'Plus de crédits',
+    getMoreMinutes: 'Obtenir plus',
+    minutesLimitWarning: 'Seulement {minutes} minute(s) d\'enregistrement restantes',
+    minutesLimitReached: 'Limite de temps atteinte. Sauvegarde en cours...',
+    insufficientMinutes: 'Crédits insuffisants pour ce fichier',
+    fileTooLong: 'Ce fichier fait {duration} min, mais il vous reste seulement {remaining} min',
+    contactSalesTitle: 'Crédits d\'essai épuisés',
+    contactSalesSubtitle: 'Contactez notre équipe commerciale pour continuer à utiliser Suisse Notes',
+    contactSalesNoMinutes: 'Vous avez besoin de plus de crédits pour démarrer l\'enregistrement. Contactez notre équipe commerciale.',
+    contactSalesLimitReached: 'Votre enregistrement a été sauvegardé. Contactez notre équipe commerciale pour plus de crédits.',
+    contactSalesRequestMore: 'Remplissez le formulaire ci-dessous et notre équipe vous recontactera.',
+    organizationName: 'Nom de l\'organisation',
+    minutesNeededPerMonth: 'Minutes nécessaires par mois',
+    messageOptional: 'Message (optionnel)',
+    contactSalesBtn: 'Contacter les ventes',
+    maybeLater: 'Plus tard',
+    inquirySubmitted: 'Votre demande a été soumise. Nous vous contacterons bientôt.',
+    contactInfoText: 'Notre équipe vous contactera à {email} dans les 24 heures.'
   },
   it: {
     // Record Page
@@ -651,7 +720,30 @@ const messages = {
     alreadyHaveAccount: 'Hai già un account?',
     fullName: 'Nome completo',
     nameRequired: 'Il nome è obbligatorio',
-    passwordMinLength: 'La password deve contenere almeno 8 caratteri'
+    passwordMinLength: 'La password deve contenere almeno 8 caratteri',
+
+    // Minutes / Trial Credits
+    trialCredits: 'Crediti di prova',
+    minutesRemaining: '{minutes} rimanenti',
+    hoursRemaining: '{hours}h {minutes}m rimanenti',
+    noMinutesRemaining: 'Nessun credito rimanente',
+    getMoreMinutes: 'Ottieni di più',
+    minutesLimitWarning: 'Solo {minutes} minuto/i di registrazione rimanenti',
+    minutesLimitReached: 'Limite di tempo raggiunto. Salvataggio in corso...',
+    insufficientMinutes: 'Crediti insufficienti per questo file',
+    fileTooLong: 'Questo file è di {duration} min, ma hai solo {remaining} min rimanenti',
+    contactSalesTitle: 'Crediti di prova esauriti',
+    contactSalesSubtitle: 'Contatta il nostro team vendite per continuare a utilizzare Suisse Notes',
+    contactSalesNoMinutes: 'Hai bisogno di più crediti per avviare la registrazione. Contatta il nostro team vendite.',
+    contactSalesLimitReached: 'La tua registrazione è stata salvata. Contatta il nostro team vendite per più crediti.',
+    contactSalesRequestMore: 'Compila il modulo qui sotto e il nostro team ti ricontatterà.',
+    organizationName: 'Nome dell\'organizzazione',
+    minutesNeededPerMonth: 'Minuti necessari al mese',
+    messageOptional: 'Messaggio (opzionale)',
+    contactSalesBtn: 'Contatta le vendite',
+    maybeLater: 'Forse dopo',
+    inquirySubmitted: 'La tua richiesta è stata inviata. Ti contatteremo presto.',
+    contactInfoText: 'Il nostro team ti contatterà a {email} entro 24 ore.'
   }
 };
 
