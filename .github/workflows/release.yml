@@ -62,7 +62,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false
           ref: main
           fetch-depth: 0
 
@@ -74,6 +74,19 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
+
+      - name: Download FFmpeg for Windows
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path resources/ffmpeg
+          # Download ffmpeg from gyan.dev (reliable Windows builds)
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg-temp -Force
+          # Find and copy ffmpeg.exe and ffprobe.exe
+          $ffmpegDir = Get-ChildItem -Path ffmpeg-temp -Directory | Select-Object -First 1
+          Copy-Item "$($ffmpegDir.FullName)/bin/ffmpeg.exe" -Destination resources/ffmpeg/
+          Copy-Item "$($ffmpegDir.FullName)/bin/ffprobe.exe" -Destination resources/ffmpeg/
+          Remove-Item -Recurse -Force ffmpeg-temp, ffmpeg.zip
 
       - name: Install dependencies
         run: npm ci
@@ -107,7 +120,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false
           ref: main
           fetch-depth: 0
 
