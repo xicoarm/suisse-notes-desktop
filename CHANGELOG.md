@@ -1,3 +1,10 @@
+## [3.5.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.5.0...v3.5.1) (2026-01-27)
+
+
+### Bug Fixes
+
+* download ffmpeg at build time instead of using LFS ([edaf9ae](https://github.com/xicoarm/suisse-notes-desktop/commit/edaf9ae9f74ea987f2a9e37027e4dfc05b459cb9))
+
 # [3.5.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.4.14...v3.5.0) (2026-01-27)
 
 
