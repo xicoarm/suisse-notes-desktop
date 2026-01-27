@@ -20,30 +20,6 @@
             <h3>{{ $t('recordNew') }}</h3>
           </div>
 
-          <!-- Minutes Remaining Display -->
-          <div
-            v-if="minutesStore.lastFetchedAt"
-            class="minutes-display"
-          >
-            <q-chip
-              :color="minutesStore.hasMinutesRemaining ? 'primary' : 'negative'"
-              text-color="white"
-              icon="schedule"
-              size="sm"
-            >
-              {{ minutesStore.hasMinutesRemaining ? $t('trialCredits') + ': ' + formattedRemainingMinutes : $t('noMinutesRemaining') }}
-            </q-chip>
-            <q-btn
-              v-if="!minutesStore.hasMinutesRemaining"
-              flat
-              dense
-              color="primary"
-              :label="$t('getMoreMinutes')"
-              size="sm"
-              @click="showContactSalesDialog = true; contactSalesReason = 'no_minutes'"
-            />
-          </div>
-
           <!-- Recording Button -->
           <div class="record-button-section">
             <RecordingControls
@@ -643,17 +619,6 @@ watch(minutesLimitReached, async (reached) => {
     contactSalesReason.value = 'limit_reached';
     showContactSalesDialog.value = true;
   }
-});
-
-// Format remaining minutes for display
-const formattedRemainingMinutes = computed(() => {
-  const minutes = minutesStore.remainingMinutes;
-  if (minutes >= 60) {
-    const hours = Math.floor(minutes / 60);
-    const mins = Math.round(minutes % 60);
-    return t('hoursRemaining', { hours, minutes: mins });
-  }
-  return t('minutesRemaining', { minutes: Math.round(minutes) });
 });
 
 // Use computed to access store values (for reactivity and persistence across navigation)
@@ -1320,16 +1285,6 @@ const removeSessionWord = (word) => {
   }
 }
 
-.minutes-display {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  margin-bottom: 20px;
-  padding: 12px 16px;
-  background: #f8fafc;
-  border-radius: 10px;
-}
 
 .record-button-section {
   text-align: center;

@@ -100,7 +100,6 @@
                 name="schedule"
                 size="14px"
               />
-              <span class="minutes-label">{{ $t('trialCredits') }}:</span>
               <span class="minutes-value">{{ formattedRemainingTime }}</span>
             </div>
 
@@ -263,7 +262,7 @@
         name="schedule"
         size="14px"
       />
-      <span>{{ $t('trialCredits') }}: {{ formattedRemainingTime }}</span>
+      <span>{{ formattedRemainingTime }}</span>
     </div>
 
     <q-page-container>
@@ -344,21 +343,15 @@ const route = useRoute();
 const currentTab = ref('record');
 const isMaximized = ref(false);
 
-// Formatted remaining time for display
+// Formatted remaining time for display - simple "X Min." format
 const formattedRemainingTime = computed(() => {
   const totalMinutes = minutesStore.remainingMinutes;
 
   if (totalMinutes <= 0) {
-    return t('noMinutesRemaining');
+    return '0 Min.';
   }
 
-  if (totalMinutes >= 60) {
-    const hours = Math.floor(totalMinutes / 60);
-    const mins = Math.round(totalMinutes % 60);
-    return t('hoursRemaining', { hours, minutes: mins });
-  }
-
-  return t('minutesRemaining', { minutes: Math.round(totalMinutes) });
+  return `${Math.round(totalMinutes)} Min.`;
 });
 
 // Language switcher
@@ -694,11 +687,6 @@ onUnmounted(() => {
     background: rgba(99, 102, 241, 0.12);
   }
 
-  .minutes-label {
-    font-weight: 500;
-    color: #64748b;
-  }
-
   .minutes-value {
     font-weight: 600;
   }
@@ -707,20 +695,12 @@ onUnmounted(() => {
     background: rgba(245, 158, 11, 0.1);
     border-color: rgba(245, 158, 11, 0.3);
     color: #d97706;
-
-    .minutes-label {
-      color: #92400e;
-    }
   }
 
   &.no-minutes {
     background: rgba(239, 68, 68, 0.1);
     border-color: rgba(239, 68, 68, 0.3);
     color: #dc2626;
-
-    .minutes-label {
-      color: #991b1b;
-    }
   }
 }
 
@@ -914,10 +894,6 @@ onUnmounted(() => {
 
   .minutes-chip {
     padding: 4px 8px;
-
-    .minutes-label {
-      display: none;
-    }
   }
 }
 
