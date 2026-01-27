@@ -9,6 +9,7 @@ const { Upload } = require('tus-js-client');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
 const Sentry = require('@sentry/electron/main');
+const { machineIdSync } = require('node-machine-id');
 
 // === Log Rotation Configuration ===
 // Prevent infinite log file growth
@@ -247,17 +248,40 @@ async function recoverOrphanedRecordings() {
           log.info(`Successfully recovered recording: ${dir} (${result.fileSizeMb}MB)`);
 
           // Add to history with "recovered" status
-          // We'll use a default userId if we can't determine the original user
+          // Try to read userId from metadata.json first, then fall back to activeSession or 'unknown'
           const recordings = historyStore.get('recordings', []);
           const existingRecording = recordings.find(r => r.id === dir);
 
           if (!existingRecording) {
+            // Try to read metadata.json to get userId and other info
+            let metadataUserId = null;
+            let metadataStartedAt = null;
+            let metadataDuration = 0;
+            const metadataPath = path.join(dirPath, 'metadata.json');
+
+            if (fs.existsSync(metadataPath)) {
+              try {
+                const metadataContent = fs.readFileSync(metadataPath, 'utf8');
+                const metadata = JSON.parse(metadataContent);
+                metadataUserId = metadata.userId;
+                metadataStartedAt = metadata.startedAt;
+                metadataDuration = metadata.duration || 0;
+                log.info(`Read metadata.json for ${dir}: userId=${metadataUserId}, startedAt=${metadataStartedAt}`);
+              } catch (e) {
+                log.warn(`Could not read metadata.json for ${dir}:`, e.message);
+              }
+            }
+
+            // Determine userId: prefer metadata, then activeSession, then 'unknown'
+            const userId = metadataUserId || activeSession?.userId || 'unknown';
+            const createdAt = metadataStartedAt || activeSession?.startedAt || new Date().toISOString();
+
             // Create a new history entry for the recovered recording
             const recoveredEntry = {
               id: dir,
-              userId: activeSession?.userId || 'unknown',
-              createdAt: activeSession?.startedAt || new Date().toISOString(),
-              duration: 0, // Unknown duration
+              userId: userId,
+              createdAt: createdAt,
+              duration: metadataDuration, // Use duration from metadata if available
               fileSize: parseFloat(result.fileSizeMb) * 1024 * 1024,
               filePath: result.outputPath,
               uploadStatus: 'pending',
@@ -266,7 +290,7 @@ async function recoverOrphanedRecordings() {
             };
             recordings.push(recoveredEntry);
             historyStore.set('recordings', recordings);
-            log.info(`Added recovered recording to history: ${dir}`);
+            log.info(`Added recovered recording to history: ${dir} (userId: ${userId})`);
           }
         } else {
           log.warn(`Could not recover recording ${dir}: ${result.error}`);
@@ -1074,13 +1098,22 @@ ipcMain.handle('config:get', async () => {
 // --- Authentication ---
 
 // Helper: Get unique device ID (for DesktopAppUser tracking)
+// Uses hardware-based machine ID that persists across reinstalls
 function getDeviceId() {
-  let deviceId = configStore.get('deviceId');
-  if (!deviceId) {
-    deviceId = `device_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    configStore.set('deviceId', deviceId);
+  try {
+    // Get hardware-based machine ID (persists across reinstalls)
+    const hardwareId = machineIdSync();
+    return `hw_${hardwareId}`;
+  } catch (error) {
+    log.warn('Failed to get hardware machine ID, falling back to stored ID:', error.message);
+    // Fallback to stored ID if hardware ID fails
+    let deviceId = configStore.get('deviceId');
+    if (!deviceId) {
+      deviceId = `device_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      configStore.set('deviceId', deviceId);
+    }
+    return deviceId;
   }
-  return deviceId;
 }
 
 // Authentication - Production only (no demo mode)
@@ -1493,11 +1526,12 @@ ipcMain.handle('recording:loadMetadata', async (event, recordId) => {
 });
 
 // 1. Create recording session (creates directories)
-ipcMain.handle('recording:createSession', async (event, recordId, ext) => {
+ipcMain.handle('recording:createSession', async (event, recordId, ext, userId) => {
   try {
     // Validate inputs to prevent path traversal attacks
     const validRecordId = validateRecordId(recordId);
     const validExt = validateExtension(ext);
+    const validUserId = userId ? validateUserId(userId) : null;
 
     // Check disk space before creating session
     const recordingsPath = getRecordingsPath();
@@ -1518,6 +1552,20 @@ ipcMain.handle('recording:createSession', async (event, recordId, ext) => {
       fs.mkdirSync(chunksPath, { recursive: true });
     }
 
+    // Write metadata.json for recording persistence and multi-account handling
+    const metadataPath = path.join(recordPath, 'metadata.json');
+    const metadata = {
+      recordId: validRecordId,
+      userId: validUserId,
+      startedAt: new Date().toISOString(),
+      version: 1
+    };
+    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+    log.info('Recording metadata written:', validRecordId, 'userId:', validUserId);
+
+    // Initialize active recording state with userId
+    updateActiveRecording(validRecordId, 0, validUserId);
+
     console.log('Recording session created:', recordId);
     return { success: true, path: chunksPath };
   } catch (error) {
@@ -1527,12 +1575,13 @@ ipcMain.handle('recording:createSession', async (event, recordId, ext) => {
 });
 
 // 2. Save recording chunk - SYNCHRONOUS write (WhisperTranscribe pattern)
-ipcMain.handle('recording:saveChunk', async (event, recordId, chunkData, chunkIndex, ext) => {
+ipcMain.handle('recording:saveChunk', async (event, recordId, chunkData, chunkIndex, ext, userId) => {
   try {
     // Validate inputs to prevent path traversal and injection attacks
     const validRecordId = validateRecordId(recordId);
     const validExt = validateExtension(ext);
     const validChunkIndex = validateChunkIndex(chunkIndex);
+    const validUserId = userId ? validateUserId(userId) : null;
 
     const recordPath = getRecordingPath(validRecordId);
     const chunksPath = getChunksPath(validRecordId);
@@ -1552,8 +1601,8 @@ ipcMain.handle('recording:saveChunk', async (event, recordId, chunkData, chunkIn
     // CRITICAL: Use SYNCHRONOUS write to ensure chunk is saved before returning
     fs.writeFileSync(chunkPath, buffer);
 
-    // Update active recording state for crash recovery
-    updateActiveRecording(validRecordId, validChunkIndex + 1);
+    // Update active recording state for crash recovery (with userId)
+    updateActiveRecording(validRecordId, validChunkIndex + 1, validUserId);
 
     console.log(`Chunk ${chunkIndex} saved (${buffer.length} bytes):`, chunkPath);
     return { success: true, chunkIndex, chunkPath };
@@ -1667,6 +1716,37 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
   }
 });
 
+// Helper function to update metadata.json on recording completion
+function updateRecordingMetadataOnCompletion(recordId, duration, hasAudioFile) {
+  try {
+    const recordPath = getRecordingPath(recordId);
+    const metadataPath = path.join(recordPath, 'metadata.json');
+
+    let metadata = {};
+    // Read existing metadata if it exists
+    if (fs.existsSync(metadataPath)) {
+      try {
+        const content = fs.readFileSync(metadataPath, 'utf8');
+        metadata = JSON.parse(content);
+      } catch (e) {
+        log.warn('Could not parse existing metadata, creating new:', e.message);
+      }
+    }
+
+    // Update with completion info
+    metadata.completedAt = new Date().toISOString();
+    metadata.duration = duration;
+    metadata.hasAudioFile = hasAudioFile;
+    metadata.version = metadata.version || 1;
+
+    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+    log.info('Recording metadata updated on completion:', recordId);
+  } catch (error) {
+    log.error('Failed to update recording metadata on completion:', error);
+    // Don't throw - this is non-critical
+  }
+}
+
 // 4. Combine recording chunks - final combination with multiple fallbacks
 ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
   try {
@@ -1725,6 +1805,10 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           clearActiveRecording();
 
           const stats = fs.statSync(outputPath);
+
+          // Update metadata.json with completion info
+          updateRecordingMetadataOnCompletion(validRecordId, 0, true);
+
           return {
             success: true,
             outputPath,
@@ -1782,6 +1866,10 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
         clearActiveRecording();
 
         const stats = fs.statSync(outputPath);
+
+        // Update metadata.json with completion info
+        updateRecordingMetadataOnCompletion(validRecordId, 0, true);
+
         return {
           success: true,
           outputPath,
@@ -1822,6 +1910,9 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
 
         // Clear active recording state - successfully combined
         clearActiveRecording();
+
+        // Update metadata.json with completion info
+        updateRecordingMetadataOnCompletion(validRecordId, 0, true);
 
         return {
           success: true,
