@@ -1,3 +1,19 @@
+# Changelog
+
+All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
+
+### [3.6.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.5.1...v3.6.1) (2026-01-27)
+
+
+### Features
+
+* add i18n translations for minutes feature and global display ([c0b6a5c](https://github.com/xicoarm/suisse-notes-desktop/commit/c0b6a5c1ef76ad4314aa3fa669bba9ccc8e0f7ea))
+
+
+### Code Refactoring
+
+* simplify minutes display UI ([fe9c718](https://github.com/xicoarm/suisse-notes-desktop/commit/fe9c718dd9e9b604cd4cfdc9184f4f3abc907d89))
+
 # [3.6.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.5.1...v3.6.0) (2026-01-27)
 
 
