@@ -32,9 +32,13 @@ const getMobileDeviceInfo = async () => {
     const { Device } = await import('@capacitor/device');
     const { App } = await import('@capacitor/app');
     const [deviceInfo, appInfo] = await Promise.all([Device.getId(), App.getInfo()]);
+    const platform = window.Capacitor?.getPlatform?.() || 'unknown';
+    // Use 'mob_' prefix for hardware-based device ID (enables trial abuse prevention)
+    // Android: ANDROID_ID persists across reinstalls
+    // iOS: UUID changes on reinstall (less effective, but still helps)
     cachedDeviceInfo = {
-      deviceId: deviceInfo.identifier || `mobile_${Date.now()}`,
-      platform: window.Capacitor?.getPlatform?.() || 'unknown',
+      deviceId: deviceInfo.identifier ? `mob_${deviceInfo.identifier}` : `mobile_${Date.now()}`,
+      platform,
       appVersion: appInfo.version || 'unknown'
     };
   } catch {
