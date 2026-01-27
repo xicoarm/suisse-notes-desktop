@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.0...v3.7.1) (2026-01-27)
+
+
+### Features
+
+* add mob_ prefix to mobile device ID for trial tracking ([8a0416f](https://github.com/xicoarm/suisse-notes-desktop/commit/8a0416ffedab351563f6d478af03a7ebb1c0e35e))
+
 ## [3.7.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.6.1...v3.7.0) (2026-01-27)
 
 
