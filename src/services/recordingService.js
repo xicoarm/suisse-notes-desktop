@@ -441,8 +441,9 @@ export async function startRecording(options = {}) {
       audio: audioConstraints
     });
 
-    // Start recording session in store
-    const sessionResult = await recordingStore.startRecording();
+    // Start recording session in store (pass userId for multi-account handling)
+    const userId = authStore?.user?.id || null;
+    const sessionResult = await recordingStore.startRecording(userId);
     if (!sessionResult.success) {
       throw new Error(sessionResult.error || 'Failed to create recording session');
     }

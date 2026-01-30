@@ -9,6 +9,7 @@ import { setLifecycleCallbacks, clearLifecycleCallbacks } from '../boot/lifecycl
 export const useRecordingStore = defineStore('recording', {
   state: () => ({
     recordId: null,
+    userId: null, // Track userId for multi-account handling
     status: 'idle', // idle | recording | paused | stopped | uploading | uploaded | error
     startTime: null,
     duration: 0, // in seconds
@@ -128,7 +129,7 @@ export const useRecordingStore = defineStore('recording', {
       }
     },
 
-    async startRecording() {
+    async startRecording(userId = null) {
       try {
         // Check storage before starting (V1 fix)
         const storageCheck = await checkStorageBeforeRecording();
@@ -143,6 +144,7 @@ export const useRecordingStore = defineStore('recording', {
         }
 
         this.recordId = uuidv4();
+        this.userId = userId; // Store userId for use in saveChunk
         this.status = 'recording';
         this.startTime = Date.now();
         this.duration = 0;
@@ -154,7 +156,8 @@ export const useRecordingStore = defineStore('recording', {
           // Electron: use preload API
           await window.electronAPI.recording.setInProgress(true);
 
-          const result = await window.electronAPI.recording.createSession(this.recordId, '.webm');
+          // Pass userId to createSession for metadata.json persistence
+          const result = await window.electronAPI.recording.createSession(this.recordId, '.webm', userId);
 
           if (!result.success) {
             await window.electronAPI.recording.setInProgress(false);
@@ -164,13 +167,16 @@ export const useRecordingStore = defineStore('recording', {
           // Capacitor: use storage service to create directory
           await storage.createDirectory(`recordings/${this.recordId}/chunks`);
 
-          // Initialize metadata
+          // Initialize metadata (include userId for multi-account handling)
           await storage.saveMetadata(this.recordId, {
             id: this.recordId,
+            userId: userId,
             startTime: this.startTime,
+            startedAt: new Date(this.startTime).toISOString(),
             status: 'recording',
             chunks: [],
-            platform: 'mobile'
+            platform: 'mobile',
+            version: 1
           });
         }
 
@@ -367,11 +373,13 @@ export const useRecordingStore = defineStore('recording', {
           let result;
 
           if (isElectron()) {
+            // Pass userId for crash recovery state tracking
             result = await window.electronAPI.recording.saveChunk(
               this.recordId,
               chunkData,
               this.chunkIndex,
-              '.webm'
+              '.webm',
+              this.userId
             );
           } else if (isCapacitor()) {
             result = await storage.saveChunk(
@@ -557,6 +565,7 @@ export const useRecordingStore = defineStore('recording', {
 
     reset() {
       this.recordId = null;
+      this.userId = null;
       this.status = 'idle';
       this.startTime = null;
       this.duration = 0;

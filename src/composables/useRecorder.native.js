@@ -5,6 +5,7 @@
 
 import { ref, onUnmounted, onMounted } from 'vue';
 import { useRecordingStore } from '../stores/recording';
+import { useAuthStore } from '../stores/auth';
 import { isIOS, isAndroid, isCapacitor } from '../utils/platform';
 
 // Lazy load Capacitor plugins
@@ -48,6 +49,7 @@ const initNativePlugin = async () => {
 
 export function useNativeRecorder() {
   const recordingStore = useRecordingStore();
+  const authStore = useAuthStore();
 
   const audioLevel = ref(0);
   const durationInterval = ref(null);
@@ -114,8 +116,11 @@ export function useNativeRecorder() {
         throw new Error('Native recording plugin not available');
       }
 
-      // Start the recording session in the store
-      const sessionResult = await recordingStore.startRecording();
+      // Get userId from authStore for multi-account handling
+      const userId = authStore?.user?.id || null;
+
+      // Start the recording session in the store (pass userId for multi-account handling)
+      const sessionResult = await recordingStore.startRecording(userId);
       if (!sessionResult.success) {
         throw new Error(sessionResult.error || 'Failed to create recording session');
       }

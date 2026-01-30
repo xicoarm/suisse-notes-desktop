@@ -25,6 +25,7 @@ export function useRecorder() {
 
   if (isElectron()) {
     const systemAudio = useSystemAudio();
+    // Use the refs directly instead of copying values
     systemAudioEnabled.value = systemAudio.systemAudioEnabled;
     permissionStatus.value = systemAudio.permissionStatus;
     captureSystemAudio = systemAudio.captureSystemAudio;

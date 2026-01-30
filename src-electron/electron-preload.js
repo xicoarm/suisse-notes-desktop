@@ -52,15 +52,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Recording (WhisperTranscribe pattern)
   recording: {
-    createSession: (id, ext) =>
+    createSession: (id, ext, userId) =>
       withTimeout(
-        ipcRenderer.invoke('recording:createSession', id, ext),
+        ipcRenderer.invoke('recording:createSession', id, ext, userId),
         IPC_TIMEOUTS.default,
         'Create session'
       ),
-    saveChunk: (id, chunkData, chunkIndex, ext) =>
+    saveChunk: (id, chunkData, chunkIndex, ext, userId) =>
       withTimeout(
-        ipcRenderer.invoke('recording:saveChunk', id, chunkData, chunkIndex, ext),
+        ipcRenderer.invoke('recording:saveChunk', id, chunkData, chunkIndex, ext, userId),
         IPC_TIMEOUTS.save,
         'Save chunk'
       ),

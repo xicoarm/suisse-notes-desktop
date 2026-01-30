@@ -254,12 +254,41 @@ export const useAuthStore = defineStore('auth', {
         const result = await auth.login(username, password);
 
         if (result.success) {
+          // CRITICAL SECURITY FIX: Clear any existing tokens FIRST to prevent user mixup
+          // This ensures we never have a stale token from a previous user session
+          try {
+            await auth.clearToken();
+          } catch (clearError) {
+            console.warn('Could not clear existing token:', clearError);
+          }
+
+          // Save the new token and verify it was saved correctly
+          const saveResult = await auth.saveToken(result.token);
+          if (!saveResult || !saveResult.success) {
+            console.error('CRITICAL: Failed to save auth token:', saveResult?.error);
+            this.error = 'Failed to save login credentials. Please try again.';
+            return { success: false, error: this.error };
+          }
+
+          // Verify the token was actually saved by reading it back
+          const savedToken = await auth.getToken();
+          if (!savedToken) {
+            console.error('CRITICAL: Token save verification failed - token not persisted');
+            this.error = 'Failed to persist login. Please try again.';
+            return { success: false, error: this.error };
+          }
+
+          // Save user info
+          const userInfoResult = await auth.saveUserInfo(result.user);
+          if (!userInfoResult || !userInfoResult.success) {
+            console.warn('Failed to save user info:', userInfoResult?.error);
+            // Don't fail login for this, but log it
+          }
+
+          // Only set authenticated state AFTER token is verified saved
           this.user = result.user;
           this.token = result.token;
           this.isAuthenticated = true;
-
-          await auth.saveToken(result.token);
-          await auth.saveUserInfo(result.user);
 
           // Start proactive token refresh
           this.startTokenRefreshTimer();
@@ -292,12 +321,39 @@ export const useAuthStore = defineStore('auth', {
         const result = await auth.register(email, password, name);
 
         if (result.success) {
+          // CRITICAL SECURITY FIX: Clear any existing tokens FIRST to prevent user mixup
+          try {
+            await auth.clearToken();
+          } catch (clearError) {
+            console.warn('Could not clear existing token:', clearError);
+          }
+
+          // Save the new token and verify it was saved correctly
+          const saveResult = await auth.saveToken(result.token);
+          if (!saveResult || !saveResult.success) {
+            console.error('CRITICAL: Failed to save auth token:', saveResult?.error);
+            this.error = 'Failed to save registration credentials. Please try again.';
+            return { success: false, error: this.error };
+          }
+
+          // Verify the token was actually saved by reading it back
+          const savedToken = await auth.getToken();
+          if (!savedToken) {
+            console.error('CRITICAL: Token save verification failed - token not persisted');
+            this.error = 'Failed to persist registration. Please try again.';
+            return { success: false, error: this.error };
+          }
+
+          // Save user info
+          const userInfoResult = await auth.saveUserInfo(result.user);
+          if (!userInfoResult || !userInfoResult.success) {
+            console.warn('Failed to save user info:', userInfoResult?.error);
+          }
+
+          // Only set authenticated state AFTER token is verified saved
           this.user = result.user;
           this.token = result.token;
           this.isAuthenticated = true;
-
-          await auth.saveToken(result.token);
-          await auth.saveUserInfo(result.user);
 
           // Start proactive token refresh
           this.startTokenRefreshTimer();

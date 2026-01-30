@@ -1299,11 +1299,41 @@ ipcMain.handle('auth:getUserInfo', async () => {
 });
 
 // Create web session token for seamless web login
+// SECURITY: Verifies token matches stored user to prevent authentication as wrong user
 ipcMain.handle('auth:createWebSession', async () => {
   try {
     const authToken = await getAuthToken();
     if (!authToken) {
       return { success: false, error: 'Not authenticated' };
+    }
+
+    // CRITICAL SECURITY CHECK: Verify the token belongs to the expected user
+    // This prevents authenticating as a stale/wrong user if token storage got out of sync
+    const storedUserInfo = configStore.get('userInfo');
+    if (storedUserInfo && storedUserInfo.id) {
+      try {
+        // Decode JWT to check the userId (without verifying signature - server will verify)
+        const tokenParts = authToken.split('.');
+        if (tokenParts.length === 3) {
+          const payload = JSON.parse(Buffer.from(tokenParts[1], 'base64').toString());
+          if (payload.userId && payload.userId !== storedUserInfo.id) {
+            log.error('CRITICAL SECURITY: Token user mismatch!', {
+              tokenUserId: payload.userId,
+              storedUserId: storedUserInfo.id,
+              storedEmail: storedUserInfo.email
+            });
+            // Clear the mismatched token to force re-login
+            configStore.delete('authToken');
+            return {
+              success: false,
+              error: 'Session mismatch detected. Please log in again for security.'
+            };
+          }
+        }
+      } catch (decodeError) {
+        log.warn('Could not decode token for verification:', decodeError.message);
+        // Continue anyway - server will validate
+      }
     }
 
     const response = await axios.post(`${API_BASE_URL}/api/auth/desktop/create-web-session`, {}, {
@@ -2929,9 +2959,9 @@ ipcMain.handle('systemAudio:checkPermission', () => {
   return 'granted';
 });
 
-// Get system audio enabled setting
+// Get system audio enabled setting - always default to off each session
 ipcMain.handle('config:getSystemAudioEnabled', () => {
-  return configStore.get('systemAudioEnabled', false);
+  return false;
 });
 
 // Set system audio enabled setting
