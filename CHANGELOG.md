@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.3](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.2...v3.7.3) (2026-02-02)
+
+
+### Bug Fixes
+
+* default system audio to off each session and add auth security checks ([81076f1](https://github.com/xicoarm/suisse-notes-desktop/commit/81076f18e03f6cbd061c7f17d4eddec943954175))
+* remove silence auto-pause, fix system audio toggle, add recording indicator ([c15a2bf](https://github.com/xicoarm/suisse-notes-desktop/commit/c15a2bf7f07fc053a3ae208121a91690643efa1a))
+
 ### [3.7.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.1...v3.7.2) (2026-01-27)
 
 
