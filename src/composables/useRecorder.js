@@ -16,23 +16,27 @@ export function useRecorder() {
   const minutesStore = useMinutesStore();
 
   // System audio composable (desktop only)
-  let systemAudioEnabled = ref(false);
-  let permissionStatus = ref('unknown');
-  let captureSystemAudio = async () => null;
-  let stopSystemAudio = () => {};
-  let loadSystemAudioState = async () => {};
-  let setSystemAudioEnabled = async () => {};
+  // Initialize with null; will be populated from useSystemAudio on desktop
+  const _systemAudioRef = isElectron() ? useSystemAudio() : null;
 
-  if (isElectron()) {
-    const systemAudio = useSystemAudio();
-    // Use the refs directly instead of copying values
-    systemAudioEnabled.value = systemAudio.systemAudioEnabled;
-    permissionStatus.value = systemAudio.permissionStatus;
-    captureSystemAudio = systemAudio.captureSystemAudio;
-    stopSystemAudio = systemAudio.stopCapture;
-    loadSystemAudioState = systemAudio.loadState;
-    setSystemAudioEnabled = systemAudio.setEnabled;
-  }
+  const systemAudioEnabled = _systemAudioRef
+    ? _systemAudioRef.systemAudioEnabled
+    : ref(false);
+  const permissionStatus = _systemAudioRef
+    ? _systemAudioRef.permissionStatus
+    : ref('unknown');
+  let captureSystemAudio = _systemAudioRef
+    ? _systemAudioRef.captureSystemAudio
+    : async () => null;
+  let stopSystemAudio = _systemAudioRef
+    ? _systemAudioRef.stopCapture
+    : () => {};
+  let loadSystemAudioState = _systemAudioRef
+    ? _systemAudioRef.loadState
+    : async () => {};
+  let setSystemAudioEnabled = _systemAudioRef
+    ? _systemAudioRef.setEnabled
+    : async () => {};
 
   // Reactive refs for UI binding (synced with service)
   const audioLevel = ref(0);

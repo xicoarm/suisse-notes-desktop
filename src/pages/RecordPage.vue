@@ -150,6 +150,21 @@
           </p>
         </div>
 
+        <!-- System Audio Indicator (desktop only) -->
+        <div
+          v-if="isElectron()"
+          class="system-audio-indicator"
+        >
+          <q-icon
+            :name="systemAudioEnabled ? 'volume_up' : 'volume_off'"
+            size="14px"
+            :color="systemAudioEnabled ? 'positive' : 'grey-5'"
+          />
+          <span :class="['indicator-text', { 'active': systemAudioEnabled }]">
+            {{ systemAudioEnabled ? $t('systemAudioEnabled') : $t('systemAudioOff') }}
+          </span>
+        </div>
+
         <!-- Timer Display -->
         <div class="timer-section">
           <div :class="['timer-display', { 'recording': recordingStore.isRecording, 'paused': recordingStore.isPaused }]">
@@ -1402,6 +1417,24 @@ const removeSessionWord = (word) => {
     &.text-negative { color: #ef4444; }
     &.text-warning { color: #f59e0b; }
     &.text-positive { color: #22c55e; }
+  }
+}
+
+.system-audio-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 4px 12px;
+
+  .indicator-text {
+    font-size: 11px;
+    color: #94a3b8;
+
+    &.active {
+      color: #16a34a;
+    }
   }
 }
 

@@ -14,6 +14,7 @@ const messages = {
     systemAudio: 'System Audio',
     systemAudioDesc: 'Record all audio playing on your computer',
     systemAudioEnabled: 'System audio will be captured',
+    systemAudioOff: 'System audio off',
     macPermissionNotice: 'Screen Recording permission required on macOS',
 
     // Recording states
@@ -200,6 +201,7 @@ const messages = {
     systemAudio: 'Systemaudio',
     systemAudioDesc: 'Alle auf Ihrem Computer abgespielten Töne aufnehmen',
     systemAudioEnabled: 'Systemaudio wird aufgenommen',
+    systemAudioOff: 'Systemaudio aus',
     macPermissionNotice: 'Bildschirmaufnahme-Berechtigung auf macOS erforderlich',
 
     // Recording states
@@ -386,6 +388,7 @@ const messages = {
     systemAudio: 'Audio système',
     systemAudioDesc: 'Enregistrer tous les sons de votre ordinateur',
     systemAudioEnabled: "L'audio système sera capturé",
+    systemAudioOff: 'Audio système désactivé',
     macPermissionNotice: "Autorisation d'enregistrement d'écran requise sur macOS",
 
     // Recording states
@@ -572,6 +575,7 @@ const messages = {
     systemAudio: 'Audio di sistema',
     systemAudioDesc: 'Registra tutti i suoni riprodotti sul computer',
     systemAudioEnabled: "L'audio di sistema verrà catturato",
+    systemAudioOff: 'Audio di sistema disattivato',
     macPermissionNotice: 'Autorizzazione registrazione schermo richiesta su macOS',
 
     // Recording states

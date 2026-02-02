@@ -52,7 +52,6 @@ let silenceError = null;
 // Configuration
 const SILENCE_THRESHOLD = 1;
 const SILENCE_WARNING_SECONDS = 10;
-const SILENCE_PAUSE_SECONDS = 30;
 const MAX_DURATION_SECONDS = 4 * 60 * 60 + 55 * 60; // 4h 55m
 const AUTH_KEEP_ALIVE_INTERVAL = 30 * 60 * 1000; // Refresh auth every 30 min during recording
 
@@ -185,12 +184,6 @@ function startLevelMonitoring(mediaStream, recordingStore) {
             silenceError = 'No audio detected - check if your microphone is connected and not muted';
             emit('silenceWarning', silenceError);
           }
-
-          if (silenceSeconds >= SILENCE_PAUSE_SECONDS) {
-            silenceError = 'Recording paused: Microphone disconnected or muted for too long';
-            emit('silenceWarning', silenceError);
-            await emergencyPauseForSilence(recordingStore);
-          }
         } else {
           if (silenceCounter > 0) {
             silenceCounter = 0;
@@ -225,19 +218,6 @@ function stopLevelMonitoring() {
   silenceError = null;
   emit('levelChange', 0);
   emit('silenceWarning', null);
-}
-
-/**
- * Emergency pause for silence
- */
-async function emergencyPauseForSilence(recordingStore) {
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.requestData();
-    mediaRecorder.pause();
-    recordingStore.pauseRecording();
-    stopDurationTracking();
-    emit('stateChange', { isRecording: false, isPaused: true });
-  }
 }
 
 // Minutes limit tracking state
