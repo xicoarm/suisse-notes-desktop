@@ -135,6 +135,7 @@ export default function (ctx) {
           gatekeeperAssess: false,
           entitlements: 'build/entitlements.mac.plist',
           entitlementsInherit: 'build/entitlements.mac.plist',
+          forceCodeSigning: !!process.env.CSC_LINK,
           notarize: process.env.APPLE_ID ? {
             teamId: process.env.APPLE_TEAM_ID
           } : false
