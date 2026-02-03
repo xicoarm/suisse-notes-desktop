@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.4](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.3...v3.7.4) (2026-02-03)
+
+
+### Features
+
+* add mic mute button, dynamic system audio toggle, fix system audio state on navigation ([e6fb0c6](https://github.com/xicoarm/suisse-notes-desktop/commit/e6fb0c6cff1b5d17586a71178dc0304aec83c465))
+
 ### [3.7.3](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.2...v3.7.3) (2026-02-02)
 
 
