@@ -2,8 +2,7 @@
 # Documentation: https://docs.fastlane.tools/actions/match/
 
 # Git URL where certificates and profiles are stored
-# This should be a private repository
-git_url(ENV["MATCH_GIT_URL"] || "git@github.com:your-org/certificates.git")
+git_url(ENV["MATCH_GIT_URL"] || "https://github.com/xicoarm/certificates.git")
 
 # Default storage mode
 storage_mode("git")
@@ -11,17 +10,15 @@ storage_mode("git")
 # App identifier
 app_identifier(["ch.suissenotes.app"])
 
-# Username (Apple ID)
-# username("your-apple-id@example.com")
-
 # Team ID
-# team_id("YOUR_TEAM_ID")
+team_id("UTU38DWABG")
 
 # Certificate types to manage
 type("appstore")
 
-# Readonly mode (don't create new certificates, only download existing)
-readonly(true)
+# First run: create certificates (readonly false)
+# After setup, change back to true
+readonly(false)
 
-# Clone using SSH
+# HTTPS authentication
 git_basic_authorization(ENV["MATCH_GIT_BASIC_AUTHORIZATION"])

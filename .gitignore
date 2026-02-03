@@ -74,6 +74,10 @@ Thumbs.db
 # Claude AI context file (local development notes)
 CLAUDE_CONTEXT.md
 
+# Certificate files (never commit these)
+*.p12
+*.p8
+
 # Android keystore
 *.keystore
 keystore.properties

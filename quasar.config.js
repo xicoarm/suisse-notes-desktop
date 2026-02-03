@@ -135,13 +135,9 @@ export default function (ctx) {
           gatekeeperAssess: false,
           entitlements: 'build/entitlements.mac.plist',
           entitlementsInherit: 'build/entitlements.mac.plist',
-          // Code signing - enable when certificate is available
-          // Set environment variables in CI/CD:
-          //   CSC_LINK: path to .p12 certificate file
-          //   CSC_KEY_PASSWORD: certificate password
-          //   APPLE_ID: Apple ID for notarization
-          //   APPLE_APP_SPECIFIC_PASSWORD: App-specific password
-          identity: process.env.CSC_LINK ? null : null // Use auto-detect when CSC_LINK is set
+          notarize: process.env.APPLE_ID ? {
+            teamId: process.env.APPLE_TEAM_ID
+          } : false
         },
         dmg: {
           contents: [
