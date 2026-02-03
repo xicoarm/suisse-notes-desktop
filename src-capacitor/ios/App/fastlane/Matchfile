@@ -16,9 +16,8 @@ team_id("UTU38DWABG")
 # Certificate types to manage
 type("appstore")
 
-# First run: create certificates (readonly false)
-# After setup, change back to true
-readonly(false)
+# Readonly mode - only download existing certificates
+readonly(true)
 
 # HTTPS authentication
 git_basic_authorization(ENV["MATCH_GIT_BASIC_AUTHORIZATION"])
