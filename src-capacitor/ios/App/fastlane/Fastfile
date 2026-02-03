@@ -20,7 +20,7 @@ platform :ios do
       type: "appstore",
       readonly: is_ci,
       git_url: ENV["MATCH_GIT_URL"],
-      app_identifier: "ch.suissenotes.app"
+      app_identifier: "ch.suissenotes.mobile"
     )
   end
 
@@ -126,7 +126,7 @@ platform :ios do
   lane :download_screenshots do
     load_api_key
     download_from_app_store_connect(
-      app_identifier: "ch.suissenotes.app"
+      app_identifier: "ch.suissenotes.mobile"
     )
   end
 
@@ -145,7 +145,7 @@ platform :ios do
     match(
       type: "development",
       force_for_new_devices: true,
-      app_identifier: "ch.suissenotes.app"
+      app_identifier: "ch.suissenotes.mobile"
     )
   end
 end

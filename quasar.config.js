@@ -70,7 +70,7 @@ export default function (ctx) {
       // Capacitor CLI version (must be installed)
       // version: 6,
       // App identifier for mobile stores (no dashes allowed in Java package names)
-      appId: 'ch.suissenotes.app',
+      appId: 'ch.suissenotes.mobile',
       appName: 'Suisse Notes',
       // iOS-specific settings
       ios: {

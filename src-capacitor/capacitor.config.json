@@ -1,5 +1,5 @@
 {
-  "appId": "ch.suissenotes.app",
+  "appId": "ch.suissenotes.mobile",
   "appName": "Suisse Notes",
   "webDir": "www",
   "bundledWebRuntime": false,

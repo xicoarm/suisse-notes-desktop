@@ -2,7 +2,7 @@
 # Documentation: https://docs.fastlane.tools/advanced/#appfile
 
 # App identifier (bundle ID)
-app_identifier("ch.suissenotes.app")
+app_identifier("ch.suissenotes.mobile")
 
 # Apple Developer Portal team
 # Uncomment and set your team ID
