@@ -8,8 +8,12 @@ let Preferences = null;
 
 const initPreferences = async () => {
   if (isCapacitor() && !Preferences) {
-    const module = await import('@capacitor/preferences');
-    Preferences = module.Preferences;
+    try {
+      const module = await import('@capacitor/preferences');
+      Preferences = module.Preferences;
+    } catch (e) {
+      console.warn('Failed to load Capacitor Preferences, will use localStorage fallback:', e);
+    }
   }
 };
 
@@ -188,41 +192,93 @@ const mobileAuth = {
   async saveToken(token) {
     await initPreferences();
     if (Preferences) {
-      await Preferences.set({ key: 'auth_token', value: token });
+      try {
+        await Preferences.set({ key: 'auth_token', value: token });
+        return { success: true };
+      } catch (e) {
+        console.warn('Preferences.set failed for auth_token, falling back to localStorage:', e);
+      }
+    }
+    try {
+      localStorage.setItem('auth_token', token);
+      return { success: true };
+    } catch (e) {
+      console.error('localStorage fallback also failed:', e);
+      return { success: false, error: 'Failed to save token' };
     }
   },
 
   async getToken() {
     await initPreferences();
     if (Preferences) {
-      const { value } = await Preferences.get({ key: 'auth_token' });
-      return value;
+      try {
+        const { value } = await Preferences.get({ key: 'auth_token' });
+        if (value) return value;
+      } catch (e) {
+        console.warn('Preferences.get failed for auth_token, falling back to localStorage:', e);
+      }
     }
-    return null;
+    try {
+      return localStorage.getItem('auth_token');
+    } catch (e) {
+      return null;
+    }
   },
 
   async clearToken() {
     await initPreferences();
     if (Preferences) {
-      await Preferences.remove({ key: 'auth_token' });
-      await Preferences.remove({ key: 'user_info' });
+      try {
+        await Preferences.remove({ key: 'auth_token' });
+        await Preferences.remove({ key: 'user_info' });
+      } catch (e) {
+        console.warn('Preferences.remove failed, clearing localStorage instead:', e);
+      }
+    }
+    try {
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('user_info');
+    } catch (e) {
+      // Best effort
     }
   },
 
   async saveUserInfo(userInfo) {
     await initPreferences();
+    const serialized = JSON.stringify(userInfo);
     if (Preferences) {
-      await Preferences.set({ key: 'user_info', value: JSON.stringify(userInfo) });
+      try {
+        await Preferences.set({ key: 'user_info', value: serialized });
+        return { success: true };
+      } catch (e) {
+        console.warn('Preferences.set failed for user_info, falling back to localStorage:', e);
+      }
+    }
+    try {
+      localStorage.setItem('user_info', serialized);
+      return { success: true };
+    } catch (e) {
+      console.error('localStorage fallback also failed:', e);
+      return { success: false, error: 'Failed to save user info' };
     }
   },
 
   async getUserInfo() {
     await initPreferences();
     if (Preferences) {
-      const { value } = await Preferences.get({ key: 'user_info' });
-      return value ? JSON.parse(value) : null;
+      try {
+        const { value } = await Preferences.get({ key: 'user_info' });
+        if (value) return JSON.parse(value);
+      } catch (e) {
+        console.warn('Preferences.get failed for user_info, falling back to localStorage:', e);
+      }
     }
-    return null;
+    try {
+      const value = localStorage.getItem('user_info');
+      return value ? JSON.parse(value) : null;
+    } catch (e) {
+      return null;
+    }
   }
 };
 
