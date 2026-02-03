@@ -40,9 +40,19 @@ let analyser = null;
 let stream = null;
 let mixedStream = null;
 let mixingContext = null;
+let mixingDest = null;
+let micSourceNode = null;
+let systemSourceNode = null;
+let systemStream = null;
 let durationInterval = null;
 let levelInterval = null;
 let stateVerificationInterval = null;
+
+// System audio state (persists across navigation)
+let systemAudioActive = false;
+
+// Mic mute state
+let micMuted = false;
 
 // Silence detection state
 let silenceCounter = 0;
@@ -108,7 +118,9 @@ export function getState() {
     isPaused: mediaRecorder?.state === 'paused',
     audioLevel: currentAudioLevel,
     silenceWarning: silenceError,
-    hasStream: stream !== null
+    hasStream: stream !== null,
+    systemAudioActive,
+    micMuted
   };
 }
 
@@ -127,24 +139,104 @@ export function getSilenceWarning() {
 }
 
 /**
- * Mix microphone and system audio streams
+ * Create mixing pipeline via AudioContext.
+ * Always creates the pipeline so system audio can be added/removed dynamically.
  */
-function mixStreams(micStream, systemStream) {
+function createMixingPipeline(micStream, sysStream) {
   const ctx = new (window.AudioContext || window.webkitAudioContext)({
     sampleRate: 48000
   });
   const dest = ctx.createMediaStreamDestination();
 
-  const micSource = ctx.createMediaStreamSource(micStream);
-  micSource.connect(dest);
+  micSourceNode = ctx.createMediaStreamSource(micStream);
+  micSourceNode.connect(dest);
 
-  if (systemStream) {
-    const systemSource = ctx.createMediaStreamSource(systemStream);
-    systemSource.connect(dest);
+  if (sysStream) {
+    systemSourceNode = ctx.createMediaStreamSource(sysStream);
+    systemSourceNode.connect(dest);
+    systemStream = sysStream;
+    systemAudioActive = true;
   }
 
   mixingContext = ctx;
+  mixingDest = dest;
   return dest.stream;
+}
+
+/**
+ * Add system audio to the active recording mix
+ */
+export function addSystemAudioStream(sysStream) {
+  if (!mixingContext || !mixingDest) {
+    console.warn('No active mixing pipeline to add system audio to');
+    return false;
+  }
+
+  // Remove existing system audio first
+  removeSystemAudioStream();
+
+  try {
+    systemSourceNode = mixingContext.createMediaStreamSource(sysStream);
+    systemSourceNode.connect(mixingDest);
+    systemStream = sysStream;
+    systemAudioActive = true;
+    emit('systemAudioChange', true);
+    console.log('System audio added to recording mix');
+    return true;
+  } catch (e) {
+    console.error('Error adding system audio:', e);
+    return false;
+  }
+}
+
+/**
+ * Remove system audio from the active recording mix
+ */
+export function removeSystemAudioStream() {
+  if (systemSourceNode) {
+    try {
+      systemSourceNode.disconnect();
+    } catch (e) {
+      // Already disconnected
+    }
+    systemSourceNode = null;
+  }
+  if (systemStream) {
+    systemStream.getTracks().forEach(track => track.stop());
+    systemStream = null;
+  }
+  if (systemAudioActive) {
+    systemAudioActive = false;
+    emit('systemAudioChange', false);
+    console.log('System audio removed from recording mix');
+  }
+}
+
+/**
+ * Toggle microphone mute state
+ */
+export function toggleMicMute() {
+  if (!stream) return false;
+
+  micMuted = !micMuted;
+  stream.getAudioTracks().forEach(track => {
+    track.enabled = !micMuted;
+  });
+
+  emit('micMuteChange', micMuted);
+
+  // Reset silence detection when intentionally muted to avoid false warnings
+  if (micMuted) {
+    silenceCounter = 0;
+    silenceWarningShown = false;
+    if (silenceError) {
+      silenceError = null;
+      emit('silenceWarning', null);
+    }
+  }
+
+  console.log('Mic mute:', micMuted);
+  return micMuted;
 }
 
 /**
@@ -174,8 +266,8 @@ function startLevelMonitoring(mediaStream, recordingStore) {
         // Emit level update
         emit('levelChange', currentAudioLevel);
 
-        // Silence detection
-        if (currentAudioLevel < SILENCE_THRESHOLD) {
+        // Silence detection (suppress when mic is intentionally muted)
+        if (currentAudioLevel < SILENCE_THRESHOLD && !micMuted) {
           silenceCounter++;
           const silenceSeconds = silenceCounter / 10;
 
@@ -386,7 +478,6 @@ function stopAuthKeepAlive() {
  * @param {string} options.deviceId - Microphone device ID
  * @param {boolean} options.systemAudioEnabled - Whether system audio is enabled
  * @param {Function} options.captureSystemAudio - Function to capture system audio
- * @param {Function} options.stopSystemAudio - Function to stop system audio
  * @param {Object} options.isAutoSplitting - Ref for auto-splitting state
  * @param {number|null} options.maxRecordingSeconds - Maximum recording duration in seconds (minutes limit)
  */
@@ -397,7 +488,6 @@ export async function startRecording(options = {}) {
     deviceId,
     systemAudioEnabled,
     captureSystemAudio,
-    stopSystemAudio,
     isAutoSplitting,
     maxRecordingSeconds = null
   } = options;
@@ -428,24 +518,22 @@ export async function startRecording(options = {}) {
       throw new Error(sessionResult.error || 'Failed to create recording session');
     }
 
+    // Reset mute state for new recording
+    micMuted = false;
+
     // Capture system audio if enabled
-    let systemStream = null;
+    let sysStream = null;
     if (systemAudioEnabled && captureSystemAudio) {
       try {
-        systemStream = await captureSystemAudio();
+        sysStream = await captureSystemAudio();
       } catch (e) {
         console.warn('Could not capture system audio:', e);
       }
     }
 
-    // Determine recording stream
-    let recordingStream;
-    if (systemStream) {
-      recordingStream = mixStreams(stream, systemStream);
-      mixedStream = recordingStream;
-    } else {
-      recordingStream = stream;
-    }
+    // Always use mixing pipeline so system audio can be added/removed dynamically
+    const recordingStream = createMixingPipeline(stream, sysStream);
+    mixedStream = recordingStream;
 
     // Determine supported mime type
     const codecPreference = [
@@ -634,10 +722,19 @@ export async function stopRecording(recordingStore, stopSystemAudio) {
           mixedStream.getTracks().forEach(track => track.stop());
           mixedStream = null;
         }
+        if (systemStream) {
+          systemStream.getTracks().forEach(track => track.stop());
+          systemStream = null;
+        }
         if (mixingContext) {
           mixingContext.close().catch(() => {});
           mixingContext = null;
         }
+        mixingDest = null;
+        micSourceNode = null;
+        systemSourceNode = null;
+        systemAudioActive = false;
+        micMuted = false;
         if (stopSystemAudio) stopSystemAudio();
 
         // Hide notification on Android
@@ -706,10 +803,19 @@ export async function stopRecording(recordingStore, stopSystemAudio) {
         mixedStream.getTracks().forEach(track => track.stop());
         mixedStream = null;
       }
+      if (systemStream) {
+        systemStream.getTracks().forEach(track => track.stop());
+        systemStream = null;
+      }
       if (mixingContext) {
         mixingContext.close().catch(() => {});
         mixingContext = null;
       }
+      mixingDest = null;
+      micSourceNode = null;
+      systemSourceNode = null;
+      systemAudioActive = false;
+      micMuted = false;
       if (stopSystemAudio) stopSystemAudio();
 
       mediaRecorder = null;
@@ -793,10 +899,19 @@ export function cleanup(stopSystemAudio) {
     mixedStream.getTracks().forEach(track => track.stop());
     mixedStream = null;
   }
+  if (systemStream) {
+    systemStream.getTracks().forEach(track => track.stop());
+    systemStream = null;
+  }
   if (mixingContext) {
     mixingContext.close().catch(() => {});
     mixingContext = null;
   }
+  mixingDest = null;
+  micSourceNode = null;
+  systemSourceNode = null;
+  systemAudioActive = false;
+  micMuted = false;
   if (stopSystemAudio) stopSystemAudio();
 
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {

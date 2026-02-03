@@ -150,7 +150,7 @@
           </p>
         </div>
 
-        <!-- System Audio Indicator (desktop only) -->
+        <!-- System Audio Toggle (desktop only, interactive during recording) -->
         <div
           v-if="isElectron()"
           class="system-audio-indicator"
@@ -163,6 +163,13 @@
           <span :class="['indicator-text', { 'active': systemAudioEnabled }]">
             {{ systemAudioEnabled ? $t('systemAudioEnabled') : $t('systemAudioOff') }}
           </span>
+          <q-toggle
+            v-model="systemAudioEnabled"
+            color="primary"
+            size="sm"
+            dense
+            @update:model-value="toggleSystemAudio"
+          />
         </div>
 
         <!-- Timer Display -->
@@ -181,10 +188,12 @@
         <div class="controls-section">
           <RecordingControls
             :audio-level="audioLevel"
+            :is-mic-muted="isMicMuted"
             @start="handleStartClick"
             @pause="handlePause"
             @resume="handleResume"
             @stop="handleStop"
+            @toggle-mute="toggleMicMute"
           />
         </div>
 
@@ -569,18 +578,26 @@ const {
   // Minutes limit tracking
   minutesLimitWarning,
   minutesLimitReached,
+  isMicMuted,
   setSystemAudioEnabled,
   loadMicrophones,
   loadSystemAudioState,
   startRecording,
   pauseRecording,
   resumeRecording,
-  stopRecording
+  stopRecording,
+  toggleSystemAudioDuringRecording,
+  toggleMicMute
 } = useRecorder();
 
 // System audio toggle functionality
 const toggleSystemAudio = async (enabled) => {
-  await setSystemAudioEnabled(enabled);
+  if (recordingStore.isRecording || recordingStore.isPaused) {
+    // Toggle dynamically during recording
+    await toggleSystemAudioDuringRecording(enabled);
+  } else {
+    await setSystemAudioEnabled(enabled);
+  }
 };
 
 const isMac = computed(() => {

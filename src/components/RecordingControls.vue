@@ -12,15 +12,28 @@
       <q-tooltip>Start Recording</q-tooltip>
     </q-btn>
 
-    <!-- Recording State - Pause and Stop -->
-    <div v-else-if="recordingStore.isRecording" class="q-gutter-sm">
+    <!-- Recording State - Mute, Pause and Stop -->
+    <div
+      v-else-if="recordingStore.isRecording"
+      class="q-gutter-sm"
+    >
+      <q-btn
+        round
+        size="md"
+        :color="props.isMicMuted ? 'negative' : 'grey-6'"
+        :icon="props.isMicMuted ? 'mic_off' : 'mic'"
+        @click="$emit('toggleMute')"
+      >
+        <q-tooltip>{{ props.isMicMuted ? 'Unmute Microphone' : 'Mute Microphone' }}</q-tooltip>
+      </q-btn>
+
       <q-btn
         round
         size="md"
         color="warning"
         icon="pause"
-        @click="$emit('pause')"
         class="recording-active"
+        @click="$emit('pause')"
       >
         <q-tooltip>Pause</q-tooltip>
       </q-btn>
@@ -36,8 +49,21 @@
       </q-btn>
     </div>
 
-    <!-- Paused State - Resume and Stop -->
-    <div v-else-if="recordingStore.isPaused" class="q-gutter-sm">
+    <!-- Paused State - Mute, Resume and Stop -->
+    <div
+      v-else-if="recordingStore.isPaused"
+      class="q-gutter-sm"
+    >
+      <q-btn
+        round
+        size="md"
+        :color="props.isMicMuted ? 'negative' : 'grey-6'"
+        :icon="props.isMicMuted ? 'mic_off' : 'mic'"
+        @click="$emit('toggleMute')"
+      >
+        <q-tooltip>{{ props.isMicMuted ? 'Unmute Microphone' : 'Mute Microphone' }}</q-tooltip>
+      </q-btn>
+
       <q-btn
         round
         size="md"
@@ -92,7 +118,12 @@ const $q = useQuasar();
 const { t } = useI18n();
 const recordingStore = useRecordingStore();
 
-const emit = defineEmits(['start', 'pause', 'resume', 'stop']);
+const props = defineProps({
+  audioLevel: { type: Number, default: 0 },
+  isMicMuted: { type: Boolean, default: false }
+});
+
+const emit = defineEmits(['start', 'pause', 'resume', 'stop', 'toggleMute']);
 
 const confirmStop = () => {
   $q.dialog({

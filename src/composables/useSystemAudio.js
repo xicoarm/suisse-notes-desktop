@@ -1,4 +1,4 @@
-import { ref, onUnmounted } from 'vue';
+import { ref } from 'vue';
 
 export function useSystemAudio() {
   const systemAudioEnabled = ref(false);
@@ -111,10 +111,8 @@ export function useSystemAudio() {
     }
   };
 
-  // Cleanup on component unmount
-  onUnmounted(() => {
-    stopCapture();
-  });
+  // NOTE: No onUnmounted cleanup - the recording service manages stream lifecycle.
+  // Cleaning up here would kill the system audio stream when navigating away during recording.
 
   return {
     systemAudioEnabled,

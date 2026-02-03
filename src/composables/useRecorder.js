@@ -42,6 +42,7 @@ export function useRecorder() {
   const audioLevel = ref(0);
   const silenceWarning = ref(null);
   const isAutoSplitting = ref(false);
+  const isMicMuted = ref(false);
 
   // Minutes limit tracking
   const minutesLimitWarning = ref(null); // Number of minutes remaining when warning triggered
@@ -96,6 +97,14 @@ export function useRecorder() {
     console.log('Recording state changed:', state);
   };
 
+  const handleMicMuteChange = (muted) => {
+    isMicMuted.value = muted;
+  };
+
+  const handleSystemAudioChange = (active) => {
+    systemAudioEnabled.value = active;
+  };
+
   // Minutes limit event handlers
   const handleLimitWarning = (minutesRemaining) => {
     console.log(`Minutes limit warning: ${minutesRemaining} minutes remaining`);
@@ -145,7 +154,6 @@ export function useRecorder() {
       deviceId: micId,
       systemAudioEnabled: systemAudioEnabled.value,
       captureSystemAudio,
-      stopSystemAudio,
       isAutoSplitting,
       maxRecordingSeconds: maxSeconds > 0 ? maxSeconds : null
     });
@@ -175,6 +183,27 @@ export function useRecorder() {
     return await recordingService.stopRecording(recordingStore, stopSystemAudio);
   };
 
+  // Toggle system audio during an active recording
+  const toggleSystemAudioDuringRecording = async (enabled) => {
+    if (enabled) {
+      // Capture and add system audio to the mix
+      const sysStream = await captureSystemAudio();
+      if (sysStream) {
+        recordingService.addSystemAudioStream(sysStream);
+        await setSystemAudioEnabled(true);
+      }
+    } else {
+      // Remove system audio from the mix
+      recordingService.removeSystemAudioStream();
+      await setSystemAudioEnabled(false);
+    }
+  };
+
+  // Toggle microphone mute
+  const toggleMicMute = () => {
+    recordingService.toggleMicMute();
+  };
+
   // Setup on mount
   onMounted(() => {
     // Subscribe to service events
@@ -183,6 +212,8 @@ export function useRecorder() {
     recordingService.addEventListener('stateChange', handleStateChange);
     recordingService.addEventListener('limitWarning', handleLimitWarning);
     recordingService.addEventListener('limitReached', handleLimitReached);
+    recordingService.addEventListener('micMuteChange', handleMicMuteChange);
+    recordingService.addEventListener('systemAudioChange', handleSystemAudioChange);
 
     // Set up visibility and beforeunload handlers
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -192,6 +223,12 @@ export function useRecorder() {
     const state = recordingService.getState();
     audioLevel.value = state.audioLevel;
     silenceWarning.value = state.silenceWarning;
+    isMicMuted.value = state.micMuted;
+
+    // Restore system audio toggle state from recording service when recording is active
+    if (state.isActive || state.isRecording || state.isPaused) {
+      systemAudioEnabled.value = state.systemAudioActive;
+    }
 
     // Set up device change listener
     if (navigator.mediaDevices) {
@@ -227,6 +264,8 @@ export function useRecorder() {
     recordingService.removeEventListener('stateChange', handleStateChange);
     recordingService.removeEventListener('limitWarning', handleLimitWarning);
     recordingService.removeEventListener('limitReached', handleLimitReached);
+    recordingService.removeEventListener('micMuteChange', handleMicMuteChange);
+    recordingService.removeEventListener('systemAudioChange', handleSystemAudioChange);
 
     // Remove visibility and beforeunload handlers
     document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -257,12 +296,15 @@ export function useRecorder() {
     minutesLimitWarning,
     minutesLimitReached,
     minutesStore,
+    isMicMuted,
     setSystemAudioEnabled,
     loadMicrophones,
     loadSystemAudioState,
     startRecording,
     pauseRecording,
     resumeRecording,
-    stopRecording
+    stopRecording,
+    toggleSystemAudioDuringRecording,
+    toggleMicMute
   };
 }
