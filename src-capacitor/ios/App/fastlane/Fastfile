@@ -32,6 +32,16 @@ platform :ios do
     # Sync certificates
     sync_certificates
 
+    # Set team and signing settings
+    update_code_signing_settings(
+      use_automatic_signing: false,
+      path: "App.xcodeproj",
+      team_id: "UTU38DWABG",
+      bundle_identifier: "ch.suissenotes.mobile",
+      profile_name: "match AppStore ch.suissenotes.mobile",
+      code_sign_identity: "Apple Distribution"
+    )
+
     # Increment build number based on TestFlight
     increment_build_number(
       build_number: latest_testflight_build_number + 1,
