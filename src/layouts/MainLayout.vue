@@ -1,8 +1,8 @@
 <template>
   <q-layout view="hHh lpR fFf">
-    <!-- Unauthenticated Header: Show on all pages when NOT logged in -->
+    <!-- Unauthenticated Header: Desktop only (mobile login/register pages handle their own layout) -->
     <q-header
-      v-if="!authStore.isAuthenticated"
+      v-if="!authStore.isAuthenticated && !isMobile()"
       class="modern-header unauth-header"
     >
       <q-toolbar class="header-toolbar">

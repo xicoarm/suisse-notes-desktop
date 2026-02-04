@@ -139,13 +139,32 @@
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 import { isElectron, isCapacitor } from '../utils/platform';
 
 const router = useRouter();
 const authStore = useAuthStore();
+
+// Set white status bar icons for purple background on mobile
+onMounted(async () => {
+  if (isCapacitor()) {
+    try {
+      const { StatusBar, Style } = await import('@capacitor/status-bar');
+      await StatusBar.setStyle({ style: Style.Dark });
+    } catch (e) { /* not available */ }
+  }
+});
+
+onUnmounted(async () => {
+  if (isCapacitor()) {
+    try {
+      const { StatusBar, Style } = await import('@capacitor/status-bar');
+      await StatusBar.setStyle({ style: Style.Light });
+    } catch (e) { /* not available */ }
+  }
+});
 
 const email = ref('');
 const password = ref('');

@@ -39,7 +39,9 @@ export const initializeLifecycle = async () => {
     // Enable overlay mode so we control safe area via CSS (both iOS and Android)
     const { StatusBar, Style } = await import('@capacitor/status-bar');
     await StatusBar.setOverlaysWebView({ overlay: true });
-    await StatusBar.setStyle({ style: Style.Dark });
+    // Dark icons for light-background pages (authenticated). Login/register pages
+    // switch to Style.Dark (white icons) for their purple backgrounds.
+    await StatusBar.setStyle({ style: Style.Light });
 
     // Import Capacitor plugins dynamically
     const { App } = await import('@capacitor/app');
