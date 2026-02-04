@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.12](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.11...v3.7.12) (2026-02-04)
+
+
+### Bug Fixes
+
+* hide header on mobile and fix status bar icon visibility on iOS ([dbcada3](https://github.com/xicoarm/suisse-notes-desktop/commit/dbcada314454ed2bcfd7ec2764b3968980dc445b))
+
 ### [3.7.10](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.9...v3.7.10) (2026-02-04)
 
 
