@@ -124,6 +124,20 @@ jobs:
           SKIP_PUBLISH: "true"
         run: npm run build
 
+      - name: Verify code signing
+        run: |
+          echo "=== Verifying code signing ==="
+          APP_PATH=$(find dist/electron/Packaged -name "*.app" -maxdepth 2 | head -1)
+          echo "Checking app: $APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          echo ""
+          echo "=== Gatekeeper assessment ==="
+          spctl --assess --type exec --verbose "$APP_PATH" || true
+          echo ""
+          echo "=== Signing identity ==="
+          codesign -dvv "$APP_PATH" 2>&1 | head -20
+          echo "=== Code signing OK ==="
+
       - name: Notarize macOS app
         env:
           API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
@@ -137,6 +151,7 @@ jobs:
               --key-id "$API_KEY_ID" \
               --issuer "$API_ISSUER_ID" \
               --wait --timeout 30m
+            echo ""
             echo "Stapling notarization ticket to $dmg..."
             xcrun stapler staple "$dmg"
           done
