@@ -1,19 +1,5 @@
 <template>
   <q-page class="register-page">
-    <!-- Back to login link -->
-    <div class="top-bar">
-      <router-link
-        to="/login"
-        class="back-link"
-      >
-        <q-icon
-          name="arrow_back"
-          size="18px"
-        />
-        <span>{{ $t('backToLogin') }}</span>
-      </router-link>
-    </div>
-
     <div class="register-container">
       <div class="register-card">
         <!-- Logo Section -->
@@ -170,8 +156,8 @@ const handleRegister = async () => {
 
 <style lang="scss" scoped>
 .register-page {
-  min-height: 100vh;
-  height: 100vh;
+  min-height: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
   background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
@@ -180,30 +166,6 @@ const handleRegister = async () => {
   padding-bottom: env(safe-area-inset-bottom, 0);
   box-sizing: border-box;
   overflow: hidden;
-}
-
-.top-bar {
-  flex-shrink: 0;
-  padding: 12px 20px;
-}
-
-.back-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 500;
-  color: white;
-  text-decoration: none;
-  transition: all 0.2s ease;
-  backdrop-filter: blur(4px);
-
-  &:hover {
-    background: rgba(255, 255, 255, 0.25);
-  }
 }
 
 .register-container {
@@ -302,15 +264,6 @@ const handleRegister = async () => {
 
 // Mobile adjustments
 @media (max-width: 600px) {
-  .top-bar {
-    padding: 8px 16px;
-  }
-
-  .back-link {
-    padding: 6px 10px;
-    font-size: 12px;
-  }
-
   .register-container {
     padding: 8px 16px;
   }

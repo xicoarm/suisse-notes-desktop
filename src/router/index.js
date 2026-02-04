@@ -92,6 +92,15 @@ export default function (/* { store, ssrContext } */) {
     } else if (to.name === 'about' && authStore.isAuthenticated) {
       // Allow authenticated users to visit about page
       next();
+    } else if (to.name === 'upload') {
+      // Prevent navigating to upload page while recording is active
+      const { useRecordingStore } = await import('../stores/recording');
+      const recordingStore = useRecordingStore();
+      if (recordingStore.isRecording || recordingStore.isPaused) {
+        next({ name: 'record' });
+      } else {
+        next();
+      }
     } else {
       next();
     }

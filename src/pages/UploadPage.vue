@@ -1069,10 +1069,38 @@ const formatBytes = (bytes) => {
 const generateTranscriptUrl = async () => {
   if (!currentAudioFileId.value) return '';
 
-  // Security: Session tokens are not included in URLs to prevent leakage
-  // via browser history, referrer headers, and server logs.
-  // Users will need to log in separately on the web app.
-  return `https://app.suisse-notes.ch/meeting/audio/${currentAudioFileId.value}`;
+  let url = `https://app.suisse-notes.ch/meeting/audio/${currentAudioFileId.value}`;
+
+  if (isElectron()) {
+    try {
+      const result = await window.electronAPI.auth.createWebSession();
+      if (result.success && result.sessionToken) {
+        url += `?session=${encodeURIComponent(result.sessionToken)}`;
+      }
+    } catch (error) {
+      console.warn('Could not create web session:', error);
+    }
+  } else if (isCapacitor()) {
+    try {
+      if (authStore.token) {
+        const response = await fetch(`${getApiUrlSync()}/api/auth/desktop/create-web-session`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${authStore.token}`
+          }
+        });
+        const data = await response.json();
+        if (data.success && data.sessionToken) {
+          url += `?session=${encodeURIComponent(data.sessionToken)}`;
+        }
+      }
+    } catch (error) {
+      console.warn('Could not create web session for mobile:', error);
+    }
+  }
+
+  return url;
 };
 
 const openInSuisseNotes = async () => {

@@ -1,14 +1,14 @@
 <template>
   <div class="audio-level-container">
     <div class="audio-level-label text-caption text-grey q-mb-xs">
-      Audio Level
+      {{ label }}
     </div>
     <div class="audio-level-meter">
       <div
         class="level-bar"
         :style="{ width: `${level}%` }"
         :class="levelClass"
-      ></div>
+      />
     </div>
     <div class="level-indicators">
       <span class="text-caption">Low</span>
@@ -25,6 +25,10 @@ const props = defineProps({
   level: {
     type: Number,
     default: 0
+  },
+  label: {
+    type: String,
+    default: 'Audio Level'
   }
 });
 

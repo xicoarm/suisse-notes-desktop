@@ -1,7 +1,67 @@
 import { defineStore } from 'pinia';
 import { useAuthStore } from './auth';
 import { useRecordingStore } from './recording';
-import { isElectron } from '../utils/platform';
+import { isElectron, isCapacitor } from '../utils/platform';
+import { getApiUrlSync } from '../services/api';
+
+// localStorage cache helpers for mobile
+const CACHE_KEY = 'recordings_history_cache';
+const PREF_KEY = 'recordings_storage_preference';
+
+function _getCachedRecordings(userId) {
+  try {
+    const raw = localStorage.getItem(`${CACHE_KEY}_${userId}`);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function _setCachedRecordings(userId, recordings) {
+  try {
+    localStorage.setItem(`${CACHE_KEY}_${userId}`, JSON.stringify(recordings));
+  } catch (e) {
+    console.warn('Failed to cache recordings to localStorage:', e);
+  }
+}
+
+function _getCachedPreference() {
+  try {
+    return localStorage.getItem(PREF_KEY) || 'keep';
+  } catch {
+    return 'keep';
+  }
+}
+
+function _setCachedPreference(preference) {
+  try {
+    localStorage.setItem(PREF_KEY, preference);
+  } catch (e) {
+    console.warn('Failed to cache storage preference:', e);
+  }
+}
+
+// Helper for authenticated server API calls
+async function _serverFetch(endpoint, options = {}) {
+  const authStore = useAuthStore();
+  const baseUrl = getApiUrlSync();
+  const url = `${baseUrl}${endpoint}`;
+
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${authStore.token}`,
+      ...options.headers
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Server returned ${response.status}`);
+  }
+
+  return response.json();
+}
 
 export const useRecordingsHistoryStore = defineStore('recordings-history', {
   state: () => ({
@@ -44,35 +104,56 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
       return authStore.user?.id || authStore.user?.userId || null;
     },
 
-    // Load recordings from electron store (filtered by current user)
-    // Only works on Electron - mobile uses server-side history
+    // Load recordings (platform-aware)
     async loadRecordings() {
       if (this.loading) return;
 
-      // Only load from electronAPI on desktop
-      if (!isElectron()) {
+      const userId = this._getUserId();
+      if (!userId) {
+        console.warn('No userId available, cannot load recordings');
         this.recordings = [];
         this.loaded = true;
         return;
       }
 
-      try {
-        this.loading = true;
-        const userId = this._getUserId();
-        if (!userId) {
-          console.warn('No userId available, cannot load recordings');
-          this.recordings = [];
+      if (isElectron()) {
+        // Desktop: load from Electron store
+        try {
+          this.loading = true;
+          this.recordings = await window.electronAPI.history.getAll(userId);
+          this.defaultStoragePreference =
+            await window.electronAPI.history.getDefaultStoragePreference();
           this.loaded = true;
-          return;
+        } catch (error) {
+          console.error('Error loading recordings history:', error);
+        } finally {
+          this.loading = false;
         }
-        this.recordings = await window.electronAPI.history.getAll(userId);
-        this.defaultStoragePreference =
-          await window.electronAPI.history.getDefaultStoragePreference();
-        this.loaded = true;
-      } catch (error) {
-        console.error('Error loading recordings history:', error);
-      } finally {
-        this.loading = false;
+      } else {
+        // Mobile/Web: load from server API, fall back to localStorage cache
+        try {
+          this.loading = true;
+
+          // Load cached recordings immediately for fast UI
+          this.recordings = _getCachedRecordings(userId);
+          this.defaultStoragePreference = _getCachedPreference();
+          this.loaded = true;
+
+          // Then fetch from server and update
+          const data = await _serverFetch('/api/desktop/history');
+          if (data.recordings) {
+            this.recordings = data.recordings;
+            _setCachedRecordings(userId, data.recordings);
+          } else if (Array.isArray(data)) {
+            this.recordings = data;
+            _setCachedRecordings(userId, data);
+          }
+        } catch (error) {
+          console.warn('Could not fetch history from server, using cache:', error);
+          // Cache already loaded above, so UI still works
+        } finally {
+          this.loading = false;
+        }
       }
     },
 
@@ -87,15 +168,34 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
 
         // Add userId to recording
         const recordingWithUser = { ...recording, userId };
-        const result = await window.electronAPI.history.add(recordingWithUser);
 
-        if (result.success) {
-          // Add to local state
-          this.recordings.unshift(result.recording);
-          return { success: true, recording: result.recording };
+        if (isElectron()) {
+          const result = await window.electronAPI.history.add(recordingWithUser);
+          if (result.success) {
+            this.recordings.unshift(result.recording);
+            return { success: true, recording: result.recording };
+          }
+          return { success: false, error: result.error };
+        } else {
+          // Mobile/Web: POST to server, update local cache
+          try {
+            const data = await _serverFetch('/api/desktop/history', {
+              method: 'POST',
+              body: JSON.stringify(recordingWithUser)
+            });
+
+            const saved = data.recording || recordingWithUser;
+            this.recordings.unshift(saved);
+            _setCachedRecordings(userId, this.recordings);
+            return { success: true, recording: saved };
+          } catch (error) {
+            // Server failed — save to local cache only so history isn't lost
+            console.warn('Could not save recording to server, caching locally:', error);
+            this.recordings.unshift(recordingWithUser);
+            _setCachedRecordings(userId, this.recordings);
+            return { success: true, recording: recordingWithUser };
+          }
         }
-
-        return { success: false, error: result.error };
       } catch (error) {
         console.error('Error adding recording to history:', error);
         return { success: false, error: error.message };
@@ -111,18 +211,35 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
           return { success: false, error: 'Not authenticated' };
         }
 
-        const result = await window.electronAPI.history.update(id, updates, userId);
-
-        if (result.success) {
-          // Update local state
+        if (isElectron()) {
+          const result = await window.electronAPI.history.update(id, updates, userId);
+          if (result.success) {
+            const index = this.recordings.findIndex(r => r.id === id);
+            if (index !== -1) {
+              this.recordings[index] = { ...this.recordings[index], ...updates };
+            }
+            return { success: true };
+          }
+          return { success: false, error: result.error };
+        } else {
+          // Mobile/Web: update locally and try server
           const index = this.recordings.findIndex(r => r.id === id);
           if (index !== -1) {
             this.recordings[index] = { ...this.recordings[index], ...updates };
           }
+          _setCachedRecordings(userId, this.recordings);
+
+          try {
+            await _serverFetch(`/api/desktop/recording/${id}`, {
+              method: 'PATCH',
+              body: JSON.stringify(updates)
+            });
+          } catch (error) {
+            console.warn('Could not update recording on server:', error);
+          }
+
           return { success: true };
         }
-
-        return { success: false, error: result.error };
       } catch (error) {
         console.error('Error updating recording:', error);
         return { success: false, error: error.message };
@@ -138,15 +255,28 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
           return { success: false, error: 'Not authenticated' };
         }
 
-        const result = await window.electronAPI.history.delete(id, deleteFile, userId);
-
-        if (result.success) {
-          // Remove from local state
+        if (isElectron()) {
+          const result = await window.electronAPI.history.delete(id, deleteFile, userId);
+          if (result.success) {
+            this.recordings = this.recordings.filter(r => r.id !== id);
+            return { success: true };
+          }
+          return { success: false, error: result.error };
+        } else {
+          // Mobile/Web: remove locally and try server
           this.recordings = this.recordings.filter(r => r.id !== id);
+          _setCachedRecordings(userId, this.recordings);
+
+          try {
+            await _serverFetch(`/api/desktop/recording/${id}`, {
+              method: 'DELETE'
+            });
+          } catch (error) {
+            console.warn('Could not delete recording on server:', error);
+          }
+
           return { success: true };
         }
-
-        return { success: false, error: result.error };
       } catch (error) {
         console.error('Error deleting recording:', error);
         return { success: false, error: error.message };
@@ -163,7 +293,11 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
     // Set default storage preference
     async setDefaultStoragePreference(preference) {
       try {
-        await window.electronAPI.history.setDefaultStoragePreference(preference);
+        if (isElectron()) {
+          await window.electronAPI.history.setDefaultStoragePreference(preference);
+        } else {
+          _setCachedPreference(preference);
+        }
         this.defaultStoragePreference = preference;
         return { success: true };
       } catch (error) {
@@ -186,7 +320,8 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
 
       // P0 Data Loss Fix: Check file locking before deletion
       // If storage preference is delete_after_upload, delete the file ONLY if safe
-      if (recording && recording.storagePreference === 'delete_after_upload') {
+      // File deletion only applies to Electron (mobile files are managed differently)
+      if (isElectron() && recording && recording.storagePreference === 'delete_after_upload') {
         const recordingStore = useRecordingStore();
 
         // Only delete if canDelete flag is true AND file is not locked

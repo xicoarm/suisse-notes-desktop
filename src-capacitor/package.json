@@ -1,6 +1,6 @@
 {
   "name": "Suisse Notes",
-  "version": "3.3.12",
+  "version": "3.7.4",
   "description": "Desktop app for recording and transcribing meetings",
   "private": true,
   "dependencies": {

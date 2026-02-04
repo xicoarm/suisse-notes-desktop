@@ -1,5 +1,105 @@
 <template>
   <q-layout view="hHh lpR fFf">
+    <!-- Unauthenticated Header: Show on all pages when NOT logged in -->
+    <q-header
+      v-if="!authStore.isAuthenticated"
+      class="modern-header unauth-header"
+    >
+      <q-toolbar class="header-toolbar">
+        <!-- Left: Brand Logo -->
+        <div class="header-left">
+          <div
+            class="brand-logo"
+            @click="goTo('/about')"
+          >
+            <img
+              src="../assets/logo.png"
+              alt="Suisse Notes"
+              class="logo-image"
+            >
+            <span class="logo-text">Suisse Notes</span>
+          </div>
+        </div>
+
+        <!-- Right: Language + Auth Buttons -->
+        <div class="header-right">
+          <!-- Language Switcher -->
+          <q-btn-dropdown
+            flat
+            no-caps
+            dense
+            class="lang-dropdown"
+            dropdown-icon="none"
+          >
+            <template #label>
+              <div class="lang-current">
+                <q-icon
+                  name="language"
+                  size="14px"
+                />
+                <span>{{ currentLangShort }}</span>
+                <q-icon
+                  name="expand_more"
+                  size="14px"
+                  class="expand-icon"
+                />
+              </div>
+            </template>
+
+            <q-list class="lang-list">
+              <q-item
+                v-for="lang in languages"
+                :key="lang.value"
+                v-close-popup
+                clickable
+                :class="{ 'lang-active': currentLang === lang.value }"
+                @click="setLanguage(lang.value)"
+              >
+                <q-item-section>
+                  <div class="lang-option">
+                    <span class="lang-short">{{ lang.short }}</span>
+                    <span class="lang-label">{{ lang.label }}</span>
+                  </div>
+                </q-item-section>
+                <q-item-section
+                  v-if="currentLang === lang.value"
+                  side
+                >
+                  <q-icon
+                    name="check"
+                    size="16px"
+                    color="primary"
+                  />
+                </q-item-section>
+              </q-item>
+            </q-list>
+          </q-btn-dropdown>
+
+          <!-- Sign In Button (hidden on /login) -->
+          <q-btn
+            v-if="route.name !== 'login'"
+            flat
+            no-caps
+            class="auth-btn signin-btn"
+            @click="goTo('/login')"
+          >
+            {{ $t('signIn') }}
+          </q-btn>
+
+          <!-- Register Button (hidden on /register) -->
+          <q-btn
+            v-if="route.name !== 'register'"
+            unelevated
+            no-caps
+            class="auth-btn register-btn"
+            @click="goTo('/register')"
+          >
+            {{ $t('createAccount') }}
+          </q-btn>
+        </div>
+      </q-toolbar>
+    </q-header>
+
     <!-- Desktop Header: Only show when authenticated AND on desktop (mobile uses bottom nav only) -->
     <q-header
       v-if="authStore.isAuthenticated && !isMobile()"
@@ -860,6 +960,34 @@ onUnmounted(() => {
   color: #94a3b8;
 }
 
+// Unauthenticated header auth buttons
+.unauth-header {
+  .auth-btn {
+    font-size: 13px;
+    font-weight: 600;
+    padding: 6px 16px;
+    border-radius: 8px;
+  }
+
+  .signin-btn {
+    color: #475569;
+
+    &:hover {
+      background: rgba(99, 102, 241, 0.08);
+      color: #6366F1;
+    }
+  }
+
+  .register-btn {
+    background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
+    color: white;
+
+    &:hover {
+      background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+    }
+  }
+}
+
 // Mobile header adjustments
 @media (max-width: 600px) {
   .header-toolbar {
@@ -894,6 +1022,13 @@ onUnmounted(() => {
 
   .minutes-chip {
     padding: 4px 8px;
+  }
+
+  .unauth-header {
+    .auth-btn {
+      font-size: 12px;
+      padding: 4px 10px;
+    }
   }
 }
 

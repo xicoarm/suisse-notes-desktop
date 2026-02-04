@@ -179,9 +179,17 @@
           </div>
         </div>
 
-        <!-- Audio Level Meter -->
+        <!-- Audio Level Meter(s) -->
         <div class="level-section">
-          <AudioLevelMeter :level="audioLevel" />
+          <AudioLevelMeter
+            :level="audioLevel"
+            :label="systemAudioEnabled ? $t('microphone') : 'Audio Level'"
+          />
+          <AudioLevelMeter
+            v-if="systemAudioEnabled"
+            :level="systemAudioLevel"
+            :label="$t('systemAudio')"
+          />
         </div>
 
         <!-- Recording Controls -->
@@ -568,6 +576,7 @@ const authStore = useAuthStore();
 
 const {
   audioLevel,
+  systemAudioLevel,
   availableMicrophones,
   selectedMicrophoneId,
   loadingMicrophones,
@@ -771,24 +780,21 @@ onMounted(async () => {
   // Load transcription settings
   await transcriptionStore.loadGlobalSettings();
 
-  if (isElectron() && !historyStore.loaded) {
+  if (!historyStore.loaded) {
     await historyStore.loadRecordings();
   }
 
   // Restore UI state from store (for navigation back during upload)
-  if (recordingStore.status === 'uploading') {
+  // If state is from a file upload (UploadPage), always reset so RecordPage starts clean
+  if (recordingStore.recordId && recordingStore.recordId.startsWith('file_')) {
+    recordingStore.reset();
+  } else if (recordingStore.status === 'uploading') {
     isAutoUploading.value = true;
     isProcessing.value = false;
   } else if (recordingStore.status === 'uploaded') {
-    // Check if this was a file upload from UploadPage (recordId starts with 'file_')
-    // If so, reset the store - we don't want to show UploadPage's success here
-    if (recordingStore.recordId && recordingStore.recordId.startsWith('file_')) {
-      recordingStore.reset();
-    } else {
-      // This was a recording upload - restore the UI state
-      isAutoUploading.value = false;
-      isProcessing.value = false;
-    }
+    // This was a recording upload - restore the UI state
+    isAutoUploading.value = false;
+    isProcessing.value = false;
   }
 
   // Set up upload listeners (Electron only)
@@ -1190,7 +1196,7 @@ const generateTranscriptUrl = async () => {
 
   let url = `https://app.suisse-notes.ch/meeting/audio/${currentAudioFileId.value}`;
 
-  // Try to get a web session token for seamless login (Electron only)
+  // Try to get a web session token for seamless login
   if (isElectron()) {
     try {
       const result = await window.electronAPI.auth.createWebSession();
@@ -1203,8 +1209,26 @@ const generateTranscriptUrl = async () => {
     } catch (error) {
       console.warn('Could not create web session:', error);
     }
+  } else if (isCapacitor()) {
+    try {
+      const authStore = useAuthStore();
+      if (authStore.token) {
+        const response = await fetch(`${getApiUrlSync()}/api/auth/desktop/create-web-session`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${authStore.token}`
+          }
+        });
+        const data = await response.json();
+        if (data.success && data.sessionToken) {
+          url += `?session=${encodeURIComponent(data.sessionToken)}`;
+        }
+      }
+    } catch (error) {
+      console.warn('Could not create web session for mobile:', error);
+    }
   }
-  // On mobile, user will need to log in manually in the browser
 
   return url;
 };
@@ -1463,6 +1487,9 @@ const removeSessionWord = (word) => {
 .level-section {
   margin-bottom: 24px;
   padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .controls-section {

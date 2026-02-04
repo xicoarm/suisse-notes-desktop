@@ -1,58 +1,5 @@
 <template>
   <q-page class="login-page">
-    <!-- Language Selector (top of page) -->
-    <div class="top-bar">
-      <q-btn-dropdown
-        flat
-        no-caps
-        dense
-        class="lang-dropdown"
-        dropdown-icon="none"
-      >
-        <template #label>
-          <div class="lang-current">
-            <q-icon
-              name="language"
-              size="14px"
-            />
-            <span>{{ currentLangShort }}</span>
-            <q-icon
-              name="expand_more"
-              size="14px"
-            />
-          </div>
-        </template>
-
-        <q-list class="lang-list">
-          <q-item
-            v-for="lang in languages"
-            :key="lang.value"
-            v-close-popup
-            clickable
-            :class="{ 'lang-active': currentLang === lang.value }"
-            @click="setLanguage(lang.value)"
-          >
-            <q-item-section>
-              <div class="lang-option">
-                <span class="lang-short">{{ lang.short }}</span>
-                <span class="lang-label">{{ lang.label }}</span>
-              </div>
-            </q-item-section>
-            <q-item-section
-              v-if="currentLang === lang.value"
-              side
-            >
-              <q-icon
-                name="check"
-                size="16px"
-                color="primary"
-              />
-            </q-item-section>
-          </q-item>
-        </q-list>
-      </q-btn-dropdown>
-    </div>
-
     <!-- Login Container -->
     <div class="login-container">
       <div class="login-card">
@@ -192,50 +139,19 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '../stores/auth';
 import { isElectron, isCapacitor } from '../utils/platform';
 
 const router = useRouter();
 const authStore = useAuthStore();
-const { locale } = useI18n();
 
 const email = ref('');
 const password = ref('');
 
 // Current year for copyright
 const currentYear = new Date().getFullYear();
-
-// Language switcher
-const languages = [
-  { label: 'English', short: 'EN', value: 'en' },
-  { label: 'Deutsch', short: 'DE', value: 'de' },
-  { label: 'Français', short: 'FR', value: 'fr' },
-  { label: 'Italiano', short: 'IT', value: 'it' }
-];
-
-const currentLang = ref(localStorage.getItem('lang') || 'de');
-
-const currentLangShort = computed(() => {
-  const lang = languages.find(l => l.value === currentLang.value);
-  return lang ? lang.short : 'DE';
-});
-
-const setLanguage = (lang) => {
-  currentLang.value = lang;
-  locale.value = lang;
-  localStorage.setItem('lang', lang);
-};
-
-onMounted(() => {
-  const savedLang = localStorage.getItem('lang');
-  if (savedLang) {
-    locale.value = savedLang;
-    currentLang.value = savedLang;
-  }
-});
 
 const handleLogin = async () => {
   if (!email.value || !password.value) return;
@@ -269,8 +185,8 @@ const openForgotPassword = async () => {
 
 <style lang="scss" scoped>
 .login-page {
-  min-height: 100vh;
-  height: 100vh;
+  min-height: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
   background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
@@ -279,83 +195,6 @@ const openForgotPassword = async () => {
   padding-bottom: env(safe-area-inset-bottom, 0);
   box-sizing: border-box;
   overflow: hidden; // Prevent scrolling on login page
-}
-
-// Top bar with language selector
-.top-bar {
-  display: flex;
-  justify-content: flex-end;
-  padding: 12px 20px;
-  flex-shrink: 0;
-}
-
-.lang-dropdown {
-  padding: 0;
-  min-height: auto;
-
-  :deep(.q-btn__content) {
-    padding: 0;
-  }
-}
-
-.lang-current {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 8px;
-  font-size: 12px;
-  font-weight: 600;
-  color: white;
-  transition: all 0.2s ease;
-  backdrop-filter: blur(4px);
-
-  &:hover {
-    background: rgba(255, 255, 255, 0.25);
-  }
-}
-
-.lang-list {
-  min-width: 160px;
-  padding: 6px;
-
-  :deep(.q-item) {
-    min-height: 36px;
-    padding: 8px 12px;
-    border-radius: 6px;
-    margin-bottom: 2px;
-
-    &:last-child {
-      margin-bottom: 0;
-    }
-
-    &:hover {
-      background: #f8fafc;
-    }
-
-    &.lang-active {
-      background: rgba(99, 102, 241, 0.08);
-    }
-  }
-}
-
-.lang-option {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-
-  .lang-short {
-    font-size: 11px;
-    font-weight: 700;
-    color: #6366F1;
-    min-width: 22px;
-  }
-
-  .lang-label {
-    font-size: 13px;
-    color: #475569;
-  }
 }
 
 // Login container
@@ -532,10 +371,6 @@ const openForgotPassword = async () => {
 
 // Mobile adjustments
 @media (max-width: 600px) {
-  .top-bar {
-    padding: 8px 16px;
-  }
-
   .login-container {
     padding: 8px 16px;
   }

@@ -51,6 +51,12 @@ let stateVerificationInterval = null;
 // System audio state (persists across navigation)
 let systemAudioActive = false;
 
+// System audio level monitoring
+let systemAudioContext = null;
+let systemAnalyser = null;
+let systemLevelInterval = null;
+let currentSystemAudioLevel = 0;
+
 // Mic mute state
 let micMuted = false;
 
@@ -117,6 +123,7 @@ export function getState() {
     isRecording: mediaRecorder?.state === 'recording',
     isPaused: mediaRecorder?.state === 'paused',
     audioLevel: currentAudioLevel,
+    systemAudioLevel: currentSystemAudioLevel,
     silenceWarning: silenceError,
     hasStream: stream !== null,
     systemAudioActive,
@@ -180,6 +187,7 @@ export function addSystemAudioStream(sysStream) {
     systemSourceNode.connect(mixingDest);
     systemStream = sysStream;
     systemAudioActive = true;
+    startSystemLevelMonitoring(sysStream);
     emit('systemAudioChange', true);
     console.log('System audio added to recording mix');
     return true;
@@ -207,6 +215,7 @@ export function removeSystemAudioStream() {
   }
   if (systemAudioActive) {
     systemAudioActive = false;
+    stopSystemLevelMonitoring();
     emit('systemAudioChange', false);
     console.log('System audio removed from recording mix');
   }
@@ -243,6 +252,9 @@ export function toggleMicMute() {
  * Start audio level monitoring with silence detection
  */
 function startLevelMonitoring(mediaStream, recordingStore) {
+  // Defensively clean up any existing monitoring
+  stopLevelMonitoring();
+
   try {
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
     analyser = audioContext.createAnalyser();
@@ -312,6 +324,51 @@ function stopLevelMonitoring() {
   emit('silenceWarning', null);
 }
 
+/**
+ * Start system audio level monitoring
+ */
+function startSystemLevelMonitoring(sysStream) {
+  stopSystemLevelMonitoring();
+  try {
+    systemAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    systemAnalyser = systemAudioContext.createAnalyser();
+    const source = systemAudioContext.createMediaStreamSource(sysStream);
+    source.connect(systemAnalyser);
+
+    systemAnalyser.fftSize = 256;
+    const bufferLength = systemAnalyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+
+    systemLevelInterval = setInterval(() => {
+      if (systemAnalyser) {
+        systemAnalyser.getByteFrequencyData(dataArray);
+        const average = dataArray.reduce((a, b) => a + b, 0) / bufferLength;
+        currentSystemAudioLevel = Math.min(100, (average / 128) * 100);
+        emit('systemLevelChange', currentSystemAudioLevel);
+      }
+    }, 100);
+  } catch (error) {
+    console.warn('Could not start system audio level monitoring:', error);
+  }
+}
+
+/**
+ * Stop system audio level monitoring
+ */
+function stopSystemLevelMonitoring() {
+  if (systemLevelInterval) {
+    clearInterval(systemLevelInterval);
+    systemLevelInterval = null;
+  }
+  if (systemAudioContext) {
+    systemAudioContext.close().catch(() => {});
+    systemAudioContext = null;
+  }
+  systemAnalyser = null;
+  currentSystemAudioLevel = 0;
+  emit('systemLevelChange', 0);
+}
+
 // Minutes limit tracking state
 let minutesLimitSeconds = null;
 let limitWarningShown = false;
@@ -324,6 +381,12 @@ const LIMIT_WARNING_SECONDS = 300; // 5 minutes warning before limit
  * @param {number|null} maxSeconds - Maximum recording seconds (from user's minutes balance)
  */
 function startDurationTracking(recordingStore, isAutoSplitting, maxSeconds = null) {
+  // Defensively clear any existing interval to prevent dual timers
+  if (durationInterval) {
+    clearInterval(durationInterval);
+    durationInterval = null;
+  }
+
   const startTime = Date.now();
   minutesLimitSeconds = maxSeconds;
   limitWarningShown = false;
@@ -605,6 +668,7 @@ export async function startRecording(options = {}) {
     console.error('Error starting recording:', error);
 
     stopLevelMonitoring();
+    stopSystemLevelMonitoring();
     stopDurationTracking();
 
     if (stream) {
@@ -657,6 +721,12 @@ export function resumeRecording(recordingStore, isAutoSplitting, maxRecordingSec
     // Reset warning flag on resume in case we paused after warning
     limitWarningShown = false;
 
+    // Defensively clear any existing interval to prevent dual timers
+    if (durationInterval) {
+      clearInterval(durationInterval);
+      durationInterval = null;
+    }
+
     durationInterval = setInterval(async () => {
       if (recordingStore.isRecording) {
         const elapsed = Math.floor((Date.now() - resumeTime) / 1000);
@@ -706,6 +776,7 @@ export async function stopRecording(recordingStore, stopSystemAudio) {
         console.warn('MediaRecorder lost but chunks exist - attempting recovery');
         silenceError = null;
         stopLevelMonitoring();
+        stopSystemLevelMonitoring();
         stopDurationTracking();
         stopAuthKeepAlive();
 
@@ -787,6 +858,7 @@ export async function stopRecording(recordingStore, stopSystemAudio) {
       await new Promise(r => setTimeout(r, 100));
 
       stopLevelMonitoring();
+      stopSystemLevelMonitoring();
       stopDurationTracking();
       stopAuthKeepAlive();
 
@@ -833,6 +905,7 @@ export async function stopRecording(recordingStore, stopSystemAudio) {
       mediaRecorder.stop();
     } else {
       stopLevelMonitoring();
+      stopSystemLevelMonitoring();
       stopDurationTracking();
       stopAuthKeepAlive();
 
@@ -883,6 +956,7 @@ export function isActive() {
  */
 export function cleanup(stopSystemAudio) {
   stopLevelMonitoring();
+  stopSystemLevelMonitoring();
   stopDurationTracking();
   stopAuthKeepAlive();
 
