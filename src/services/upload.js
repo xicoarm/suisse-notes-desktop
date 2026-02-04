@@ -224,24 +224,26 @@ export const uploadWithVerification = async (options) => {
 
   try {
     // Phase 1a: Calculate local checksum before upload
-    onStatusChange('calculating_checksum');
-    try {
-      let fileData;
-      if (file) {
-        // Read from File object (from file picker)
-        fileData = await file.arrayBuffer();
-      } else if (filePath) {
-        // Read from file path (from recording)
-        fileData = await readFileData(filePath);
-      }
+    // Skip on mobile — reading the file for checksumming is expensive (base64 decode)
+    // and the file will be read again for the actual upload, causing a long freeze.
+    // TUS protocol has its own integrity checks on mobile.
+    if (!isCapacitor()) {
+      onStatusChange('calculating_checksum');
+      try {
+        let fileData;
+        if (file) {
+          fileData = await file.arrayBuffer();
+        } else if (filePath) {
+          fileData = await readFileData(filePath);
+        }
 
-      if (fileData) {
-        localChecksum = await calculateUploadChecksum(fileData);
-        console.log('Local checksum calculated:', localChecksum);
+        if (fileData) {
+          localChecksum = await calculateUploadChecksum(fileData);
+          console.log('Local checksum calculated:', localChecksum);
+        }
+      } catch (error) {
+        console.warn('Could not calculate local checksum:', error.message);
       }
-    } catch (error) {
-      console.warn('Could not calculate local checksum:', error.message);
-      // Continue without checksum - verification will be trust-based
     }
 
     // Phase 1b: Upload the file
@@ -279,11 +281,8 @@ export const uploadWithVerification = async (options) => {
         audioFileId = uploadResult.audioFileId;
         break;
       } else if (isCapacitor()) {
-        // Use fetch-based upload for mobile
-        // Support both File object (from picker) and filePath (from recording)
-        const uploadResult = file
-          ? await uploadFileMobileSimple(null, apiUrl, currentToken, metadata, onProgress, file, recordId)
-          : await uploadFileMobile(filePath, apiUrl, currentToken, metadata, onProgress, recordId);
+        // Use simple POST upload for mobile (TUS endpoint not available on server)
+        const uploadResult = await uploadFileMobileSimple(filePath, apiUrl, currentToken, metadata, onProgress, file, recordId);
 
         if (!uploadResult.success) {
           // Check for token expiration
