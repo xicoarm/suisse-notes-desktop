@@ -169,19 +169,25 @@ jobs:
       - name: Build Electron app for macOS
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          APPLE_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run build
+
+      - name: Notarize macOS app
+        env:
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
         run: |
-          # APPLE_API_KEY_PATH is set via GITHUB_ENV in the previous step
-          export APPLE_API_KEY="$APPLE_API_KEY_PATH"
-          # Ensure no conflicting auth methods
-          unset APPLE_ID
-          unset APPLE_APP_SPECIFIC_PASSWORD
-          unset APPLE_KEYCHAIN
-          unset APPLE_KEYCHAIN_PROFILE
-          ls -la "$APPLE_API_KEY" || { echo "API KEY FILE NOT FOUND!"; exit 1; }
-          npm run build
+          echo "=== Notarizing macOS DMG files ==="
+          for dmg in dist/electron/Packaged/*.dmg; do
+            echo "Submitting $dmg for notarization..."
+            xcrun notarytool submit "$dmg" \
+              --key "$APPLE_API_KEY_PATH" \
+              --key-id "$API_KEY_ID" \
+              --issuer "$API_ISSUER_ID" \
+              --wait --timeout 10m
+            echo "Stapling notarization ticket to $dmg..."
+            xcrun stapler staple "$dmg"
+          done
+          echo "=== Notarization complete ==="
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
