@@ -1113,8 +1113,6 @@ onUnmounted(() => {
 .mobile-bottom-nav {
   background: white;
   border-top: 1px solid #e2e8f0;
-  // Safe area padding for mobile home indicator
-  padding-bottom: env(safe-area-inset-bottom, 0);
 
   .mobile-nav-tabs {
     :deep(.q-tab) {
