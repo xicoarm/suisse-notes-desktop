@@ -157,13 +157,19 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
       }
     },
 
-    // Add a new recording to history (with userId)
+    // Add a new recording to history (with userId) — idempotent: if ID exists, delegates to updateRecording
     async addRecording(recording) {
       try {
         const userId = this._getUserId();
         if (!userId) {
           console.error('SECURITY: Cannot add recording without userId');
           return { success: false, error: 'Not authenticated' };
+        }
+
+        // Idempotent: if a recording with the same ID already exists, update it instead
+        if (recording.id && this.recordings.find(r => r.id === recording.id)) {
+          const { id, ...updates } = recording;
+          return this.updateRecording(id, updates);
         }
 
         // Add userId to recording

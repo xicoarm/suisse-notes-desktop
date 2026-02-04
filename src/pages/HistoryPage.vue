@@ -148,7 +148,9 @@ import { useQuasar } from 'quasar';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingStore } from '../stores/recording';
-import { isElectron } from '../utils/platform';
+import { isElectron, isCapacitor } from '../utils/platform';
+import { uploadWithVerification } from '../services/upload';
+import { getApiUrlSync } from '../services/api';
 import RecordingHistoryCard from '../components/RecordingHistoryCard.vue';
 
 export default {
@@ -200,14 +202,6 @@ export default {
         return;
       }
 
-      if (!isElectron()) {
-        $q.notify({
-          type: 'info',
-          message: 'Re-upload from history is only available on desktop'
-        });
-        return;
-      }
-
       if (!recording.filePath) {
         $q.notify({
           type: 'negative',
@@ -225,30 +219,46 @@ export default {
       recordingStore.lockForUpload(recording.id);
 
       try {
-        let result = await window.electronAPI.upload.start({
-          recordId: recording.id,
-          filePath: recording.filePath,
-          metadata: {
-            duration: recording.duration
-          }
-        });
+        let result;
 
-        // Handle token expiration - attempt refresh and retry
-        if (!result.success && result.status === 401) {
-          console.log('Token expired, attempting refresh...');
-          const refreshResult = await authStore.handleAuthError();
-          if (refreshResult.success) {
-            console.log('Token refreshed, retrying upload...');
-            result = await window.electronAPI.upload.start({
-              recordId: recording.id,
-              filePath: recording.filePath,
-              metadata: {
-                duration: recording.duration
-              }
-            });
-          } else if (refreshResult.shouldLogout) {
-            result = { success: false, error: 'Session expired. Please log in again.' };
+        if (isElectron()) {
+          result = await window.electronAPI.upload.start({
+            recordId: recording.id,
+            filePath: recording.filePath,
+            metadata: {
+              duration: recording.duration?.toString()
+            }
+          });
+
+          // Handle token expiration - attempt refresh and retry
+          if (!result.success && result.status === 401) {
+            console.log('Token expired, attempting refresh...');
+            const refreshResult = await authStore.handleAuthError();
+            if (refreshResult.success) {
+              console.log('Token refreshed, retrying upload...');
+              result = await window.electronAPI.upload.start({
+                recordId: recording.id,
+                filePath: recording.filePath,
+                metadata: {
+                  duration: recording.duration?.toString()
+                }
+              });
+            } else if (refreshResult.shouldLogout) {
+              result = { success: false, error: 'Session expired. Please log in again.' };
+            }
           }
+        } else if (isCapacitor()) {
+          result = await uploadWithVerification({
+            filePath: recording.filePath,
+            recordId: recording.id,
+            apiUrl: getApiUrlSync(),
+            authToken: authStore.token,
+            metadata: { duration: recording.duration?.toString() },
+            onProgress: (p) => { uploadProgress.value = p; },
+            getAuthStore: () => authStore
+          });
+        } else {
+          result = { success: false, error: 'Unsupported platform' };
         }
 
         if (result.success) {
@@ -262,10 +272,12 @@ export default {
 
           // P0 Data Loss Fix: Handle delete after upload with lock check
           if (recording.storagePreference === 'delete_after_upload') {
-            // Only delete if result.canDelete is true AND file is not locked
             if (result.canDelete && recordingStore.canDelete(recording.id)) {
               try {
-                await window.electronAPI.recording.deleteRecording(recording.id);
+                if (isElectron()) {
+                  await window.electronAPI.recording.deleteRecording(recording.id);
+                }
+                // On mobile, skip file deletion for now (files managed by storage service)
                 await historyStore.updateRecording(recording.id, { filePath: null });
                 recordingStore.unlockFile(recording.id);
               } catch (e) {
@@ -286,9 +298,6 @@ export default {
             uploadError: result.error
           });
 
-          // P0 Data Loss Fix: Keep file locked on failure - user can retry
-          // Don't unlock so file stays protected
-
           $q.notify({
             type: 'negative',
             message: result.error || 'Upload failed',
@@ -300,8 +309,6 @@ export default {
           uploadStatus: 'failed',
           uploadError: error.message
         });
-
-        // P0 Data Loss Fix: Keep file locked on failure - user can retry
 
         $q.notify({
           type: 'negative',

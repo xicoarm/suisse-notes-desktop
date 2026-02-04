@@ -257,7 +257,7 @@ export const useRecordingStore = defineStore('recording', {
           await window.electronAPI.recording.setInProgress(false);
           await window.electronAPI.recording.setProcessing(false);
         }
-        return { success: false, error: error.message };
+        return { success: false, error: error.message, partialRecovery: this.chunkIndex > 0, chunkCount: this.chunkIndex, recordId: this.recordId };
       }
     },
 
@@ -386,7 +386,7 @@ export const useRecordingStore = defineStore('recording', {
               this.recordId,
               chunkData,
               this.chunkIndex,
-              '.m4a' // Mobile uses m4a format
+              '.webm' // Mobile uses webm format
             );
           } else {
             throw new Error('Unsupported platform');

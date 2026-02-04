@@ -377,7 +377,7 @@ const uploadFileMobile = async (filePath, apiUrl, authToken, metadata, onProgres
       throw new Error(fileResult.error || 'Failed to read file for upload');
     }
 
-    const fileBlob = new Blob([fileResult.data], { type: 'audio/m4a' });
+    const fileBlob = new Blob([fileResult.data], { type: 'audio/webm' });
     const fileSize = fileBlob.size;
 
     // Calculate appropriate chunk size based on file size
@@ -389,13 +389,41 @@ const uploadFileMobile = async (filePath, apiUrl, authToken, metadata, onProgres
     };
 
     return new Promise((resolve, reject) => {
+      // Timeout: if no progress fires within 60 seconds, abort and fall back
+      let progressTimeout = setTimeout(() => {
+        console.warn('TUS upload: no progress within 60s, aborting');
+        try { upload.abort(); } catch (e) { /* ignore */ }
+        if (fileSize < 50 * 1024 * 1024) {
+          uploadFileMobileSimple(filePath, apiUrl, authToken, metadata, onProgress, null, recordId)
+            .then(resolve)
+            .catch(reject);
+        } else {
+          reject(new Error('Upload stuck: no progress within 60 seconds'));
+        }
+      }, 60000);
+
+      const resetProgressTimeout = () => {
+        clearTimeout(progressTimeout);
+        progressTimeout = setTimeout(() => {
+          console.warn('TUS upload: no progress within 60s, aborting');
+          try { upload.abort(); } catch (e) { /* ignore */ }
+          if (fileSize < 50 * 1024 * 1024) {
+            uploadFileMobileSimple(filePath, apiUrl, authToken, metadata, onProgress, null, recordId)
+              .then(resolve)
+              .catch(reject);
+          } else {
+            reject(new Error('Upload stuck: no progress within 60 seconds'));
+          }
+        }, 60000);
+      };
+
       const upload = new Upload(fileBlob, {
         endpoint: `${apiUrl}/api/desktop/upload/tus`,
         retryDelays: [0, 1000, 3000, 5000, 10000, 30000], // Retry delays in ms
         chunkSize: getChunkSize(fileSize),
         metadata: {
-          filename: 'recording.m4a',
-          filetype: 'audio/m4a',
+          filename: 'recording.webm',
+          filetype: 'audio/webm',
           ...metadata,
           recordMetadata: JSON.stringify(metadata)
         },
@@ -403,6 +431,7 @@ const uploadFileMobile = async (filePath, apiUrl, authToken, metadata, onProgres
           'Authorization': `Bearer ${authToken}`
         },
         onError: (error) => {
+          clearTimeout(progressTimeout);
           console.error('TUS upload error:', error);
           // Check if we can fall back to simple upload for smaller files
           if (fileSize < 50 * 1024 * 1024) {
@@ -415,10 +444,12 @@ const uploadFileMobile = async (filePath, apiUrl, authToken, metadata, onProgres
           }
         },
         onProgress: (bytesUploaded, bytesTotal) => {
+          resetProgressTimeout();
           const percentage = Math.round((bytesUploaded / bytesTotal) * 100);
           onProgress(percentage);
         },
         onSuccess: () => {
+          clearTimeout(progressTimeout);
           // Extract audioFileId from the upload URL
           const uploadUrl = upload.url;
           const audioFileId = uploadUrl ? uploadUrl.split('/').pop() : null;
@@ -475,13 +506,13 @@ const uploadFileMobileSimple = async (filePath, apiUrl, authToken, metadata, onP
       if (!fileResult.success) {
         throw new Error(fileResult.error || 'Failed to read file for upload');
       }
-      fileBlob = new Blob([fileResult.data], { type: 'audio/m4a' });
+      fileBlob = new Blob([fileResult.data], { type: 'audio/webm' });
     } else {
       throw new Error('No file provided for upload');
     }
 
     const formData = new FormData();
-    formData.append('audio', fileBlob, fileObj?.name || 'recording.m4a');
+    formData.append('audio', fileBlob, fileObj?.name || 'recording.webm');
     formData.append('metadata', JSON.stringify(metadata));
 
     // Calculate timeout based on file size (1 minute per 10MB, minimum 10 minutes)

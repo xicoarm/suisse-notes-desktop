@@ -252,6 +252,42 @@
         </div>
       </div>
 
+      <!-- ERROR STATE: Recording failed -->
+      <div
+        v-if="recordingStore.status === 'error' && !showUploadSection"
+        class="error-card modern-card no-hover"
+      >
+        <div class="error-card-content">
+          <q-icon
+            name="error_outline"
+            size="lg"
+            color="negative"
+          />
+          <h3>Recording Error</h3>
+          <p>{{ recordingStore.error || 'An unexpected error occurred' }}</p>
+          <div
+            v-if="recordingStore.chunkIndex > 0"
+            class="chunks-info"
+          >
+            {{ recordingStore.chunkIndex }} audio chunk(s) saved locally.
+          </div>
+          <div class="error-card-actions">
+            <q-btn
+              color="primary"
+              label="New Recording"
+              icon="mic"
+              @click="handleNewRecording"
+            />
+            <q-btn
+              v-if="recordingStore.chunkIndex > 0"
+              flat
+              label="Retry Combining"
+              @click="retryChunkCombine"
+            />
+          </div>
+        </div>
+      </div>
+
       <!-- Auto-Upload Progress Section -->
       <div
         v-if="showUploadSection"
@@ -922,11 +958,34 @@ const handleStop = async () => {
         }
       }
 
+      // Save to history BEFORE upload starts (so it survives app kill)
+      await historyStore.addRecording({
+        id: recordingStore.recordId,
+        createdAt: new Date().toISOString(),
+        duration: finalDuration.value,
+        fileSize: currentFileSize.value,
+        filePath: currentFilePath.value,
+        uploadStatus: 'pending',
+        storagePreference: currentStoragePreference.value
+      });
+
       // Processing done, start auto-upload
       isProcessing.value = false;
       await startAutoUpload();
     } else {
       isProcessing.value = false;
+
+      // Save to history as failed if there are chunks on mobile
+      if (isCapacitor() && result.chunkCount > 0) {
+        await historyStore.addRecording({
+          id: result.recordId || recordingStore.recordId,
+          createdAt: new Date().toISOString(),
+          duration: finalDuration.value,
+          filePath: null,
+          uploadStatus: 'failed',
+          uploadError: result.error
+        });
+      }
 
       // Show more detailed error for partial recovery
       if (result.partialRecovery) {
@@ -1024,15 +1083,9 @@ const startAutoUpload = async () => {
     if (result.success) {
       recordingStore.setUploaded(result.audioFileId);
 
-      // Add to history
-      await historyStore.addRecording({
-        id: recordingStore.recordId,
-        createdAt: new Date().toISOString(),
-        duration: finalDuration.value,
-        fileSize: currentFileSize.value,
-        filePath: currentFilePath.value,
+      // Update history entry (already added before upload started)
+      await historyStore.updateRecording(recordingStore.recordId, {
         uploadStatus: 'uploaded',
-        storagePreference: currentStoragePreference.value,
         transcriptionId: result.transcriptionId,
         audioFileId: result.audioFileId
       });
@@ -1087,15 +1140,9 @@ const startAutoUpload = async () => {
 const handleUploadError = async (errorMessage) => {
   uploadError.value = errorMessage;
 
-  // Save to history as failed - KEEP the file regardless of preference
-  await historyStore.addRecording({
-    id: recordingStore.recordId,
-    createdAt: new Date().toISOString(),
-    duration: finalDuration.value,
-    fileSize: currentFileSize.value,
-    filePath: currentFilePath.value,
+  // Update history entry as failed (already added before upload started)
+  await historyStore.updateRecording(recordingStore.recordId, {
     uploadStatus: 'failed',
-    storagePreference: currentStoragePreference.value,
     uploadError: errorMessage
   });
 
@@ -1120,6 +1167,23 @@ const retryUpload = async () => {
   } catch (error) {
     isRetrying.value = false;
     uploadError.value = error.message;
+  }
+};
+
+const retryChunkCombine = async () => {
+  isProcessing.value = true;
+  recordingStore.error = null;
+  recordingStore.status = 'stopped';
+  const result = await recordingStore.combineChunksNative();
+  if (result.success) {
+    currentFilePath.value = result.outputPath;
+    currentFileSize.value = result.fileSize || 0;
+    isProcessing.value = false;
+    await startAutoUpload();
+  } else {
+    isProcessing.value = false;
+    recordingStore.error = result.error;
+    recordingStore.status = 'error';
   }
 };
 
@@ -1512,6 +1576,52 @@ const removeSessionWord = (word) => {
   .error-banner {
     background: rgba(239, 68, 68, 0.1);
     border: 1px solid rgba(239, 68, 68, 0.2);
+  }
+}
+
+.error-card {
+  padding: 36px 40px;
+  margin-bottom: 32px;
+  border-radius: 16px;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+
+  @media (max-width: 600px) {
+    padding: 24px 16px;
+  }
+
+  .error-card-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 12px;
+
+    h3 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1e293b;
+      margin: 0;
+    }
+
+    p {
+      font-size: 13px;
+      color: #64748b;
+      margin: 0;
+    }
+
+    .chunks-info {
+      font-size: 12px;
+      color: #f59e0b;
+      padding: 6px 12px;
+      background: rgba(245, 158, 11, 0.1);
+      border-radius: 6px;
+    }
+
+    .error-card-actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 8px;
+    }
   }
 }
 
