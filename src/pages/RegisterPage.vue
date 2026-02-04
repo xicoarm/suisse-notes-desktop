@@ -161,8 +161,7 @@ const handleRegister = async () => {
   display: flex;
   flex-direction: column;
   background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
-  // Status bar is handled by @capacitor/status-bar plugin with overlaysWebView: false
-  // Only need safe-area for bottom home indicator on iOS
+  padding-top: env(safe-area-inset-top, 0);
   padding-bottom: env(safe-area-inset-bottom, 0);
   box-sizing: border-box;
   overflow: hidden;

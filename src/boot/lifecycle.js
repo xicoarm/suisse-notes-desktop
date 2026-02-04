@@ -36,6 +36,11 @@ export const initializeLifecycle = async () => {
   }
 
   try {
+    // Enable overlay mode so we control safe area via CSS (both iOS and Android)
+    const { StatusBar, Style } = await import('@capacitor/status-bar');
+    await StatusBar.setOverlaysWebView({ overlay: true });
+    await StatusBar.setStyle({ style: Style.Dark });
+
     // Import Capacitor plugins dynamically
     const { App } = await import('@capacitor/app');
     const { Network } = await import('@capacitor/network');
