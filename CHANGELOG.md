@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.9](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.5...v3.7.9) (2026-02-04)
+
+
+### Bug Fixes
+
+* guard electronAPI.recording in AudioPlayback for mobile ([f99296c](https://github.com/xicoarm/suisse-notes-desktop/commit/f99296c71b7e87989e118c4eebf22683615856ee))
+
 ### [3.7.8](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.7...v3.7.8) (2026-02-04)
 
 
