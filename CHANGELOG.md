@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.8](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.7...v3.7.8) (2026-02-04)
+
+
+### Bug Fixes
+
+* mobile recording MIME type, error UI, pre-upload history, and re-upload ([d312f93](https://github.com/xicoarm/suisse-notes-desktop/commit/d312f932b91ad9e2481f56cce7024d9c4d947af2))
+
 ### [3.7.4](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.3...v3.7.4) (2026-02-03)
 
 
