@@ -167,8 +167,6 @@ jobs:
           echo "APPLE_API_KEY_PATH=$API_KEY_DIR/AuthKey_${API_KEY_ID}.p8" >> $GITHUB_ENV
 
       - name: Build Electron app for macOS
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         run: npm run build
 
       - name: Notarize macOS app
