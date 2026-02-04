@@ -135,10 +135,9 @@ export default function (ctx) {
           gatekeeperAssess: false,
           entitlements: 'build/entitlements.mac.plist',
           entitlementsInherit: 'build/entitlements.mac.plist',
-          forceCodeSigning: !!process.env.CSC_LINK,
-          notarize: process.env.APPLE_ID ? {
-            teamId: process.env.APPLE_TEAM_ID
-          } : false
+          forceCodeSigning: !!process.env.CSC_KEYCHAIN,
+          // TODO: re-enable notarization after signing is confirmed working
+          notarize: false
         },
         dmg: {
           contents: [
