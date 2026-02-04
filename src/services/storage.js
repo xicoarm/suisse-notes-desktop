@@ -132,6 +132,37 @@ export const readFile = async (path) => {
 };
 
 /**
+ * Write an ArrayBuffer to a file
+ * @param {string} path - File path
+ * @param {ArrayBuffer} data - Data to write
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+export const writeFile = async (path, data) => {
+  if (isElectron()) {
+    return window.electronAPI.file.writeBinary(path, Array.from(new Uint8Array(data)));
+  }
+
+  if (isCapacitor()) {
+    await initCapacitorFilesystem();
+
+    try {
+      await Filesystem.writeFile({
+        path,
+        data: arrayBufferToBase64(data),
+        directory: Directory.Documents,
+        recursive: true
+      });
+      return { success: true };
+    } catch (error) {
+      console.error('Error writing file on Capacitor:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  return { success: false, error: 'Unsupported platform' };
+};
+
+/**
  * Delete a file
  * @param {string} path - File path
  * @returns {Promise<{success: boolean, error?: string}>}

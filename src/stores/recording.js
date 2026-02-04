@@ -243,7 +243,7 @@ export const useRecordingStore = defineStore('recording', {
           const result = await this.combineChunksNative();
           if (result.success) {
             this.audioFilePath = result.outputPath;
-            return { success: true, filePath: result.outputPath };
+            return { success: true, filePath: result.outputPath, fileSize: result.fileSize };
           } else {
             throw new Error(result.error || 'Failed to combine recording chunks');
           }
@@ -426,22 +426,60 @@ export const useRecordingStore = defineStore('recording', {
       }
 
       try {
-        // For mobile, we'll call a native plugin to combine chunks
-        // This will use AVFoundation on iOS or MediaMuxer on Android
-        // For now, return the path to the chunks directory
-        const outputPath = `recordings/${this.recordId}/combined.m4a`;
+        const chunksDir = `recordings/${this.recordId}/chunks`;
+        const outputPath = `recordings/${this.recordId}/combined.webm`;
 
-        // TODO: Call native audio combination plugin
-        // const result = await Plugins.AudioCombiner.combine({
-        //   recordId: this.recordId,
-        //   outputPath
-        // });
+        // List all chunk files and sort them
+        const listResult = await storage.listFiles(chunksDir);
+        if (!listResult.success || !listResult.files || listResult.files.length === 0) {
+          return { success: false, error: 'No audio chunks found' };
+        }
 
-        // For MVP, we can upload chunks individually or rely on server-side combination
+        const chunkFiles = listResult.files
+          .filter(f => f.startsWith('chunk_'))
+          .sort();
+
+        if (chunkFiles.length === 0) {
+          return { success: false, error: 'No audio chunks found' };
+        }
+
+        // Read all chunks and concatenate into a single ArrayBuffer
+        const chunkBuffers = [];
+        let totalSize = 0;
+
+        for (const chunkFile of chunkFiles) {
+          const chunkPath = `${chunksDir}/${chunkFile}`;
+          const readResult = await storage.readFile(chunkPath);
+          if (!readResult.success) {
+            console.warn(`Failed to read chunk ${chunkFile}:`, readResult.error);
+            continue;
+          }
+          chunkBuffers.push(readResult.data);
+          totalSize += readResult.data.byteLength;
+        }
+
+        if (chunkBuffers.length === 0) {
+          return { success: false, error: 'Could not read any audio chunks' };
+        }
+
+        // Combine all chunks into a single buffer
+        const combined = new Uint8Array(totalSize);
+        let offset = 0;
+        for (const buffer of chunkBuffers) {
+          combined.set(new Uint8Array(buffer), offset);
+          offset += buffer.byteLength;
+        }
+
+        // Write combined file
+        const writeResult = await storage.writeFile(outputPath, combined.buffer);
+        if (!writeResult.success) {
+          return { success: false, error: writeResult.error || 'Failed to write combined file' };
+        }
+
         return {
           success: true,
           outputPath,
-          usesChunkedUpload: true
+          fileSize: totalSize
         };
       } catch (error) {
         console.error('Error combining chunks on mobile:', error);

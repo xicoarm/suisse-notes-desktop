@@ -200,6 +200,14 @@ export default {
         return;
       }
 
+      if (!isElectron()) {
+        $q.notify({
+          type: 'info',
+          message: 'Re-upload from history is only available on desktop'
+        });
+        return;
+      }
+
       if (!recording.filePath) {
         $q.notify({
           type: 'negative',
