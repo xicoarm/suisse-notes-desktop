@@ -1,5 +1,8 @@
 <template>
-  <div class="audio-player" v-if="audioUrl">
+  <div
+    v-if="audioUrl"
+    class="audio-player"
+  >
     <div class="player-controls">
       <q-btn
         round
@@ -10,7 +13,9 @@
         @click="togglePlay"
       />
 
-      <div class="time-display">{{ formatTime(currentTime) }}</div>
+      <div class="time-display">
+        {{ formatTime(currentTime) }}
+      </div>
 
       <q-slider
         v-model="progress"
@@ -22,7 +27,9 @@
         @update:model-value="onSeek"
       />
 
-      <div class="time-display">{{ formatTime(duration) }}</div>
+      <div class="time-display">
+        {{ formatTime(duration) }}
+      </div>
 
       <q-btn
         round
@@ -46,19 +53,34 @@
     />
   </div>
 
-  <div class="audio-player-error" v-else-if="error">
-    <q-icon name="error_outline" color="negative" size="sm" />
+  <div
+    v-else-if="error"
+    class="audio-player-error"
+  >
+    <q-icon
+      name="error_outline"
+      color="negative"
+      size="sm"
+    />
     <span>{{ error }}</span>
   </div>
 
-  <div class="audio-player-loading" v-else-if="loading">
-    <q-spinner-dots color="primary" size="sm" />
+  <div
+    v-else-if="loading"
+    class="audio-player-loading"
+  >
+    <q-spinner-dots
+      color="primary"
+      size="sm"
+    />
     <span>Loading audio...</span>
   </div>
 </template>
 
 <script>
 import { ref, watch, onMounted, onUnmounted } from 'vue';
+import { isElectron, isCapacitor } from '../utils/platform';
+import { readFile } from '../services/storage';
 
 export default {
   name: 'AudioPlayback',
@@ -91,12 +113,23 @@ export default {
       error.value = null;
 
       try {
-        const result = await window.electronAPI.recording.getFileUrl(props.filePath);
-
-        if (result.success) {
-          audioUrl.value = result.url;
+        if (isElectron()) {
+          const result = await window.electronAPI.recording.getFileUrl(props.filePath);
+          if (result.success) {
+            audioUrl.value = result.url;
+          } else {
+            error.value = result.error || 'Could not load audio file';
+          }
+        } else if (isCapacitor()) {
+          const result = await readFile(props.filePath);
+          if (result.success) {
+            const blob = new Blob([result.data], { type: 'audio/webm' });
+            audioUrl.value = URL.createObjectURL(blob);
+          } else {
+            error.value = result.error || 'Could not load audio file';
+          }
         } else {
-          error.value = result.error || 'Could not load audio file';
+          error.value = 'Audio playback not supported on this platform';
         }
       } catch (e) {
         error.value = e.message || 'Error loading audio';
@@ -177,6 +210,10 @@ export default {
     onUnmounted(() => {
       if (audioElement.value) {
         audioElement.value.pause();
+      }
+      // Revoke blob URL to free memory
+      if (audioUrl.value && audioUrl.value.startsWith('blob:')) {
+        URL.revokeObjectURL(audioUrl.value);
       }
     });
 
