@@ -94,12 +94,11 @@ export default function (ctx) {
         icon: 'src-electron/icons/icon',
 
         // GitHub Releases for auto-updates
-        publish: {
+        publish: process.env.SKIP_PUBLISH ? null : {
           provider: 'github',
           owner: 'xicoarm',
           repo: 'suisse-notes-desktop',
           releaseType: 'release'
-          // Note: private: false is the default for public repos
         },
 
         win: {

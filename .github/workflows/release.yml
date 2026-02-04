@@ -11,33 +11,9 @@ permissions:
 
 jobs:
   # =============================================================================
-  # Create GitHub Release - Creates a release for the pushed tag
-  # =============================================================================
-  create-release:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.get_version.outputs.version }}
-    steps:
-      - name: Get version from tag
-        id: get_version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # =============================================================================
-  # Windows Build
+  # Windows Build - electron-builder auto-publishes to GitHub Releases
   # =============================================================================
   build-windows:
-    needs: create-release
     runs-on: windows-latest
 
     steps:
@@ -56,10 +32,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path resources/ffmpeg
-          # Download ffmpeg from gyan.dev (reliable Windows builds)
           Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
           Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg-temp -Force
-          # Find and copy ffmpeg.exe and ffprobe.exe
           $ffmpegDir = Get-ChildItem -Path ffmpeg-temp -Directory | Select-Object -First 1
           Copy-Item "$($ffmpegDir.FullName)/bin/ffmpeg.exe" -Destination resources/ffmpeg/
           Copy-Item "$($ffmpegDir.FullName)/bin/ffprobe.exe" -Destination resources/ffmpeg/
@@ -68,28 +42,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build Electron app
+      - name: Build and publish Electron app
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          # Code signing (uncomment when certificate is available)
-          # CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          # CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
         run: npm run build
 
-      - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-build
-          path: |
-            dist/electron/Packaged/*.exe
-            dist/electron/Packaged/*.exe.blockmap
-            dist/electron/Packaged/latest.yml
-
   # =============================================================================
-  # macOS Build
+  # macOS Build - sign, notarize, then upload to release
   # =============================================================================
   build-macos:
-    needs: create-release
     runs-on: macos-latest
 
     steps:
@@ -107,12 +68,10 @@ jobs:
       - name: Download FFmpeg for macOS
         run: |
           mkdir -p resources/ffmpeg/darwin
-          # Use ffmpeg.martin-riedl.de for reliable static ffmpeg builds
           curl -L "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip" -o ffmpeg-arm64.zip
           curl -L "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffmpeg.zip" -o ffmpeg-amd64.zip
           unzip -o ffmpeg-arm64.zip -d ffmpeg-arm64
           unzip -o ffmpeg-amd64.zip -d ffmpeg-amd64
-          # Create universal binary using lipo
           lipo -create -output resources/ffmpeg/darwin/ffmpeg ffmpeg-arm64/ffmpeg ffmpeg-amd64/ffmpeg
           chmod +x resources/ffmpeg/darwin/ffmpeg
           rm -rf ffmpeg-arm64 ffmpeg-amd64 ffmpeg-arm64.zip ffmpeg-amd64.zip
@@ -127,37 +86,29 @@ jobs:
           API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           API_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
         run: |
-          # Debug: check if secrets are available
           if [ -z "$CSC_LINK" ]; then
             echo "ERROR: CSC_LINK is empty!"
             exit 1
           fi
-          echo "CSC_LINK length: ${#CSC_LINK}"
-          echo "CSC_KEY_PASSWORD is set: $([ -n "$CSC_KEY_PASSWORD" ] && echo 'yes' || echo 'no')"
 
           # Decode and import certificate
           echo "$CSC_LINK" | base64 --decode > certificate.p12
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
 
-          # Create temporary keychain
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          # Import certificate
           security import certificate.p12 -P "$CSC_KEY_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
 
-          # Verify certificate was imported
           echo "Installed certificates:"
           security find-identity -v "$KEYCHAIN_PATH"
 
-          # Clean up
           rm certificate.p12
 
-          # Export keychain path for the build step
           echo "CSC_KEYCHAIN=$KEYCHAIN_PATH" >> $GITHUB_ENV
 
           # Write API key for notarization
@@ -167,6 +118,10 @@ jobs:
           echo "APPLE_API_KEY_PATH=$API_KEY_DIR/AuthKey_${API_KEY_ID}.p8" >> $GITHUB_ENV
 
       - name: Build Electron app for macOS
+        env:
+          # SKIP_PUBLISH prevents electron-builder from uploading to GitHub
+          # We upload manually after notarization
+          SKIP_PUBLISH: "true"
         run: npm run build
 
       - name: Notarize macOS app
@@ -187,42 +142,15 @@ jobs:
           done
           echo "=== Notarization complete ==="
 
-      - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-build
-          path: |
-            dist/electron/Packaged/*.dmg
-            dist/electron/Packaged/*.dmg.blockmap
-            dist/electron/Packaged/*.zip
-            dist/electron/Packaged/latest-mac.yml
-
-  # =============================================================================
-  # Upload to GitHub Release - Adds build artifacts to the release
-  # =============================================================================
-  upload-release-assets:
-    needs: [create-release, build-windows, build-macos]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download Windows artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-build
-          path: artifacts/windows
-
-      - name: Download macOS artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-build
-          path: artifacts/macos
-
-      - name: Upload to GitHub Release
+      - name: Upload macOS artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           files: |
-            artifacts/windows/*
-            artifacts/macos/*
+            dist/electron/Packaged/*.dmg
+            dist/electron/Packaged/*.dmg.blockmap
+            dist/electron/Packaged/*.zip
+            dist/electron/Packaged/*.zip.blockmap
+            dist/electron/Packaged/latest-mac.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
