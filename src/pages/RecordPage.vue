@@ -2048,4 +2048,109 @@ const removeSessionWord = (word) => {
     }
   }
 }
+
+@media (max-width: 600px) {
+  .mic-section .section-label {
+    font-size: 13px;
+  }
+
+  .mic-selected-text {
+    font-size: 15px;
+    max-width: 100%;
+  }
+
+  .system-audio-section {
+    .system-audio-text {
+      .label {
+        font-size: 15px;
+      }
+
+      .description {
+        font-size: 13px;
+      }
+    }
+
+    .system-audio-active,
+    .permission-notice {
+      font-size: 13px;
+    }
+  }
+
+  .card-header .status-text {
+    font-size: 13px;
+  }
+
+  .system-audio-indicator .indicator-text {
+    font-size: 13px;
+  }
+
+  .upload-content {
+    .upload-progress-section {
+      .progress-info {
+        .progress-text {
+          font-size: 14px;
+        }
+
+        .progress-percent {
+          font-size: 14px;
+        }
+      }
+
+      .progress-meta {
+        font-size: 13px;
+      }
+    }
+
+    .upload-note,
+    .error-note {
+      font-size: 13px;
+    }
+  }
+
+  .upload-success .transcript-cta {
+    .cta-title {
+      font-size: 17px;
+    }
+
+    .cta-subtitle {
+      font-size: 13px;
+    }
+
+    .main-cta-button {
+      .button-text .button-label {
+        font-size: 14px;
+      }
+
+      .button-text .button-hint {
+        font-size: 12px;
+      }
+    }
+  }
+
+  .tips-header {
+    font-size: 14px;
+  }
+
+  .tips-list {
+    font-size: 13px;
+  }
+
+  .tips-contact {
+    font-size: 13px;
+  }
+
+  .mic-select {
+    :deep(.q-field__control) {
+      min-height: 48px;
+    }
+
+    :deep(.q-field--dense .q-field__control) {
+      height: 48px;
+    }
+
+    :deep(.q-field__native) {
+      font-size: 16px;
+    }
+  }
+}
 </style>

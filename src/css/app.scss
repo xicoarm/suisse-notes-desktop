@@ -821,3 +821,33 @@ h4 {
 .safe-area-bottom {
   padding-bottom: env(safe-area-inset-bottom);
 }
+
+// ==================== MOBILE BEST-PRACTICE OVERRIDES ====================
+// iOS HIG + Material Design 3 compliance
+// All changes scoped to mobile — desktop remains untouched
+
+@media (max-width: $breakpoint-sm) {
+  body {
+    font-size: 15px;
+  }
+
+  .gradient-btn,
+  .btn-primary,
+  .btn-secondary,
+  .btn-danger {
+    height: 48px;
+    font-size: 15px;
+  }
+
+  .q-field--outlined .q-field__control {
+    min-height: 48px;
+  }
+
+  .q-field--outlined .q-field__native {
+    font-size: 16px; // Prevents iOS auto-zoom on input focus
+  }
+
+  .q-field__label {
+    font-size: 14px;
+  }
+}

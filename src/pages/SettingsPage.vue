@@ -475,6 +475,40 @@ const handleLogout = async () => {
   margin-top: 32px;
 }
 
+@media (max-width: 600px) {
+  .settings-page {
+    padding: 16px;
+  }
+
+  .page-header {
+    margin-bottom: 20px;
+
+    h1 {
+      font-size: 22px;
+    }
+  }
+
+  .settings-section {
+    padding: 16px;
+
+    .setting-row {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 8px;
+    }
+  }
+
+  .preference-select {
+    min-width: unset;
+    width: 100%;
+  }
+
+  .danger-zone {
+    margin: 16px -16px -16px -16px;
+    padding: 20px 16px;
+  }
+}
+
 // Override Quasar select styling
 :deep(.q-field--outlined .q-field__control) {
   border-radius: 8px;
@@ -500,6 +534,11 @@ const handleLogout = async () => {
 .delete-dialog {
   min-width: 400px;
   max-width: 500px;
+
+  @media (max-width: 600px) {
+    min-width: unset;
+    max-width: calc(100vw - 32px);
+  }
 
   .dialog-header {
     text-align: center;

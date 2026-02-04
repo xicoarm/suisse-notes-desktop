@@ -353,4 +353,37 @@ export default {
   min-width: 280px;
   border-radius: 8px;
 }
+
+@media (max-width: 600px) {
+  .history-card {
+    padding: 14px 16px;
+  }
+
+  .status-badge {
+    font-size: 12px;
+    padding: 3px 10px;
+  }
+
+  .card-title .recording-date {
+    font-size: 15px;
+  }
+
+  .recording-meta {
+    font-size: 13px;
+    gap: 14px;
+
+    .meta-item {
+      gap: 5px;
+    }
+  }
+
+  .card-actions {
+    gap: 4px;
+
+    :deep(.q-btn--round.q-btn--sm) {
+      min-width: 44px;
+      min-height: 44px;
+    }
+  }
+}
 </style>

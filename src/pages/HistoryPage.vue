@@ -406,6 +406,14 @@ export default {
     font-size: 15px;
     margin: 0;
   }
+
+  @media (max-width: 600px) {
+    margin-bottom: 20px;
+
+    h1 {
+      font-size: 22px;
+    }
+  }
 }
 
 .upload-progress-banner {
@@ -463,6 +471,10 @@ export default {
     &.text-positive { color: #22c55e; }
     &.text-warning { color: #f59e0b; }
     &.text-negative { color: #ef4444; }
+
+    @media (max-width: 600px) {
+      font-size: 20px;
+    }
   }
 
   .stat-label {

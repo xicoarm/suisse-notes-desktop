@@ -365,7 +365,7 @@
       <span>{{ formattedRemainingTime }}</span>
     </div>
 
-    <q-page-container>
+    <q-page-container :class="{ 'mobile-safe-top': isMobile() && authStore.isAuthenticated }">
       <router-view />
     </q-page-container>
 
@@ -400,21 +400,25 @@
         <q-tab
           name="about"
           icon="home"
+          :label="$t('home')"
           @click="goTo('/about')"
         />
         <q-tab
           name="record"
           icon="mic"
+          :label="$t('record')"
           @click="goTo('/record')"
         />
         <q-tab
           name="history"
           icon="history"
+          :label="$t('history')"
           @click="goTo('/history')"
         />
         <q-tab
           name="settings"
           icon="settings"
+          :label="$t('settings')"
           @click="goTo('/settings')"
         />
       </q-tabs>
@@ -1100,6 +1104,11 @@ onUnmounted(() => {
   }
 }
 
+// Mobile safe area top padding (when no header is rendered on mobile)
+.mobile-safe-top {
+  padding-top: env(safe-area-inset-top, 0) !important;
+}
+
 // Mobile bottom navigation
 .mobile-bottom-nav {
   background: white;
@@ -1118,7 +1127,12 @@ onUnmounted(() => {
     }
 
     :deep(.q-tab__icon) {
-      font-size: 24px;
+      font-size: 26px;
+    }
+
+    :deep(.q-tab__label) {
+      font-size: 10px;
+      margin-top: 2px;
     }
 
     :deep(.q-tabs__content) {
