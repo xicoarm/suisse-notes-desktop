@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia';
 import { isElectron, isCapacitor } from '../utils/platform';
+import { getMergedSpellings, addUserSpellings, removeUserSpelling } from '../services/api';
+import { useAuthStore } from './auth';
 
 // Capacitor Preferences (lazy loaded)
 let Preferences = null;
@@ -49,11 +51,12 @@ export const useTranscriptionSettingsStore = defineStore('transcription-settings
   },
 
   actions: {
-    // Load global settings from storage
+    // Load global settings from local storage, then sync from server
     async loadGlobalSettings() {
       if (this.loaded) return;
 
       try {
+        // Load local settings first (fast)
         if (isElectron() && window.electronAPI?.config?.getTranscriptionSettings) {
           const settings = await window.electronAPI.config.getTranscriptionSettings();
           if (settings) {
@@ -72,9 +75,30 @@ export const useTranscriptionSettingsStore = defineStore('transcription-settings
           }
         }
         this.loaded = true;
+
+        // Then sync from server (non-blocking)
+        this.syncFromServer();
       } catch (error) {
         console.error('Error loading transcription settings:', error);
         this.loaded = true;
+      }
+    },
+
+    // Sync vocabulary from server (merges org + user spellings)
+    async syncFromServer() {
+      try {
+        const authStore = useAuthStore();
+        if (!authStore.token) return;
+
+        const data = await getMergedSpellings(authStore.token);
+        if (data?.spellings && Array.isArray(data.spellings)) {
+          // Merge server spellings with local, deduplicate
+          const merged = [...new Set([...this.globalVocabulary, ...data.spellings])];
+          this.globalVocabulary = merged;
+          this.saveGlobalSettings();
+        }
+      } catch (error) {
+        console.warn('Could not sync spellings from server:', error.message);
       }
     },
 
@@ -119,6 +143,14 @@ export const useTranscriptionSettingsStore = defineStore('transcription-settings
       if (trimmed && !this.globalVocabulary.includes(trimmed)) {
         this.globalVocabulary.push(trimmed);
         this.saveGlobalSettings();
+
+        // Sync to server (non-blocking)
+        const authStore = useAuthStore();
+        if (authStore.token) {
+          addUserSpellings(authStore.token, [trimmed]).catch(err =>
+            console.warn('Could not sync spelling to server:', err.message)
+          );
+        }
       }
     },
 
@@ -127,6 +159,14 @@ export const useTranscriptionSettingsStore = defineStore('transcription-settings
       if (index > -1) {
         this.globalVocabulary.splice(index, 1);
         this.saveGlobalSettings();
+
+        // Sync to server (non-blocking)
+        const authStore = useAuthStore();
+        if (authStore.token) {
+          removeUserSpelling(authStore.token, word).catch(err =>
+            console.warn('Could not sync spelling removal to server:', err.message)
+          );
+        }
       }
     },
 

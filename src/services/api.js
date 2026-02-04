@@ -54,7 +54,11 @@ export const API_ENDPOINTS = {
   salesInquiry: '/api/sales/inquiry',
 
   // Analytics
-  authAnalytics: '/api/analytics/auth-event'
+  authAnalytics: '/api/analytics/auth-event',
+
+  // Custom Spelling
+  customSpellingMerged: '/api/custom-spelling/merged',
+  customSpellingUser: '/api/custom-spelling/user'
 };
 
 /**
@@ -300,6 +304,57 @@ export const submitSalesInquiry = async (inquiry, token = null) => {
   if (!response.ok) {
     const data = await response.json();
     throw new Error(data.error || 'Failed to submit inquiry');
+  }
+  return response.json();
+};
+
+/**
+ * Fetch merged custom spellings (org + user)
+ * @param {string} token - Authentication token
+ * @returns {Promise<{spellings: string[], orgSpellings: string[], userSpellings: string[]}>}
+ */
+export const getMergedSpellings = async (token) => {
+  const response = await authenticatedRequest(API_ENDPOINTS.customSpellingMerged, token);
+  if (!response.ok) {
+    const data = await response.json();
+    throw new Error(data.error || 'Failed to fetch spellings');
+  }
+  return response.json();
+};
+
+/**
+ * Add custom spelling terms for the current user
+ * @param {string} token - Authentication token
+ * @param {string[]} terms - Terms to add
+ * @returns {Promise<{spellings: string[], added: string[]}>}
+ */
+export const addUserSpellings = async (token, terms) => {
+  const response = await authenticatedRequest(API_ENDPOINTS.customSpellingUser, token, {
+    method: 'POST',
+    body: JSON.stringify({ terms })
+  });
+  if (!response.ok) {
+    const data = await response.json();
+    throw new Error(data.error || 'Failed to add spellings');
+  }
+  return response.json();
+};
+
+/**
+ * Remove a custom spelling term for the current user
+ * @param {string} token - Authentication token
+ * @param {string} term - Term to remove
+ * @returns {Promise<{spellings: string[], removed: string}>}
+ */
+export const removeUserSpelling = async (token, term) => {
+  const response = await authenticatedRequest(
+    `${API_ENDPOINTS.customSpellingUser}?term=${encodeURIComponent(term)}`,
+    token,
+    { method: 'DELETE' }
+  );
+  if (!response.ok) {
+    const data = await response.json();
+    throw new Error(data.error || 'Failed to remove spelling');
   }
   return response.json();
 };
