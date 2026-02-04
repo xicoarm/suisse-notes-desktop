@@ -136,8 +136,9 @@ export default function (ctx) {
           entitlements: 'build/entitlements.mac.plist',
           entitlementsInherit: 'build/entitlements.mac.plist',
           forceCodeSigning: !!process.env.CSC_KEYCHAIN,
-          // TODO: re-enable notarization after signing is confirmed working
-          notarize: false
+          notarize: process.env.APPLE_ID ? {
+            teamId: process.env.APPLE_TEAM_ID
+          } : false
         },
         dmg: {
           contents: [
