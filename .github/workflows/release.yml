@@ -183,7 +183,7 @@ jobs:
               --key "$APPLE_API_KEY_PATH" \
               --key-id "$API_KEY_ID" \
               --issuer "$API_ISSUER_ID" \
-              --wait --timeout 10m
+              --wait --timeout 30m
             echo "Stapling notarization ticket to $dmg..."
             xcrun stapler staple "$dmg"
           done
