@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.27](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.26...v3.7.27) (2026-02-05)
+
+
+### Bug Fixes
+
+* update latest-mac.yml to match actual filenames instead of renaming ([1ce8bed](https://github.com/xicoarm/suisse-notes-desktop/commit/1ce8bedb8d759e764525edc0f6024e10ff868f3b))
+
 ### [3.7.26](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.25...v3.7.26) (2026-02-05)
 
 
