@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.26](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.25...v3.7.26) (2026-02-05)
+
+
+### Bug Fixes
+
+* add extensive debugging to macOS filename verification step ([3f3c08e](https://github.com/xicoarm/suisse-notes-desktop/commit/3f3c08e2a69f769d7a9b9c86df70d0653d46f33c))
+
 ### [3.7.25](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.24...v3.7.25) (2026-02-05)
 
 
