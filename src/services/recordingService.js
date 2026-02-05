@@ -330,23 +330,49 @@ function stopLevelMonitoring() {
 function startSystemLevelMonitoring(sysStream) {
   stopSystemLevelMonitoring();
   try {
+    // Check if stream has audio tracks
+    const audioTracks = sysStream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      console.warn('System audio stream has no audio tracks');
+      return;
+    }
+    console.log('System audio tracks:', audioTracks.map(t => ({ label: t.label, enabled: t.enabled, muted: t.muted })));
+
     systemAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+    // Resume AudioContext if suspended (required for user gesture policy)
+    if (systemAudioContext.state === 'suspended') {
+      systemAudioContext.resume();
+    }
+
     systemAnalyser = systemAudioContext.createAnalyser();
     const source = systemAudioContext.createMediaStreamSource(sysStream);
     source.connect(systemAnalyser);
 
-    systemAnalyser.fftSize = 256;
-    const bufferLength = systemAnalyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
+    // Use time domain data instead of frequency data for more accurate level
+    systemAnalyser.fftSize = 2048;
+    const bufferLength = systemAnalyser.fftSize;
+    const dataArray = new Float32Array(bufferLength);
 
     systemLevelInterval = setInterval(() => {
-      if (systemAnalyser) {
-        systemAnalyser.getByteFrequencyData(dataArray);
-        const average = dataArray.reduce((a, b) => a + b, 0) / bufferLength;
-        currentSystemAudioLevel = Math.min(100, (average / 128) * 100);
+      if (systemAnalyser && systemAudioContext.state === 'running') {
+        // Use time domain data for RMS calculation (more accurate for level metering)
+        systemAnalyser.getFloatTimeDomainData(dataArray);
+
+        // Calculate RMS (root mean square) for accurate audio level
+        let sum = 0;
+        for (let i = 0; i < bufferLength; i++) {
+          sum += dataArray[i] * dataArray[i];
+        }
+        const rms = Math.sqrt(sum / bufferLength);
+
+        // Convert to percentage (0-100), with some amplification for visibility
+        currentSystemAudioLevel = Math.min(100, rms * 300);
         emit('systemLevelChange', currentSystemAudioLevel);
       }
     }, 100);
+
+    console.log('System audio level monitoring started, AudioContext state:', systemAudioContext.state);
   } catch (error) {
     console.warn('Could not start system audio level monitoring:', error);
   }
