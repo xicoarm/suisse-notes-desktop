@@ -94,7 +94,9 @@ export default function (ctx) {
         icon: 'src-electron/icons/icon',
 
         // GitHub Releases for auto-updates
-        publish: process.env.SKIP_PUBLISH ? null : {
+        // Always configure publish so latest-mac.yml gets generated
+        // Actual upload is controlled by GH_TOKEN presence in CI
+        publish: {
           provider: 'github',
           owner: 'xicoarm',
           repo: 'suisse-notes-desktop',

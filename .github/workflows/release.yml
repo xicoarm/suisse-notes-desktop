@@ -138,11 +138,10 @@ jobs:
           echo "=== FFmpeg signed successfully ==="
 
       - name: Build Electron app for macOS
-        env:
-          # SKIP_PUBLISH prevents electron-builder from uploading to GitHub
-          # We upload manually after notarization
-          SKIP_PUBLISH: "true"
-        run: npm run build
+        run: |
+          # Build WITHOUT GH_TOKEN so electron-builder generates latest-mac.yml
+          # but doesn't try to upload (we upload manually after notarization)
+          npm run build
 
       - name: Verify code signing
         run: |
