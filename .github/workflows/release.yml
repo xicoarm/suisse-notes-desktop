@@ -139,12 +139,12 @@ jobs:
 
       - name: Build Electron app for macOS
         env:
-          # GH_TOKEN is needed by electron-builder for GitHub provider config
+          # GH_TOKEN is needed by electron-builder to resolve GitHub publish provider
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          # PUBLISH=never tells electron-builder to generate yml files but not upload
+        run: |
+          # -P never: generate latest-mac.yml but don't upload artifacts
           # We upload manually after notarization via action-gh-release
-          PUBLISH: never
-        run: npm run build
+          npx quasar build -m electron -P never
 
       - name: Verify code signing
         run: |

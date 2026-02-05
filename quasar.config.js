@@ -94,8 +94,8 @@ export default function (ctx) {
         icon: 'src-electron/icons/icon',
 
         // GitHub Releases for auto-updates
-        // This config is required to generate latest-mac.yml / latest.yml for auto-updates
-        // Use PUBLISH=never env var to prevent upload (for macOS we upload after notarization)
+        // This config is required to generate latest-mac.yml / latest.yml
+        // Use -P never CLI flag to prevent upload (macOS uploads after notarization)
         publish: {
           provider: 'github',
           owner: 'xicoarm',
