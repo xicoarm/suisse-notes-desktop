@@ -163,6 +163,7 @@ function createMixingPipeline(micStream, sysStream) {
     systemSourceNode.connect(dest);
     systemStream = sysStream;
     systemAudioActive = true;
+    startSystemLevelMonitoring(sysStream);
   }
 
   mixingContext = ctx;
