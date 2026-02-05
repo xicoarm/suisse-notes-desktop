@@ -94,9 +94,9 @@ export default function (ctx) {
         icon: 'src-electron/icons/icon',
 
         // GitHub Releases for auto-updates
-        // publish config is needed to generate latest-mac.yml / latest.yml
-        // PUBLISH_NEVER env var prevents actual upload (we upload manually after notarization)
-        publish: process.env.PUBLISH_NEVER ? 'never' : {
+        // This config is required to generate latest-mac.yml / latest.yml for auto-updates
+        // Use PUBLISH=never env var to prevent upload (for macOS we upload after notarization)
+        publish: {
           provider: 'github',
           owner: 'xicoarm',
           repo: 'suisse-notes-desktop',

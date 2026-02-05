@@ -139,9 +139,11 @@ jobs:
 
       - name: Build Electron app for macOS
         env:
-          # GH_TOKEN is needed by electron-builder, but PUBLISH_NEVER prevents upload
+          # GH_TOKEN is needed by electron-builder for GitHub provider config
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          PUBLISH_NEVER: "true"
+          # PUBLISH=never tells electron-builder to generate yml files but not upload
+          # We upload manually after notarization via action-gh-release
+          PUBLISH: never
         run: npm run build
 
       - name: Verify code signing
