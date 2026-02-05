@@ -6,7 +6,6 @@ on:
     paths:
       - 'src/**'
       - 'src-capacitor/**'
-      - 'package.json'
       - 'quasar.config.js'
 
   # Allow manual trigger
@@ -31,11 +30,13 @@ jobs:
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
     steps:
-      - name: Check if triggered by semantic-release
+      - name: Check if mobile build is needed
         id: check
         run: |
-          # Skip if this is a release commit from semantic-release
-          if [[ "${{ github.event.head_commit.message }}" == *"[skip ci]"* ]]; then
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          # Skip release version bumps (desktop-only) and [skip ci] commits
+          if [[ "$COMMIT_MSG" == *"[skip ci]"* ]] || [[ "$COMMIT_MSG" == chore\(release\):* ]]; then
+            echo "Skipping: commit is a release bump or has [skip ci]"
             echo "should_run=false" >> $GITHUB_OUTPUT
           else
             echo "should_run=true" >> $GITHUB_OUTPUT
