@@ -117,6 +117,26 @@ jobs:
           echo "$API_KEY_CONTENT" > "$API_KEY_DIR/AuthKey_${API_KEY_ID}.p8"
           echo "APPLE_API_KEY_PATH=$API_KEY_DIR/AuthKey_${API_KEY_ID}.p8" >> $GITHUB_ENV
 
+      - name: Sign FFmpeg binary
+        run: |
+          echo "=== Signing FFmpeg binary with Developer ID ==="
+          # Get the signing identity
+          IDENTITY=$(security find-identity -v -p codesigning "$CSC_KEYCHAIN" | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "Using identity: $IDENTITY"
+
+          # Sign ffmpeg with hardened runtime and timestamp
+          codesign --sign "$IDENTITY" \
+            --keychain "$CSC_KEYCHAIN" \
+            --options runtime \
+            --timestamp \
+            --force \
+            resources/ffmpeg/darwin/ffmpeg
+
+          # Verify the signature
+          echo "Verifying FFmpeg signature..."
+          codesign --verify --deep --strict --verbose=2 resources/ffmpeg/darwin/ffmpeg
+          echo "=== FFmpeg signed successfully ==="
+
       - name: Build Electron app for macOS
         env:
           # SKIP_PUBLISH prevents electron-builder from uploading to GitHub
