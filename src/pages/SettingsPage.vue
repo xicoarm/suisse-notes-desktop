@@ -62,6 +62,36 @@
         </div>
       </div>
 
+      <!-- Language Section -->
+      <div class="settings-section">
+        <div class="section-title">
+          {{ $t('language') || 'Language' }}
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">
+              {{ $t('appLanguage') || 'App Language' }}
+            </div>
+            <div class="setting-description">
+              {{ $t('appLanguageDesc') || 'Choose your preferred language' }}
+            </div>
+          </div>
+          <q-select
+            :model-value="languages.find(l => l.value === currentLang)"
+            :options="languages"
+            option-value="value"
+            option-label="label"
+            emit-value
+            map-options
+            outlined
+            dense
+            class="preference-select"
+            @update:model-value="setLanguage"
+          />
+        </div>
+      </div>
+
       <!-- Storage Preferences Section -->
       <div class="settings-section">
         <div class="section-title">
@@ -251,6 +281,7 @@ import { useConfigStore } from '../stores/config';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
+import { useLanguage } from '../composables/useLanguage';
 import CustomVocabularyInput from '../components/CustomVocabularyInput.vue';
 
 const $q = useQuasar();
@@ -259,6 +290,7 @@ const configStore = useConfigStore();
 const authStore = useAuthStore();
 const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
+const { languages, currentLang, setLanguage, initLanguage } = useLanguage();
 
 const appVersion = ref('1.0.0');
 const userDataPath = ref('');
@@ -287,6 +319,8 @@ const removeGlobalWord = (word) => {
 };
 
 onMounted(async () => {
+  initLanguage();
+
   // Get app info
   try {
     appVersion.value = await window.electronAPI.app.getVersion();

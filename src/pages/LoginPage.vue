@@ -1,5 +1,58 @@
 <template>
   <q-page class="login-page">
+    <!-- Language selector - top right corner -->
+    <div class="login-lang-selector">
+      <q-btn-dropdown
+        flat
+        no-caps
+        dense
+        class="login-lang-dropdown"
+        dropdown-icon="none"
+      >
+        <template #label>
+          <div class="login-lang-current">
+            <q-icon
+              name="language"
+              size="16px"
+            />
+            <span>{{ currentLangShort }}</span>
+            <q-icon
+              name="expand_more"
+              size="14px"
+            />
+          </div>
+        </template>
+
+        <q-list class="lang-list">
+          <q-item
+            v-for="lang in languages"
+            :key="lang.value"
+            v-close-popup
+            clickable
+            :class="{ 'lang-active': currentLang === lang.value }"
+            @click="setLanguage(lang.value)"
+          >
+            <q-item-section>
+              <div class="lang-option">
+                <span class="lang-short">{{ lang.short }}</span>
+                <span class="lang-label">{{ lang.label }}</span>
+              </div>
+            </q-item-section>
+            <q-item-section
+              v-if="currentLang === lang.value"
+              side
+            >
+              <q-icon
+                name="check"
+                size="16px"
+                color="primary"
+              />
+            </q-item-section>
+          </q-item>
+        </q-list>
+      </q-btn-dropdown>
+    </div>
+
     <!-- Login Container -->
     <div class="login-container">
       <div class="login-card">
@@ -143,12 +196,15 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 import { isElectron, isCapacitor } from '../utils/platform';
+import { useLanguage } from '../composables/useLanguage';
 
 const router = useRouter();
 const authStore = useAuthStore();
+const { languages, currentLang, currentLangShort, setLanguage, initLanguage } = useLanguage();
 
 // Set white status bar icons for purple background on mobile
 onMounted(async () => {
+  initLanguage();
   if (isCapacitor()) {
     try {
       const { StatusBar, Style } = await import('@capacitor/status-bar');
@@ -376,6 +432,84 @@ const openForgotPassword = async () => {
   font-size: 11px;
   color: rgba(255, 255, 255, 0.6);
   margin-top: 4px;
+}
+
+// Language selector - top right corner
+.login-lang-selector {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  right: 16px;
+  z-index: 10;
+}
+
+.login-lang-dropdown {
+  padding: 0;
+  min-height: auto;
+
+  :deep(.q-btn__content) {
+    padding: 0;
+  }
+}
+
+.login-lang-current {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.95);
+  transition: all 0.2s ease;
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.3);
+  }
+}
+
+.lang-list {
+  min-width: 160px;
+  padding: 6px;
+
+  :deep(.q-item) {
+    min-height: 36px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    margin-bottom: 2px;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+
+    &:hover {
+      background: #f8fafc;
+    }
+
+    &.lang-active {
+      background: rgba(99, 102, 241, 0.08);
+    }
+  }
+}
+
+.lang-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+
+  .lang-short {
+    font-size: 11px;
+    font-weight: 700;
+    color: #6366F1;
+    min-width: 22px;
+  }
+
+  .lang-label {
+    font-size: 13px;
+    color: #475569;
+  }
 }
 
 // Override Quasar input styling

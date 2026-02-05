@@ -428,21 +428,22 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
-import { useI18n } from 'vue-i18n';
 import { useQuasar } from 'quasar';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingStore } from '../stores/recording';
 import { useMinutesStore } from '../stores/minutes';
 import { useRouter, useRoute } from 'vue-router';
 import { isElectron, isMobile } from '../utils/platform';
+import { useLanguage } from '../composables/useLanguage';
 
-const { locale, t } = useI18n();
 const $q = useQuasar();
 const authStore = useAuthStore();
 const recordingStore = useRecordingStore();
 const minutesStore = useMinutesStore();
 const router = useRouter();
 const route = useRoute();
+
+const { languages, currentLang, currentLangShort, setLanguage, initLanguage } = useLanguage();
 
 const currentTab = ref('record');
 const isMaximized = ref(false);
@@ -458,34 +459,9 @@ const formattedRemainingTime = computed(() => {
   return `${Math.round(totalMinutes)} Min.`;
 });
 
-// Language switcher
-const languages = [
-  { label: 'English', short: 'EN', value: 'en' },
-  { label: 'Deutsch', short: 'DE', value: 'de' },
-  { label: 'Français', short: 'FR', value: 'fr' },
-  { label: 'Italiano', short: 'IT', value: 'it' }
-];
-
-const currentLang = ref(localStorage.getItem('lang') || 'de');
-
-const currentLangShort = computed(() => {
-  const lang = languages.find(l => l.value === currentLang.value);
-  return lang ? lang.short : 'DE';
-});
-
-const setLanguage = (lang) => {
-  currentLang.value = lang;
-  locale.value = lang;
-  localStorage.setItem('lang', lang);
-};
-
 // Load saved language on mount
 onMounted(() => {
-  const savedLang = localStorage.getItem('lang');
-  if (savedLang) {
-    locale.value = savedLang;
-    currentLang.value = savedLang;
-  }
+  initLanguage();
 });
 
 // Check initial maximize state

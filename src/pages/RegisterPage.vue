@@ -1,5 +1,58 @@
 <template>
   <q-page class="register-page">
+    <!-- Language selector - top right corner -->
+    <div class="register-lang-selector">
+      <q-btn-dropdown
+        flat
+        no-caps
+        dense
+        class="register-lang-dropdown"
+        dropdown-icon="none"
+      >
+        <template #label>
+          <div class="register-lang-current">
+            <q-icon
+              name="language"
+              size="16px"
+            />
+            <span>{{ currentLangShort }}</span>
+            <q-icon
+              name="expand_more"
+              size="14px"
+            />
+          </div>
+        </template>
+
+        <q-list class="lang-list">
+          <q-item
+            v-for="lang in languages"
+            :key="lang.value"
+            v-close-popup
+            clickable
+            :class="{ 'lang-active': currentLang === lang.value }"
+            @click="setLanguage(lang.value)"
+          >
+            <q-item-section>
+              <div class="lang-option">
+                <span class="lang-short">{{ lang.short }}</span>
+                <span class="lang-label">{{ lang.label }}</span>
+              </div>
+            </q-item-section>
+            <q-item-section
+              v-if="currentLang === lang.value"
+              side
+            >
+              <q-icon
+                name="check"
+                size="16px"
+                color="primary"
+              />
+            </q-item-section>
+          </q-item>
+        </q-list>
+      </q-btn-dropdown>
+    </div>
+
     <div class="register-container">
       <div class="register-card">
         <!-- Logo Section -->
@@ -73,6 +126,26 @@
             </template>
           </q-input>
 
+          <q-input
+            v-model="confirmPassword"
+            label="Confirm Password"
+            type="password"
+            outlined
+            :rules="[
+              val => !!val || 'Please confirm your password',
+              val => val === password || 'Passwords do not match'
+            ]"
+            autocomplete="new-password"
+            class="q-mb-md"
+          >
+            <template #prepend>
+              <q-icon
+                name="lock"
+                color="grey-6"
+              />
+            </template>
+          </q-input>
+
           <!-- Error Banner -->
           <div
             v-if="authStore.error"
@@ -127,14 +200,17 @@ import { useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '../stores/auth';
 import { isCapacitor } from '../utils/platform';
+import { useLanguage } from '../composables/useLanguage';
 
 const { t } = useI18n();
 
 const router = useRouter();
 const authStore = useAuthStore();
+const { languages, currentLang, currentLangShort, setLanguage, initLanguage } = useLanguage();
 
 // Set white status bar icons for purple background on mobile
 onMounted(async () => {
+  initLanguage();
   if (isCapacitor()) {
     try {
       const { StatusBar, Style } = await import('@capacitor/status-bar');
@@ -155,6 +231,7 @@ onUnmounted(async () => {
 const name = ref('');
 const email = ref('');
 const password = ref('');
+const confirmPassword = ref('');
 
 const isValidEmail = (val) => {
   const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -162,8 +239,9 @@ const isValidEmail = (val) => {
 };
 
 const handleRegister = async () => {
-  if (!name.value || !email.value || !password.value) return;
+  if (!name.value || !email.value || !password.value || !confirmPassword.value) return;
   if (password.value.length < 8) return;
+  if (password.value !== confirmPassword.value) return;
   if (!isValidEmail(email.value)) return;
 
   const result = await authStore.register(email.value, password.value, name.value);
@@ -269,6 +347,84 @@ const handleRegister = async () => {
     &:hover {
       text-decoration: underline;
     }
+  }
+}
+
+// Language selector - top right corner
+.register-lang-selector {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  right: 16px;
+  z-index: 10;
+}
+
+.register-lang-dropdown {
+  padding: 0;
+  min-height: auto;
+
+  :deep(.q-btn__content) {
+    padding: 0;
+  }
+}
+
+.register-lang-current {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.95);
+  transition: all 0.2s ease;
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.3);
+  }
+}
+
+.lang-list {
+  min-width: 160px;
+  padding: 6px;
+
+  :deep(.q-item) {
+    min-height: 36px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    margin-bottom: 2px;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+
+    &:hover {
+      background: #f8fafc;
+    }
+
+    &.lang-active {
+      background: rgba(99, 102, 241, 0.08);
+    }
+  }
+}
+
+.lang-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+
+  .lang-short {
+    font-size: 11px;
+    font-weight: 700;
+    color: #6366F1;
+    min-width: 22px;
+  }
+
+  .lang-label {
+    font-size: 13px;
+    color: #475569;
   }
 }
 
