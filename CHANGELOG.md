@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.24](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.23...v3.7.24) (2026-02-05)
+
+
+### Bug Fixes
+
+* prevent mobile workflow from triggering on desktop-only changes ([72b49f1](https://github.com/xicoarm/suisse-notes-desktop/commit/72b49f1090d38a69ca01118f1fda46215c35be55))
+* rename macOS artifacts to match latest-mac.yml for auto-update ([583d368](https://github.com/xicoarm/suisse-notes-desktop/commit/583d36878e1487ad67ac65fd478b952bc9ccdd89))
+
 ### [3.7.23](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.22...v3.7.23) (2026-02-05)
 
 
