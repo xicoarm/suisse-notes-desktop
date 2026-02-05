@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.22](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.21...v3.7.22) (2026-02-05)
+
+
+### Bug Fixes
+
+* use -P never CLI flag for macOS build to generate latest-mac.yml ([3572d7d](https://github.com/xicoarm/suisse-notes-desktop/commit/3572d7dc9096194707ffc2544691689604288047))
+* use PUBLISH=never env var for electron-builder ([01c2923](https://github.com/xicoarm/suisse-notes-desktop/commit/01c29236de88e2c95b67d5096049de42a7071641))
+
 ### [3.7.12](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.11...v3.7.12) (2026-02-04)
 
 
