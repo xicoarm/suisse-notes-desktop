@@ -164,20 +164,20 @@ jobs:
 
       - name: Fix artifact filenames to match latest-mac.yml
         run: |
-          cd dist/electron/Packaged
+          cd dist/electron/Packaged || { echo "FATAL: dist/electron/Packaged not found!"; exit 1; }
 
           echo "=== latest-mac.yml content ==="
           cat latest-mac.yml
           echo ""
 
-          echo "=== Files before rename ==="
+          echo "=== All files in directory ==="
           ls -la
+          echo ""
 
           # electron-builder has a known bug: latest-mac.yml references filenames
           # with dashes (Suisse-Notes-) but actual files use dots (Suisse.Notes-)
           # Rename actual files to match what latest-mac.yml references
-          echo ""
-          echo "=== Renaming files to match latest-mac.yml references ==="
+          echo "=== Renaming dot-separated files to match latest-mac.yml ==="
           for file in *.dmg *.zip *.blockmap; do
             [ -f "$file" ] || continue
             newname=$(echo "$file" | sed 's/^Suisse\.Notes-/Suisse-Notes-/')
@@ -193,26 +193,43 @@ jobs:
 
           # Verify every file referenced in latest-mac.yml actually exists
           echo ""
-          echo "=== Verifying latest-mac.yml references match actual files ==="
+          echo "=== Extracting url: references from latest-mac.yml ==="
+          grep 'url:' latest-mac.yml || echo "WARNING: No url: lines found!"
+          echo ""
+
+          echo "=== Verifying files ==="
           MISSING=0
-          # Extract url: values, strip leading/trailing whitespace and quotes
-          URLS=$(grep 'url:' latest-mac.yml | sed 's/.*url: *//' | sed 's/^ *//;s/ *$//' | sed 's/^"//;s/"$//' | tr -d '\r')
-          for fname in $URLS; do
+          FOUND=0
+          while IFS= read -r line; do
+            # Extract filename after "url:" - handle various YAML formats
+            fname=$(echo "$line" | sed 's/.*url:[[:space:]]*//' | sed 's/[[:space:]]*$//' | tr -d '\r"'"'")
             if [ -z "$fname" ]; then
+              echo "SKIP: empty url value from line: $line"
               continue
             fi
+            echo "Checking: '$fname'"
             if [ ! -f "$fname" ]; then
-              echo "FATAL: latest-mac.yml references '$fname' but file does not exist!"
+              echo "  MISSING: '$fname'"
+              # Debug: show hex of filename to detect invisible chars
+              echo -n "  HEX: " && echo -n "$fname" | od -A x -t x1z | head -2
               MISSING=1
             else
-              echo "OK: $fname"
+              echo "  OK: $fname"
+              FOUND=$((FOUND + 1))
             fi
-          done
-          if [ "$MISSING" -eq 1 ]; then
-            echo "Auto-update will fail! Fix the filename mismatch above."
+          done < <(grep 'url:' latest-mac.yml)
+
+          echo ""
+          echo "Result: $FOUND files found, MISSING=$MISSING"
+          if [ "$FOUND" -eq 0 ]; then
+            echo "FATAL: No url: references found or matched in latest-mac.yml!"
             exit 1
           fi
-          echo "All files verified OK"
+          if [ "$MISSING" -eq 1 ]; then
+            echo "FATAL: Auto-update will fail! Some files referenced in latest-mac.yml are missing."
+            exit 1
+          fi
+          echo "All $FOUND files verified OK"
 
       - name: Verify auto-update files exist
         run: |
