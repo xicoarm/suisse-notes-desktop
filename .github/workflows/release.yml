@@ -162,6 +162,43 @@ jobs:
           # We upload manually after notarization via action-gh-release
           npx quasar build -m electron -P never
 
+      - name: Fix artifact filenames to match latest-mac.yml
+        run: |
+          cd dist/electron/Packaged
+          echo "=== Files before rename ==="
+          ls -la
+
+          # electron-builder has a known bug: latest-mac.yml may reference filenames
+          # with dashes (Suisse-Notes-) but actual files use dots (Suisse.Notes-)
+          # Rename actual files to match what latest-mac.yml references
+          echo ""
+          echo "=== Renaming files to match latest-mac.yml references ==="
+          for file in *.dmg *.zip *.blockmap; do
+            [ -f "$file" ] || continue
+            # Extract the expected name from latest-mac.yml url fields
+            # Replace dots with dashes in the product name part only (before version number)
+            newname=$(echo "$file" | sed 's/^Suisse\.Notes-/Suisse-Notes-/')
+            if [ "$file" != "$newname" ]; then
+              echo "Renaming: $file → $newname"
+              mv "$file" "$newname"
+            fi
+          done
+
+          echo ""
+          echo "=== Files after rename ==="
+          ls -la
+
+          # Verify every file referenced in latest-mac.yml actually exists
+          echo ""
+          echo "=== Verifying latest-mac.yml references match actual files ==="
+          grep "url:" latest-mac.yml | sed 's/.*url: //' | while read -r fname; do
+            if [ ! -f "$fname" ]; then
+              echo "FATAL: latest-mac.yml references '$fname' but file does not exist!"
+              exit 1
+            fi
+            echo "OK: $fname"
+          done
+
       - name: Verify auto-update files exist
         run: |
           echo "=== Checking latest-mac.yml ==="
