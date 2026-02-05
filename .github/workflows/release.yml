@@ -47,6 +47,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         run: npm run build
 
+      - name: Verify auto-update files exist
+        shell: pwsh
+        run: |
+          $yml = "dist/electron/Packaged/latest.yml"
+          if (-not (Test-Path $yml)) {
+            Write-Error "FATAL: $yml not found! Auto-update will be broken for Windows users."
+            exit 1
+          }
+          $content = Get-Content $yml -Raw
+          if ($content -notmatch "version:" -or $content -notmatch "sha512:") {
+            Write-Error "FATAL: $yml is malformed! Missing version or sha512."
+            exit 1
+          }
+          Write-Host "latest.yml OK:"
+          Write-Host $content
+
   # =============================================================================
   # macOS Build - sign, notarize, then upload to release
   # =============================================================================
@@ -146,6 +162,29 @@ jobs:
           # We upload manually after notarization via action-gh-release
           npx quasar build -m electron -P never
 
+      - name: Verify auto-update files exist
+        run: |
+          echo "=== Checking latest-mac.yml ==="
+          if [ ! -f dist/electron/Packaged/latest-mac.yml ]; then
+            echo "FATAL: latest-mac.yml not found! Auto-update will be broken for macOS users."
+            echo "This usually means the publish config in quasar.config.js was removed or -P never was not passed."
+            exit 1
+          fi
+          if ! grep -q "version:" dist/electron/Packaged/latest-mac.yml || ! grep -q "sha512:" dist/electron/Packaged/latest-mac.yml; then
+            echo "FATAL: latest-mac.yml is malformed! Missing version or sha512."
+            exit 1
+          fi
+          echo "latest-mac.yml OK:"
+          cat dist/electron/Packaged/latest-mac.yml
+          echo ""
+          echo "=== Checking zip files for auto-update ==="
+          ZIP_COUNT=$(find dist/electron/Packaged -name "*.zip" | wc -l)
+          if [ "$ZIP_COUNT" -lt 2 ]; then
+            echo "FATAL: Expected at least 2 zip files (x64 + arm64), found $ZIP_COUNT"
+            exit 1
+          fi
+          echo "Found $ZIP_COUNT zip files - OK"
+
       - name: Verify code signing
         run: |
           echo "=== Verifying code signing ==="
@@ -219,3 +258,20 @@ jobs:
             dist/electron/Packaged/latest-mac.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify release has auto-update files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== Verifying GitHub Release assets ==="
+          TAG="${{ github.ref_name }}"
+          ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          echo "Release assets:"
+          echo "$ASSETS"
+          echo ""
+          if ! echo "$ASSETS" | grep -q "latest-mac.yml"; then
+            echo "FATAL: latest-mac.yml is missing from GitHub Release $TAG!"
+            echo "macOS auto-update will NOT work. Investigate and re-upload."
+            exit 1
+          fi
+          echo "latest-mac.yml present in release - auto-update OK"
