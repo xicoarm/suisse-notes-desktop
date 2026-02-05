@@ -165,18 +165,21 @@ jobs:
       - name: Fix artifact filenames to match latest-mac.yml
         run: |
           cd dist/electron/Packaged
+
+          echo "=== latest-mac.yml content ==="
+          cat latest-mac.yml
+          echo ""
+
           echo "=== Files before rename ==="
           ls -la
 
-          # electron-builder has a known bug: latest-mac.yml may reference filenames
+          # electron-builder has a known bug: latest-mac.yml references filenames
           # with dashes (Suisse-Notes-) but actual files use dots (Suisse.Notes-)
           # Rename actual files to match what latest-mac.yml references
           echo ""
           echo "=== Renaming files to match latest-mac.yml references ==="
           for file in *.dmg *.zip *.blockmap; do
             [ -f "$file" ] || continue
-            # Extract the expected name from latest-mac.yml url fields
-            # Replace dots with dashes in the product name part only (before version number)
             newname=$(echo "$file" | sed 's/^Suisse\.Notes-/Suisse-Notes-/')
             if [ "$file" != "$newname" ]; then
               echo "Renaming: $file → $newname"
@@ -191,13 +194,25 @@ jobs:
           # Verify every file referenced in latest-mac.yml actually exists
           echo ""
           echo "=== Verifying latest-mac.yml references match actual files ==="
-          grep "url:" latest-mac.yml | sed 's/.*url: //' | while read -r fname; do
+          MISSING=0
+          # Extract url: values, strip leading/trailing whitespace and quotes
+          URLS=$(grep 'url:' latest-mac.yml | sed 's/.*url: *//' | sed 's/^ *//;s/ *$//' | sed 's/^"//;s/"$//' | tr -d '\r')
+          for fname in $URLS; do
+            if [ -z "$fname" ]; then
+              continue
+            fi
             if [ ! -f "$fname" ]; then
               echo "FATAL: latest-mac.yml references '$fname' but file does not exist!"
-              exit 1
+              MISSING=1
+            else
+              echo "OK: $fname"
             fi
-            echo "OK: $fname"
           done
+          if [ "$MISSING" -eq 1 ]; then
+            echo "Auto-update will fail! Fix the filename mismatch above."
+            exit 1
+          fi
+          echo "All files verified OK"
 
       - name: Verify auto-update files exist
         run: |
