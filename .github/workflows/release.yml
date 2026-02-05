@@ -163,74 +163,51 @@ jobs:
           npx quasar build -m electron -P never
 
       - name: Align filenames between latest-mac.yml and actual files
+        shell: bash
         run: |
-          cd dist/electron/Packaged || { echo "FATAL: dist/electron/Packaged not found!"; exit 1; }
+          set -x  # Print every command for debugging
+          DIR="dist/electron/Packaged"
+          if [ ! -d "$DIR" ]; then
+            echo "FATAL: $DIR does not exist!"
+            ls -la dist/ || true
+            ls -la dist/electron/ || true
+            exit 1
+          fi
+          cd "$DIR"
 
-          echo "=== latest-mac.yml content (before) ==="
+          echo "=== Files ==="
+          ls -1 || true
+
+          if [ ! -f latest-mac.yml ]; then
+            echo "FATAL: latest-mac.yml not found in $DIR"
+            exit 1
+          fi
+
+          echo "=== latest-mac.yml (before) ==="
           cat latest-mac.yml
-          echo ""
-          echo "=== Files in directory ==="
-          ls -la *.dmg *.zip *.blockmap *.yml 2>/dev/null || true
-          echo ""
 
           # electron-builder bug: latest-mac.yml may reference "Suisse-Notes-" (dashes)
           # but actual files are "Suisse.Notes-" (dots), or vice versa.
-          # Strategy: update latest-mac.yml to match actual filenames.
-          # This is safer than renaming files because we KNOW the files exist.
+          # Fix: update latest-mac.yml to match actual filenames.
+          HAS_DOT_FILES=false
+          HAS_DASH_FILES=false
+          ls Suisse.Notes-*.zip 1>/dev/null 2>&1 && HAS_DOT_FILES=true
+          ls Suisse-Notes-*.zip 1>/dev/null 2>&1 && HAS_DASH_FILES=true
 
-          # Check if files use dots (Suisse.Notes-) while yml uses dashes (Suisse-Notes-)
-          if ls Suisse.Notes-* 1>/dev/null 2>&1; then
-            if grep -q 'Suisse-Notes-' latest-mac.yml; then
-              echo "=== Fixing: latest-mac.yml uses dashes but files use dots ==="
-              sed -i '' 's/Suisse-Notes-/Suisse.Notes-/g' latest-mac.yml
-              echo "Updated latest-mac.yml to use dots (matching actual files)"
-            else
-              echo "Both files and yml use dots - no fix needed"
-            fi
-          elif ls Suisse-Notes-* 1>/dev/null 2>&1; then
-            if grep -q 'Suisse\.Notes-' latest-mac.yml; then
-              echo "=== Fixing: latest-mac.yml uses dots but files use dashes ==="
-              sed -i '' 's/Suisse\.Notes-/Suisse-Notes-/g' latest-mac.yml
-              echo "Updated latest-mac.yml to use dashes (matching actual files)"
-            else
-              echo "Both files and yml use dashes - no fix needed"
-            fi
+          echo "HAS_DOT_FILES=$HAS_DOT_FILES HAS_DASH_FILES=$HAS_DASH_FILES"
+
+          if [ "$HAS_DOT_FILES" = "true" ] && grep -q 'Suisse-Notes-' latest-mac.yml; then
+            echo "Fixing: yml has dashes, files have dots"
+            sed -i '' 's/Suisse-Notes-/Suisse.Notes-/g' latest-mac.yml
+          elif [ "$HAS_DASH_FILES" = "true" ] && grep -q 'Suisse\.Notes-' latest-mac.yml; then
+            echo "Fixing: yml has dots, files have dashes"
+            sed -i '' 's/Suisse\.Notes-/Suisse-Notes-/g' latest-mac.yml
           else
-            echo "WARNING: No Suisse.Notes-* or Suisse-Notes-* files found!"
-            ls -la
+            echo "No dot/dash mismatch to fix"
           fi
 
-          echo ""
-          echo "=== latest-mac.yml content (after) ==="
+          echo "=== latest-mac.yml (after) ==="
           cat latest-mac.yml
-          echo ""
-
-          # Verify: every url: in latest-mac.yml must point to an existing file
-          echo "=== Final verification ==="
-          MISSING=0
-          FOUND=0
-          while IFS= read -r line; do
-            fname=$(echo "$line" | sed 's/.*url:[[:space:]]*//' | sed 's/[[:space:]]*$//' | tr -d '\r"'"'")
-            [ -z "$fname" ] && continue
-            if [ -f "$fname" ]; then
-              echo "OK: $fname"
-              FOUND=$((FOUND + 1))
-            else
-              echo "MISSING: $fname"
-              MISSING=1
-            fi
-          done < <(grep 'url:' latest-mac.yml)
-
-          echo ""
-          if [ "$FOUND" -eq 0 ]; then
-            echo "FATAL: No url: references matched any files!"
-            exit 1
-          fi
-          if [ "$MISSING" -eq 1 ]; then
-            echo "FATAL: Some files in latest-mac.yml are still missing!"
-            exit 1
-          fi
-          echo "All $FOUND files verified OK"
 
       - name: Verify auto-update files exist
         run: |
