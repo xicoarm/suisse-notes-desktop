@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.23](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.22...v3.7.23) (2026-02-05)
+
+
+### Bug Fixes
+
+* add auto-update validation guards to release workflow ([25d37e1](https://github.com/xicoarm/suisse-notes-desktop/commit/25d37e17c6f7a4fd2076256dfaabac11142d2df5))
+* system audio volume indicator always zero and clarify permission notice ([8f6b703](https://github.com/xicoarm/suisse-notes-desktop/commit/8f6b7034141acdc3904c119ece3d57d46fd20788))
+
 ### [3.7.22](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.21...v3.7.22) (2026-02-05)
 
 
