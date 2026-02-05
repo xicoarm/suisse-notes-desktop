@@ -162,71 +162,72 @@ jobs:
           # We upload manually after notarization via action-gh-release
           npx quasar build -m electron -P never
 
-      - name: Fix artifact filenames to match latest-mac.yml
+      - name: Align filenames between latest-mac.yml and actual files
         run: |
           cd dist/electron/Packaged || { echo "FATAL: dist/electron/Packaged not found!"; exit 1; }
 
-          echo "=== latest-mac.yml content ==="
+          echo "=== latest-mac.yml content (before) ==="
+          cat latest-mac.yml
+          echo ""
+          echo "=== Files in directory ==="
+          ls -la *.dmg *.zip *.blockmap *.yml 2>/dev/null || true
+          echo ""
+
+          # electron-builder bug: latest-mac.yml may reference "Suisse-Notes-" (dashes)
+          # but actual files are "Suisse.Notes-" (dots), or vice versa.
+          # Strategy: update latest-mac.yml to match actual filenames.
+          # This is safer than renaming files because we KNOW the files exist.
+
+          # Check if files use dots (Suisse.Notes-) while yml uses dashes (Suisse-Notes-)
+          if ls Suisse.Notes-* 1>/dev/null 2>&1; then
+            if grep -q 'Suisse-Notes-' latest-mac.yml; then
+              echo "=== Fixing: latest-mac.yml uses dashes but files use dots ==="
+              sed -i '' 's/Suisse-Notes-/Suisse.Notes-/g' latest-mac.yml
+              echo "Updated latest-mac.yml to use dots (matching actual files)"
+            else
+              echo "Both files and yml use dots - no fix needed"
+            fi
+          elif ls Suisse-Notes-* 1>/dev/null 2>&1; then
+            if grep -q 'Suisse\.Notes-' latest-mac.yml; then
+              echo "=== Fixing: latest-mac.yml uses dots but files use dashes ==="
+              sed -i '' 's/Suisse\.Notes-/Suisse-Notes-/g' latest-mac.yml
+              echo "Updated latest-mac.yml to use dashes (matching actual files)"
+            else
+              echo "Both files and yml use dashes - no fix needed"
+            fi
+          else
+            echo "WARNING: No Suisse.Notes-* or Suisse-Notes-* files found!"
+            ls -la
+          fi
+
+          echo ""
+          echo "=== latest-mac.yml content (after) ==="
           cat latest-mac.yml
           echo ""
 
-          echo "=== All files in directory ==="
-          ls -la
-          echo ""
-
-          # electron-builder has a known bug: latest-mac.yml references filenames
-          # with dashes (Suisse-Notes-) but actual files use dots (Suisse.Notes-)
-          # Rename actual files to match what latest-mac.yml references
-          echo "=== Renaming dot-separated files to match latest-mac.yml ==="
-          for file in *.dmg *.zip *.blockmap; do
-            [ -f "$file" ] || continue
-            newname=$(echo "$file" | sed 's/^Suisse\.Notes-/Suisse-Notes-/')
-            if [ "$file" != "$newname" ]; then
-              echo "Renaming: $file → $newname"
-              mv "$file" "$newname"
-            fi
-          done
-
-          echo ""
-          echo "=== Files after rename ==="
-          ls -la
-
-          # Verify every file referenced in latest-mac.yml actually exists
-          echo ""
-          echo "=== Extracting url: references from latest-mac.yml ==="
-          grep 'url:' latest-mac.yml || echo "WARNING: No url: lines found!"
-          echo ""
-
-          echo "=== Verifying files ==="
+          # Verify: every url: in latest-mac.yml must point to an existing file
+          echo "=== Final verification ==="
           MISSING=0
           FOUND=0
           while IFS= read -r line; do
-            # Extract filename after "url:" - handle various YAML formats
             fname=$(echo "$line" | sed 's/.*url:[[:space:]]*//' | sed 's/[[:space:]]*$//' | tr -d '\r"'"'")
-            if [ -z "$fname" ]; then
-              echo "SKIP: empty url value from line: $line"
-              continue
-            fi
-            echo "Checking: '$fname'"
-            if [ ! -f "$fname" ]; then
-              echo "  MISSING: '$fname'"
-              # Debug: show hex of filename to detect invisible chars
-              echo -n "  HEX: " && echo -n "$fname" | od -A x -t x1z | head -2
-              MISSING=1
-            else
-              echo "  OK: $fname"
+            [ -z "$fname" ] && continue
+            if [ -f "$fname" ]; then
+              echo "OK: $fname"
               FOUND=$((FOUND + 1))
+            else
+              echo "MISSING: $fname"
+              MISSING=1
             fi
           done < <(grep 'url:' latest-mac.yml)
 
           echo ""
-          echo "Result: $FOUND files found, MISSING=$MISSING"
           if [ "$FOUND" -eq 0 ]; then
-            echo "FATAL: No url: references found or matched in latest-mac.yml!"
+            echo "FATAL: No url: references matched any files!"
             exit 1
           fi
           if [ "$MISSING" -eq 1 ]; then
-            echo "FATAL: Auto-update will fail! Some files referenced in latest-mac.yml are missing."
+            echo "FATAL: Some files in latest-mac.yml are still missing!"
             exit 1
           fi
           echo "All $FOUND files verified OK"
