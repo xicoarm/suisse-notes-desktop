@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.28](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.27...v3.7.28) (2026-02-05)
+
+
+### Bug Fixes
+
+* simplify filename alignment step with set -x debugging ([7bf8a3a](https://github.com/xicoarm/suisse-notes-desktop/commit/7bf8a3a5b8b70b9f1e826c978f907dbd94740ae0))
+
 ### [3.7.27](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.26...v3.7.27) (2026-02-05)
 
 
