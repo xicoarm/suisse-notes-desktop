@@ -49,7 +49,9 @@ describe('Auth Store', () => {
         user: mockUser,
         token: mockToken
       });
+      mockElectronAPI.auth.clearToken.mockResolvedValue({ success: true });
       mockElectronAPI.auth.saveToken.mockResolvedValue({ success: true });
+      mockElectronAPI.auth.getToken.mockResolvedValue(mockToken);
       mockElectronAPI.auth.saveUserInfo.mockResolvedValue({ success: true });
 
       const result = await store.login('test@example.com', 'password123');
@@ -98,6 +100,10 @@ describe('Auth Store', () => {
         expect(store.loading).toBe(true);
         return Promise.resolve({ success: true, user: {}, token: 'token' });
       });
+      mockElectronAPI.auth.clearToken.mockResolvedValue({ success: true });
+      mockElectronAPI.auth.saveToken.mockResolvedValue({ success: true });
+      mockElectronAPI.auth.getToken.mockResolvedValue('token');
+      mockElectronAPI.auth.saveUserInfo.mockResolvedValue({ success: true });
 
       await store.login('test@example.com', 'password123');
       expect(store.loading).toBe(false);
@@ -115,7 +121,9 @@ describe('Auth Store', () => {
         user: mockUser,
         token: mockToken
       });
+      mockElectronAPI.auth.clearToken.mockResolvedValue({ success: true });
       mockElectronAPI.auth.saveToken.mockResolvedValue({ success: true });
+      mockElectronAPI.auth.getToken.mockResolvedValue(mockToken);
       mockElectronAPI.auth.saveUserInfo.mockResolvedValue({ success: true });
 
       const result = await store.register('new@example.com', 'password123', 'New User');
