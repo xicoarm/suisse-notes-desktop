@@ -162,49 +162,19 @@ jobs:
           # We upload manually after notarization via action-gh-release
           npx quasar build -m electron -P never
 
-      - name: Align filenames between latest-mac.yml and actual files
-        shell: bash
+      - name: Align latest-mac.yml with actual filenames
         run: |
-          set -x  # Print every command for debugging
-          DIR="dist/electron/Packaged"
-          if [ ! -d "$DIR" ]; then
-            echo "FATAL: $DIR does not exist!"
-            ls -la dist/ || true
-            ls -la dist/electron/ || true
-            exit 1
-          fi
-          cd "$DIR"
-
+          cd dist/electron/Packaged
           echo "=== Files ==="
-          ls -1 || true
-
-          if [ ! -f latest-mac.yml ]; then
-            echo "FATAL: latest-mac.yml not found in $DIR"
-            exit 1
-          fi
-
+          ls -1
           echo "=== latest-mac.yml (before) ==="
           cat latest-mac.yml
 
-          # electron-builder bug: latest-mac.yml may reference "Suisse-Notes-" (dashes)
-          # but actual files are "Suisse.Notes-" (dots), or vice versa.
-          # Fix: update latest-mac.yml to match actual filenames.
-          HAS_DOT_FILES=false
-          HAS_DASH_FILES=false
-          ls Suisse.Notes-*.zip 1>/dev/null 2>&1 && HAS_DOT_FILES=true
-          ls Suisse-Notes-*.zip 1>/dev/null 2>&1 && HAS_DASH_FILES=true
-
-          echo "HAS_DOT_FILES=$HAS_DOT_FILES HAS_DASH_FILES=$HAS_DASH_FILES"
-
-          if [ "$HAS_DOT_FILES" = "true" ] && grep -q 'Suisse-Notes-' latest-mac.yml; then
-            echo "Fixing: yml has dashes, files have dots"
-            sed -i '' 's/Suisse-Notes-/Suisse.Notes-/g' latest-mac.yml
-          elif [ "$HAS_DASH_FILES" = "true" ] && grep -q 'Suisse\.Notes-' latest-mac.yml; then
-            echo "Fixing: yml has dots, files have dashes"
-            sed -i '' 's/Suisse\.Notes-/Suisse-Notes-/g' latest-mac.yml
-          else
-            echo "No dot/dash mismatch to fix"
-          fi
+          # electron-builder bug (#2706): productName "Suisse Notes" creates files
+          # with dots (Suisse.Notes-) but latest-mac.yml references dashes (Suisse-Notes-).
+          # Fix: unconditionally replace dashes with dots in latest-mac.yml to match files.
+          # This is safe because the actual files ALWAYS use dots on our builds.
+          sed -i '' 's/Suisse-Notes-/Suisse.Notes-/g' latest-mac.yml
 
           echo "=== latest-mac.yml (after) ==="
           cat latest-mac.yml
