@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.31](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.30...v3.7.31) (2026-02-06)
+
+
+### Bug Fixes
+
+* update auth tests to match token verification flow ([95464f7](https://github.com/xicoarm/suisse-notes-desktop/commit/95464f7c8821978c09292354090d51d161a91caf))
+
 ### [3.7.30](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.29...v3.7.30) (2026-02-06)
 
 
