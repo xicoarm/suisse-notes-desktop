@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.30](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.29...v3.7.30) (2026-02-06)
+
+
+### Bug Fixes
+
+* remove broken system audio level meter, add missing i18n keys, fix settings alignment ([e993981](https://github.com/xicoarm/suisse-notes-desktop/commit/e99398141d941fff9386b9d7bdbdbaee8a3b1630))
+
 ### [3.7.29](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.28...v3.7.29) (2026-02-06)
 
 
