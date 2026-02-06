@@ -106,6 +106,11 @@ const messages = {
     startUpload: 'Start Upload',
     changeFile: 'Change File',
 
+    // Settings - Language
+    language: 'Language',
+    appLanguage: 'App Language',
+    appLanguageDesc: 'Choose your preferred language',
+
     // Transcription Options
     transcriptionOptions: 'Transcription Options',
     transcriptTitle: 'Transcript Title',
@@ -292,6 +297,11 @@ const messages = {
     fileSelected: 'Datei ausgewählt',
     startUpload: 'Upload starten',
     changeFile: 'Datei ändern',
+
+    // Settings - Language
+    language: 'Sprache',
+    appLanguage: 'App-Sprache',
+    appLanguageDesc: 'Wählen Sie Ihre bevorzugte Sprache',
 
     // Transcription Options
     transcriptionOptions: 'Transkriptionsoptionen',
@@ -480,6 +490,11 @@ const messages = {
     startUpload: 'Démarrer le téléchargement',
     changeFile: 'Changer de fichier',
 
+    // Settings - Language
+    language: 'Langue',
+    appLanguage: 'Langue de l\'application',
+    appLanguageDesc: 'Choisissez votre langue préférée',
+
     // Transcription Options
     transcriptionOptions: 'Options de transcription',
     transcriptTitle: 'Titre de la transcription',
@@ -666,6 +681,11 @@ const messages = {
     fileSelected: 'File selezionato',
     startUpload: 'Avvia caricamento',
     changeFile: 'Cambia file',
+
+    // Settings - Language
+    language: 'Lingua',
+    appLanguage: 'Lingua dell\'app',
+    appLanguageDesc: 'Scegli la tua lingua preferita',
 
     // Transcription Options
     transcriptionOptions: 'Opzioni di trascrizione',

@@ -179,16 +179,11 @@
           </div>
         </div>
 
-        <!-- Audio Level Meter(s) -->
+        <!-- Audio Level Meter -->
         <div class="level-section">
           <AudioLevelMeter
             :level="audioLevel"
             :label="systemAudioEnabled ? $t('microphone') : 'Audio Level'"
-          />
-          <AudioLevelMeter
-            v-if="systemAudioEnabled"
-            :level="systemAudioLevel"
-            :label="$t('systemAudio')"
           />
         </div>
 
@@ -612,7 +607,6 @@ const authStore = useAuthStore();
 
 const {
   audioLevel,
-  systemAudioLevel,
   availableMicrophones,
   selectedMicrophoneId,
   loadingMicrophones,

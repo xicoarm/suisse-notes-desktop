@@ -65,16 +65,16 @@
       <!-- Language Section -->
       <div class="settings-section">
         <div class="section-title">
-          {{ $t('language') || 'Language' }}
+          {{ $t('language') }}
         </div>
 
         <div class="setting-row">
           <div class="setting-info">
             <div class="setting-label">
-              {{ $t('appLanguage') || 'App Language' }}
+              {{ $t('appLanguage') }}
             </div>
             <div class="setting-description">
-              {{ $t('appLanguageDesc') || 'Choose your preferred language' }}
+              {{ $t('appLanguageDesc') }}
             </div>
           </div>
           <q-select
@@ -537,7 +537,7 @@ const handleLogout = async () => {
     width: 100%;
   }
 
-  .danger-zone {
+  .settings-section .setting-row.danger-zone {
     margin: 16px -16px -16px -16px;
     padding: 20px 16px;
   }
@@ -549,10 +549,9 @@ const handleLogout = async () => {
 }
 
 // Danger zone styling
-.danger-zone {
-  margin-top: 16px;
-  padding-top: 16px;
+.settings-section .setting-row.danger-zone {
   border-top: 1px solid #fecaca;
+  border-bottom: none;
   background: #fef2f2;
   margin: 16px -24px -24px -24px;
   padding: 20px 24px;

@@ -51,12 +51,6 @@ let stateVerificationInterval = null;
 // System audio state (persists across navigation)
 let systemAudioActive = false;
 
-// System audio level monitoring
-let systemAudioContext = null;
-let systemAnalyser = null;
-let systemLevelInterval = null;
-let currentSystemAudioLevel = 0;
-
 // Mic mute state
 let micMuted = false;
 
@@ -123,7 +117,6 @@ export function getState() {
     isRecording: mediaRecorder?.state === 'recording',
     isPaused: mediaRecorder?.state === 'paused',
     audioLevel: currentAudioLevel,
-    systemAudioLevel: currentSystemAudioLevel,
     silenceWarning: silenceError,
     hasStream: stream !== null,
     systemAudioActive,
@@ -163,7 +156,6 @@ function createMixingPipeline(micStream, sysStream) {
     systemSourceNode.connect(dest);
     systemStream = sysStream;
     systemAudioActive = true;
-    startSystemLevelMonitoring(sysStream);
   }
 
   mixingContext = ctx;
@@ -188,7 +180,6 @@ export function addSystemAudioStream(sysStream) {
     systemSourceNode.connect(mixingDest);
     systemStream = sysStream;
     systemAudioActive = true;
-    startSystemLevelMonitoring(sysStream);
     emit('systemAudioChange', true);
     console.log('System audio added to recording mix');
     return true;
@@ -216,7 +207,6 @@ export function removeSystemAudioStream() {
   }
   if (systemAudioActive) {
     systemAudioActive = false;
-    stopSystemLevelMonitoring();
     emit('systemAudioChange', false);
     console.log('System audio removed from recording mix');
   }
@@ -323,77 +313,6 @@ function stopLevelMonitoring() {
   silenceError = null;
   emit('levelChange', 0);
   emit('silenceWarning', null);
-}
-
-/**
- * Start system audio level monitoring
- */
-function startSystemLevelMonitoring(sysStream) {
-  stopSystemLevelMonitoring();
-  try {
-    // Check if stream has audio tracks
-    const audioTracks = sysStream.getAudioTracks();
-    if (audioTracks.length === 0) {
-      console.warn('System audio stream has no audio tracks');
-      return;
-    }
-    console.log('System audio tracks:', audioTracks.map(t => ({ label: t.label, enabled: t.enabled, muted: t.muted })));
-
-    systemAudioContext = new (window.AudioContext || window.webkitAudioContext)();
-
-    // Resume AudioContext if suspended (required for user gesture policy)
-    if (systemAudioContext.state === 'suspended') {
-      systemAudioContext.resume();
-    }
-
-    systemAnalyser = systemAudioContext.createAnalyser();
-    const source = systemAudioContext.createMediaStreamSource(sysStream);
-    source.connect(systemAnalyser);
-
-    // Use time domain data instead of frequency data for more accurate level
-    systemAnalyser.fftSize = 2048;
-    const bufferLength = systemAnalyser.fftSize;
-    const dataArray = new Float32Array(bufferLength);
-
-    systemLevelInterval = setInterval(() => {
-      if (systemAnalyser && systemAudioContext.state === 'running') {
-        // Use time domain data for RMS calculation (more accurate for level metering)
-        systemAnalyser.getFloatTimeDomainData(dataArray);
-
-        // Calculate RMS (root mean square) for accurate audio level
-        let sum = 0;
-        for (let i = 0; i < bufferLength; i++) {
-          sum += dataArray[i] * dataArray[i];
-        }
-        const rms = Math.sqrt(sum / bufferLength);
-
-        // Convert to percentage (0-100), with some amplification for visibility
-        currentSystemAudioLevel = Math.min(100, rms * 300);
-        emit('systemLevelChange', currentSystemAudioLevel);
-      }
-    }, 100);
-
-    console.log('System audio level monitoring started, AudioContext state:', systemAudioContext.state);
-  } catch (error) {
-    console.warn('Could not start system audio level monitoring:', error);
-  }
-}
-
-/**
- * Stop system audio level monitoring
- */
-function stopSystemLevelMonitoring() {
-  if (systemLevelInterval) {
-    clearInterval(systemLevelInterval);
-    systemLevelInterval = null;
-  }
-  if (systemAudioContext) {
-    systemAudioContext.close().catch(() => {});
-    systemAudioContext = null;
-  }
-  systemAnalyser = null;
-  currentSystemAudioLevel = 0;
-  emit('systemLevelChange', 0);
 }
 
 // Minutes limit tracking state
@@ -695,7 +614,7 @@ export async function startRecording(options = {}) {
     console.error('Error starting recording:', error);
 
     stopLevelMonitoring();
-    stopSystemLevelMonitoring();
+
     stopDurationTracking();
 
     if (stream) {
@@ -803,7 +722,7 @@ export async function stopRecording(recordingStore, stopSystemAudio) {
         console.warn('MediaRecorder lost but chunks exist - attempting recovery');
         silenceError = null;
         stopLevelMonitoring();
-        stopSystemLevelMonitoring();
+    
         stopDurationTracking();
         stopAuthKeepAlive();
 
@@ -885,7 +804,7 @@ export async function stopRecording(recordingStore, stopSystemAudio) {
       await new Promise(r => setTimeout(r, 100));
 
       stopLevelMonitoring();
-      stopSystemLevelMonitoring();
+  
       stopDurationTracking();
       stopAuthKeepAlive();
 
@@ -932,7 +851,7 @@ export async function stopRecording(recordingStore, stopSystemAudio) {
       mediaRecorder.stop();
     } else {
       stopLevelMonitoring();
-      stopSystemLevelMonitoring();
+  
       stopDurationTracking();
       stopAuthKeepAlive();
 
@@ -983,7 +902,6 @@ export function isActive() {
  */
 export function cleanup(stopSystemAudio) {
   stopLevelMonitoring();
-  stopSystemLevelMonitoring();
   stopDurationTracking();
   stopAuthKeepAlive();
 

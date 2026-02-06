@@ -352,49 +352,103 @@ docker restart swiss-german-api
 
 ---
 
-## Desktop App Release & Auto-Updates
-
-The desktop app uses **electron-updater** with **GitHub Releases** for automatic updates.
-
-### Auto-Update Configuration
-
-Located in `src-electron/electron-main.js`:
-- `autoUpdater.autoDownload = true` — Updates download silently in the background
-- `autoUpdater.autoInstallOnAppQuit = true` — Installs when user closes the app
-- Checks for updates on startup + every 4 hours
-
-### GitHub Release Settings
-
-Located in `quasar.config.js`:
-```javascript
-publish: {
-  provider: 'github',
-  owner: 'xicoarm',
-  repo: 'suisse-notes-desktop',
-  releaseType: 'release',
-  private: true
-}
-```
-
-**GitHub Repo:** https://github.com/xicoarm/suisse-notes-desktop (private)
+## Desktop Release Process (CRITICAL)
+- Release workflow: `.github/workflows/release.yml`, triggered on `v*` tags
+- Release steps: `npm run release:patch` → `git push --follow-tags origin main`
+- `standard-version` bumps version in package.json, creates CHANGELOG, tags with `v*`
+- **Windows**: `npm run build` with `GH_TOKEN` → electron-builder auto-publishes to GitHub Release
+- **macOS**: `npx quasar build -m electron -P never` → sign → notarize → upload via `action-gh-release`
+- The `-P never` flag is Quasar's pass-through to electron-builder's `--publish never`
+- NEVER use `PUBLISH` env var or `SKIP_PUBLISH` — electron-builder does NOT read these
+- NEVER set `publish: null` in quasar.config.js — it prevents `latest-mac.yml` generation
 
 ### How to Release a New Version
 
-**CI/CD handles releases automatically!** When you push a tag, GitHub Actions builds and publishes the release.
-
 ```bash
 # 1. Bump version (uses standard-version)
-npm run release:patch    # 3.3.4 → 3.3.5 (bug fixes)
-npm run release:minor    # 3.3.4 → 3.4.0 (new features)
-npm run release:major    # 3.3.4 → 4.0.0 (breaking changes)
+npm run release:patch    # 3.7.29 → 3.7.30 (bug fixes)
+npm run release:minor    # 3.7.29 → 3.8.0 (new features)
+npm run release:major    # 3.7.29 → 4.0.0 (breaking changes)
 
 # 2. Push version bump + git tag
-git push --follow-tags
+git push --follow-tags origin main
 
 # 3. Done! GitHub Actions will:
-#    - Build the app for Windows
-#    - Create a GitHub Release with the tag
-#    - Upload the installer + latest.yml auPrivate token: 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
+#    - Build for Windows (auto-publish to GitHub Release)
+#    - Build for macOS (sign, notarize, then upload to GitHub Release)
+#    - Generate latest.yml and latest-mac.yml for auto-updates
+```
 
+## Auto-Update (CRITICAL - DO NOT BREAK)
+- `quasar.config.js` → `builder.publish` config MUST always be present (never conditional/null)
+- This config generates `latest.yml` (Windows) and `latest-mac.yml` (macOS) during build
+- `electron-updater` in the app reads `app-update.yml` (embedded at build time) to find the GitHub repo
+- Then fetches `latest-mac.yml` / `latest.yml` from the latest GitHub Release to check for updates
+- macOS auto-update uses the `.zip` files (not DMGs) — both x64 and arm64 zips must be present
+- Release workflow has validation guards that FAIL the build if auto-update files are missing
+- Three guards: Windows post-build, macOS post-build, macOS post-upload verification
+- Auto-update settings in `electron-main.js`: `autoDownload=true`, `autoInstallOnAppQuit=true`
+- KNOWN BUG: electron-builder generates filenames with dots (Suisse.Notes-) but latest-mac.yml references dashes (Suisse-Notes-)
+- Fix: release workflow runs `sed -i '' 's/Suisse-Notes-/Suisse.Notes-/g' latest-mac.yml` to update yml to match files
+- DO NOT try to rename files to match yml — just update yml to match files (simpler, more reliable)
+- DO NOT try to detect the mismatch conditionally — just always run the sed (it's a no-op if already matching)
+- NEVER use `artifactName` in mac config to fix this — electron-builder ignores it for latest-mac.yml (known bug #2706)
 
-Every change and every implementation that we are doing should have an effect on all four platforms, which are the desktop Windows version, the desktop Mac iOS version, the mobile Android version, and the mobile iOS version. And it is crucial that we always consider everything we implement to make it adaptable for all of these platforms, and if needed, do individual solutions or individual code so we can really support all of the four platforms equally.
+### Dot/Dash Filename Fix - Lessons Learned (v3.7.24–v3.7.29)
+The following approaches were tried and FAILED. Do NOT repeat them:
+
+**FAILED Approach 1: Rename files to match yml (v3.7.24)**
+```bash
+# WRONG — DO NOT DO THIS
+for file in *.dmg *.zip *.blockmap; do
+  newname=$(echo "$file" | sed 's/^Suisse\.Notes-/Suisse-Notes-/')
+  mv "$file" "$newname"
+done
+# Then verify yml references match renamed files
+grep "url:" latest-mac.yml | sed 's/.*url: //' | while read -r fname; do
+  [ ! -f "$fname" ] && exit 1  # THIS ONLY EXITS SUBSHELL, NOT SCRIPT
+done
+```
+Why it failed: (1) Renaming files then verifying is fragile — the verification parsing
+of latest-mac.yml kept failing due to invisible characters or YAML format variations.
+(2) `while read` in a pipe creates a subshell — `exit 1` only exits the subshell,
+not the parent script.
+
+**FAILED Approach 2: Conditional detection with if/elif (v3.7.27, v3.7.28)**
+```bash
+# WRONG — DO NOT DO THIS
+if ls Suisse.Notes-*.zip 1>/dev/null 2>&1 && grep -q 'Suisse-Notes-' latest-mac.yml; then
+  sed -i '' 's/Suisse-Notes-/Suisse.Notes-/g' latest-mac.yml
+fi
+```
+Why it failed: The conditional detection (`ls` + `grep`) consistently fell through
+to the else branch in CI even though the mismatch existed. The exact cause is unclear
+(possibly globbing behavior differences on macOS CI runners), but the detection
+logic never triggered the sed fix. v3.7.28 passed but the yml was NOT updated.
+
+**WORKING Approach (v3.7.29):**
+```bash
+# CORRECT — ALWAYS DO THIS
+sed -i '' 's/Suisse-Notes-/Suisse.Notes-/g' latest-mac.yml
+```
+Why it works: No detection, no conditionals, no verification parsing. Just
+unconditionally run sed. Since electron-builder ALWAYS produces this mismatch
+for productName "Suisse Notes", and sed is a no-op if there's nothing to replace,
+this is safe and reliable.
+
+**Key principles:**
+1. NEVER add conditional logic around this sed — just run it unconditionally
+2. NEVER try to rename files — update the yml instead
+3. NEVER use `while read` in a pipe for verification — it creates a subshell
+4. Keep CI workflow steps as simple as possible — complex bash in YAML is fragile
+5. If you can't access CI logs to debug, simplify the code instead of adding more logic
+
+## Mobile Release Workflow
+- `.github/workflows/mobile-release.yml` triggers on push to main
+- Watches: `src/**`, `src-capacitor/**`, `quasar.config.js` (NOT `package.json`)
+- Skips `chore(release):` commits (desktop version bumps) and `[skip ci]` commits
+- Deploys to TestFlight (iOS) and Play Store Internal (Android) via Fastlane
+- Desktop and mobile share `src/` so i18n or shared component changes trigger both workflows
+
+## Multi-Platform Development
+Every change and every implementation should consider all four platforms: desktop Windows, desktop macOS, mobile Android, and mobile iOS. Always make implementations adaptable for all platforms, and if needed, create individual solutions to support all four platforms equally.

@@ -40,7 +40,6 @@ export function useRecorder() {
 
   // Reactive refs for UI binding (synced with service)
   const audioLevel = ref(0);
-  const systemAudioLevel = ref(0);
   const silenceWarning = ref(null);
   const isAutoSplitting = ref(false);
   const isMicMuted = ref(false);
@@ -87,10 +86,6 @@ export function useRecorder() {
   // Event handlers for service events
   const handleLevelChange = (level) => {
     audioLevel.value = level;
-  };
-
-  const handleSystemLevelChange = (level) => {
-    systemAudioLevel.value = level;
   };
 
   const handleSilenceWarning = (warning) => {
@@ -213,7 +208,6 @@ export function useRecorder() {
   onMounted(() => {
     // Subscribe to service events
     recordingService.addEventListener('levelChange', handleLevelChange);
-    recordingService.addEventListener('systemLevelChange', handleSystemLevelChange);
     recordingService.addEventListener('silenceWarning', handleSilenceWarning);
     recordingService.addEventListener('stateChange', handleStateChange);
     recordingService.addEventListener('limitWarning', handleLimitWarning);
@@ -228,7 +222,6 @@ export function useRecorder() {
     // Sync with current service state (for navigation back to page)
     const state = recordingService.getState();
     audioLevel.value = state.audioLevel;
-    systemAudioLevel.value = state.systemAudioLevel;
     silenceWarning.value = state.silenceWarning;
     isMicMuted.value = state.micMuted;
 
@@ -267,7 +260,6 @@ export function useRecorder() {
   onUnmounted(() => {
     // Remove event listeners from service
     recordingService.removeEventListener('levelChange', handleLevelChange);
-    recordingService.removeEventListener('systemLevelChange', handleSystemLevelChange);
     recordingService.removeEventListener('silenceWarning', handleSilenceWarning);
     recordingService.removeEventListener('stateChange', handleStateChange);
     recordingService.removeEventListener('limitWarning', handleLimitWarning);
@@ -295,7 +287,6 @@ export function useRecorder() {
 
   return {
     audioLevel,
-    systemAudioLevel,
     availableMicrophones,
     selectedMicrophoneId,
     loadingMicrophones,
