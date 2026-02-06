@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.29](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.28...v3.7.29) (2026-02-06)
+
+
+### Bug Fixes
+
+* unconditionally fix latest-mac.yml dot/dash mismatch ([b54d1ed](https://github.com/xicoarm/suisse-notes-desktop/commit/b54d1ed9ba2a9bdd32d81b9523d99f118039b20c))
+
 ### [3.7.28](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.27...v3.7.28) (2026-02-05)
 
 
