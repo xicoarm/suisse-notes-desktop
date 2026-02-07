@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.33](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.32...v3.7.33) (2026-02-07)
+
+
+### Bug Fixes
+
+* critical recording persistence bugs across 10 files ([342e9c5](https://github.com/xicoarm/suisse-notes-desktop/commit/342e9c57e3e9cf7e452ed6e255ebced1458ba5a4))
+
 ### [3.7.32](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.31...v3.7.32) (2026-02-07)
 
 
