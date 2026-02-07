@@ -43,13 +43,16 @@ platform :ios do
     )
 
     # Increment build number based on TestFlight
-    # initial_build_number ensures we never go below a known floor (prevents conflicts
-    # when latest_testflight_build_number returns a stale/lower value)
+    # Use .max to ensure we always exceed the highest known build (24) even if
+    # latest_testflight_build_number returns a stale/lower value
+    latest_build = latest_testflight_build_number(
+      app_identifier: "ch.suissenotes.mobile",
+      initial_build_number: 0
+    )
+    new_build = [latest_build, 24].max + 1
+
     increment_build_number(
-      build_number: latest_testflight_build_number(
-        app_identifier: "ch.suissenotes.mobile",
-        initial_build_number: 24
-      ) + 1,
+      build_number: new_build,
       xcodeproj: "App.xcodeproj"
     )
 
