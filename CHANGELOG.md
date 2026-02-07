@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.32](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.31...v3.7.32) (2026-02-07)
+
+
+### Features
+
+* add recording health monitor to detect and alert on dead recordings ([544f96b](https://github.com/xicoarm/suisse-notes-desktop/commit/544f96bd6ac2940f794390b547fa84637d06ede6))
+
 ### [3.7.31](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.30...v3.7.31) (2026-02-06)
 
 
