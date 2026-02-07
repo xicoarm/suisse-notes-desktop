@@ -9,9 +9,138 @@
  * - Capacitor (iOS/Android): Uses TUS protocol for resumable uploads
  */
 
-import { isElectron, isCapacitor, PlatformConstants } from '../utils/platform';
+import { isElectron, isCapacitor, isMobile, PlatformConstants } from '../utils/platform';
 import { calculateUploadChecksum, verifyUploadChecksum } from './integrity';
 import { readFile, deleteFile } from './storage';
+
+// --- Persistent Mobile Upload Queue (localStorage-based) ---
+const MOBILE_UPLOAD_QUEUE_KEY = 'mobile_upload_queue';
+const MAX_QUEUE_RETRIES = 10;
+
+/**
+ * Get the persistent mobile upload queue from localStorage
+ * @returns {Array<{recordId: string, filePath: string, metadata: Object, retries: number, addedAt: number}>}
+ */
+export function getMobileUploadQueue() {
+  try {
+    const raw = localStorage.getItem(MOBILE_UPLOAD_QUEUE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Add a failed upload to the persistent mobile queue
+ * @param {string} recordId
+ * @param {string} filePath
+ * @param {Object} metadata - Upload metadata (duration, title, customVocabulary, etc.)
+ */
+export function addToMobileUploadQueue(recordId, filePath, metadata) {
+  try {
+    const queue = getMobileUploadQueue();
+    // Don't add duplicates
+    if (queue.some(item => item.recordId === recordId)) return;
+    queue.push({ recordId, filePath, metadata, retries: 0, addedAt: Date.now() });
+    localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, JSON.stringify(queue));
+  } catch (e) {
+    console.warn('Failed to add to mobile upload queue:', e);
+  }
+}
+
+/**
+ * Remove a successfully uploaded item from the queue
+ * @param {string} recordId
+ */
+export function removeFromMobileUploadQueue(recordId) {
+  try {
+    const queue = getMobileUploadQueue().filter(item => item.recordId !== recordId);
+    localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, JSON.stringify(queue));
+  } catch (e) {
+    console.warn('Failed to remove from mobile upload queue:', e);
+  }
+}
+
+/**
+ * Update retry count for a specific queue item
+ * @param {string} recordId
+ * @param {number} retries
+ */
+function _updateQueueItemRetries(recordId, retries) {
+  try {
+    const queue = getMobileUploadQueue();
+    const item = queue.find(i => i.recordId === recordId);
+    if (item) {
+      item.retries = retries;
+      localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, JSON.stringify(queue));
+    }
+  } catch (e) {
+    console.warn('Failed to update queue item retries:', e);
+  }
+}
+
+/**
+ * Process the persistent mobile upload queue — retries all pending uploads
+ * @param {Object} authStore - Auth store for token
+ * @param {Function} getApiUrl - Function returning the API URL
+ * @returns {Promise<{processed: number, succeeded: number, failed: number}>}
+ */
+export async function processMobileUploadQueue(authStore, getApiUrl) {
+  const queue = getMobileUploadQueue();
+  if (queue.length === 0) return { processed: 0, succeeded: 0, failed: 0 };
+
+  const apiUrl = typeof getApiUrl === 'function' ? getApiUrl() : getApiUrl;
+  let succeeded = 0;
+  let failed = 0;
+
+  for (const item of queue) {
+    if (item.retries >= MAX_QUEUE_RETRIES) {
+      failed++;
+      continue;
+    }
+
+    try {
+      const result = await uploadWithVerification({
+        filePath: item.filePath,
+        recordId: item.recordId,
+        apiUrl,
+        authToken: authStore.token,
+        metadata: item.metadata || {},
+        onProgress: () => {},
+        getAuthStore: () => authStore
+      });
+
+      if (result.success) {
+        removeFromMobileUploadQueue(item.recordId);
+        succeeded++;
+
+        // Update history if store is available
+        try {
+          const { useRecordingsHistoryStore } = await import('../stores/recordings-history');
+          const historyStore = useRecordingsHistoryStore();
+          await historyStore.updateRecording(item.recordId, {
+            uploadStatus: 'uploaded',
+            audioFileId: result.audioFileId
+          });
+        } catch (e) {
+          console.warn('Could not update history after queued upload:', e);
+        }
+      } else {
+        // Increment retry count and persist immediately
+        item.retries++;
+        _updateQueueItemRetries(item.recordId, item.retries);
+        failed++;
+      }
+    } catch (e) {
+      console.warn('Queued upload failed for', item.recordId, e);
+      item.retries++;
+      _updateQueueItemRetries(item.recordId, item.retries);
+      failed++;
+    }
+  }
+
+  return { processed: queue.length, succeeded, failed };
+}
 
 // Token refresh callback - set by calling code
 let onTokenRefreshNeeded = null;

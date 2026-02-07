@@ -52,12 +52,12 @@ export const initializeLifecycle = async () => {
       if (isActive) {
         console.log('Lifecycle: App came to foreground');
         if (onAppForeground) {
-          await onAppForeground();
+          try { await onAppForeground(); } catch (e) { console.error('Lifecycle: onAppForeground error:', e); }
         }
       } else {
         console.log('Lifecycle: App went to background');
         if (onAppBackground) {
-          await onAppBackground();
+          try { await onAppBackground(); } catch (e) { console.error('Lifecycle: onAppBackground error:', e); }
         }
       }
     });
@@ -67,12 +67,12 @@ export const initializeLifecycle = async () => {
       if (status.connected) {
         console.log('Lifecycle: Network connected', status.connectionType);
         if (onNetworkOnline) {
-          await onNetworkOnline(status.connectionType);
+          try { await onNetworkOnline(status.connectionType); } catch (e) { console.error('Lifecycle: onNetworkOnline error:', e); }
         }
       } else {
         console.log('Lifecycle: Network disconnected');
         if (onNetworkOffline) {
-          await onNetworkOffline();
+          try { await onNetworkOffline(); } catch (e) { console.error('Lifecycle: onNetworkOffline error:', e); }
         }
       }
     });
@@ -125,10 +125,10 @@ const startBatteryMonitoring = async () => {
 
         if (batteryPercent <= PlatformConstants.CRITICAL_BATTERY_PERCENT && onCriticalBattery) {
           console.warn(`Lifecycle: CRITICAL battery level (${batteryPercent}%)`);
-          await onCriticalBattery(batteryPercent);
+          try { await onCriticalBattery(batteryPercent); } catch (e) { console.error('Lifecycle: onCriticalBattery error:', e); }
         } else if (batteryPercent <= PlatformConstants.LOW_BATTERY_PERCENT && onLowBattery) {
           console.warn(`Lifecycle: Low battery level (${batteryPercent}%)`);
-          await onLowBattery(batteryPercent);
+          try { await onLowBattery(batteryPercent); } catch (e) { console.error('Lifecycle: onLowBattery error:', e); }
         }
       } catch (error) {
         console.warn('Lifecycle: Battery check failed', error);

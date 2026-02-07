@@ -77,6 +77,7 @@ const messages = {
     statusPending: 'Pending',
     statusUploaded: 'Uploaded',
     statusFailed: 'Failed',
+    statusRecording: 'Recording',
     autoDelete: 'Auto-delete',
 
     // Common
@@ -278,6 +279,7 @@ const messages = {
     statusPending: 'Ausstehend',
     statusUploaded: 'Hochgeladen',
     statusFailed: 'Fehlgeschlagen',
+    statusRecording: 'Aufnahme',
     autoDelete: 'Auto-Löschen',
 
     // Common
@@ -479,6 +481,7 @@ const messages = {
     statusPending: 'En attente',
     statusUploaded: 'Téléchargé',
     statusFailed: 'Échoué',
+    statusRecording: 'Enregistrement',
     autoDelete: 'Suppression auto',
 
     // Common
@@ -680,6 +683,7 @@ const messages = {
     statusPending: 'In attesa',
     statusUploaded: 'Caricato',
     statusFailed: 'Fallito',
+    statusRecording: 'Registrazione',
     autoDelete: 'Auto-elimina',
 
     // Common

@@ -85,6 +85,9 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
     failedRecordings: (state) =>
       state.recordings.filter(r => r.uploadStatus === 'failed'),
 
+    inProgressRecordings: (state) =>
+      state.recordings.filter(r => r.uploadStatus === 'recording'),
+
     // Get recording count
     recordingCount: (state) => state.recordings.length,
 
@@ -98,10 +101,27 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
   },
 
   actions: {
-    // Helper to get current user ID
-    _getUserId() {
+    // Helper to get current user ID with fallback chain
+    // When forWrite is true, skip the localStorage fallback to prevent cross-user data attribution
+    _getUserId(fallbackUserId = null, { forWrite = false } = {}) {
       const authStore = useAuthStore();
-      return authStore.user?.id || authStore.user?.userId || null;
+      const userId = authStore.user?.id || authStore.user?.userId || null;
+
+      if (userId) {
+        // Cache for future use when auth may be unavailable
+        try { localStorage.setItem('last_known_user_id', userId); } catch (e) { /* ignore */ }
+        return userId;
+      }
+
+      // Fallback: use provided userId (e.g. from recording object)
+      if (fallbackUserId) return fallbackUserId;
+
+      // Last resort: use cached userId from localStorage (read-only operations only)
+      if (!forWrite) {
+        try { return localStorage.getItem('last_known_user_id'); } catch (e) { return null; }
+      }
+
+      return null;
     },
 
     // Load recordings (platform-aware)
@@ -160,7 +180,7 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
     // Add a new recording to history (with userId) — idempotent: if ID exists, delegates to updateRecording
     async addRecording(recording) {
       try {
-        const userId = this._getUserId();
+        const userId = this._getUserId(recording?.userId, { forWrite: true });
         if (!userId) {
           console.error('SECURITY: Cannot add recording without userId');
           return { success: false, error: 'Not authenticated' };
@@ -211,7 +231,9 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
     // Update a recording in history (with userId check)
     async updateRecording(id, updates) {
       try {
-        const userId = this._getUserId();
+        // Try to get userId from the existing recording as fallback
+        const existing = this.recordings.find(r => r.id === id);
+        const userId = this._getUserId(existing?.userId || updates?.userId, { forWrite: true });
         if (!userId) {
           console.error('SECURITY: Cannot update recording without userId');
           return { success: false, error: 'Not authenticated' };
@@ -255,7 +277,7 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
     // Delete a recording from history (with userId check)
     async deleteRecording(id, deleteFile = false) {
       try {
-        const userId = this._getUserId();
+        const userId = this._getUserId(null, { forWrite: true });
         if (!userId) {
           console.error('SECURITY: Cannot delete recording without userId');
           return { success: false, error: 'Not authenticated' };

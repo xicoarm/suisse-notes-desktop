@@ -955,8 +955,30 @@ const onStorageOptionCancel = () => {
 };
 
 const doStartRecording = async () => {
+  // Block start if recovery is in progress (FIX H)
+  if (recordingStore.recoveryInProgress) {
+    $q.notify({
+      type: 'warning',
+      message: 'Please wait — recovering a previous recording...',
+      timeout: 3000
+    });
+    return;
+  }
+
   const result = await startRecording();
-  if (!result.success) {
+  if (result.success) {
+    // Add to history immediately so recording survives app kill
+    await historyStore.addRecording({
+      id: recordingStore.recordId,
+      userId: authStore.user?.id || null,
+      createdAt: new Date().toISOString(),
+      duration: 0,
+      fileSize: 0,
+      filePath: null,
+      uploadStatus: 'recording',
+      storagePreference: currentStoragePreference.value
+    });
+  } else {
     $q.notify({
       type: 'negative',
       message: result.error || 'Failed to start recording'
@@ -1009,15 +1031,12 @@ const handleStop = async () => {
         }
       }
 
-      // Save to history BEFORE upload starts (so it survives app kill)
-      await historyStore.addRecording({
-        id: recordingStore.recordId,
-        createdAt: new Date().toISOString(),
+      // Update existing history entry (created at recording start) with final details
+      await historyStore.updateRecording(recordingStore.recordId, {
         duration: finalDuration.value,
         fileSize: currentFileSize.value,
         filePath: currentFilePath.value,
-        uploadStatus: 'pending',
-        storagePreference: currentStoragePreference.value
+        uploadStatus: 'pending'
       });
 
       // Processing done, start auto-upload
@@ -1197,6 +1216,21 @@ const handleUploadError = async (errorMessage) => {
     uploadError: errorMessage
   });
 
+  // On mobile, add to persistent upload queue for automatic retry
+  if (isCapacitor() && currentFilePath.value) {
+    try {
+      const { addToMobileUploadQueue } = await import('../services/upload');
+      const options = transcriptionStore.transcriptionOptions;
+      addToMobileUploadQueue(recordingStore.recordId, currentFilePath.value, {
+        duration: finalDuration.value?.toString(),
+        title: options.title,
+        customVocabulary: options.customVocabulary
+      });
+    } catch (e) {
+      console.warn('Could not add to mobile upload queue:', e);
+    }
+  }
+
   $q.notify({
     type: 'negative',
     message: 'Upload failed. Your recording is saved locally.',
@@ -1271,15 +1305,12 @@ const handleSaveDeadRecording = async () => {
         }
       }
 
-      // Save to history
-      await historyStore.addRecording({
-        id: recordingStore.recordId,
-        createdAt: new Date().toISOString(),
+      // Update existing history entry (created at recording start) with final details
+      await historyStore.updateRecording(recordingStore.recordId, {
         duration: finalDuration.value,
         fileSize: currentFileSize.value,
         filePath: currentFilePath.value,
-        uploadStatus: 'pending',
-        storagePreference: currentStoragePreference.value
+        uploadStatus: 'pending'
       });
 
       isProcessing.value = false;
@@ -1359,8 +1390,21 @@ const cancelUpload = async () => {
     if (recordingStore.recordId && isElectron()) {
       await window.electronAPI.upload.cancel(recordingStore.recordId);
     }
-    // On mobile, upload cancellation is handled by aborting the XHR request
-    // For now, we just reset the UI state
+
+    // On mobile, cancel the active XHR upload
+    if (recordingStore.recordId && isCapacitor()) {
+      try {
+        const { cancelUpload: cancelMobileUpload } = await import('../services/upload');
+        await cancelMobileUpload(recordingStore.recordId);
+      } catch (e) {
+        console.warn('Could not cancel mobile upload:', e);
+      }
+    }
+
+    // Update history entry to pending so it's not stuck on 'uploading'
+    if (recordingStore.recordId) {
+      await historyStore.updateRecording(recordingStore.recordId, { uploadStatus: 'pending' });
+    }
 
     // Reset UI state
     isProcessing.value = false;

@@ -449,12 +449,13 @@ export const useAuthStore = defineStore('auth', {
         console.error('Error clearing token:', error);
       }
 
+      // Clear cached userId to prevent cross-user data attribution
+      try { localStorage.removeItem('last_known_user_id'); } catch (e) { /* ignore */ }
+
       // Clear history store to prevent data leaks between users
-      if (isElectron()) {
-        const { useRecordingsHistoryStore } = await import('./recordings-history');
-        const historyStore = useRecordingsHistoryStore();
-        historyStore.reset();
-      }
+      const { useRecordingsHistoryStore } = await import('./recordings-history');
+      const historyStore = useRecordingsHistoryStore();
+      historyStore.reset();
 
       // Clear minutes store
       const minutesStore = useMinutesStore();
@@ -736,12 +737,13 @@ export const useAuthStore = defineStore('auth', {
         console.error('Error clearing token:', error);
       }
 
+      // Clear cached userId to prevent cross-user data attribution
+      try { localStorage.removeItem('last_known_user_id'); } catch (e) { /* ignore */ }
+
       // Clear history store
-      if (isElectron()) {
-        const { useRecordingsHistoryStore } = await import('./recordings-history');
-        const historyStore = useRecordingsHistoryStore();
-        historyStore.reset();
-      }
+      const { useRecordingsHistoryStore } = await import('./recordings-history');
+      const historyStore = useRecordingsHistoryStore();
+      historyStore.reset();
 
       // Clear minutes store
       const minutesStore = useMinutesStore();

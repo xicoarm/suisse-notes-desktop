@@ -54,6 +54,9 @@ let systemAudioActive = false;
 // Mic mute state
 let micMuted = false;
 
+// Flush synchronization: resolved when ondataavailable saves the chunk after a flush request
+let flushResolvers = [];
+
 // Silence detection state
 let silenceCounter = 0;
 let silenceWarningShown = false;
@@ -597,6 +600,12 @@ export async function startRecording(options = {}) {
           console.error('Error saving chunk:', error);
         }
       }
+      // Signal flush completion to all pending flush callers
+      if (flushResolvers.length > 0) {
+        const resolvers = flushResolvers;
+        flushResolvers = [];
+        resolvers.forEach(resolve => resolve());
+      }
     };
 
     mediaRecorder.onstop = () => {
@@ -916,12 +925,25 @@ export async function stopRecording(recordingStore, stopSystemAudio) {
 
 /**
  * Flush recording data (for visibility changes / suspend)
+ * Returns a Promise that resolves when the flushed chunk has been saved,
+ * with a 2-second timeout fallback.
  */
 export async function flushRecordingData() {
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     try {
+      const chunkSaved = new Promise((resolve) => {
+        flushResolvers.push(resolve);
+        // Timeout fallback: resolve after 2s even if ondataavailable hasn't fired
+        setTimeout(() => {
+          const idx = flushResolvers.indexOf(resolve);
+          if (idx !== -1) {
+            flushResolvers.splice(idx, 1);
+            resolve();
+          }
+        }, 2000);
+      });
       mediaRecorder.requestData();
-      await new Promise(r => setTimeout(r, 300));
+      await chunkSaved;
     } catch (e) {
       console.warn('Could not flush recording data:', e);
     }

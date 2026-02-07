@@ -50,6 +50,8 @@ export const useRecordingStore = defineStore('recording', {
     // Recording health monitor
     recordingInterrupted: false,
     interruptionInfo: null, // { reason, chunkCount, lastChunkTimestamp, detectedAt }
+    // Recovery state
+    recoveryInProgress: false,
     // Mobile-specific state
     appInBackground: false,
     networkConnected: true,
@@ -81,7 +83,7 @@ export const useRecordingStore = defineStore('recording', {
     // Check if storage is low
     hasLowStorage: (state) => state.storageStatus.status === 'low' || state.storageStatus.status === 'critical',
     // Check if app can safely record
-    canRecord: (state) => state.storageStatus.status !== 'critical' && !state.appInBackground,
+    canRecord: (state) => state.storageStatus.status !== 'critical' && !state.appInBackground && !state.recoveryInProgress,
     // Check if recording died unexpectedly (native stopped but store still says recording/paused)
     isRecordingDead: (state) => state.recordingInterrupted &&
       (state.status === 'recording' || state.status === 'paused')
@@ -94,20 +96,50 @@ export const useRecordingStore = defineStore('recording', {
         setLifecycleCallbacks({
           onBackground: async () => {
             this.appInBackground = true;
-            // Save current state when going to background
+            // Flush MediaRecorder buffer to a chunk on disk, then save metadata
             if (this.status === 'recording') {
+              try {
+                const { flushRecordingData } = await import('../services/recordingService.js');
+                await flushRecordingData();
+              } catch (e) {
+                console.warn('Could not flush recording data on background:', e);
+              }
               await this.flushCurrentState();
             }
           },
           onForeground: async () => {
             this.appInBackground = false;
             // Check for recovery needs when coming back
-            await this.checkRecoveryState();
+            const recovery = await this.checkRecoveryState();
+            if (recovery.recovered && recovery.recordings?.length > 0) {
+              try {
+                const { useRecordingsHistoryStore } = await import('./recordings-history');
+                const historyStore = useRecordingsHistoryStore();
+                for (const rec of recovery.recordings) {
+                  await historyStore.addRecording(rec);
+                }
+                console.log(`Recovered ${recovery.recordings.length} recording(s) on foreground`);
+              } catch (e) {
+                console.warn('Could not add recovered recordings to history:', e);
+              }
+            }
           },
           onOnline: async (connectionType) => {
             this.networkConnected = true;
             // Resume pending uploads when back online
-            // TODO: Integrate with upload queue
+            try {
+              const { processMobileUploadQueue } = await import('../services/upload.js');
+              const { useAuthStore } = await import('./auth');
+              const { getApiUrlSync } = await import('../services/api');
+              const authStore = useAuthStore();
+              if (authStore.token) {
+                processMobileUploadQueue(authStore, getApiUrlSync).catch(e => {
+                  console.warn('Failed to process upload queue on reconnect:', e);
+                });
+              }
+            } catch (e) {
+              console.warn('Could not process upload queue on reconnect:', e);
+            }
           },
           onOffline: async () => {
             this.networkConnected = false;
@@ -313,6 +345,7 @@ export const useRecordingStore = defineStore('recording', {
       if (this.integrity && isCapacitor()) {
         await storage.saveMetadata(this.recordId, {
           id: this.recordId,
+          userId: this.userId,
           startTime: this.startTime,
           duration: this.duration,
           chunkIndex: this.chunkIndex,
@@ -324,36 +357,38 @@ export const useRecordingStore = defineStore('recording', {
       }
     },
 
-    // Check for recordings that need recovery
+    // Check for recordings that need recovery — auto-combines chunks and returns recovered recordings
     async checkRecoveryState() {
+      this.recoveryInProgress = true;
       try {
         if (isElectron()) {
           // Electron: Check for interrupted recordings via main process
           // The main process already handles this on startup - see electron-main.js recoverInterruptedRecordings
           console.log('Recovery check: Electron handles recovery on startup');
-          return { success: true, recovered: false };
+          return { success: true, recovered: false, recordings: [] };
         } else if (isCapacitor()) {
-          // Capacitor: Scan for recordings with 'recording' status that weren't closed properly
+          // Capacitor: Scan for recordings with 'recording' or 'interrupted' status
           const listResult = await storage.listFiles('recordings');
 
           if (!listResult.success || !listResult.files) {
             console.log('No recordings directory or empty');
-            return { success: true, recovered: false };
+            return { success: true, recovered: false, recordings: [] };
           }
+
+          const recoveredRecordings = [];
 
           for (const recordId of listResult.files) {
             // Skip current active recording
             if (recordId === this.recordId) continue;
 
-            // Try to load metadata
             try {
               const metaResult = await storage.loadMetadata(recordId);
               if (!metaResult.success || !metaResult.metadata) continue;
 
               const metadata = metaResult.metadata;
 
-              // Check if this recording was interrupted (still in 'recording' status)
-              if (metadata.status === 'recording') {
+              // Check if this recording was interrupted
+              if (metadata.status === 'recording' || metadata.status === 'interrupted') {
                 console.warn('Found orphaned recording:', recordId);
 
                 // Check if there are chunks
@@ -361,30 +396,59 @@ export const useRecordingStore = defineStore('recording', {
                 const chunkCount = chunksResult.success ? (chunksResult.files?.length || 0) : 0;
 
                 if (chunkCount > 0) {
-                  console.log('Orphaned recording has', chunkCount, 'chunks - marking as recoverable');
+                  console.log('Orphaned recording has', chunkCount, 'chunks - auto-combining');
 
-                  // Update metadata to mark as recoverable
-                  await storage.saveMetadata(recordId, {
-                    ...metadata,
-                    status: 'interrupted',
-                    recoverable: true,
-                    chunkCount,
-                    lastUpdated: Date.now()
-                  });
+                  const combineResult = await this.combineChunksNative(recordId);
+
+                  if (combineResult.success) {
+                    // Update metadata to mark as recovered
+                    await storage.saveMetadata(recordId, {
+                      ...metadata,
+                      status: 'recovered',
+                      recoveredAt: Date.now()
+                    });
+
+                    recoveredRecordings.push({
+                      id: recordId,
+                      userId: metadata.userId || null,
+                      createdAt: metadata.startedAt || new Date(metadata.startTime || Date.now()).toISOString(),
+                      duration: metadata.duration || 0,
+                      fileSize: combineResult.fileSize || 0,
+                      filePath: combineResult.outputPath,
+                      uploadStatus: 'pending',
+                      recovered: true
+                    });
+                  } else {
+                    console.warn('Could not combine chunks for', recordId, combineResult.error);
+                    // Still mark as interrupted for future attempts
+                    await storage.saveMetadata(recordId, {
+                      ...metadata,
+                      status: 'interrupted',
+                      recoverable: true,
+                      chunkCount,
+                      lastUpdated: Date.now()
+                    });
+                  }
                 }
               }
             } catch (e) {
-              console.error('Error checking orphaned recording:', recordId, e);
+              console.error('Error recovering orphaned recording:', recordId, e);
             }
           }
 
-          return { success: true, recovered: false };
+          return {
+            success: true,
+            recovered: recoveredRecordings.length > 0,
+            recordings: recoveredRecordings
+          };
         }
 
-        return { success: true, recovered: false };
+        return { success: true, recovered: false, recordings: [] };
       } catch (error) {
         console.error('Error in checkRecoveryState:', error);
-        return { success: false, error: error.message };
+        return { success: false, error: error.message, recordings: [] };
+      } finally {
+        this.recoveryInProgress = false;
       }
     },
 
@@ -447,14 +511,15 @@ export const useRecordingStore = defineStore('recording', {
     },
 
     // Combine chunks on mobile (native implementation)
-    async combineChunksNative() {
+    async combineChunksNative(recordIdOverride = null) {
       if (!isCapacitor()) {
         return { success: false, error: 'Not on mobile platform' };
       }
 
       try {
-        const chunksDir = `recordings/${this.recordId}/chunks`;
-        const outputPath = `recordings/${this.recordId}/combined.webm`;
+        const targetRecordId = recordIdOverride || this.recordId;
+        const chunksDir = `recordings/${targetRecordId}/chunks`;
+        const outputPath = `recordings/${targetRecordId}/combined.webm`;
 
         // List all chunk files and sort them
         const listResult = await storage.listFiles(chunksDir);
@@ -650,6 +715,7 @@ export const useRecordingStore = defineStore('recording', {
       this.integrity = null;
       this.recordingInterrupted = false;
       this.interruptionInfo = null;
+      this.recoveryInProgress = false;
       this.storageStatus = {
         status: 'ok',
         freeMB: -1,

@@ -209,7 +209,8 @@ export default {
       const statusKeys = {
         pending: 'statusPending',
         uploaded: 'statusUploaded',
-        failed: 'statusFailed'
+        failed: 'statusFailed',
+        recording: 'statusRecording'
       };
       const key = statusKeys[props.recording.uploadStatus];
       return key ? t(key) : 'Unknown';
@@ -270,6 +271,10 @@ export default {
   &.status-uploading {
     border-left: 3px solid #6366f1;
   }
+
+  &.status-recording {
+    border-left: 3px solid #ef4444;
+  }
 }
 
 .card-header {
@@ -321,6 +326,11 @@ export default {
   &.uploading {
     background: rgba(99, 102, 241, 0.1);
     color: #6366f1;
+  }
+
+  &.recording {
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
   }
 }
 
