@@ -43,8 +43,13 @@ platform :ios do
     )
 
     # Increment build number based on TestFlight
+    # initial_build_number ensures we never go below a known floor (prevents conflicts
+    # when latest_testflight_build_number returns a stale/lower value)
     increment_build_number(
-      build_number: latest_testflight_build_number + 1,
+      build_number: latest_testflight_build_number(
+        app_identifier: "ch.suissenotes.mobile",
+        initial_build_number: 24
+      ) + 1,
       xcodeproj: "App.xcodeproj"
     )
 
