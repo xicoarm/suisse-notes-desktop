@@ -105,6 +105,13 @@ export function useRecorder() {
     systemAudioEnabled.value = active;
   };
 
+  // Recording death handler (desktop) - recording service detected MediaRecorder death
+  const handleRecordingDead = (data) => {
+    console.warn('Recording dead event from service:', data);
+    // The store is already updated by recordingService.verifyRecordingState()
+    // The UI will react to recordingStore.isRecordingDead
+  };
+
   // Minutes limit event handlers
   const handleLimitWarning = (minutesRemaining) => {
     console.log(`Minutes limit warning: ${minutesRemaining} minutes remaining`);
@@ -214,6 +221,7 @@ export function useRecorder() {
     recordingService.addEventListener('limitReached', handleLimitReached);
     recordingService.addEventListener('micMuteChange', handleMicMuteChange);
     recordingService.addEventListener('systemAudioChange', handleSystemAudioChange);
+    recordingService.addEventListener('recordingDead', handleRecordingDead);
 
     // Set up visibility and beforeunload handlers
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -266,6 +274,7 @@ export function useRecorder() {
     recordingService.removeEventListener('limitReached', handleLimitReached);
     recordingService.removeEventListener('micMuteChange', handleMicMuteChange);
     recordingService.removeEventListener('systemAudioChange', handleSystemAudioChange);
+    recordingService.removeEventListener('recordingDead', handleRecordingDead);
 
     // Remove visibility and beforeunload handlers
     document.removeEventListener('visibilitychange', handleVisibilityChange);

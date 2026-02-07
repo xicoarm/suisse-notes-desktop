@@ -417,10 +417,15 @@ async function performAutoSplit(recordingStore, isAutoSplitting) {
 }
 
 /**
- * Verify MediaRecorder state
+ * Verify MediaRecorder state - detects dead recordings
  */
 function verifyRecordingState(recordingStore) {
   if (!recordingStore.isRecording && !recordingStore.isPaused) {
+    return;
+  }
+
+  // Skip if already detected as dead
+  if (recordingStore.recordingInterrupted) {
     return;
   }
 
@@ -429,13 +434,28 @@ function verifyRecordingState(recordingStore) {
 
   if (storeIsRecording && mediaState === 'inactive') {
     console.error('CRITICAL: Store says recording but MediaRecorder is inactive!');
-    const chunkCount = recordingStore.chunkIndex;
-    if (chunkCount > 0) {
-      silenceError = 'Recording interrupted but your audio is saved. Press Stop to save your recording.';
-    } else {
-      silenceError = 'Recording may have stopped unexpectedly. Please check your recording.';
+
+    // Stop the duration timer
+    stopDurationTracking();
+
+    // Stop verification interval
+    if (stateVerificationInterval) {
+      clearInterval(stateVerificationInterval);
+      stateVerificationInterval = null;
     }
-    emit('silenceWarning', silenceError);
+
+    // Notify store about the death
+    recordingStore.handleRecordingDeath({
+      reason: 'media_recorder_inactive',
+      chunkCount: recordingStore.chunkIndex,
+      lastChunkTimestamp: Date.now()
+    });
+
+    // Emit event for UI
+    emit('recordingDead', {
+      reason: 'media_recorder_inactive',
+      chunkCount: recordingStore.chunkIndex
+    });
   } else if (storeIsRecording && mediaState === 'paused') {
     try {
       mediaRecorder.resume();
@@ -597,10 +617,28 @@ export async function startRecording(options = {}) {
     // Show notification on Android
     await showRecordingNotification();
 
-    // Start state verification
+    // Add track.onended listeners for faster death detection
+    const recordingTracks = recordingStream.getTracks();
+    for (const track of recordingTracks) {
+      track.onended = () => {
+        console.warn('Recording track ended unexpectedly:', track.kind);
+        verifyRecordingState(recordingStore);
+      };
+    }
+    // Also monitor mic stream tracks
+    if (stream) {
+      for (const track of stream.getTracks()) {
+        track.onended = () => {
+          console.warn('Mic track ended unexpectedly:', track.kind);
+          verifyRecordingState(recordingStore);
+        };
+      }
+    }
+
+    // Start state verification (every 5s)
     stateVerificationInterval = setInterval(() => {
       verifyRecordingState(recordingStore);
-    }, 10000);
+    }, 5000);
 
     // Start auth keep-alive to prevent session expiry during long recordings
     if (authStore) {

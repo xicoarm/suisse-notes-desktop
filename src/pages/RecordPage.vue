@@ -139,112 +139,169 @@
         v-if="(recordingStore.isRecording || recordingStore.isPaused) && !isUploadedFromRecording"
         class="recording-card modern-card no-hover"
       >
-        <!-- Header -->
-        <div class="card-header text-center">
-          <h2>Meeting Recorder</h2>
-          <p
-            class="status-text"
-            :class="statusClass"
-          >
-            {{ statusText }}
-          </p>
-        </div>
-
-        <!-- System Audio Toggle (desktop only, interactive during recording) -->
+        <!-- Recording Death Alert -->
         <div
-          v-if="isElectron()"
-          class="system-audio-indicator"
+          v-if="recordingStore.isRecordingDead"
+          class="recording-dead-alert"
         >
-          <q-icon
-            :name="systemAudioEnabled ? 'volume_up' : 'volume_off'"
-            size="14px"
-            :color="systemAudioEnabled ? 'positive' : 'grey-5'"
-          />
-          <span :class="['indicator-text', { 'active': systemAudioEnabled }]">
-            {{ systemAudioEnabled ? $t('systemAudioEnabled') : $t('systemAudioOff') }}
-          </span>
-          <q-toggle
-            v-model="systemAudioEnabled"
-            color="primary"
-            size="sm"
-            dense
-            @update:model-value="toggleSystemAudio"
-          />
-        </div>
+          <div class="dead-alert-header">
+            <q-icon
+              name="error"
+              size="28px"
+              color="negative"
+            />
+            <div class="dead-alert-text">
+              <h3>{{ $t('recordingStoppedUnexpectedly') }}</h3>
+              <p>{{ $t('recordingStoppedDesc') }}</p>
+            </div>
+          </div>
 
-        <!-- Timer Display -->
-        <div class="timer-section">
-          <div :class="['timer-display', { 'recording': recordingStore.isRecording, 'paused': recordingStore.isPaused }]">
-            {{ recordingStore.formattedDuration }}
+          <div
+            v-if="recordingStore.interruptionInfo?.chunkCount > 0"
+            class="dead-chunks-info"
+          >
+            <q-icon
+              name="save"
+              size="16px"
+              color="warning"
+            />
+            <span>{{ $t('chunksAvailable', { count: recordingStore.interruptionInfo.chunkCount }) }}</span>
+          </div>
+
+          <div class="dead-timer">
+            <div class="timer-display dead">
+              {{ recordingStore.formattedDuration }}
+            </div>
+            <span class="timer-stopped-label">{{ $t('timerStopped') }}</span>
+          </div>
+
+          <div class="dead-actions">
+            <q-btn
+              unelevated
+              color="primary"
+              :label="$t('saveRecording')"
+              icon="save"
+              @click="handleSaveDeadRecording"
+            />
+            <q-btn
+              flat
+              color="negative"
+              :label="$t('discardRecording')"
+              icon="delete"
+              @click="handleDiscardDeadRecording"
+            />
           </div>
         </div>
 
-        <!-- Audio Level Meter -->
-        <div class="level-section">
-          <AudioLevelMeter
-            :level="audioLevel"
-            :label="systemAudioEnabled ? $t('microphone') : 'Audio Level'"
-          />
-        </div>
+        <!-- Normal recording UI (hidden when recording is dead) -->
+        <template v-if="!recordingStore.isRecordingDead">
+          <!-- Header -->
+          <div class="card-header text-center">
+            <h2>Meeting Recorder</h2>
+            <p
+              class="status-text"
+              :class="statusClass"
+            >
+              {{ statusText }}
+            </p>
+          </div>
 
-        <!-- Recording Controls -->
-        <div class="controls-section">
-          <RecordingControls
-            :audio-level="audioLevel"
-            :is-mic-muted="isMicMuted"
-            @start="handleStartClick"
-            @pause="handlePause"
-            @resume="handleResume"
-            @stop="handleStop"
-            @toggle-mute="toggleMicMute"
-          />
-        </div>
-
-        <!-- P0 Data Loss Fix: Silence Warning Display -->
-        <div
-          v-if="silenceWarning"
-          class="warning-section"
-        >
-          <q-banner
-            class="warning-banner"
-            rounded
+          <!-- System Audio Toggle (desktop only, interactive during recording) -->
+          <div
+            v-if="isElectron()"
+            class="system-audio-indicator"
           >
-            <template #avatar>
-              <q-icon
-                name="mic_off"
-                color="warning"
-              />
-            </template>
-            {{ silenceWarning }}
-          </q-banner>
-        </div>
+            <q-icon
+              :name="systemAudioEnabled ? 'volume_up' : 'volume_off'"
+              size="14px"
+              :color="systemAudioEnabled ? 'positive' : 'grey-5'"
+            />
+            <span :class="['indicator-text', { 'active': systemAudioEnabled }]">
+              {{ systemAudioEnabled ? $t('systemAudioEnabled') : $t('systemAudioOff') }}
+            </span>
+            <q-toggle
+              v-model="systemAudioEnabled"
+              color="primary"
+              size="sm"
+              dense
+              @update:model-value="toggleSystemAudio"
+            />
+          </div>
 
-        <!-- Error Display -->
-        <div
-          v-if="recordingStore.error && !isAutoUploading"
-          class="error-section"
-        >
-          <q-banner
-            class="error-banner"
-            rounded
+          <!-- Timer Display -->
+          <div class="timer-section">
+            <div :class="['timer-display', { 'recording': recordingStore.isRecording, 'paused': recordingStore.isPaused }]">
+              {{ recordingStore.formattedDuration }}
+            </div>
+          </div>
+
+          <!-- Audio Level Meter -->
+          <div class="level-section">
+            <AudioLevelMeter
+              :level="audioLevel"
+              :label="systemAudioEnabled ? $t('microphone') : 'Audio Level'"
+            />
+          </div>
+
+          <!-- Recording Controls -->
+          <div class="controls-section">
+            <RecordingControls
+              :audio-level="audioLevel"
+              :is-mic-muted="isMicMuted"
+              @start="handleStartClick"
+              @pause="handlePause"
+              @resume="handleResume"
+              @stop="handleStop"
+              @toggle-mute="toggleMicMute"
+            />
+          </div>
+
+          <!-- P0 Data Loss Fix: Silence Warning Display -->
+          <div
+            v-if="silenceWarning"
+            class="warning-section"
           >
-            <template #avatar>
-              <q-icon
-                name="error_outline"
-                color="negative"
-              />
-            </template>
-            {{ recordingStore.error }}
-            <template #action>
-              <q-btn
-                flat
-                color="negative"
-                label="Dismiss"
-                @click="recordingStore.error = null"
-              />
-            </template>
-          </q-banner>
-        </div>
+            <q-banner
+              class="warning-banner"
+              rounded
+            >
+              <template #avatar>
+                <q-icon
+                  name="mic_off"
+                  color="warning"
+                />
+              </template>
+              {{ silenceWarning }}
+            </q-banner>
+          </div>
+
+          <!-- Error Display -->
+          <div
+            v-if="recordingStore.error && !isAutoUploading"
+            class="error-section"
+          >
+            <q-banner
+              class="error-banner"
+              rounded
+            >
+              <template #avatar>
+                <q-icon
+                  name="error_outline"
+                  color="negative"
+                />
+              </template>
+              {{ recordingStore.error }}
+              <template #action>
+                <q-btn
+                  flat
+                  color="negative"
+                  label="Dismiss"
+                  @click="recordingStore.error = null"
+                />
+              </template>
+            </q-banner>
+          </div>
+        </template>
       </div>
 
       <!-- ERROR STATE: Recording failed -->
@@ -1181,6 +1238,84 @@ const retryChunkCombine = async () => {
   }
 };
 
+// Handle saving a dead recording (interrupted)
+const handleSaveDeadRecording = async () => {
+  // Save duration before stopping
+  recordingStore.setFinalDuration(recordingStore.duration);
+
+  isProcessing.value = true;
+  uploadError.value = null;
+
+  try {
+    const result = await stopRecording();
+
+    if (result.success) {
+      // Show recovery notification
+      $q.notify({
+        type: 'warning',
+        message: result.warning || 'Recording recovered after interruption. Some audio at the end may be missing.',
+        timeout: 8000
+      });
+
+      // Get file info
+      if (isElectron()) {
+        const fileInfo = await window.electronAPI.recording.getFilePath(recordingStore.recordId, '.webm');
+        if (fileInfo.success) {
+          currentFilePath.value = fileInfo.filePath;
+          currentFileSize.value = fileInfo.fileSize;
+        }
+      } else if (isCapacitor()) {
+        if (result.filePath) {
+          currentFilePath.value = result.filePath;
+          currentFileSize.value = result.fileSize || 0;
+        }
+      }
+
+      // Save to history
+      await historyStore.addRecording({
+        id: recordingStore.recordId,
+        createdAt: new Date().toISOString(),
+        duration: finalDuration.value,
+        fileSize: currentFileSize.value,
+        filePath: currentFilePath.value,
+        uploadStatus: 'pending',
+        storagePreference: currentStoragePreference.value
+      });
+
+      isProcessing.value = false;
+      await startAutoUpload();
+    } else {
+      isProcessing.value = false;
+      $q.notify({
+        type: 'negative',
+        message: result.error || 'Failed to save recording'
+      });
+    }
+  } catch (error) {
+    isProcessing.value = false;
+    $q.notify({
+      type: 'negative',
+      message: error.message || 'Error processing recording'
+    });
+  }
+};
+
+// Handle discarding a dead recording
+const handleDiscardDeadRecording = () => {
+  $q.dialog({
+    title: t('discardRecording'),
+    message: t('discardRecordingConfirm'),
+    cancel: { flat: true, label: t('cancel') },
+    ok: { color: 'negative', label: t('discardRecording') },
+    persistent: true
+  }).onOk(() => {
+    recordingStore.reset();
+    isProcessing.value = false;
+    isAutoUploading.value = false;
+    uploadError.value = null;
+  });
+};
+
 const handleNewRecording = () => {
   recordingStore.reset();
   isProcessing.value = false;
@@ -1561,6 +1696,78 @@ const removeSessionWord = (word) => {
     background: rgba(245, 158, 11, 0.1);
     border: 1px solid rgba(245, 158, 11, 0.2);
     color: #92400e;
+  }
+}
+
+.recording-dead-alert {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 8px 0;
+
+  .dead-alert-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 16px;
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.2);
+    border-radius: 10px;
+
+    .dead-alert-text {
+      h3 {
+        font-size: 15px;
+        font-weight: 600;
+        color: #ef4444;
+        margin: 0 0 4px 0;
+      }
+
+      p {
+        font-size: 12px;
+        color: #64748b;
+        margin: 0;
+        line-height: 1.4;
+      }
+    }
+  }
+
+  .dead-chunks-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: rgba(245, 158, 11, 0.1);
+    border-radius: 8px;
+    font-size: 12px;
+    color: #92400e;
+  }
+
+  .dead-timer {
+    text-align: center;
+
+    .timer-display.dead {
+      font-size: 48px;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+      color: #ef4444;
+      opacity: 0.7;
+      letter-spacing: 2px;
+    }
+
+    .timer-stopped-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: #ef4444;
+      letter-spacing: 2px;
+      margin-top: 4px;
+    }
+  }
+
+  .dead-actions {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
   }
 }
 

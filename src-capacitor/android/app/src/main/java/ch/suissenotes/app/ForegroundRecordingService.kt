@@ -55,6 +55,14 @@ class ForegroundRecordingService : Service() {
             private set
         var chunkIndex: Int = 0
             private set
+        var lastChunkTimestampMs: Long = 0L
+            private set
+
+        // Broadcast action for recording death
+        const val ACTION_RECORDING_DEAD = "ch.suissenotes.app.RECORDING_DEAD"
+        const val EXTRA_REASON = "reason"
+        const val EXTRA_CHUNK_COUNT = "chunkCount"
+        const val EXTRA_LAST_CHUNK_TIMESTAMP = "lastChunkTimestampMs"
     }
 
     private var mediaRecorder: MediaRecorder? = null
@@ -92,6 +100,10 @@ class ForegroundRecordingService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        if (isRecording) {
+            // Service being killed while recording - broadcast death
+            broadcastRecordingDeath("service_destroyed")
+        }
         stopRecording()
     }
 
@@ -144,6 +156,7 @@ class ForegroundRecordingService : Service() {
 
             currentRecordId = recordId
             chunkIndex = 0
+            lastChunkTimestampMs = System.currentTimeMillis()
 
             // Start foreground service
             startForeground(NOTIFICATION_ID, createNotification("Recording in progress..."))
@@ -195,9 +208,18 @@ class ForegroundRecordingService : Service() {
                 setAudioEncodingBitRate(BIT_RATE)
                 setOutputFile(currentChunkFile?.absolutePath)
 
+                // Set error listener for death detection
+                setOnErrorListener { _, what, extra ->
+                    Log.e(TAG, "MediaRecorder error: what=$what, extra=$extra")
+                    handleRecordingDeath("media_recorder_error")
+                }
+
                 prepare()
                 start()
             }
+
+            // Update chunk timestamp
+            lastChunkTimestampMs = System.currentTimeMillis()
 
             Log.d(TAG, "Started chunk $chunkIndex: ${currentChunkFile?.name}")
 
@@ -230,6 +252,45 @@ class ForegroundRecordingService : Service() {
         startNewChunk()
     }
 
+    private fun handleRecordingDeath(reason: String) {
+        if (!isRecording) return
+
+        Log.w(TAG, "Recording death detected: $reason")
+
+        // Stop timers
+        chunkTimer?.cancel()
+        chunkTimer = null
+
+        // Stop recorder
+        mediaRecorder?.apply {
+            try {
+                stop()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error stopping recorder during death handling", e)
+            }
+            release()
+        }
+        mediaRecorder = null
+
+        isRecording = false
+
+        // Broadcast death event
+        broadcastRecordingDeath(reason)
+
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun broadcastRecordingDeath(reason: String) {
+        val intent = Intent(ACTION_RECORDING_DEAD).apply {
+            putExtra(EXTRA_REASON, reason)
+            putExtra(EXTRA_CHUNK_COUNT, chunkIndex)
+            putExtra(EXTRA_LAST_CHUNK_TIMESTAMP, lastChunkTimestampMs)
+            setPackage(packageName)
+        }
+        sendBroadcast(intent)
+    }
+
     private fun pauseRecording() {
         if (!isRecording) return
 
@@ -256,6 +317,7 @@ class ForegroundRecordingService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 mediaRecorder?.resume()
             }
+            lastChunkTimestampMs = System.currentTimeMillis()
             startChunkTimer()
 
             // Update notification

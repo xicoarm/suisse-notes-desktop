@@ -9,6 +9,7 @@ import Capacitor
  * - Background recording via audio session
  * - 5-second chunk intervals for crash recovery
  * - Phone call interruption handling
+ * - Health check monitoring to detect dead recordings
  */
 @objc(BackgroundRecordingPlugin)
 public class BackgroundRecordingPlugin: CAPPlugin {
@@ -18,14 +19,17 @@ public class BackgroundRecordingPlugin: CAPPlugin {
     private var audioRecorder: AVAudioRecorder?
     private var audioSession: AVAudioSession?
     private var chunkTimer: Timer?
+    private var healthCheckTimer: Timer?
     private var recordingSession: RecordingSession?
     private var isRecording = false
+    private var lastChunkTimestamp: Date = Date()
 
     // Recording settings
     private let sampleRate: Double = 48000
     private let channels: Int = 1
     private let bitRate: Int = 128000
     private let chunkIntervalSeconds: TimeInterval = 5.0
+    private let healthCheckIntervalSeconds: TimeInterval = 2.0
 
     // MARK: - Recording Session Model
 
@@ -74,6 +78,7 @@ public class BackgroundRecordingPlugin: CAPPlugin {
 
         recorder.pause()
         chunkTimer?.invalidate()
+        healthCheckTimer?.invalidate()
 
         call.resolve(["success": true])
     }
@@ -85,16 +90,25 @@ public class BackgroundRecordingPlugin: CAPPlugin {
         }
 
         recorder.record()
+        lastChunkTimestamp = Date()
         startChunkTimer()
+        startHealthCheckTimer()
 
         call.resolve(["success": true])
     }
 
     @objc func getStatus(_ call: CAPPluginCall) {
+        let isRecorderActive = audioRecorder?.isRecording ?? false
+        let secondsSinceLastChunk = Date().timeIntervalSince(lastChunkTimestamp)
+        let lastChunkMs = lastChunkTimestamp.timeIntervalSince1970 * 1000
+
         call.resolve([
             "isRecording": isRecording,
+            "isRecorderActive": isRecorderActive,
             "chunkIndex": recordingSession?.chunkIndex ?? 0,
-            "recordId": recordingSession?.id ?? ""
+            "recordId": recordingSession?.id ?? "",
+            "secondsSinceLastChunk": secondsSinceLastChunk,
+            "lastChunkTimestampMs": lastChunkMs
         ])
     }
 
@@ -120,6 +134,14 @@ public class BackgroundRecordingPlugin: CAPPlugin {
                 object: audioSession
             )
 
+            // Add route change observer to detect audio device changes
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleRouteChange),
+                name: AVAudioSession.routeChangeNotification,
+                object: audioSession
+            )
+
             // Create chunks directory
             let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             let chunksDirectory = documentsPath
@@ -142,6 +164,7 @@ public class BackgroundRecordingPlugin: CAPPlugin {
 
             isRecording = true
             startChunkTimer()
+            startHealthCheckTimer()
 
             call.resolve([
                 "success": true,
@@ -182,6 +205,9 @@ public class BackgroundRecordingPlugin: CAPPlugin {
         audioRecorder?.isMeteringEnabled = true
         audioRecorder?.record()
 
+        // Update chunk timestamp
+        lastChunkTimestamp = Date()
+
         // Update session
         session.currentChunkURL = chunkURL
         session.chunkIndex += 1
@@ -201,6 +227,46 @@ public class BackgroundRecordingPlugin: CAPPlugin {
         }
     }
 
+    private func startHealthCheckTimer() {
+        healthCheckTimer?.invalidate()
+        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: healthCheckIntervalSeconds, repeats: true) { [weak self] _ in
+            self?.performHealthCheck()
+        }
+    }
+
+    private func performHealthCheck() {
+        guard isRecording else { return }
+
+        let recorderIsActive = audioRecorder?.isRecording ?? false
+
+        if !recorderIsActive {
+            // Native recorder has stopped but our flag says recording
+            handleRecordingDeath(reason: "native_recorder_stopped")
+        }
+    }
+
+    private func handleRecordingDeath(reason: String) {
+        guard isRecording else { return } // Already handled
+
+        // Stop all timers
+        chunkTimer?.invalidate()
+        chunkTimer = nil
+        healthCheckTimer?.invalidate()
+        healthCheckTimer = nil
+
+        isRecording = false
+
+        let chunkCount = recordingSession?.chunkIndex ?? 0
+        let lastChunkMs = lastChunkTimestamp.timeIntervalSince1970 * 1000
+
+        // Fire event to JS
+        notifyListeners("recordingDead", data: [
+            "reason": reason,
+            "chunkCount": chunkCount,
+            "lastChunkTimestampMs": lastChunkMs
+        ])
+    }
+
     private func rotateChunk() {
         guard isRecording else { return }
 
@@ -215,6 +281,8 @@ public class BackgroundRecordingPlugin: CAPPlugin {
     private func stopCurrentRecording(call: CAPPluginCall) {
         chunkTimer?.invalidate()
         chunkTimer = nil
+        healthCheckTimer?.invalidate()
+        healthCheckTimer = nil
 
         audioRecorder?.stop()
         audioRecorder = nil
@@ -226,6 +294,7 @@ public class BackgroundRecordingPlugin: CAPPlugin {
 
         // Remove observers
         NotificationCenter.default.removeObserver(self, name: AVAudioSession.interruptionNotification, object: audioSession)
+        NotificationCenter.default.removeObserver(self, name: AVAudioSession.routeChangeNotification, object: audioSession)
 
         guard let session = recordingSession else {
             call.reject("No recording session found")
@@ -254,6 +323,7 @@ public class BackgroundRecordingPlugin: CAPPlugin {
             // Interruption began (e.g., phone call)
             audioRecorder?.pause()
             chunkTimer?.invalidate()
+            healthCheckTimer?.invalidate()
             notifyListeners("interrupted", data: ["reason": "call"])
 
         case .ended:
@@ -263,11 +333,35 @@ public class BackgroundRecordingPlugin: CAPPlugin {
 
             if options.contains(.shouldResume) {
                 audioRecorder?.record()
+                lastChunkTimestamp = Date()
                 startChunkTimer()
+                startHealthCheckTimer()
                 notifyListeners("resumed", data: [:])
             }
 
         @unknown default:
+            break
+        }
+    }
+
+    @objc private func handleRouteChange(notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
+            return
+        }
+
+        switch reason {
+        case .oldDeviceUnavailable, .categoryChange:
+            // Audio device disconnected or category changed - check if recorder is still alive
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self = self, self.isRecording else { return }
+                let recorderIsActive = self.audioRecorder?.isRecording ?? false
+                if !recorderIsActive {
+                    self.handleRecordingDeath(reason: "route_change")
+                }
+            }
+        default:
             break
         }
     }
@@ -277,14 +371,18 @@ public class BackgroundRecordingPlugin: CAPPlugin {
 
 extension BackgroundRecordingPlugin: AVAudioRecorderDelegate {
     public func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
-        if !flag {
-            notifyListeners("error", data: ["message": "Chunk recording finished unsuccessfully"])
+        if !flag && isRecording {
+            // Recorder finished unsuccessfully while we think we're recording - this is a death
+            handleRecordingDeath(reason: "recorder_finished_unsuccessfully")
         }
     }
 
     public func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
         if let error = error {
             notifyListeners("error", data: ["message": "Encoding error: \(error.localizedDescription)"])
+            if isRecording {
+                handleRecordingDeath(reason: "encoding_error")
+            }
         }
     }
 }

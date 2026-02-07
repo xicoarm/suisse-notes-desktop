@@ -26,6 +26,15 @@ const messages = {
     uploadComplete: 'Upload complete',
     processing: 'Processing...',
 
+    // Recording Health Monitor
+    recordingStoppedUnexpectedly: 'Recording Stopped Unexpectedly',
+    recordingStoppedDesc: 'The recording was interrupted, possibly because another app took over audio.',
+    chunksAvailable: '{count} audio segment(s) saved before the interruption.',
+    saveRecording: 'Save What Was Recorded',
+    discardRecording: 'Discard',
+    discardRecordingConfirm: 'Are you sure you want to discard the recording? All saved audio segments will be lost.',
+    timerStopped: 'STOPPED',
+
     // Tips
     tipsTitle: 'Tips for better recordings',
     tip1: 'Use a proper external microphone for best audio quality and speaker differentiation',
@@ -217,6 +226,15 @@ const messages = {
     uploading: 'Wird hochgeladen...',
     uploadComplete: 'Upload abgeschlossen',
     processing: 'Wird verarbeitet...',
+
+    // Recording Health Monitor
+    recordingStoppedUnexpectedly: 'Aufnahme unerwartet gestoppt',
+    recordingStoppedDesc: 'Die Aufnahme wurde unterbrochen, möglicherweise weil eine andere App die Audiowiedergabe übernommen hat.',
+    chunksAvailable: '{count} Audiosegment(e) vor der Unterbrechung gespeichert.',
+    saveRecording: 'Aufgenommenes speichern',
+    discardRecording: 'Verwerfen',
+    discardRecordingConfirm: 'Möchten Sie die Aufnahme wirklich verwerfen? Alle gespeicherten Audiosegmente gehen verloren.',
+    timerStopped: 'GESTOPPT',
 
     // Tips
     tipsTitle: 'Tipps für bessere Aufnahmen',
@@ -410,6 +428,15 @@ const messages = {
     uploadComplete: 'Téléchargement terminé',
     processing: 'Traitement...',
 
+    // Recording Health Monitor
+    recordingStoppedUnexpectedly: 'Enregistrement arrêté de manière inattendue',
+    recordingStoppedDesc: "L'enregistrement a été interrompu, peut-être parce qu'une autre application a pris le contrôle de l'audio.",
+    chunksAvailable: '{count} segment(s) audio sauvegardé(s) avant l\'interruption.',
+    saveRecording: 'Sauvegarder ce qui a été enregistré',
+    discardRecording: 'Supprimer',
+    discardRecordingConfirm: "Êtes-vous sûr de vouloir supprimer l'enregistrement ? Tous les segments audio sauvegardés seront perdus.",
+    timerStopped: 'ARRÊTÉ',
+
     // Tips
     tipsTitle: 'Conseils pour de meilleurs enregistrements',
     tip1: 'Utilisez un microphone externe pour une meilleure qualité audio et différenciation des locuteurs',
@@ -601,6 +628,15 @@ const messages = {
     uploading: 'Caricamento...',
     uploadComplete: 'Caricamento completato',
     processing: 'Elaborazione...',
+
+    // Recording Health Monitor
+    recordingStoppedUnexpectedly: 'Registrazione interrotta inaspettatamente',
+    recordingStoppedDesc: "La registrazione è stata interrotta, probabilmente perché un'altra app ha preso il controllo dell'audio.",
+    chunksAvailable: '{count} segmento/i audio salvato/i prima dell\'interruzione.',
+    saveRecording: 'Salva quanto registrato',
+    discardRecording: 'Elimina',
+    discardRecordingConfirm: 'Sei sicuro di voler eliminare la registrazione? Tutti i segmenti audio salvati andranno persi.',
+    timerStopped: 'FERMATO',
 
     // Tips
     tipsTitle: 'Consigli per registrazioni migliori',

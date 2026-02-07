@@ -47,6 +47,9 @@ export const useRecordingStore = defineStore('recording', {
       freeMB: -1,
       warning: null
     },
+    // Recording health monitor
+    recordingInterrupted: false,
+    interruptionInfo: null, // { reason, chunkCount, lastChunkTimestamp, detectedAt }
     // Mobile-specific state
     appInBackground: false,
     networkConnected: true,
@@ -78,7 +81,10 @@ export const useRecordingStore = defineStore('recording', {
     // Check if storage is low
     hasLowStorage: (state) => state.storageStatus.status === 'low' || state.storageStatus.status === 'critical',
     // Check if app can safely record
-    canRecord: (state) => state.storageStatus.status !== 'critical' && !state.appInBackground
+    canRecord: (state) => state.storageStatus.status !== 'critical' && !state.appInBackground,
+    // Check if recording died unexpectedly (native stopped but store still says recording/paused)
+    isRecordingDead: (state) => state.recordingInterrupted &&
+      (state.status === 'recording' || state.status === 'paused')
   },
 
   actions: {
@@ -259,6 +265,27 @@ export const useRecordingStore = defineStore('recording', {
         }
         return { success: false, error: error.message, partialRecovery: this.chunkIndex > 0, chunkCount: this.chunkIndex, recordId: this.recordId };
       }
+    },
+
+    // Handle recording death (native recorder stopped unexpectedly)
+    async handleRecordingDeath({ reason = 'unknown', chunkCount = 0, lastChunkTimestamp = null } = {}) {
+      if (this.recordingInterrupted) return; // Prevent duplicate handling
+
+      console.warn('Recording death detected:', reason);
+      this.recordingInterrupted = true;
+      this.interruptionInfo = {
+        reason,
+        chunkCount: chunkCount || this.chunkIndex,
+        lastChunkTimestamp,
+        detectedAt: Date.now()
+      };
+
+      // Flush state on mobile so chunks are persisted
+      if (isCapacitor()) {
+        await this.flushCurrentState();
+      }
+
+      // Do NOT change status to 'stopped' - keep it so the UI can show the alert
     },
 
     // Emergency stop for critical situations (battery, storage)
@@ -621,6 +648,8 @@ export const useRecordingStore = defineStore('recording', {
         finalDuration: 0
       };
       this.integrity = null;
+      this.recordingInterrupted = false;
+      this.interruptionInfo = null;
       this.storageStatus = {
         status: 'ok',
         freeMB: -1,

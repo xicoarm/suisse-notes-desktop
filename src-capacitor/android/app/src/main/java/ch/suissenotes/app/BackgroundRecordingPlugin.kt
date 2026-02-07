@@ -1,7 +1,10 @@
 package ch.suissenotes.app
 
 import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.ActivityCompat
@@ -34,6 +37,44 @@ import com.getcapacitor.annotation.PermissionCallback
 class BackgroundRecordingPlugin : Plugin() {
 
     private var pendingCall: PluginCall? = null
+
+    // Broadcast receiver for recording death events from the foreground service
+    private val recordingDeadReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ForegroundRecordingService.ACTION_RECORDING_DEAD) {
+                val reason = intent.getStringExtra(ForegroundRecordingService.EXTRA_REASON) ?: "unknown"
+                val chunkCount = intent.getIntExtra(ForegroundRecordingService.EXTRA_CHUNK_COUNT, 0)
+                val lastChunkTimestampMs = intent.getLongExtra(ForegroundRecordingService.EXTRA_LAST_CHUNK_TIMESTAMP, 0L)
+
+                val data = JSObject().apply {
+                    put("reason", reason)
+                    put("chunkCount", chunkCount)
+                    put("lastChunkTimestampMs", lastChunkTimestampMs)
+                }
+                notifyListeners("recordingDead", data)
+            }
+        }
+    }
+
+    override fun load() {
+        super.load()
+        // Register broadcast receiver for recording death events
+        val filter = IntentFilter(ForegroundRecordingService.ACTION_RECORDING_DEAD)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(recordingDeadReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            context.registerReceiver(recordingDeadReceiver, filter)
+        }
+    }
+
+    override fun handleOnDestroy() {
+        super.handleOnDestroy()
+        try {
+            context.unregisterReceiver(recordingDeadReceiver)
+        } catch (e: Exception) {
+            // Already unregistered
+        }
+    }
 
     @PluginMethod
     fun startRecording(call: PluginCall) {
@@ -185,10 +226,19 @@ class BackgroundRecordingPlugin : Plugin() {
 
     @PluginMethod
     fun getStatus(call: PluginCall) {
+        val lastChunkTs = ForegroundRecordingService.lastChunkTimestampMs
+        val secondsSinceLastChunk = if (lastChunkTs > 0) {
+            (System.currentTimeMillis() - lastChunkTs) / 1000.0
+        } else {
+            0.0
+        }
+
         val result = JSObject().apply {
             put("isRecording", ForegroundRecordingService.isRecording)
             put("chunkIndex", ForegroundRecordingService.chunkIndex)
             put("recordId", ForegroundRecordingService.currentRecordId ?: "")
+            put("secondsSinceLastChunk", secondsSinceLastChunk)
+            put("lastChunkTimestampMs", lastChunkTs)
         }
         call.resolve(result)
     }
