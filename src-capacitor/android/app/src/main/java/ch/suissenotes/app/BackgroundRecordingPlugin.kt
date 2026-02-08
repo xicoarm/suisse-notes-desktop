@@ -359,12 +359,15 @@ class BackgroundRecordingPlugin : Plugin() {
 
                 val fileSize = outputFile.length()
                 val relativePath = "recordings/$recordId/combined.webm"
+                // Estimate duration from chunk count (WebM chunks are ~3s each from MediaRecorder)
+                val estimatedDuration = loadedChunkCount * 3.0
 
                 val result = JSObject().apply {
                     put("success", true)
                     put("outputPath", relativePath)
                     put("fileSize", fileSize)
                     put("chunkCount", loadedChunkCount)
+                    put("duration", estimatedDuration)
                 }
                 call.resolve(result)
 
@@ -468,12 +471,15 @@ class BackgroundRecordingPlugin : Plugin() {
 
                 val fileSize = outputFile.length()
                 val relativePath = "recordings/$recordId/combined.m4a"
+                // Total duration from accumulated timestamps (microseconds to seconds)
+                val totalDurationSeconds = timeOffsetUs / 1_000_000.0
 
                 val result = JSObject().apply {
                     put("success", true)
                     put("outputPath", relativePath)
                     put("fileSize", fileSize)
                     put("chunkCount", loadedChunkCount)
+                    put("duration", totalDurationSeconds)
                 }
                 call.resolve(result)
 

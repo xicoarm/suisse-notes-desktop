@@ -1066,6 +1066,11 @@ const handleStop = async () => {
         });
       }
 
+      // Use native duration as fallback if JS timer gave 0
+      if ((!finalDuration.value || finalDuration.value === 0) && result.duration) {
+        recordingStore.setFinalDuration(result.duration);
+      }
+
       // Get file info - platform specific
       if (isElectron()) {
         const fileInfo = await window.electronAPI.recording.getFilePath(recordingStore.recordId, '.webm');
@@ -1365,6 +1370,11 @@ const handleSaveDeadRecording = async () => {
         message: result.warning || 'Recording recovered after interruption. Some audio at the end may be missing.',
         timeout: 8000
       });
+
+      // Use native duration as fallback if JS timer gave 0
+      if ((!finalDuration.value || finalDuration.value === 0) && result.duration) {
+        recordingStore.setFinalDuration(result.duration);
+      }
 
       // Get file info
       if (isElectron()) {

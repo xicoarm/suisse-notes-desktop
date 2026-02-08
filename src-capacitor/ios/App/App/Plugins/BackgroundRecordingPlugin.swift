@@ -358,11 +358,15 @@ public class BackgroundRecordingPlugin: CAPPlugin {
                 let fileSize = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? Int64) ?? 0
                 let relativePath = "recordings/\(recordId)/combined.webm"
 
+                // Estimate duration from chunk count (WebM chunks are ~3s each from MediaRecorder)
+                let estimatedDuration = Double(loadedChunkCount) * 3.0
+
                 call.resolve([
                     "success": true,
                     "outputPath": relativePath,
                     "fileSize": fileSize,
-                    "chunkCount": loadedChunkCount
+                    "chunkCount": loadedChunkCount,
+                    "duration": estimatedDuration
                 ])
             } catch {
                 NSLog("BackgroundRecording: WebM combine failed: \(error)")
@@ -442,6 +446,9 @@ public class BackgroundRecordingPlugin: CAPPlugin {
                 // Get file size
                 let fileSize = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? Int64) ?? 0
 
+                // Get total duration from composition
+                let totalDurationSeconds = CMTimeGetSeconds(insertTime)
+
                 // Return relative path for Capacitor compatibility
                 let relativePath = "recordings/\(recordId)/combined.m4a"
 
@@ -449,7 +456,8 @@ public class BackgroundRecordingPlugin: CAPPlugin {
                     "success": true,
                     "outputPath": relativePath,
                     "fileSize": fileSize,
-                    "chunkCount": loadedChunkCount
+                    "chunkCount": loadedChunkCount,
+                    "duration": totalDurationSeconds.isFinite ? totalDurationSeconds : 0
                 ])
 
             case .failed:

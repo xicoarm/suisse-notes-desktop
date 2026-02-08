@@ -159,14 +159,33 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
           this.defaultStoragePreference = _getCachedPreference();
           this.loaded = true;
 
-          // Then fetch from server and update
+          // Then fetch from server and merge with local cache
           const data = await _serverFetch('/api/desktop/history');
-          if (data.recordings) {
-            this.recordings = data.recordings;
-            _setCachedRecordings(userId, data.recordings);
-          } else if (Array.isArray(data)) {
-            this.recordings = data;
-            _setCachedRecordings(userId, data);
+          const serverRecordings = data.recordings || (Array.isArray(data) ? data : null);
+          if (serverRecordings) {
+            // Merge: preserve local non-zero duration/fileSize when server has 0
+            const cached = _getCachedRecordings(userId);
+            const merged = serverRecordings.map(serverRec => {
+              const localRec = cached.find(r => r.id === serverRec.id);
+              if (localRec) {
+                const updates = {};
+                if (localRec.duration > 0 && (!serverRec.duration || serverRec.duration === 0)) {
+                  updates.duration = localRec.duration;
+                }
+                if (localRec.fileSize > 0 && (!serverRec.fileSize || serverRec.fileSize === 0)) {
+                  updates.fileSize = localRec.fileSize;
+                }
+                if (localRec.filePath && !serverRec.filePath) {
+                  updates.filePath = localRec.filePath;
+                }
+                if (Object.keys(updates).length > 0) {
+                  return { ...serverRec, ...updates };
+                }
+              }
+              return serverRec;
+            });
+            this.recordings = merged;
+            _setCachedRecordings(userId, merged);
           }
         } catch (error) {
           console.warn('Could not fetch history from server, using cache:', error);

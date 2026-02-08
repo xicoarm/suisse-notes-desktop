@@ -294,11 +294,15 @@ export const useRecordingStore = defineStore('recording', {
           }
         } else if (isCapacitor()) {
           // Capacitor: combine chunks using native method or concatenation
-          // For now, mark as ready for upload (chunks will be combined by native code)
           const result = await this.combineChunksNative();
           if (result.success) {
             this.audioFilePath = result.outputPath;
-            return { success: true, filePath: result.outputPath, fileSize: result.fileSize };
+            // Use native-reported duration as fallback if JS timer duration is 0
+            const nativeDuration = result.duration || null;
+            if (nativeDuration && (!this.duration || this.duration === 0)) {
+              this.duration = nativeDuration;
+            }
+            return { success: true, filePath: result.outputPath, fileSize: result.fileSize, duration: nativeDuration };
           } else {
             throw new Error(result.error || 'Failed to combine recording chunks');
           }
@@ -416,7 +420,8 @@ export const useRecordingStore = defineStore('recording', {
                     const combineResult = await this.combineChunksNative(recordId);
                     if (combineResult.success) {
                       recoveredRecordings.push({
-                        id: recordId, userId: null, duration: 0,
+                        id: recordId, userId: null,
+                        duration: combineResult.duration || 0,
                         fileSize: combineResult.fileSize || 0,
                         filePath: combineResult.outputPath,
                         uploadStatus: 'pending', recovered: true
@@ -454,7 +459,7 @@ export const useRecordingStore = defineStore('recording', {
                       id: recordId,
                       userId: metadata.userId || null,
                       createdAt: metadata.startedAt || new Date(metadata.startTime || Date.now()).toISOString(),
-                      duration: metadata.duration || 0,
+                      duration: metadata.duration || combineResult.duration || 0,
                       fileSize: combineResult.fileSize || 0,
                       filePath: combineResult.outputPath,
                       uploadStatus: 'pending',
@@ -580,7 +585,8 @@ export const useRecordingStore = defineStore('recording', {
             success: true,
             outputPath: result.outputPath,
             fileSize: result.fileSize,
-            chunkCount: result.chunkCount
+            chunkCount: result.chunkCount,
+            duration: result.duration ? Math.round(result.duration) : null
           };
         }
         return { success: false, error: result.error || 'Native combine failed' };
