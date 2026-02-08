@@ -116,7 +116,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     saveMetadata: (recordId, metadata) =>
       ipcRenderer.invoke('recording:saveMetadata', recordId, metadata),
     loadMetadata: (recordId) =>
-      ipcRenderer.invoke('recording:loadMetadata', recordId)
+      ipcRenderer.invoke('recording:loadMetadata', recordId),
+    // Persistent file locks for upload safety (V6 fix)
+    lockForUpload: (recordId) =>
+      ipcRenderer.invoke('recording:lockForUpload', recordId),
+    unlockAfterUpload: (recordId) =>
+      ipcRenderer.invoke('recording:unlockAfterUpload', recordId),
+    getLockedRecordings: () =>
+      ipcRenderer.invoke('recording:getLockedRecordings')
   },
 
   // History management (all methods require userId for security)

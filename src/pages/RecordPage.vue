@@ -275,6 +275,25 @@
             </q-banner>
           </div>
 
+          <!-- P0 Data Loss Fix: Chunk Save Failure Warning (V1/V7) -->
+          <div
+            v-if="recordingStore.chunkSaveErrorWarning"
+            class="warning-section"
+          >
+            <q-banner
+              class="warning-banner"
+              rounded
+            >
+              <template #avatar>
+                <q-icon
+                  name="warning"
+                  color="negative"
+                />
+              </template>
+              {{ $t('chunkSaveWarning', 'Audio chunks failing to save. Recording data may be lost. Check available storage.') }}
+            </q-banner>
+          </div>
+
           <!-- Error Display -->
           <div
             v-if="recordingStore.error && !isAutoUploading"

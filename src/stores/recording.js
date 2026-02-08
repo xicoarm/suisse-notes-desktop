@@ -4,7 +4,7 @@ import { isElectron, isCapacitor, isMobile, PlatformConstants } from '../utils/p
 import * as storage from '../services/storage';
 import { createChunkIntegrity, createRecordingIntegrity, addChunkToRecordingIntegrity } from '../services/integrity';
 import { startStorageMonitor, stopStorageMonitor, checkStorageBeforeRecording } from '../services/storageMonitor';
-import { setLifecycleCallbacks, clearLifecycleCallbacks } from '../boot/lifecycle';
+import { setLifecycleCallbacks, clearLifecycleCallbacks, setRecordingActive } from '../boot/lifecycle';
 
 export const useRecordingStore = defineStore('recording', {
   state: () => ({
@@ -47,6 +47,9 @@ export const useRecordingStore = defineStore('recording', {
       freeMB: -1,
       warning: null
     },
+    // Chunk save failure tracking (V1/V7 fix)
+    chunkSaveErrors: 0,
+    chunkSaveErrorWarning: false,
     // Recording health monitor
     recordingInterrupted: false,
     interruptionInfo: null, // { reason, chunkCount, lastChunkTimestamp, detectedAt }
@@ -92,6 +95,9 @@ export const useRecordingStore = defineStore('recording', {
   actions: {
     // Initialize lifecycle callbacks for mobile
     initializeLifecycle() {
+      // Restore persistent file locks on initialization (all platforms)
+      this._restoreLockedFiles();
+
       if (isMobile()) {
         setLifecycleCallbacks({
           onBackground: async () => {
@@ -218,6 +224,9 @@ export const useRecordingStore = defineStore('recording', {
           });
         }
 
+        // P0 Data Loss Fix: Notify lifecycle for adaptive battery monitoring (V9)
+        setRecordingActive(true);
+
         // Start storage monitoring during recording (V1 fix)
         await startStorageMonitor({
           onLow: (freeMB) => {
@@ -259,6 +268,8 @@ export const useRecordingStore = defineStore('recording', {
       try {
         this.status = 'stopped';
         stopStorageMonitor();
+        // P0 Data Loss Fix: Notify lifecycle for adaptive battery monitoring (V9)
+        setRecordingActive(false);
 
         if (isElectron()) {
           // Electron: use preload API
@@ -579,6 +590,28 @@ export const useRecordingStore = defineStore('recording', {
       }
     },
 
+    // P0 Data Loss Fix: Clean up chunks after successful upload (V5)
+    async cleanupChunksAfterUpload(recordId) {
+      if (!isCapacitor()) return; // Only needed on mobile
+
+      try {
+        const chunksDir = `recordings/${recordId}/chunks`;
+        const listResult = await storage.listFiles(chunksDir);
+        if (listResult.success && listResult.files && listResult.files.length > 0) {
+          for (const file of listResult.files) {
+            try {
+              await storage.deleteFile(`${chunksDir}/${file}`);
+            } catch (e) {
+              console.warn(`Failed to delete chunk ${file}:`, e);
+            }
+          }
+          console.log(`Cleaned up ${listResult.files.length} chunks for recording ${recordId}`);
+        }
+      } catch (e) {
+        console.warn('Failed to clean up chunks after upload:', e);
+      }
+    },
+
     updateDuration(seconds) {
       this.duration = seconds;
     },
@@ -616,17 +649,70 @@ export const useRecordingStore = defineStore('recording', {
       console.log('Chunk index reset for new session');
     },
 
-    // File locking for upload safety (V6 fix)
-    lockForUpload(recordId) {
+    // File locking for upload safety (V6 fix - now persistent)
+    async lockForUpload(recordId) {
       this.lockedFiles.add(recordId);
+      // Persist to disk so locks survive app restart
+      if (isElectron() && window.electronAPI?.recording?.lockForUpload) {
+        try {
+          await window.electronAPI.recording.lockForUpload(recordId);
+        } catch (e) {
+          console.warn('Failed to persist lock to electron-store:', e);
+        }
+      } else if (isCapacitor() || !isElectron()) {
+        try {
+          localStorage.setItem('locked_recordings', JSON.stringify([...this.lockedFiles]));
+        } catch (e) {
+          console.warn('Failed to persist lock to localStorage:', e);
+        }
+      }
     },
 
-    unlockFile(recordId) {
+    async unlockFile(recordId) {
       this.lockedFiles.delete(recordId);
+      // Remove persistent lock
+      if (isElectron() && window.electronAPI?.recording?.unlockAfterUpload) {
+        try {
+          await window.electronAPI.recording.unlockAfterUpload(recordId);
+        } catch (e) {
+          console.warn('Failed to remove persistent lock:', e);
+        }
+      } else if (isCapacitor() || !isElectron()) {
+        try {
+          localStorage.setItem('locked_recordings', JSON.stringify([...this.lockedFiles]));
+        } catch (e) {
+          console.warn('Failed to update persistent locks:', e);
+        }
+      }
     },
 
     canDelete(recordId) {
       return !this.lockedFiles.has(recordId);
+    },
+
+    // Restore locks from persistent storage on initialization
+    async _restoreLockedFiles() {
+      try {
+        if (isElectron() && window.electronAPI?.recording?.getLockedRecordings) {
+          const locked = await window.electronAPI.recording.getLockedRecordings();
+          if (Array.isArray(locked)) {
+            locked.forEach(id => this.lockedFiles.add(id));
+          }
+        } else {
+          const raw = localStorage.getItem('locked_recordings');
+          if (raw) {
+            const locked = JSON.parse(raw);
+            if (Array.isArray(locked)) {
+              locked.forEach(id => this.lockedFiles.add(id));
+            }
+          }
+        }
+        if (this.lockedFiles.size > 0) {
+          console.log('Restored persistent file locks:', [...this.lockedFiles]);
+        }
+      } catch (e) {
+        console.warn('Failed to restore locked files:', e);
+      }
     },
 
     updateUploadProgress(progress, bytesUploaded, bytesTotal) {
@@ -713,6 +799,8 @@ export const useRecordingStore = defineStore('recording', {
         finalDuration: 0
       };
       this.integrity = null;
+      this.chunkSaveErrors = 0;
+      this.chunkSaveErrorWarning = false;
       this.recordingInterrupted = false;
       this.interruptionInfo = null;
       this.recoveryInProgress = false;

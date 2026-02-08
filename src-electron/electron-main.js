@@ -67,6 +67,34 @@ process.on('unhandledRejection', (reason, promise) => {
 app.on('render-process-gone', (event, webContents, details) => {
   log.error('Renderer process gone:', details);
   Sentry.captureMessage(`Renderer crashed: ${details.reason}`, 'error');
+
+  // P0 Data Loss Fix: Write crash metadata for active recording (V8)
+  // Do NOT clear active recording state - let recoverOrphanedRecordings find it on next launch
+  try {
+    const activeSession = getActiveRecording();
+    if (activeSession && activeSession.recordId) {
+      const recordPath = getRecordingPath(activeSession.recordId);
+      const metadataPath = path.join(recordPath, 'metadata.json');
+
+      let metadata = {};
+      if (fs.existsSync(metadataPath)) {
+        try {
+          metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+        } catch (e) { /* start fresh */ }
+      }
+
+      metadata.status = 'interrupted';
+      metadata.crashReason = details.reason;
+      metadata.crashedAt = new Date().toISOString();
+      metadata.chunkCount = activeSession.chunkCount;
+      metadata.userId = activeSession.userId || metadata.userId;
+
+      fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+      log.info('Crash metadata written for recording:', activeSession.recordId);
+    }
+  } catch (e) {
+    log.error('Failed to write crash metadata:', e);
+  }
 });
 
 app.on('child-process-gone', (event, details) => {
@@ -340,16 +368,24 @@ async function combineChunksForRecovery(recordId) {
 
       if (sessions.length === 1) {
         fs.copyFileSync(path.join(sessionsPath, sessions[0]), outputPath);
+
+        // P0 Data Loss Fix: Validate output BEFORE deleting sources
+        const validation = validateAudioOutput(outputPath);
+        if (!validation.valid) {
+          log.error('Recovery: Output validation failed after single session copy:', validation.error);
+          try { fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
+          return { success: false, error: `Output validation failed: ${validation.error}` };
+        }
+
         await fs.promises.rm(sessionsPath, { recursive: true, force: true });
         if (fs.existsSync(chunksPath)) {
           await fs.promises.rm(chunksPath, { recursive: true, force: true });
         }
 
-        const stats = fs.statSync(outputPath);
         return {
           success: true,
           outputPath,
-          fileSizeMb: (stats.size / (1024 * 1024)).toFixed(2)
+          fileSizeMb: (validation.size / (1024 * 1024)).toFixed(2)
         };
       } else if (sessions.length > 1) {
         // Multiple sessions - use FFmpeg concat
@@ -376,16 +412,24 @@ async function combineChunksForRecovery(recordId) {
         );
 
         fs.unlinkSync(concatListPath);
+
+        // P0 Data Loss Fix: Validate output BEFORE deleting sources
+        const concatValidation = validateAudioOutput(outputPath);
+        if (!concatValidation.valid) {
+          log.error('Recovery: Output validation failed after multi-session concat:', concatValidation.error);
+          try { fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
+          return { success: false, error: `Output validation failed: ${concatValidation.error}` };
+        }
+
         await fs.promises.rm(sessionsPath, { recursive: true, force: true });
         if (fs.existsSync(chunksPath)) {
           await fs.promises.rm(chunksPath, { recursive: true, force: true });
         }
 
-        const stats = fs.statSync(outputPath);
         return {
           success: true,
           outputPath,
-          fileSizeMb: (stats.size / (1024 * 1024)).toFixed(2)
+          fileSizeMb: (concatValidation.size / (1024 * 1024)).toFixed(2)
         };
       }
     }
@@ -398,18 +442,21 @@ async function combineChunksForRecovery(recordId) {
       if (chunks.length > 0) {
         const sortedChunks = sortChunksNumerically(chunks, '.webm');
         await combineChunksStreaming(chunksPath, sortedChunks, outputPath);
-        await fs.promises.rm(chunksPath, { recursive: true, force: true });
 
-        const stats = fs.statSync(outputPath);
-        if (stats.size < MIN_RECORDING_SIZE) {
-          fs.unlinkSync(outputPath);
-          return { success: false, error: 'Recording too short or empty' };
+        // P0 Data Loss Fix: Validate output BEFORE deleting sources
+        const fallbackValidation = validateAudioOutput(outputPath);
+        if (!fallbackValidation.valid) {
+          log.error('Recovery: Output validation failed after direct concatenation:', fallbackValidation.error);
+          try { fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
+          return { success: false, error: `Output validation failed: ${fallbackValidation.error}` };
         }
+
+        await fs.promises.rm(chunksPath, { recursive: true, force: true });
 
         return {
           success: true,
           outputPath,
-          fileSizeMb: (stats.size / (1024 * 1024)).toFixed(2)
+          fileSizeMb: (fallbackValidation.size / (1024 * 1024)).toFixed(2)
         };
       }
     }
@@ -1444,6 +1491,41 @@ async function combineChunksStreaming(chunksPath, sortedChunks, outputPath) {
 // Minimum file size for valid recording (1KB)
 const MIN_RECORDING_SIZE = 1024;
 
+// === P0 Data Loss Fix: Validate audio output before deleting source data (V2, V11) ===
+/**
+ * Validate that an output audio file exists, meets minimum size, and is readable.
+ * MUST be called before deleting any source data (chunks, sessions, raw files).
+ * @param {string} outputPath - Path to the output audio file
+ * @param {number} minSize - Minimum acceptable file size in bytes (default: MIN_RECORDING_SIZE)
+ * @returns {{valid: boolean, error?: string, size?: number}}
+ */
+function validateAudioOutput(outputPath, minSize = MIN_RECORDING_SIZE) {
+  try {
+    if (!fs.existsSync(outputPath)) {
+      return { valid: false, error: 'Output file does not exist' };
+    }
+    const stats = fs.statSync(outputPath);
+    if (stats.size < minSize) {
+      return { valid: false, error: `Output file too small (${stats.size} bytes, minimum ${minSize})`, size: stats.size };
+    }
+    // Read first and last 1KB to verify file is readable (not corrupted/locked)
+    const fd = fs.openSync(outputPath, 'r');
+    try {
+      const headBuf = Buffer.alloc(Math.min(1024, stats.size));
+      fs.readSync(fd, headBuf, 0, headBuf.length, 0);
+      if (stats.size > 1024) {
+        const tailBuf = Buffer.alloc(1024);
+        fs.readSync(fd, tailBuf, 0, tailBuf.length, stats.size - 1024);
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    return { valid: true, size: stats.size };
+  } catch (error) {
+    return { valid: false, error: `Output validation failed: ${error.message}` };
+  }
+}
+
 // Calculate dynamic upload timeout based on file size
 // Assumes worst-case 100KB/s upload speed with 50% buffer
 function calculateUploadTimeout(fileSizeBytes) {
@@ -1725,6 +1807,14 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
       console.warn('Could not get audio duration:', e);
     }
 
+    // P0 Data Loss Fix: Validate session file BEFORE deleting source data
+    const ipcSessionValidation = validateAudioOutput(finalPath);
+    if (!ipcSessionValidation.valid) {
+      log.error('IPC createSessionFile: Output validation failed:', ipcSessionValidation.error);
+      try { fs.unlinkSync(finalPath); } catch (e) { /* ignore */ }
+      return { success: false, error: `Session file validation failed: ${ipcSessionValidation.error}` };
+    }
+
     // Clean up raw file and chunks
     try {
       fs.unlinkSync(rawPath);
@@ -1825,6 +1915,14 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
         if (sessionFiles.length === 1) {
           fs.copyFileSync(path.join(sessionsPath, sessionFiles[0]), outputPath);
 
+          // P0 Data Loss Fix: Validate output BEFORE deleting sources
+          const singleSessionValidation = validateAudioOutput(outputPath);
+          if (!singleSessionValidation.valid) {
+            log.error('combineChunks: Single session output validation failed:', singleSessionValidation.error);
+            try { fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
+            return { success: false, error: `Output validation failed: ${singleSessionValidation.error}` };
+          }
+
           // Cleanup
           await fs.promises.rm(sessionsPath, { recursive: true, force: true });
           if (fs.existsSync(chunksPath)) {
@@ -1834,8 +1932,6 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           // Clear active recording state - successfully combined
           clearActiveRecording();
 
-          const stats = fs.statSync(outputPath);
-
           // Update metadata.json with completion info
           updateRecordingMetadataOnCompletion(validRecordId, 0, true);
 
@@ -1843,7 +1939,7 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
             success: true,
             outputPath,
             filename: outputFile,
-            fileSizeMb: (stats.size / (1024 * 1024)).toFixed(2)
+            fileSizeMb: (singleSessionValidation.size / (1024 * 1024)).toFixed(2)
           };
         }
 
@@ -1879,14 +1975,24 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
             );
           } catch (reencodeErr) {
             console.error('Re-encode also failed:', reencodeErr.message);
-            // Clean up concat list before throwing
+            // Clean up concat list and any partial output before throwing
             try { fs.unlinkSync(concatListPath); } catch (e) { /* ignore */ }
+            try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
             throw new Error(`FFmpeg concat failed: ${reencodeErr.message}`);
           }
         }
 
         // Cleanup
         fs.unlinkSync(concatListPath);
+
+        // P0 Data Loss Fix: Validate output BEFORE deleting sources
+        const multiSessionValidation = validateAudioOutput(outputPath);
+        if (!multiSessionValidation.valid) {
+          log.error('combineChunks: Multi-session output validation failed:', multiSessionValidation.error);
+          try { fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
+          return { success: false, error: `Output validation failed: ${multiSessionValidation.error}` };
+        }
+
         await fs.promises.rm(sessionsPath, { recursive: true, force: true });
         if (fs.existsSync(chunksPath)) {
           await fs.promises.rm(chunksPath, { recursive: true, force: true });
@@ -1895,8 +2001,6 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
         // Clear active recording state - successfully combined
         clearActiveRecording();
 
-        const stats = fs.statSync(outputPath);
-
         // Update metadata.json with completion info
         updateRecordingMetadataOnCompletion(validRecordId, 0, true);
 
@@ -1904,7 +2008,7 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           success: true,
           outputPath,
           filename: outputFile,
-          fileSizeMb: (stats.size / (1024 * 1024)).toFixed(2)
+          fileSizeMb: (multiSessionValidation.size / (1024 * 1024)).toFixed(2)
         };
       }
     }
@@ -1927,16 +2031,16 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
         // Use streaming concatenation to avoid memory issues
         await combineChunksStreaming(chunksPath, sortedChunks, outputPath);
 
+        // P0 Data Loss Fix: Validate output BEFORE deleting sources
+        const directConcatValidation = validateAudioOutput(outputPath);
+        if (!directConcatValidation.valid) {
+          log.error('combineChunks: Direct concat output validation failed:', directConcatValidation.error);
+          try { fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
+          return { success: false, error: `Output validation failed: ${directConcatValidation.error}` };
+        }
+
         // Cleanup
         await fs.promises.rm(chunksPath, { recursive: true, force: true });
-
-        const stats = fs.statSync(outputPath);
-
-        // Validate file is not empty/too small
-        if (stats.size < MIN_RECORDING_SIZE) {
-          fs.unlinkSync(outputPath);
-          return { success: false, error: 'Recording too short or empty' };
-        }
 
         // Clear active recording state - successfully combined
         clearActiveRecording();
@@ -1948,7 +2052,7 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           success: true,
           outputPath,
           filename: outputFile,
-          fileSizeMb: (stats.size / (1024 * 1024)).toFixed(2),
+          fileSizeMb: (directConcatValidation.size / (1024 * 1024)).toFixed(2),
           warning: sequenceCheck.message || undefined
         };
       }
@@ -2032,6 +2136,15 @@ async function createSessionFileInternal(recordId, ext) {
       try { fs.unlinkSync(rawPath); } catch (e) { /* ignore */ }
       return { success: false, error: `FFmpeg processing failed: ${reencodeErr.message}` };
     }
+  }
+
+  // P0 Data Loss Fix: Validate session file BEFORE deleting source chunks
+  const sessionValidation = validateAudioOutput(finalPath);
+  if (!sessionValidation.valid) {
+    log.error('Session file validation failed:', sessionValidation.error);
+    try { fs.unlinkSync(finalPath); } catch (e) { /* ignore */ }
+    // Keep raw file and chunks intact for recovery
+    return { success: false, error: `Session file validation failed: ${sessionValidation.error}` };
   }
 
   try {
@@ -2753,6 +2866,13 @@ ipcMain.handle('history:delete', async (event, id, deleteFile = false, userId) =
       return { success: false, error: 'Recording not found' };
     }
 
+    // P0 Data Loss Fix: Check file locks before deletion (V3)
+    const lockedRecordings = activeRecordingStore.get('lockedRecordings', []);
+    if (lockedRecordings.includes(id)) {
+      log.warn('history:delete blocked - recording is locked for upload:', id);
+      return { success: false, error: 'Recording locked - upload in progress' };
+    }
+
     // Delete the file if requested
     if (deleteFile && recording.filePath) {
       try {
@@ -2786,11 +2906,22 @@ ipcMain.handle('history:deleteAll', async (event, userId) => {
     const recordings = historyStore.get('recordings', []);
     const userRecordings = recordings.filter(r => r.userId === validUserId);
 
+    // P0 Data Loss Fix: Get locked recordings to skip them (V3)
+    const lockedRecordings = activeRecordingStore.get('lockedRecordings', []);
+
     let deletedCount = 0;
     let errorCount = 0;
+    let skippedCount = 0;
 
     // Delete all recording files for this user
     for (const recording of userRecordings) {
+      // Skip locked recordings
+      if (lockedRecordings.includes(recording.id)) {
+        log.warn('history:deleteAll skipping locked recording:', recording.id);
+        skippedCount++;
+        continue;
+      }
+
       if (recording.filePath) {
         try {
           const recordingDir = path.dirname(recording.filePath);
@@ -2805,15 +2936,18 @@ ipcMain.handle('history:deleteAll', async (event, userId) => {
       }
     }
 
-    // Remove all user's recordings from history
-    const newRecordings = recordings.filter(r => r.userId !== validUserId);
+    // Remove all user's recordings from history (except locked ones)
+    const newRecordings = recordings.filter(r =>
+      r.userId !== validUserId || lockedRecordings.includes(r.id)
+    );
     historyStore.set('recordings', newRecordings);
 
-    console.log(`Deleted ${deletedCount} recordings for user ${validUserId} (${errorCount} errors)`);
+    console.log(`Deleted ${deletedCount} recordings for user ${validUserId} (${errorCount} errors, ${skippedCount} skipped/locked)`);
     return {
       success: true,
       deletedCount,
-      errorCount
+      errorCount,
+      skippedCount
     };
   } catch (error) {
     console.error('Error deleting all recordings:', error);
@@ -2834,6 +2968,43 @@ ipcMain.handle('history:setDefaultStoragePreference', async (event, preference) 
   } catch (error) {
     return { success: false, error: error.message };
   }
+});
+
+// === P0 Data Loss Fix: Persistent file locks for upload safety (V6) ===
+
+// Lock a recording for upload (persists to disk)
+ipcMain.handle('recording:lockForUpload', async (event, recordId) => {
+  try {
+    const locked = activeRecordingStore.get('lockedRecordings', []);
+    if (!locked.includes(recordId)) {
+      locked.push(recordId);
+      activeRecordingStore.set('lockedRecordings', locked);
+    }
+    log.info('Recording locked for upload:', recordId);
+    return { success: true };
+  } catch (error) {
+    log.error('Error locking recording:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Unlock a recording after upload (or on upload failure)
+ipcMain.handle('recording:unlockAfterUpload', async (event, recordId) => {
+  try {
+    const locked = activeRecordingStore.get('lockedRecordings', []);
+    const newLocked = locked.filter(id => id !== recordId);
+    activeRecordingStore.set('lockedRecordings', newLocked);
+    log.info('Recording unlocked after upload:', recordId);
+    return { success: true };
+  } catch (error) {
+    log.error('Error unlocking recording:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get all locked recording IDs (for store restoration)
+ipcMain.handle('recording:getLockedRecordings', async () => {
+  return activeRecordingStore.get('lockedRecordings', []);
 });
 
 // Get file URL for playback (returns local-audio:// URL for custom protocol)

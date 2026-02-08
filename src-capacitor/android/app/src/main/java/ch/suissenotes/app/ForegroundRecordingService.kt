@@ -148,11 +148,15 @@ class ForegroundRecordingService : Service() {
         }
 
         try {
-            // Create chunks directory
-            val documentsDir = getExternalFilesDir(null) ?: filesDir
+            // P0 Data Loss Fix: Use internal storage (filesDir) instead of external (V10)
+            // Internal storage is more reliable and doesn't require permissions
+            val documentsDir = filesDir
             chunksDirectory = File(documentsDir, "recordings/$recordId/chunks").apply {
                 mkdirs()
             }
+
+            // Migrate any existing recordings from external to internal storage
+            migrateExternalChunks(recordId)
 
             currentRecordId = recordId
             chunkIndex = 0
@@ -175,6 +179,30 @@ class ForegroundRecordingService : Service() {
             Log.e(TAG, "Failed to start recording", e)
             onError?.invoke("Failed to start recording: ${e.message}")
             stopSelf()
+        }
+    }
+
+    // P0 Data Loss Fix: Migrate existing recordings from external to internal storage (V10)
+    private fun migrateExternalChunks(recordId: String) {
+        try {
+            val externalDir = getExternalFilesDir(null) ?: return
+            val externalChunks = File(externalDir, "recordings/$recordId/chunks")
+            if (externalChunks.exists() && externalChunks.isDirectory) {
+                val files = externalChunks.listFiles() ?: return
+                for (file in files) {
+                    val dest = File(chunksDirectory, file.name)
+                    if (!dest.exists()) {
+                        file.copyTo(dest)
+                        file.delete()
+                    }
+                }
+                // Clean up empty external directory
+                externalChunks.delete()
+                externalChunks.parentFile?.delete()
+                Log.i(TAG, "Migrated ${files.size} chunks from external to internal storage")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Migration from external storage failed (non-critical)", e)
         }
     }
 

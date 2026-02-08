@@ -595,12 +595,48 @@ export async function startRecording(options = {}) {
         try {
           const arrayBuffer = await event.data.arrayBuffer();
           const uint8Array = new Uint8Array(arrayBuffer);
-          await recordingStore.saveChunk(Array.from(uint8Array));
+          const result = await recordingStore.saveChunk(Array.from(uint8Array));
+
+          // P0 Data Loss Fix: Check saveChunk return value (V1/V7)
+          if (result && !result.success) {
+            recordingStore.chunkSaveErrors++;
+            console.error('Chunk save failed:', result.error, `(${recordingStore.chunkSaveErrors} consecutive failures)`);
+
+            // After 3 consecutive failures, emit warning for UI
+            if (recordingStore.chunkSaveErrors >= 3 && !recordingStore.chunkSaveErrorWarning) {
+              recordingStore.chunkSaveErrorWarning = true;
+              emit('chunkSaveFailure', {
+                consecutiveErrors: recordingStore.chunkSaveErrors,
+                error: result.error
+              });
+            }
+
+            // Don't resolve flush as successful when save failed
+            return;
+          } else {
+            // Reset consecutive error counter on success
+            if (recordingStore.chunkSaveErrors > 0) {
+              recordingStore.chunkSaveErrors = 0;
+              if (recordingStore.chunkSaveErrorWarning) {
+                recordingStore.chunkSaveErrorWarning = false;
+                emit('chunkSaveFailure', null); // Clear warning
+              }
+            }
+          }
         } catch (error) {
           console.error('Error saving chunk:', error);
+          recordingStore.chunkSaveErrors++;
+          if (recordingStore.chunkSaveErrors >= 3 && !recordingStore.chunkSaveErrorWarning) {
+            recordingStore.chunkSaveErrorWarning = true;
+            emit('chunkSaveFailure', {
+              consecutiveErrors: recordingStore.chunkSaveErrors,
+              error: error.message
+            });
+          }
+          return; // Don't resolve flush on error
         }
       }
-      // Signal flush completion to all pending flush callers
+      // Signal flush completion to all pending flush callers (only on success)
       if (flushResolvers.length > 0) {
         const resolvers = flushResolvers;
         flushResolvers = [];
@@ -617,7 +653,8 @@ export async function startRecording(options = {}) {
       recordingStore.setError(event.error?.message || 'Recording error');
     };
 
-    mediaRecorder.start(5000);
+    // P0 Data Loss Fix: Reduced from 5s to 3s to minimize crash data loss (V8)
+    mediaRecorder.start(3000);
 
     // Start monitoring
     startLevelMonitoring(stream, recordingStore);

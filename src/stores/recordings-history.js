@@ -346,12 +346,12 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
 
       await this.updateRecording(id, updates);
 
+      const recordingStore = useRecordingStore();
+
       // P0 Data Loss Fix: Check file locking before deletion
       // If storage preference is delete_after_upload, delete the file ONLY if safe
       // File deletion only applies to Electron (mobile files are managed differently)
       if (isElectron() && recording && recording.storagePreference === 'delete_after_upload') {
-        const recordingStore = useRecordingStore();
-
         // Only delete if canDelete flag is true AND file is not locked
         if (canDelete && recordingStore.canDelete(id)) {
           try {
@@ -366,6 +366,11 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
         } else {
           console.warn('File not deleted: upload not verified or file is locked');
         }
+      }
+
+      // P0 Data Loss Fix: Clean up mobile chunks after verified upload (V5)
+      if (isCapacitor() && canDelete) {
+        recordingStore.cleanupChunksAfterUpload(id);
       }
     },
 

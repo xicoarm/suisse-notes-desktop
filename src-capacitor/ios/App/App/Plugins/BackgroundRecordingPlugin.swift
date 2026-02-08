@@ -22,6 +22,7 @@ public class BackgroundRecordingPlugin: CAPPlugin {
     private var healthCheckTimer: Timer?
     private var recordingSession: RecordingSession?
     private var isRecording = false
+    private var isInterrupted = false // P0 Data Loss Fix: Track interruption state (V4)
     private var lastChunkTimestamp: Date = Date()
 
     // Recording settings
@@ -237,6 +238,9 @@ public class BackgroundRecordingPlugin: CAPPlugin {
     private func performHealthCheck() {
         guard isRecording else { return }
 
+        // P0 Data Loss Fix: Don't declare death during interruption (V4)
+        guard !isInterrupted else { return }
+
         let recorderIsActive = audioRecorder?.isRecording ?? false
 
         if !recorderIsActive {
@@ -321,22 +325,62 @@ public class BackgroundRecordingPlugin: CAPPlugin {
         switch type {
         case .began:
             // Interruption began (e.g., phone call)
+            isInterrupted = true
             audioRecorder?.pause()
             chunkTimer?.invalidate()
             healthCheckTimer?.invalidate()
             notifyListeners("interrupted", data: ["reason": "call"])
 
         case .ended:
-            // Interruption ended
-            guard let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt else { return }
-            let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+            // P0 Data Loss Fix: Always attempt resume after interruption (V4)
+            // Previously gated on .shouldResume flag, which is unreliable
+            isInterrupted = false
 
-            if options.contains(.shouldResume) {
-                audioRecorder?.record()
-                lastChunkTimestamp = Date()
-                startChunkTimer()
-                startHealthCheckTimer()
-                notifyListeners("resumed", data: [:])
+            // Add 0.5s delay for audio system to settle
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self = self, self.isRecording else { return }
+
+                // Try to reactivate audio session
+                do {
+                    try self.audioSession?.setActive(true)
+                } catch {
+                    NSLog("BackgroundRecording: Failed to reactivate audio session: \(error)")
+                }
+
+                if let recorder = self.audioRecorder {
+                    // Existing recorder - try to resume
+                    let resumed = recorder.record()
+                    if resumed {
+                        self.lastChunkTimestamp = Date()
+                        self.startChunkTimer()
+                        self.startHealthCheckTimer()
+                        self.notifyListeners("resumed", data: [:])
+                    } else {
+                        // Recorder failed to resume - try starting a new chunk
+                        NSLog("BackgroundRecording: recorder.record() returned false, trying new chunk")
+                        do {
+                            try self.startNewChunk()
+                            self.startChunkTimer()
+                            self.startHealthCheckTimer()
+                            self.notifyListeners("resumed", data: ["recoveredWithNewChunk": true])
+                        } catch {
+                            NSLog("BackgroundRecording: Recovery failed: \(error)")
+                            self.handleRecordingDeath(reason: "interruption_resume_failed")
+                        }
+                    }
+                } else {
+                    // Recorder was released by the system - try to start a new chunk
+                    NSLog("BackgroundRecording: recorder is nil after interruption, trying new chunk")
+                    do {
+                        try self.startNewChunk()
+                        self.startChunkTimer()
+                        self.startHealthCheckTimer()
+                        self.notifyListeners("resumed", data: ["recoveredWithNewChunk": true])
+                    } catch {
+                        NSLog("BackgroundRecording: Recovery from nil recorder failed: \(error)")
+                        self.handleRecordingDeath(reason: "interruption_resume_failed")
+                    }
+                }
             }
 
         @unknown default:

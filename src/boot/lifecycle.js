@@ -12,6 +12,10 @@ let appStateListener = null;
 let networkListener = null;
 let batteryCheckInterval = null;
 
+// P0 Data Loss Fix: Adaptive battery monitoring state (V9)
+let isRecordingActiveFlag = false;
+let currentBatteryIntervalMs = 60000; // Default: 60s
+
 // Callbacks set by recording store
 let onAppBackground = null;
 let onAppForeground = null;
@@ -100,7 +104,10 @@ export const initializeLifecycle = async () => {
 };
 
 /**
- * Start battery monitoring
+ * Start battery monitoring with adaptive intervals (V9 fix)
+ * - 60s when idle
+ * - 15s during active recording
+ * - 10s when battery < 20%
  */
 const startBatteryMonitoring = async () => {
   if (batteryCheckInterval) {
@@ -117,6 +124,25 @@ const startBatteryMonitoring = async () => {
         // info.batteryLevel is 0-1, convert to percentage
         const batteryPercent = Math.round((info.batteryLevel || 0) * 100);
         const isCharging = info.isCharging || false;
+
+        // P0 Data Loss Fix: Adaptive interval based on state (V9)
+        let newInterval;
+        if (isCharging) {
+          newInterval = 60000; // 60s when charging
+        } else if (batteryPercent <= 20) {
+          newInterval = 10000; // 10s when low battery
+        } else if (isRecordingActiveFlag) {
+          newInterval = 15000; // 15s during recording
+        } else {
+          newInterval = 60000; // 60s idle
+        }
+
+        // Adjust interval if it changed
+        if (newInterval !== currentBatteryIntervalMs) {
+          currentBatteryIntervalMs = newInterval;
+          clearInterval(batteryCheckInterval);
+          batteryCheckInterval = setInterval(checkBattery, currentBatteryIntervalMs);
+        }
 
         // Skip warnings if charging
         if (isCharging) {
@@ -138,11 +164,20 @@ const startBatteryMonitoring = async () => {
     // Initial check
     await checkBattery();
 
-    // Periodic checks (every 60 seconds)
-    batteryCheckInterval = setInterval(checkBattery, 60000);
+    // Start with default interval
+    batteryCheckInterval = setInterval(checkBattery, currentBatteryIntervalMs);
   } catch (error) {
     console.warn('Lifecycle: Battery monitoring not available', error);
   }
+};
+
+/**
+ * Set recording active state for adaptive battery monitoring (V9 fix)
+ * Called from recording store on start/stop
+ * @param {boolean} active - Whether recording is active
+ */
+export const setRecordingActive = (active) => {
+  isRecordingActiveFlag = active;
 };
 
 /**

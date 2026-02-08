@@ -17,17 +17,61 @@ import { readFile, deleteFile } from './storage';
 const MOBILE_UPLOAD_QUEUE_KEY = 'mobile_upload_queue';
 const MAX_QUEUE_RETRIES = 10;
 
+// P0 Data Loss Fix: Write-ahead pattern for queue persistence (V12)
+const MOBILE_UPLOAD_QUEUE_TMP_KEY = MOBILE_UPLOAD_QUEUE_KEY + '_tmp';
+
+/**
+ * Safely write queue to localStorage using write-ahead pattern (V12)
+ * Writes to _tmp first, then overwrites main key
+ */
+function _safeWriteQueue(queue) {
+  const data = JSON.stringify(queue);
+  localStorage.setItem(MOBILE_UPLOAD_QUEUE_TMP_KEY, data);
+  localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, data);
+}
+
 /**
  * Get the persistent mobile upload queue from localStorage
+ * With validation and recovery from _tmp key on corruption (V12)
  * @returns {Array<{recordId: string, filePath: string, metadata: Object, retries: number, addedAt: number}>}
  */
 export function getMobileUploadQueue() {
   try {
     const raw = localStorage.getItem(MOBILE_UPLOAD_QUEUE_KEY);
-    return raw ? JSON.parse(raw) : [];
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      // Validate: must be an array with valid entries
+      if (Array.isArray(parsed)) {
+        return parsed.filter(item =>
+          item && typeof item.recordId === 'string' && typeof item.filePath === 'string'
+        );
+      }
+    }
   } catch {
-    return [];
+    // Main key corrupted - try recovery from _tmp
+    console.warn('Upload queue corrupted, attempting recovery from _tmp key');
   }
+
+  // Try recovery from _tmp key
+  try {
+    const tmpRaw = localStorage.getItem(MOBILE_UPLOAD_QUEUE_TMP_KEY);
+    if (tmpRaw) {
+      const parsed = JSON.parse(tmpRaw);
+      if (Array.isArray(parsed)) {
+        const valid = parsed.filter(item =>
+          item && typeof item.recordId === 'string' && typeof item.filePath === 'string'
+        );
+        // Restore main key from _tmp
+        localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, JSON.stringify(valid));
+        console.log('Upload queue recovered from _tmp key');
+        return valid;
+      }
+    }
+  } catch {
+    console.warn('Upload queue _tmp recovery also failed');
+  }
+
+  return [];
 }
 
 /**
@@ -42,7 +86,7 @@ export function addToMobileUploadQueue(recordId, filePath, metadata) {
     // Don't add duplicates
     if (queue.some(item => item.recordId === recordId)) return;
     queue.push({ recordId, filePath, metadata, retries: 0, addedAt: Date.now() });
-    localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, JSON.stringify(queue));
+    _safeWriteQueue(queue);
   } catch (e) {
     console.warn('Failed to add to mobile upload queue:', e);
   }
@@ -55,7 +99,7 @@ export function addToMobileUploadQueue(recordId, filePath, metadata) {
 export function removeFromMobileUploadQueue(recordId) {
   try {
     const queue = getMobileUploadQueue().filter(item => item.recordId !== recordId);
-    localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, JSON.stringify(queue));
+    _safeWriteQueue(queue);
   } catch (e) {
     console.warn('Failed to remove from mobile upload queue:', e);
   }
@@ -72,7 +116,7 @@ function _updateQueueItemRetries(recordId, retries) {
     const item = queue.find(i => i.recordId === recordId);
     if (item) {
       item.retries = retries;
-      localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, JSON.stringify(queue));
+      _safeWriteQueue(queue);
     }
   } catch (e) {
     console.warn('Failed to update queue item retries:', e);
