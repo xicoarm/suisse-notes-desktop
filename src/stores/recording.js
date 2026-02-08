@@ -539,7 +539,7 @@ export const useRecordingStore = defineStore('recording', {
       return { success: false, error: 'Unexpected error in saveChunk' };
     },
 
-    // Combine chunks on mobile (native implementation)
+    // Combine chunks on mobile using native plugin (proper M4A merging)
     async combineChunksNative(recordIdOverride = null) {
       if (!isCapacitor()) {
         return { success: false, error: 'Not on mobile platform' };
@@ -547,61 +547,22 @@ export const useRecordingStore = defineStore('recording', {
 
       try {
         const targetRecordId = recordIdOverride || this.recordId;
-        const chunksDir = `recordings/${targetRecordId}/chunks`;
-        const outputPath = `recordings/${targetRecordId}/combined.webm`;
 
-        // List all chunk files and sort them
-        const listResult = await storage.listFiles(chunksDir);
-        if (!listResult.success || !listResult.files || listResult.files.length === 0) {
-          return { success: false, error: 'No audio chunks found' };
+        // Use native plugin for proper M4A/AAC combining via platform APIs
+        // (AVMutableComposition on iOS, MediaMuxer on Android)
+        const { registerPlugin } = await import('@capacitor/core');
+        const BackgroundRecording = registerPlugin('BackgroundRecording');
+        const result = await BackgroundRecording.combineChunks({ recordId: targetRecordId });
+
+        if (result.success) {
+          return {
+            success: true,
+            outputPath: result.outputPath,
+            fileSize: result.fileSize,
+            chunkCount: result.chunkCount
+          };
         }
-
-        const chunkFiles = listResult.files
-          .filter(f => f.startsWith('chunk_'))
-          .sort();
-
-        if (chunkFiles.length === 0) {
-          return { success: false, error: 'No audio chunks found' };
-        }
-
-        // Read all chunks and concatenate into a single ArrayBuffer
-        const chunkBuffers = [];
-        let totalSize = 0;
-
-        for (const chunkFile of chunkFiles) {
-          const chunkPath = `${chunksDir}/${chunkFile}`;
-          const readResult = await storage.readFile(chunkPath);
-          if (!readResult.success) {
-            console.warn(`Failed to read chunk ${chunkFile}:`, readResult.error);
-            continue;
-          }
-          chunkBuffers.push(readResult.data);
-          totalSize += readResult.data.byteLength;
-        }
-
-        if (chunkBuffers.length === 0) {
-          return { success: false, error: 'Could not read any audio chunks' };
-        }
-
-        // Combine all chunks into a single buffer
-        const combined = new Uint8Array(totalSize);
-        let offset = 0;
-        for (const buffer of chunkBuffers) {
-          combined.set(new Uint8Array(buffer), offset);
-          offset += buffer.byteLength;
-        }
-
-        // Write combined file
-        const writeResult = await storage.writeFile(outputPath, combined.buffer);
-        if (!writeResult.success) {
-          return { success: false, error: writeResult.error || 'Failed to write combined file' };
-        }
-
-        return {
-          success: true,
-          outputPath,
-          fileSize: totalSize
-        };
+        return { success: false, error: result.error || 'Native combine failed' };
       } catch (error) {
         console.error('Error combining chunks on mobile:', error);
         return { success: false, error: error.message };

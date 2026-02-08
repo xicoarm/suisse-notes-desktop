@@ -1095,23 +1095,20 @@ const handleStop = async () => {
     } else {
       isProcessing.value = false;
 
-      // Save to history as failed if there are chunks on mobile
-      if (isCapacitor() && result.chunkCount > 0) {
-        await historyStore.addRecording({
-          id: result.recordId || recordingStore.recordId,
-          createdAt: new Date().toISOString(),
-          duration: finalDuration.value,
-          filePath: null,
-          uploadStatus: 'failed',
-          uploadError: result.error
-        });
-      }
+      // Update existing history entry (created at recording start) to 'failed' status
+      // Do NOT call addRecording — the entry already exists with uploadStatus 'recording'
+      await historyStore.updateRecording(recordingStore.recordId, {
+        duration: finalDuration.value,
+        uploadStatus: 'failed',
+        uploadError: result.error || 'Failed to process recording',
+        chunkCount: result.chunkCount || 0
+      });
 
       // Show more detailed error for partial recovery
       if (result.partialRecovery) {
         $q.notify({
           type: 'warning',
-          message: 'Recording was interrupted. Your audio chunks are saved locally but could not be combined. Please contact support.',
+          message: 'Recording was interrupted. Your audio chunks are saved locally but could not be combined. Please try again from History.',
           timeout: 10000
         });
       } else {

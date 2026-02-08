@@ -6,7 +6,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMuxer
 import android.os.Build
+import android.os.Environment
+import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.getcapacitor.JSObject
@@ -16,6 +22,8 @@ import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.annotation.Permission
 import com.getcapacitor.annotation.PermissionCallback
+import java.io.File
+import java.nio.ByteBuffer
 
 /**
  * BackgroundRecordingPlugin
@@ -35,6 +43,10 @@ import com.getcapacitor.annotation.PermissionCallback
     ]
 )
 class BackgroundRecordingPlugin : Plugin() {
+
+    companion object {
+        private const val TAG = "BackgroundRecording"
+    }
 
     private var pendingCall: PluginCall? = null
 
@@ -221,6 +233,172 @@ class BackgroundRecordingPlugin : Plugin() {
 
         } catch (e: Exception) {
             call.reject("Failed to resume recording: ${e.message}")
+        }
+    }
+
+    @PluginMethod
+    fun combineChunks(call: PluginCall) {
+        val recordId = call.getString("recordId")
+        if (recordId == null) {
+            call.reject("Missing recordId parameter")
+            return
+        }
+
+        // Run on background thread
+        Thread {
+            try {
+                performCombineChunks(recordId, call)
+            } catch (e: Exception) {
+                Log.e(TAG, "combineChunks failed", e)
+                call.reject("Failed to combine chunks: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun performCombineChunks(recordId: String, call: PluginCall) {
+        val ctx = context ?: run {
+            call.reject("Context not available")
+            return
+        }
+
+        // Use same directory resolution as ForegroundRecordingService and Capacitor Directory.Documents
+        val documentsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+            ?: ctx.filesDir
+        val chunksDir = File(documentsDir, "recordings/$recordId/chunks")
+        val outputFile = File(documentsDir, "recordings/$recordId/combined.m4a")
+
+        // Also check filesDir as fallback (old recordings may be there)
+        val effectiveChunksDir = if (chunksDir.exists() && (chunksDir.listFiles()?.isNotEmpty() == true)) {
+            chunksDir
+        } else {
+            val fallbackDir = File(ctx.filesDir, "recordings/$recordId/chunks")
+            if (fallbackDir.exists() && (fallbackDir.listFiles()?.isNotEmpty() == true)) {
+                fallbackDir
+            } else {
+                chunksDir // Use default, will fail gracefully below
+            }
+        }
+
+        // List and sort chunk files
+        val chunkFiles = effectiveChunksDir.listFiles()
+            ?.filter { it.name.startsWith("chunk_") && it.extension == "m4a" }
+            ?.sortedBy { it.name }
+            ?: emptyList()
+
+        if (chunkFiles.isEmpty()) {
+            call.reject("No audio chunks found in ${effectiveChunksDir.absolutePath}")
+            return
+        }
+
+        // Delete existing output if present
+        if (outputFile.exists()) {
+            outputFile.delete()
+        }
+
+        // Ensure output directory exists
+        outputFile.parentFile?.mkdirs()
+
+        // Use MediaMuxer to combine M4A chunks
+        var muxer: MediaMuxer? = null
+        var outputTrackIndex = -1
+        var loadedChunkCount = 0
+        var timeOffsetUs = 0L
+
+        try {
+            muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            var muxerStarted = false
+            val bufferSize = 1024 * 1024 // 1MB buffer
+            val buffer = ByteBuffer.allocate(bufferSize)
+            val bufferInfo = MediaCodec.BufferInfo()
+
+            for (chunkFile in chunkFiles) {
+                val extractor = MediaExtractor()
+                try {
+                    extractor.setDataSource(chunkFile.absolutePath)
+
+                    // Find audio track
+                    var audioTrackIdx = -1
+                    for (i in 0 until extractor.trackCount) {
+                        val format = extractor.getTrackFormat(i)
+                        val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+                        if (mime.startsWith("audio/")) {
+                            audioTrackIdx = i
+                            break
+                        }
+                    }
+
+                    if (audioTrackIdx < 0) {
+                        Log.w(TAG, "Skipping chunk with no audio track: ${chunkFile.name}")
+                        continue
+                    }
+
+                    extractor.selectTrack(audioTrackIdx)
+                    val format = extractor.getTrackFormat(audioTrackIdx)
+
+                    // Add track to muxer on first valid chunk
+                    if (!muxerStarted) {
+                        outputTrackIndex = muxer.addTrack(format)
+                        muxer.start()
+                        muxerStarted = true
+                    }
+
+                    // Read and write samples, tracking max PTS for offset calculation
+                    var chunkMaxPts = 0L
+                    while (true) {
+                        val sampleSize = extractor.readSampleData(buffer, 0)
+                        if (sampleSize < 0) break
+
+                        val sampleTime = extractor.sampleTime
+                        if (sampleTime > chunkMaxPts) chunkMaxPts = sampleTime
+
+                        bufferInfo.offset = 0
+                        bufferInfo.size = sampleSize
+                        bufferInfo.presentationTimeUs = sampleTime + timeOffsetUs
+                        bufferInfo.flags = extractor.sampleFlags
+
+                        muxer.writeSampleData(outputTrackIndex, buffer, bufferInfo)
+                        extractor.advance()
+                    }
+
+                    // Offset next chunk's timestamps after this chunk's end (+20ms gap)
+                    timeOffsetUs += chunkMaxPts + 20000
+
+                    loadedChunkCount++
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error processing chunk ${chunkFile.name}: ${e.message}")
+                    continue
+                } finally {
+                    extractor.release()
+                }
+            }
+
+            if (!muxerStarted || loadedChunkCount == 0) {
+                muxer.release()
+                outputFile.delete()
+                call.reject("Could not read any audio chunks")
+                return
+            }
+
+            muxer.stop()
+            muxer.release()
+            muxer = null
+
+            val fileSize = outputFile.length()
+            val relativePath = "recordings/$recordId/combined.m4a"
+
+            val result = JSObject().apply {
+                put("success", true)
+                put("outputPath", relativePath)
+                put("fileSize", fileSize)
+                put("chunkCount", loadedChunkCount)
+            }
+            call.resolve(result)
+
+        } catch (e: Exception) {
+            muxer?.release()
+            if (outputFile.exists()) outputFile.delete()
+            Log.e(TAG, "Failed to combine chunks", e)
+            call.reject("Failed to combine chunks: ${e.message}")
         }
     }
 

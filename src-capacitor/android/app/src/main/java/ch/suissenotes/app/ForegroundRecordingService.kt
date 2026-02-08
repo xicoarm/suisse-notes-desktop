@@ -20,6 +20,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.Timer
 import java.util.TimerTask
+import android.os.Environment
 
 /**
  * ForegroundRecordingService
@@ -148,9 +149,10 @@ class ForegroundRecordingService : Service() {
         }
 
         try {
-            // P0 Data Loss Fix: Use internal storage (filesDir) instead of external (V10)
-            // Internal storage is more reliable and doesn't require permissions
-            val documentsDir = filesDir
+            // P0 Data Loss Fix: Use the same directory that Capacitor's Directory.Documents resolves to
+            // so JS code can find native-saved chunks. Fallback to filesDir if unavailable.
+            val documentsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+                ?: filesDir
             chunksDirectory = File(documentsDir, "recordings/$recordId/chunks").apply {
                 mkdirs()
             }
@@ -182,27 +184,35 @@ class ForegroundRecordingService : Service() {
         }
     }
 
-    // P0 Data Loss Fix: Migrate existing recordings from external to internal storage (V10)
+    // Migrate existing recordings from old storage locations to the current Documents directory
     private fun migrateExternalChunks(recordId: String) {
-        try {
-            val externalDir = getExternalFilesDir(null) ?: return
-            val externalChunks = File(externalDir, "recordings/$recordId/chunks")
-            if (externalChunks.exists() && externalChunks.isDirectory) {
-                val files = externalChunks.listFiles() ?: return
-                for (file in files) {
-                    val dest = File(chunksDirectory, file.name)
-                    if (!dest.exists()) {
-                        file.copyTo(dest)
-                        file.delete()
+        // Migrate from both old locations: getExternalFilesDir and filesDir
+        val oldDirs = listOfNotNull(
+            getExternalFilesDir(null),
+            filesDir
+        )
+        for (oldDir in oldDirs) {
+            try {
+                val oldChunks = File(oldDir, "recordings/$recordId/chunks")
+                // Skip if this IS the current chunks directory
+                if (oldChunks.absolutePath == chunksDirectory?.absolutePath) continue
+                if (oldChunks.exists() && oldChunks.isDirectory) {
+                    val files = oldChunks.listFiles() ?: continue
+                    for (file in files) {
+                        val dest = File(chunksDirectory, file.name)
+                        if (!dest.exists()) {
+                            file.copyTo(dest)
+                            file.delete()
+                        }
                     }
+                    // Clean up empty old directory
+                    oldChunks.delete()
+                    oldChunks.parentFile?.delete()
+                    Log.i(TAG, "Migrated ${files.size} chunks from ${oldDir.name} to Documents")
                 }
-                // Clean up empty external directory
-                externalChunks.delete()
-                externalChunks.parentFile?.delete()
-                Log.i(TAG, "Migrated ${files.size} chunks from external to internal storage")
+            } catch (e: Exception) {
+                Log.w(TAG, "Migration from ${oldDir.name} failed (non-critical)", e)
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "Migration from external storage failed (non-critical)", e)
         }
     }
 
