@@ -43,13 +43,14 @@ platform :ios do
     )
 
     # Increment build number based on TestFlight
-    # Use .max to ensure we always exceed the highest known build even if
-    # latest_testflight_build_number returns a stale/lower value
+    # Use version: "latest" to search ALL versions, not just the current one
+    # (builds may be spread across different MARKETING_VERSION values)
     latest_build = latest_testflight_build_number(
       app_identifier: "ch.suissenotes.mobile",
-      initial_build_number: 0
+      initial_build_number: 0,
+      version: "latest"
     )
-    new_build = [latest_build, 25].max + 1
+    new_build = [latest_build, 26].max + 1
 
     increment_build_number(
       build_number: new_build,
