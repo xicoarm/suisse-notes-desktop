@@ -179,9 +179,9 @@
             <q-btn
               unelevated
               color="primary"
-              :label="$t('saveRecording')"
+              :label="autoSaveCountdown > 0 ? $t('autoSavingIn', { seconds: autoSaveCountdown }) : $t('saveRecording')"
               icon="save"
-              @click="handleSaveDeadRecording"
+              @click="handleSaveDeadRecordingManual"
             />
             <q-btn
               flat
@@ -495,11 +495,11 @@
 
           <div class="error-note">
             <q-icon
-              name="save"
+              name="check_circle"
               size="xs"
-              color="grey-6"
+              color="positive"
             />
-            <span>Your recording is saved locally and can be uploaded later from History</span>
+            <span>{{ $t('recordingSavedLocally') }}</span>
           </div>
         </div>
 
@@ -723,6 +723,10 @@ const showMacPermissionNotice = computed(() => {
   return isMac.value && systemAudioPermissionStatus.value !== 'granted' && systemAudioEnabled.value;
 });
 
+// Auto-save countdown for dead recordings
+const autoSaveCountdown = ref(0);
+const autoSaveTimer = ref(null);
+
 const showStorageDialog = ref(false);
 const showContactSalesDialog = ref(false);
 const contactSalesReason = ref('limit_reached');
@@ -765,6 +769,28 @@ watch(minutesLimitReached, async (reached) => {
     // Show contact sales dialog after stopping
     contactSalesReason.value = 'limit_reached';
     showContactSalesDialog.value = true;
+  }
+});
+
+// Auto-save dead recordings after 5-second countdown
+watch(() => recordingStore.isRecordingDead, (isDead) => {
+  if (isDead && recordingStore.interruptionInfo?.chunkCount > 0) {
+    autoSaveCountdown.value = 5;
+    autoSaveTimer.value = setInterval(() => {
+      autoSaveCountdown.value--;
+      if (autoSaveCountdown.value <= 0) {
+        clearInterval(autoSaveTimer.value);
+        autoSaveTimer.value = null;
+        handleSaveDeadRecording();
+      }
+    }, 1000);
+  } else {
+    // Clear timer if recording is no longer dead
+    if (autoSaveTimer.value) {
+      clearInterval(autoSaveTimer.value);
+      autoSaveTimer.value = null;
+      autoSaveCountdown.value = 0;
+    }
   }
 });
 
@@ -922,6 +948,11 @@ onMounted(async () => {
 onUnmounted(() => {
   if (isElectron() && window.electronAPI?.upload?.removeAllListeners) {
     window.electronAPI.upload.removeAllListeners();
+  }
+  // Clear auto-save timer
+  if (autoSaveTimer.value) {
+    clearInterval(autoSaveTimer.value);
+    autoSaveTimer.value = null;
   }
 });
 
@@ -1250,11 +1281,24 @@ const handleUploadError = async (errorMessage) => {
     }
   }
 
-  $q.notify({
-    type: 'negative',
-    message: 'Upload failed. Your recording is saved locally.',
-    timeout: 5000
-  });
+  // Detect network errors and show reassuring message
+  const isNetworkError = !navigator.onLine ||
+    (errorMessage && /network|timeout|fetch|ERR_INTERNET|ENOTFOUND/i.test(errorMessage));
+
+  if (isNetworkError) {
+    $q.notify({
+      type: 'warning',
+      message: t('uploadFailedNoInternet'),
+      icon: 'wifi_off',
+      timeout: 8000
+    });
+  } else {
+    $q.notify({
+      type: 'negative',
+      message: t('uploadFailedServer'),
+      timeout: 5000
+    });
+  }
 };
 
 const retryUpload = async () => {
@@ -1289,6 +1333,21 @@ const retryChunkCombine = async () => {
     recordingStore.error = result.error;
     recordingStore.status = 'error';
   }
+};
+
+// Clear auto-save timer helper
+const clearAutoSaveTimer = () => {
+  if (autoSaveTimer.value) {
+    clearInterval(autoSaveTimer.value);
+    autoSaveTimer.value = null;
+    autoSaveCountdown.value = 0;
+  }
+};
+
+// Manual save click - clear timer then save
+const handleSaveDeadRecordingManual = () => {
+  clearAutoSaveTimer();
+  handleSaveDeadRecording();
 };
 
 // Handle saving a dead recording (interrupted)
@@ -1352,6 +1411,7 @@ const handleSaveDeadRecording = async () => {
 
 // Handle discarding a dead recording
 const handleDiscardDeadRecording = () => {
+  clearAutoSaveTimer();
   $q.dialog({
     title: t('discardRecording'),
     message: t('discardRecordingConfirm'),

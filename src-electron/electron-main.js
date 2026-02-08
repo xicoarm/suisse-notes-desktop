@@ -1055,6 +1055,13 @@ app.whenReady().then(() => {
     processPendingUploads().catch(err => {
       log.error('Error processing pending uploads:', err);
     });
+
+    // Periodic retry every 5 minutes for failed desktop uploads
+    setInterval(() => {
+      processPendingUploads().catch(err => {
+        log.error('Periodic upload retry failed:', err);
+      });
+    }, 5 * 60 * 1000);
   }, 15000);
 
   app.on('activate', () => {

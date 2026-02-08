@@ -201,7 +201,14 @@ const messages = {
     contactSalesBtn: 'Contact Sales',
     maybeLater: 'Maybe Later',
     inquirySubmitted: 'Your inquiry has been submitted. We will contact you soon.',
-    contactInfoText: 'Our team will contact you at {email} within 24 hours.'
+    contactInfoText: 'Our team will contact you at {email} within 24 hours.',
+
+    // Offline Banner & Auto-save
+    offlineBanner: 'You are offline. Recordings are saved locally and will upload when connected.',
+    autoSavingIn: 'Auto-saving in {seconds}s...',
+    uploadFailedNoInternet: 'No internet connection. Your recording is safe and will upload automatically when you reconnect.',
+    uploadFailedServer: 'Server error. Your recording is saved locally and will retry automatically.',
+    recordingSavedLocally: 'Your recording is saved locally'
   },
   de: {
     // Record Page
@@ -403,7 +410,14 @@ const messages = {
     contactSalesBtn: 'Vertrieb kontaktieren',
     maybeLater: 'Vielleicht später',
     inquirySubmitted: 'Ihre Anfrage wurde übermittelt. Wir werden Sie in Kürze kontaktieren.',
-    contactInfoText: 'Unser Team wird Sie unter {email} innerhalb von 24 Stunden kontaktieren.'
+    contactInfoText: 'Unser Team wird Sie unter {email} innerhalb von 24 Stunden kontaktieren.',
+
+    // Offline Banner & Auto-save
+    offlineBanner: 'Sie sind offline. Aufnahmen werden lokal gespeichert und hochgeladen, sobald Sie verbunden sind.',
+    autoSavingIn: 'Automatisches Speichern in {seconds}s...',
+    uploadFailedNoInternet: 'Keine Internetverbindung. Ihre Aufnahme ist sicher und wird automatisch hochgeladen, wenn Sie wieder verbunden sind.',
+    uploadFailedServer: 'Serverfehler. Ihre Aufnahme ist lokal gespeichert und wird automatisch erneut versucht.',
+    recordingSavedLocally: 'Ihre Aufnahme ist lokal gespeichert'
   },
   fr: {
     // Record Page
@@ -605,7 +619,14 @@ const messages = {
     contactSalesBtn: 'Contacter les ventes',
     maybeLater: 'Plus tard',
     inquirySubmitted: 'Votre demande a été soumise. Nous vous contacterons bientôt.',
-    contactInfoText: 'Notre équipe vous contactera à {email} dans les 24 heures.'
+    contactInfoText: 'Notre équipe vous contactera à {email} dans les 24 heures.',
+
+    // Offline Banner & Auto-save
+    offlineBanner: 'Vous êtes hors ligne. Les enregistrements sont sauvegardés localement et seront téléchargés une fois connecté.',
+    autoSavingIn: 'Sauvegarde automatique dans {seconds}s...',
+    uploadFailedNoInternet: 'Pas de connexion internet. Votre enregistrement est en sécurité et sera téléchargé automatiquement lorsque vous vous reconnecterez.',
+    uploadFailedServer: 'Erreur serveur. Votre enregistrement est sauvegardé localement et sera réessayé automatiquement.',
+    recordingSavedLocally: 'Votre enregistrement est sauvegardé localement'
   },
   it: {
     // Record Page
@@ -807,7 +828,14 @@ const messages = {
     contactSalesBtn: 'Contatta le vendite',
     maybeLater: 'Forse dopo',
     inquirySubmitted: 'La tua richiesta è stata inviata. Ti contatteremo presto.',
-    contactInfoText: 'Il nostro team ti contatterà a {email} entro 24 ore.'
+    contactInfoText: 'Il nostro team ti contatterà a {email} entro 24 ore.',
+
+    // Offline Banner & Auto-save
+    offlineBanner: 'Sei offline. Le registrazioni vengono salvate localmente e caricate quando sei connesso.',
+    autoSavingIn: 'Salvataggio automatico tra {seconds}s...',
+    uploadFailedNoInternet: 'Nessuna connessione internet. La tua registrazione è al sicuro e verrà caricata automaticamente quando ti riconnetti.',
+    uploadFailedServer: 'Errore del server. La tua registrazione è salvata localmente e verrà ritentata automaticamente.',
+    recordingSavedLocally: 'La tua registrazione è salvata localmente'
   }
 };
 

@@ -20,6 +20,9 @@ const MAX_QUEUE_RETRIES = 10;
 // P0 Data Loss Fix: Write-ahead pattern for queue persistence (V12)
 const MOBILE_UPLOAD_QUEUE_TMP_KEY = MOBILE_UPLOAD_QUEUE_KEY + '_tmp';
 
+// Re-entry guard for processMobileUploadQueue
+let isProcessingMobileQueue = false;
+
 /**
  * Safely write queue to localStorage using write-ahead pattern (V12)
  * Writes to _tmp first, then overwrites main key
@@ -130,6 +133,10 @@ function _updateQueueItemRetries(recordId, retries) {
  * @returns {Promise<{processed: number, succeeded: number, failed: number}>}
  */
 export async function processMobileUploadQueue(authStore, getApiUrl) {
+  if (isProcessingMobileQueue) return { processed: 0, succeeded: 0, failed: 0, skipped: true };
+  isProcessingMobileQueue = true;
+
+  try {
   const queue = getMobileUploadQueue();
   if (queue.length === 0) return { processed: 0, succeeded: 0, failed: 0 };
 
@@ -184,6 +191,9 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
   }
 
   return { processed: queue.length, succeeded, failed };
+  } finally {
+    isProcessingMobileQueue = false;
+  }
 }
 
 // Token refresh callback - set by calling code

@@ -365,6 +365,18 @@
       <span>{{ formattedRemainingTime }}</span>
     </div>
 
+    <!-- Offline Banner -->
+    <div
+      v-if="isOffline || (isMobile() && !recordingStore.networkConnected)"
+      class="offline-banner"
+    >
+      <q-icon
+        name="wifi_off"
+        size="16px"
+      />
+      <span>{{ $t('offlineBanner') }}</span>
+    </div>
+
     <q-page-container :class="{ 'mobile-safe-top': isMobile() && authStore.isAuthenticated }">
       <router-view />
     </q-page-container>
@@ -433,7 +445,7 @@ import { useAuthStore } from '../stores/auth';
 import { useRecordingStore } from '../stores/recording';
 import { useMinutesStore } from '../stores/minutes';
 import { useRouter, useRoute } from 'vue-router';
-import { isElectron, isMobile } from '../utils/platform';
+import { isElectron, isMobile, isCapacitor } from '../utils/platform';
 import { useLanguage } from '../composables/useLanguage';
 
 const $q = useQuasar();
@@ -447,6 +459,7 @@ const { languages, currentLang, currentLangShort, setLanguage, initLanguage } = 
 
 const currentTab = ref('record');
 const isMaximized = ref(false);
+const isOffline = ref(!navigator.onLine);
 
 // Formatted remaining time for display - simple "X Min." format
 const formattedRemainingTime = computed(() => {
@@ -459,9 +472,16 @@ const formattedRemainingTime = computed(() => {
   return `${Math.round(totalMinutes)} Min.`;
 });
 
+// Offline tracking handlers
+const handleOnline = () => { isOffline.value = false; };
+const handleOffline = () => { isOffline.value = true; };
+
 // Load saved language on mount
 onMounted(() => {
   initLanguage();
+  // Track online/offline state for desktop
+  window.addEventListener('online', handleOnline);
+  window.addEventListener('offline', handleOffline);
 });
 
 // Check initial maximize state
@@ -561,6 +581,8 @@ onUnmounted(() => {
     window.electronAPI.auth.removeExpiredListener();
   }
   window.removeEventListener('auth:forceLogout', handleForceLogout);
+  window.removeEventListener('online', handleOnline);
+  window.removeEventListener('offline', handleOffline);
 });
 </script>
 
@@ -1077,6 +1099,28 @@ onUnmounted(() => {
     background: rgba(254, 242, 242, 0.95);
     border-color: rgba(239, 68, 68, 0.3);
     color: #dc2626;
+  }
+}
+
+// Offline Banner
+.offline-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: #fef3c7;
+  border-bottom: 1px solid #fcd34d;
+  font-size: 12px;
+  color: #92400e;
+  text-align: center;
+  z-index: 100;
+}
+
+@media (max-width: 600px) {
+  .offline-banner {
+    font-size: 13px;
+    padding: 10px 16px;
   }
 }
 

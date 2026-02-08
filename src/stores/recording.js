@@ -120,11 +120,29 @@ export const useRecordingStore = defineStore('recording', {
             if (recovery.recovered && recovery.recordings?.length > 0) {
               try {
                 const { useRecordingsHistoryStore } = await import('./recordings-history');
+                const { addToMobileUploadQueue, processMobileUploadQueue } = await import('../services/upload');
+                const { useAuthStore } = await import('./auth');
+                const { getApiUrlSync } = await import('../services/api');
                 const historyStore = useRecordingsHistoryStore();
+                const authStore = useAuthStore();
                 for (const rec of recovery.recordings) {
                   await historyStore.addRecording(rec);
+                  // Auto-queue recovered recordings for upload
+                  if (rec.filePath) {
+                    addToMobileUploadQueue(rec.id, rec.filePath, {
+                      duration: (rec.duration || 0).toString(),
+                      title: '',
+                      customVocabulary: []
+                    });
+                  }
                 }
                 console.log(`Recovered ${recovery.recordings.length} recording(s) on foreground`);
+                // Trigger upload queue processing
+                if (authStore.token) {
+                  processMobileUploadQueue(authStore, getApiUrlSync).catch(e => {
+                    console.warn('Failed to process upload queue after recovery:', e);
+                  });
+                }
               } catch (e) {
                 console.warn('Could not add recovered recordings to history:', e);
               }

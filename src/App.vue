@@ -3,13 +3,14 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, watch } from 'vue';
+import { onMounted, onUnmounted, watch, ref } from 'vue';
 import { useConfigStore } from './stores/config';
 import { useRecordingStore } from './stores/recording';
 import { isMobile } from './utils/platform';
 
 const configStore = useConfigStore();
 const recordingStore = useRecordingStore();
+const mobileRetryInterval = ref(null);
 
 onMounted(async () => {
   // Load configuration on app start
@@ -25,11 +26,20 @@ onMounted(async () => {
       const recovery = await recordingStore.checkRecoveryState();
       if (recovery.recovered && recovery.recordings?.length > 0) {
         const { useRecordingsHistoryStore } = await import('./stores/recordings-history');
+        const { addToMobileUploadQueue } = await import('./services/upload');
         const historyStore = useRecordingsHistoryStore();
         for (const rec of recovery.recordings) {
           await historyStore.addRecording(rec);
+          // Auto-queue recovered recordings for upload
+          if (rec.filePath) {
+            addToMobileUploadQueue(rec.id, rec.filePath, {
+              duration: (rec.duration || 0).toString(),
+              title: '',
+              customVocabulary: []
+            });
+          }
         }
-        console.log(`Startup: recovered ${recovery.recordings.length} recording(s)`);
+        console.log(`Startup: recovered ${recovery.recordings.length} recording(s) and queued for upload`);
       }
     } catch (e) {
       console.warn('Startup recovery failed:', e);
@@ -38,11 +48,23 @@ onMounted(async () => {
     // Process persistent upload queue once auth is ready
     const processQueue = async (authStore) => {
       try {
-        const { processMobileUploadQueue } = await import('./services/upload');
+        const { processMobileUploadQueue, getMobileUploadQueue } = await import('./services/upload');
         const { getApiUrlSync } = await import('./services/api');
         processMobileUploadQueue(authStore, getApiUrlSync).catch(e => {
           console.warn('Startup upload queue processing failed:', e);
         });
+
+        // Periodic retry every 60 seconds for failed mobile uploads
+        mobileRetryInterval.value = setInterval(() => {
+          // Only retry when authenticated and app is in foreground
+          if (!authStore.isAuthenticated || document.hidden) return;
+          const queue = getMobileUploadQueue();
+          if (queue.length > 0) {
+            processMobileUploadQueue(authStore, getApiUrlSync).catch(e => {
+              console.warn('Periodic mobile upload retry failed:', e);
+            });
+          }
+        }, 60000);
       } catch (e) {
         console.warn('Could not process upload queue:', e);
       }
@@ -75,6 +97,10 @@ onMounted(async () => {
 onUnmounted(() => {
   if (isMobile()) {
     recordingStore.cleanupLifecycle();
+  }
+  if (mobileRetryInterval.value) {
+    clearInterval(mobileRetryInterval.value);
+    mobileRetryInterval.value = null;
   }
 });
 </script>
