@@ -7,11 +7,15 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.io.File
@@ -59,8 +63,10 @@ class ForegroundRecordingService : Service() {
         var lastChunkTimestampMs: Long = 0L
             private set
 
-        // Broadcast action for recording death
+        // Broadcast actions
         const val ACTION_RECORDING_DEAD = "ch.suissenotes.app.RECORDING_DEAD"
+        const val ACTION_RECORDING_INTERRUPTED = "ch.suissenotes.app.RECORDING_INTERRUPTED"
+        const val ACTION_RECORDING_RESUMED = "ch.suissenotes.app.RECORDING_RESUMED"
         const val EXTRA_REASON = "reason"
         const val EXTRA_CHUNK_COUNT = "chunkCount"
         const val EXTRA_LAST_CHUNK_TIMESTAMP = "lastChunkTimestampMs"
@@ -71,6 +77,14 @@ class ForegroundRecordingService : Service() {
     private var chunksDirectory: File? = null
     private var currentChunkFile: File? = null
     private val handler = Handler(Looper.getMainLooper())
+
+    // FIX 3: Audio focus handling
+    private var audioManager: AudioManager? = null
+    private var audioFocusRequest: AudioFocusRequest? = null
+    private var isPausedByFocusLoss = false
+
+    // FIX 6: Wake lock
+    private var wakeLock: PowerManager.WakeLock? = null
 
     // Callbacks for plugin communication
     private var onChunkSaved: ((Int, String) -> Unit)? = null
@@ -106,6 +120,9 @@ class ForegroundRecordingService : Service() {
             broadcastRecordingDeath("service_destroyed")
         }
         stopRecording()
+        // FIX 3 & 6: Ensure cleanup even if stopRecording skips
+        abandonAudioFocus()
+        releaseWakeLock()
     }
 
     private fun createNotificationChannel() {
@@ -167,6 +184,12 @@ class ForegroundRecordingService : Service() {
             // Start foreground service
             startForeground(NOTIFICATION_ID, createNotification("Recording in progress..."))
 
+            // FIX 3: Request audio focus
+            requestAudioFocus()
+
+            // FIX 6: Acquire wake lock
+            acquireWakeLock()
+
             // Start first chunk
             startNewChunk()
 
@@ -180,6 +203,8 @@ class ForegroundRecordingService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start recording", e)
             onError?.invoke("Failed to start recording: ${e.message}")
+            releaseWakeLock()
+            abandonAudioFocus()
             stopSelf()
         }
     }
@@ -269,6 +294,8 @@ class ForegroundRecordingService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start new chunk", e)
             onError?.invoke("Failed to save chunk: ${e.message}")
+            // FIX 4: Escalate chunk creation failure to recording death
+            handleRecordingDeath("chunk_creation_failed")
         }
     }
 
@@ -287,7 +314,13 @@ class ForegroundRecordingService : Service() {
 
     private fun rotateChunk() {
         if (!isRecording) return
-        startNewChunk()
+        // FIX 4: Wrap in try-catch to prevent Timer thread death on exception
+        try {
+            startNewChunk()
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception during chunk rotation", e)
+            handleRecordingDeath("chunk_rotation_error")
+        }
     }
 
     private fun handleRecordingDeath(reason: String) {
@@ -387,6 +420,10 @@ class ForegroundRecordingService : Service() {
 
             isRecording = false
 
+            // FIX 3 & 6: Release audio focus and wake lock
+            abandonAudioFocus()
+            releaseWakeLock()
+
             Log.i(TAG, "Recording stopped: $currentRecordId, chunks: $chunkIndex")
 
         } catch (e: Exception) {
@@ -395,6 +432,117 @@ class ForegroundRecordingService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
+    }
+
+    // MARK: - Audio Focus Handling (FIX 3)
+
+    private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        handler.post {
+            when (focusChange) {
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                    // Transient loss (e.g., phone call) — pause recording
+                    if (isRecording && !isPausedByFocusLoss) {
+                        Log.i(TAG, "Audio focus lost transiently, pausing recording")
+                        isPausedByFocusLoss = true
+                        pauseRecording()
+                        broadcastInterruption("audio_focus_loss_transient")
+                    }
+                }
+                AudioManager.AUDIOFOCUS_LOSS -> {
+                    // Full loss — pause but don't kill (may be temporary)
+                    if (isRecording && !isPausedByFocusLoss) {
+                        Log.i(TAG, "Audio focus lost, pausing recording")
+                        isPausedByFocusLoss = true
+                        pauseRecording()
+                        broadcastInterruption("audio_focus_loss")
+                    }
+                }
+                AudioManager.AUDIOFOCUS_GAIN -> {
+                    // Regained focus — resume if we paused for focus
+                    if (isPausedByFocusLoss) {
+                        Log.i(TAG, "Audio focus regained, resuming recording")
+                        isPausedByFocusLoss = false
+                        resumeRecording()
+                        broadcastResume()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun requestAudioFocus() {
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val audioAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+
+            audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(audioAttributes)
+                .setOnAudioFocusChangeListener(audioFocusChangeListener, handler)
+                .build()
+
+            audioManager?.requestAudioFocus(audioFocusRequest!!)
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager?.requestAudioFocus(
+                audioFocusChangeListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN
+            )
+        }
+    }
+
+    private fun abandonAudioFocus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { audioManager?.abandonAudioFocusRequest(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager?.abandonAudioFocus(audioFocusChangeListener)
+        }
+        audioFocusRequest = null
+        isPausedByFocusLoss = false
+    }
+
+    private fun broadcastInterruption(reason: String) {
+        val intent = Intent(ACTION_RECORDING_INTERRUPTED).apply {
+            putExtra(EXTRA_REASON, reason)
+            setPackage(packageName)
+        }
+        sendBroadcast(intent)
+    }
+
+    private fun broadcastResume() {
+        val intent = Intent(ACTION_RECORDING_RESUMED).apply {
+            setPackage(packageName)
+        }
+        sendBroadcast(intent)
+    }
+
+    // MARK: - Wake Lock (FIX 6)
+
+    private fun acquireWakeLock() {
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "SuisseNotes::RecordingWakeLock"
+        ).apply {
+            acquire(5 * 60 * 60 * 1000L) // 5-hour timeout
+        }
+        Log.d(TAG, "Wake lock acquired")
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let {
+            if (it.isHeld) {
+                it.release()
+                Log.d(TAG, "Wake lock released")
+            }
+        }
+        wakeLock = null
     }
 
     /**

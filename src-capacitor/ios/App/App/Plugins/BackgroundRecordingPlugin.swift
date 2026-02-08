@@ -23,7 +23,9 @@ public class BackgroundRecordingPlugin: CAPPlugin {
     private var recordingSession: RecordingSession?
     private var isRecording = false
     private var isInterrupted = false // P0 Data Loss Fix: Track interruption state (V4)
+    private var isRecovering = false // FIX 5: Prevent health check during recovery window
     private var lastChunkTimestamp: Date = Date()
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid // FIX 2: Background task protection
 
     // Recording settings
     private let sampleRate: Double = 48000
@@ -128,6 +130,9 @@ public class BackgroundRecordingPlugin: CAPPlugin {
 
     private func setupAndStartRecording(recordId: String, call: CAPPluginCall) {
         do {
+            // FIX 2: Request background task to prevent iOS from killing app during recording
+            beginBackgroundTaskProtection()
+
             // Configure audio session for background recording
             audioSession = AVAudioSession.sharedInstance()
 
@@ -252,6 +257,9 @@ public class BackgroundRecordingPlugin: CAPPlugin {
         // P0 Data Loss Fix: Don't declare death during interruption (V4)
         guard !isInterrupted else { return }
 
+        // FIX 5: Don't declare death during recovery window (0.5s after interruption ends)
+        guard !isRecovering else { return }
+
         let recorderIsActive = audioRecorder?.isRecording ?? false
 
         if !recorderIsActive {
@@ -270,6 +278,7 @@ public class BackgroundRecordingPlugin: CAPPlugin {
         healthCheckTimer = nil
 
         isRecording = false
+        endBackgroundTaskProtection() // FIX 2
 
         let chunkCount = recordingSession?.chunkIndex ?? 0
         let lastChunkMs = lastChunkTimestamp.timeIntervalSince1970 * 1000
@@ -418,6 +427,7 @@ public class BackgroundRecordingPlugin: CAPPlugin {
         audioRecorder = nil
 
         isRecording = false
+        endBackgroundTaskProtection() // FIX 2
 
         // Deactivate audio session
         try? audioSession?.setActive(false)
@@ -441,6 +451,31 @@ public class BackgroundRecordingPlugin: CAPPlugin {
         recordingSession = nil
     }
 
+    // MARK: - Background Task Protection (FIX 2)
+
+    private func beginBackgroundTaskProtection() {
+        guard backgroundTask == .invalid else { return }
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "SuisseNotesRecording") { [weak self] in
+            // Expiration handler — iOS is about to kill our background time
+            guard let self = self else { return }
+            NSLog("BackgroundRecording: Background task expiring, saving checkpoint")
+            // Save state checkpoint
+            if let session = self.recordingSession {
+                UserDefaults.standard.set(session.id, forKey: "bgRecording_recordId")
+                UserDefaults.standard.set(session.chunkIndex, forKey: "bgRecording_chunkIndex")
+            }
+            // Stop recorder gracefully to preserve last chunk
+            self.audioRecorder?.stop()
+            self.endBackgroundTaskProtection()
+        }
+    }
+
+    private func endBackgroundTaskProtection() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
+    }
+
     @objc private func handleInterruption(notification: Notification) {
         guard let userInfo = notification.userInfo,
               let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
@@ -460,11 +495,17 @@ public class BackgroundRecordingPlugin: CAPPlugin {
         case .ended:
             // P0 Data Loss Fix: Always attempt resume after interruption (V4)
             // Previously gated on .shouldResume flag, which is unreliable
-            isInterrupted = false
+            // FIX 5: Keep isInterrupted=true and set isRecovering=true during the 0.5s recovery window
+            // so health check doesn't falsely declare death
+            isRecovering = true
 
             // Add 0.5s delay for audio system to settle
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self = self, self.isRecording else { return }
+                guard let self = self, self.isRecording else {
+                    self?.isInterrupted = false
+                    self?.isRecovering = false
+                    return
+                }
 
                 // Try to reactivate audio session
                 do {
@@ -480,6 +521,8 @@ public class BackgroundRecordingPlugin: CAPPlugin {
                         self.lastChunkTimestamp = Date()
                         self.startChunkTimer()
                         self.startHealthCheckTimer()
+                        self.isInterrupted = false
+                        self.isRecovering = false
                         self.notifyListeners("resumed", data: [:])
                     } else {
                         // Recorder failed to resume - try starting a new chunk
@@ -488,9 +531,13 @@ public class BackgroundRecordingPlugin: CAPPlugin {
                             try self.startNewChunk()
                             self.startChunkTimer()
                             self.startHealthCheckTimer()
+                            self.isInterrupted = false
+                            self.isRecovering = false
                             self.notifyListeners("resumed", data: ["recoveredWithNewChunk": true])
                         } catch {
                             NSLog("BackgroundRecording: Recovery failed: \(error)")
+                            self.isInterrupted = false
+                            self.isRecovering = false
                             self.handleRecordingDeath(reason: "interruption_resume_failed")
                         }
                     }
@@ -501,9 +548,13 @@ public class BackgroundRecordingPlugin: CAPPlugin {
                         try self.startNewChunk()
                         self.startChunkTimer()
                         self.startHealthCheckTimer()
+                        self.isInterrupted = false
+                        self.isRecovering = false
                         self.notifyListeners("resumed", data: ["recoveredWithNewChunk": true])
                     } catch {
                         NSLog("BackgroundRecording: Recovery from nil recorder failed: \(error)")
+                        self.isInterrupted = false
+                        self.isRecovering = false
                         self.handleRecordingDeath(reason: "interruption_resume_failed")
                     }
                 }

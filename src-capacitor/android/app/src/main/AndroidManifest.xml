@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Wake lock for recording during device sleep (FIX 6) -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <!-- Bluetooth permissions (for Bluetooth headsets/microphones) -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />

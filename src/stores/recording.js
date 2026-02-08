@@ -37,8 +37,8 @@ export const useRecordingStore = defineStore('recording', {
       bytesTotal: 0,
       metadata: null
     },
-    // File locking for upload safety (V6 fix)
-    lockedFiles: new Set(),
+    // File locking for upload safety (V6 fix, FIX 7: Map<recordId, timestamp> with 24h expiry)
+    lockedFiles: new Map(),
     // Chunk integrity tracking (V7 fix)
     integrity: null,
     // Storage status (V1 fix)
@@ -50,6 +50,8 @@ export const useRecordingStore = defineStore('recording', {
     // Chunk save failure tracking (V1/V7 fix)
     chunkSaveErrors: 0,
     chunkSaveErrorWarning: false,
+    // FIX 8: Mutex for serializing concurrent saveChunk() calls
+    _chunkSaveQueue: Promise.resolve(),
     // Recording health monitor
     recordingInterrupted: false,
     interruptionInfo: null, // { reason, chunkCount, lastChunkTimestamp, detectedAt }
@@ -81,8 +83,14 @@ export const useRecordingStore = defineStore('recording', {
       const seconds = state.duration % 60;
       return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
     },
-    // Check if a file is locked for upload
-    isFileLocked: (state) => (recordId) => state.lockedFiles.has(recordId),
+    // Check if a file is locked for upload (with 24h expiry - FIX 7)
+    isFileLocked: (state) => (recordId) => {
+      const lockTime = state.lockedFiles.get(recordId);
+      if (!lockTime) return false;
+      // Auto-expire locks older than 24 hours
+      if (Date.now() - lockTime > 24 * 60 * 60 * 1000) return false;
+      return true;
+    },
     // Check if storage is low
     hasLowStorage: (state) => state.storageStatus.status === 'low' || state.storageStatus.status === 'critical',
     // Check if app can safely record
@@ -482,61 +490,69 @@ export const useRecordingStore = defineStore('recording', {
     },
 
     async saveChunk(chunkData) {
-      const maxRetries = 3;
-      const retryDelays = [1000, 2000, 4000];
+      // FIX 8: Serialize concurrent saveChunk calls to prevent chunkIndex races
+      const savePromise = this._chunkSaveQueue.then(async () => {
+        const maxRetries = 3;
+        const retryDelays = [1000, 2000, 4000];
 
-      // Create chunk integrity before saving (V7 fix)
-      const chunkIntegrity = createChunkIntegrity(this.chunkIndex, chunkData);
+        // Create chunk integrity before saving (V7 fix)
+        const chunkIntegrity = createChunkIntegrity(this.chunkIndex, chunkData);
 
-      for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-          let result;
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+          try {
+            let result;
 
-          if (isElectron()) {
-            // Pass userId for crash recovery state tracking
-            result = await window.electronAPI.recording.saveChunk(
-              this.recordId,
-              chunkData,
-              this.chunkIndex,
-              '.webm',
-              this.userId
-            );
-          } else if (isCapacitor()) {
-            result = await storage.saveChunk(
-              this.recordId,
-              chunkData,
-              this.chunkIndex,
-              '.webm' // Mobile uses webm format
-            );
-          } else {
-            throw new Error('Unsupported platform');
-          }
-
-          if (result.success) {
-            // Track integrity
-            if (this.integrity) {
-              this.integrity = addChunkToRecordingIntegrity(this.integrity, chunkIntegrity);
+            if (isElectron()) {
+              // Pass userId for crash recovery state tracking
+              result = await window.electronAPI.recording.saveChunk(
+                this.recordId,
+                chunkData,
+                this.chunkIndex,
+                '.webm',
+                this.userId
+              );
+            } else if (isCapacitor()) {
+              result = await storage.saveChunk(
+                this.recordId,
+                chunkData,
+                this.chunkIndex,
+                '.webm' // Mobile uses webm format
+              );
+            } else {
+              throw new Error('Unsupported platform');
             }
-            this.chunkIndex++;
-            return { success: true };
-          } else {
-            throw new Error(result.error || 'Failed to save chunk');
-          }
-        } catch (error) {
-          console.error(`Error saving chunk (attempt ${attempt + 1}/${maxRetries + 1}):`, error);
 
-          if (attempt < maxRetries) {
-            const delay = retryDelays[attempt];
-            console.log(`Retrying chunk save in ${delay}ms...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-          } else {
-            console.error('All chunk save retries exhausted, chunk may be lost');
-            return { success: false, error: error.message, retriesExhausted: true };
+            if (result.success) {
+              // Track integrity
+              if (this.integrity) {
+                this.integrity = addChunkToRecordingIntegrity(this.integrity, chunkIntegrity);
+              }
+              this.chunkIndex++;
+              return { success: true };
+            } else {
+              throw new Error(result.error || 'Failed to save chunk');
+            }
+          } catch (error) {
+            console.error(`Error saving chunk (attempt ${attempt + 1}/${maxRetries + 1}):`, error);
+
+            if (attempt < maxRetries) {
+              const delay = retryDelays[attempt];
+              console.log(`Retrying chunk save in ${delay}ms...`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+            } else {
+              console.error('All chunk save retries exhausted, chunk may be lost');
+              return { success: false, error: error.message, retriesExhausted: true };
+            }
           }
         }
-      }
 
-      return { success: false, error: 'Unexpected error in saveChunk' };
+        return { success: false, error: 'Unexpected error in saveChunk' };
+      });
+
+      // Chain onto queue — catch to prevent queue from breaking on error
+      this._chunkSaveQueue = savePromise.catch(() => {});
+
+      return savePromise;
     },
 
     // Combine chunks on mobile using native plugin (proper M4A merging)
@@ -630,7 +646,7 @@ export const useRecordingStore = defineStore('recording', {
 
     // File locking for upload safety (V6 fix - now persistent)
     async lockForUpload(recordId) {
-      this.lockedFiles.add(recordId);
+      this.lockedFiles.set(recordId, Date.now()); // FIX 7: Store timestamp
       // Persist to disk so locks survive app restart
       if (isElectron() && window.electronAPI?.recording?.lockForUpload) {
         try {
@@ -640,7 +656,7 @@ export const useRecordingStore = defineStore('recording', {
         }
       } else if (isCapacitor() || !isElectron()) {
         try {
-          localStorage.setItem('locked_recordings', JSON.stringify([...this.lockedFiles]));
+          localStorage.setItem('locked_recordings', JSON.stringify(Object.fromEntries(this.lockedFiles)));
         } catch (e) {
           console.warn('Failed to persist lock to localStorage:', e);
         }
@@ -658,7 +674,7 @@ export const useRecordingStore = defineStore('recording', {
         }
       } else if (isCapacitor() || !isElectron()) {
         try {
-          localStorage.setItem('locked_recordings', JSON.stringify([...this.lockedFiles]));
+          localStorage.setItem('locked_recordings', JSON.stringify(Object.fromEntries(this.lockedFiles)));
         } catch (e) {
           console.warn('Failed to update persistent locks:', e);
         }
@@ -666,28 +682,41 @@ export const useRecordingStore = defineStore('recording', {
     },
 
     canDelete(recordId) {
-      return !this.lockedFiles.has(recordId);
+      const lockTime = this.lockedFiles.get(recordId);
+      if (!lockTime) return true;
+      // FIX 7: Auto-expire locks older than 24 hours
+      if (Date.now() - lockTime > 24 * 60 * 60 * 1000) {
+        this.lockedFiles.delete(recordId);
+        return true;
+      }
+      return false;
     },
 
     // Restore locks from persistent storage on initialization
+    // FIX 7: Handles both old format (array of IDs) and new format ({id: timestamp})
     async _restoreLockedFiles() {
       try {
         if (isElectron() && window.electronAPI?.recording?.getLockedRecordings) {
           const locked = await window.electronAPI.recording.getLockedRecordings();
           if (Array.isArray(locked)) {
-            locked.forEach(id => this.lockedFiles.add(id));
+            // Old format: array of IDs — assign current timestamp
+            locked.forEach(id => this.lockedFiles.set(id, Date.now()));
           }
         } else {
           const raw = localStorage.getItem('locked_recordings');
           if (raw) {
             const locked = JSON.parse(raw);
             if (Array.isArray(locked)) {
-              locked.forEach(id => this.lockedFiles.add(id));
+              // Old format: array of IDs — assign current timestamp
+              locked.forEach(id => this.lockedFiles.set(id, Date.now()));
+            } else if (locked && typeof locked === 'object') {
+              // New format: {recordId: timestamp}
+              Object.entries(locked).forEach(([id, ts]) => this.lockedFiles.set(id, ts));
             }
           }
         }
         if (this.lockedFiles.size > 0) {
-          console.log('Restored persistent file locks:', [...this.lockedFiles]);
+          console.log('Restored persistent file locks:', [...this.lockedFiles.keys()]);
         }
       } catch (e) {
         console.warn('Failed to restore locked files:', e);
@@ -780,6 +809,7 @@ export const useRecordingStore = defineStore('recording', {
       this.integrity = null;
       this.chunkSaveErrors = 0;
       this.chunkSaveErrorWarning = false;
+      this._chunkSaveQueue = Promise.resolve(); // FIX 8: Reset mutex queue
       this.recordingInterrupted = false;
       this.interruptionInfo = null;
       this.recoveryInProgress = false;

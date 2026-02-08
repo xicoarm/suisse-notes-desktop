@@ -143,10 +143,29 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
   const apiUrl = typeof getApiUrl === 'function' ? getApiUrl() : getApiUrl;
   let succeeded = 0;
   let failed = 0;
+  let tokenRefreshAttempts = 0;
+  const MAX_TOKEN_REFRESHES_PER_RUN = 2;
 
-  for (const item of queue) {
+  // Proactively refresh token if expiring soon (e.g., after long offline period)
+  if (authStore.isTokenExpiringSoon && authStore.isTokenExpiringSoon()) {
+    try {
+      const refreshResult = await authStore.handleAuthError();
+      if (refreshResult.success) {
+        console.log('Proactively refreshed expiring token before queue processing');
+        tokenRefreshAttempts++;
+      }
+    } catch (e) {
+      console.warn('Proactive token refresh failed:', e);
+    }
+  }
+
+  let i = 0;
+  while (i < queue.length) {
+    const item = queue[i];
+
     if (item.retries >= MAX_QUEUE_RETRIES) {
       failed++;
+      i++;
       continue;
     }
 
@@ -176,17 +195,46 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
         } catch (e) {
           console.warn('Could not update history after queued upload:', e);
         }
+        i++;
       } else {
-        // Increment retry count and persist immediately
+        // Check if this is a token expiration error — refresh and retry same item
+        if (isTokenExpiredError(result.error, result.status) && tokenRefreshAttempts < MAX_TOKEN_REFRESHES_PER_RUN) {
+          try {
+            const refreshResult = await authStore.handleAuthError();
+            tokenRefreshAttempts++;
+            if (refreshResult.success) {
+              console.log('Token refreshed after 401, retrying upload for', item.recordId);
+              continue; // Retry same item without incrementing retries
+            }
+          } catch (e) {
+            console.warn('Token refresh failed during queue processing:', e);
+          }
+        }
+        // Non-token error or refresh failed — increment retry count
         item.retries++;
         _updateQueueItemRetries(item.recordId, item.retries);
         failed++;
+        i++;
       }
     } catch (e) {
       console.warn('Queued upload failed for', item.recordId, e);
+      // Check if exception message indicates token error
+      if (isTokenExpiredError(e.message) && tokenRefreshAttempts < MAX_TOKEN_REFRESHES_PER_RUN) {
+        try {
+          const refreshResult = await authStore.handleAuthError();
+          tokenRefreshAttempts++;
+          if (refreshResult.success) {
+            console.log('Token refreshed after exception, retrying upload for', item.recordId);
+            continue; // Retry same item
+          }
+        } catch (refreshErr) {
+          console.warn('Token refresh failed:', refreshErr);
+        }
+      }
       item.retries++;
       _updateQueueItemRetries(item.recordId, item.retries);
       failed++;
+      i++;
     }
   }
 

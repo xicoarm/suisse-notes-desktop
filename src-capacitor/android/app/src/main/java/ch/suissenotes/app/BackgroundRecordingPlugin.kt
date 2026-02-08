@@ -68,14 +68,44 @@ class BackgroundRecordingPlugin : Plugin() {
         }
     }
 
+    // FIX 3: Broadcast receiver for audio focus interruption events
+    private val recordingInterruptedReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ForegroundRecordingService.ACTION_RECORDING_INTERRUPTED) {
+                val reason = intent.getStringExtra(ForegroundRecordingService.EXTRA_REASON) ?: "audio_focus"
+                val data = JSObject().apply {
+                    put("reason", reason)
+                }
+                notifyListeners("interrupted", data)
+            }
+        }
+    }
+
+    // FIX 3: Broadcast receiver for audio focus resume events
+    private val recordingResumedReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ForegroundRecordingService.ACTION_RECORDING_RESUMED) {
+                notifyListeners("resumed", JSObject())
+            }
+        }
+    }
+
     override fun load() {
         super.load()
         // Register broadcast receiver for recording death events
-        val filter = IntentFilter(ForegroundRecordingService.ACTION_RECORDING_DEAD)
+        val deadFilter = IntentFilter(ForegroundRecordingService.ACTION_RECORDING_DEAD)
+        // FIX 3: Register receivers for audio focus interruption/resume events
+        val interruptedFilter = IntentFilter(ForegroundRecordingService.ACTION_RECORDING_INTERRUPTED)
+        val resumedFilter = IntentFilter(ForegroundRecordingService.ACTION_RECORDING_RESUMED)
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(recordingDeadReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            context.registerReceiver(recordingDeadReceiver, deadFilter, Context.RECEIVER_NOT_EXPORTED)
+            context.registerReceiver(recordingInterruptedReceiver, interruptedFilter, Context.RECEIVER_NOT_EXPORTED)
+            context.registerReceiver(recordingResumedReceiver, resumedFilter, Context.RECEIVER_NOT_EXPORTED)
         } else {
-            context.registerReceiver(recordingDeadReceiver, filter)
+            context.registerReceiver(recordingDeadReceiver, deadFilter)
+            context.registerReceiver(recordingInterruptedReceiver, interruptedFilter)
+            context.registerReceiver(recordingResumedReceiver, resumedFilter)
         }
     }
 
@@ -83,9 +113,13 @@ class BackgroundRecordingPlugin : Plugin() {
         super.handleOnDestroy()
         try {
             context.unregisterReceiver(recordingDeadReceiver)
-        } catch (e: Exception) {
-            // Already unregistered
-        }
+        } catch (e: Exception) { /* Already unregistered */ }
+        try {
+            context.unregisterReceiver(recordingInterruptedReceiver)
+        } catch (e: Exception) { /* Already unregistered */ }
+        try {
+            context.unregisterReceiver(recordingResumedReceiver)
+        } catch (e: Exception) { /* Already unregistered */ }
     }
 
     @PluginMethod
