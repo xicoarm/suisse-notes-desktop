@@ -573,6 +573,7 @@ public class BackgroundRecordingPlugin: CAPPlugin {
                         self.isInterrupted = false
                         self.isRecovering = false
                         self.notifyListeners("resumed", data: [:])
+                        self.schedulePostResumeVerification()
                     } else {
                         // Recorder failed to resume - try starting a new chunk
                         NSLog("BackgroundRecording: recorder.record() returned false, trying new chunk")
@@ -583,6 +584,7 @@ public class BackgroundRecordingPlugin: CAPPlugin {
                             self.isInterrupted = false
                             self.isRecovering = false
                             self.notifyListeners("resumed", data: ["recoveredWithNewChunk": true])
+                            self.schedulePostResumeVerification()
                         } catch {
                             NSLog("BackgroundRecording: Recovery failed: \(error)")
                             self.isInterrupted = false
@@ -600,6 +602,7 @@ public class BackgroundRecordingPlugin: CAPPlugin {
                         self.isInterrupted = false
                         self.isRecovering = false
                         self.notifyListeners("resumed", data: ["recoveredWithNewChunk": true])
+                        self.schedulePostResumeVerification()
                     } catch {
                         NSLog("BackgroundRecording: Recovery from nil recorder failed: \(error)")
                         self.isInterrupted = false
@@ -611,6 +614,26 @@ public class BackgroundRecordingPlugin: CAPPlugin {
 
         @unknown default:
             break
+        }
+    }
+
+    // Fix 5: Post-resume verification — ensure recording is actually producing audio
+    private func schedulePostResumeVerification() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self = self, self.isRecording, !self.isInterrupted else { return }
+            if let chunkURL = self.recordingSession?.currentChunkURL {
+                let attrs = try? FileManager.default.attributesOfItem(atPath: chunkURL.path)
+                let fileSize = (attrs?[.size] as? Int64) ?? 0
+                if fileSize == 0 {
+                    NSLog("BackgroundRecording: Post-resume verification failed (0 bytes), rotating chunk")
+                    do {
+                        try self.startNewChunk()
+                    } catch {
+                        NSLog("BackgroundRecording: Post-resume chunk rotation failed: \(error)")
+                        self.handleRecordingDeath(reason: "resume_verification_failed")
+                    }
+                }
+            }
         }
     }
 

@@ -400,7 +400,32 @@ export const useRecordingStore = defineStore('recording', {
 
             try {
               const metaResult = await storage.loadMetadata(recordId);
-              if (!metaResult.success || !metaResult.metadata) continue;
+
+              // Fix 4: Handle recordings with missing/corrupt metadata
+              if (!metaResult.success || !metaResult.metadata) {
+                // No readable metadata - still check for chunks on disk
+                const chunksResult = await storage.listFiles(`recordings/${recordId}/chunks`);
+                const chunkCount = chunksResult.success ? (chunksResult.files?.length || 0) : 0;
+                if (chunkCount > 0) {
+                  // Check no combined file already exists
+                  const hasM4a = await storage.exists(`recordings/${recordId}/combined.m4a`);
+                  const hasWebm = await storage.exists(`recordings/${recordId}/combined.webm`);
+                  const hasCombined = hasM4a || hasWebm;
+                  if (!hasCombined) {
+                    console.warn('Found', chunkCount, 'orphaned chunks without metadata for', recordId, '- attempting combine');
+                    const combineResult = await this.combineChunksNative(recordId);
+                    if (combineResult.success) {
+                      recoveredRecordings.push({
+                        id: recordId, userId: null, duration: 0,
+                        fileSize: combineResult.fileSize || 0,
+                        filePath: combineResult.outputPath,
+                        uploadStatus: 'pending', recovered: true
+                      });
+                    }
+                  }
+                }
+                continue;
+              }
 
               const metadata = metaResult.metadata;
 

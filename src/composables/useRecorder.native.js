@@ -44,6 +44,7 @@ export function useNativeRecorder() {
   let healthCheckInterval = null;
   let interruptedTimeout = null;
   let recordingDeadHandled = false;
+  let healthCheckTick = 0;
   let pluginListeners = [];
 
   // Duration tracking
@@ -75,11 +76,19 @@ export function useNativeRecorder() {
     stopHealthCheck();
     recordingDeadHandled = false;
 
+    healthCheckTick = 0;
     healthCheckInterval = setInterval(async () => {
       if (!isNativeRecording.value || recordingDeadHandled) return;
 
+      healthCheckTick++;
+
       try {
         const status = await BackgroundRecording.getStatus();
+
+        // Fix 2: Sync native chunk count to store (native writes chunks directly, bypassing store)
+        if (status.chunkIndex > recordingStore.chunkIndex) {
+          recordingStore.chunkIndex = status.chunkIndex;
+        }
 
         // Check if native recorder has stopped
         if (!status.isRecording && !status.isRecorderActive) {
@@ -100,6 +109,14 @@ export function useNativeRecorder() {
             chunkCount: status.chunkIndex || recordingStore.chunkIndex,
             lastChunkTimestamp: status.lastChunkTimestampMs || null
           });
+          return;
+        }
+
+        // Fix 3: Periodic metadata flush every ~30s (every 10th health check tick)
+        if (healthCheckTick % 10 === 0 && recordingStore.status === 'recording') {
+          recordingStore.flushCurrentState().catch(e =>
+            console.warn('Periodic metadata flush failed:', e)
+          );
         }
       } catch (e) {
         console.error('Health check error:', e);
@@ -322,11 +339,12 @@ export function useNativeRecorder() {
 
   // Stop recording
   const stopRecording = async () => {
-    // P0 Data Loss Fix: Handle case where native recording state was lost but chunks exist
+    // P0 Data Loss Fix: Handle case where native recording state was lost but chunks exist on disk
     if (!isNativeRecording.value) {
-      // Check if we have a recording session with saved chunks
-      if (recordingStore.recordId && recordingStore.chunkIndex > 0) {
-        console.warn('Native recording state lost but chunks exist - attempting recovery');
+      if (recordingStore.recordId) {
+        // Native recording writes chunks directly to disk, bypassing store chunkIndex.
+        // Always attempt combine via native plugin (it scans filesystem, not store).
+        console.warn('Native recording state lost - attempting filesystem recovery');
 
         stopDurationTracking();
         stopHealthCheck();
@@ -340,16 +358,15 @@ export function useNativeRecorder() {
           }
         }
 
-        // Attempt to combine existing chunks
-        console.log('Attempting to combine', recordingStore.chunkIndex, 'saved chunks...');
+        // Attempt to combine chunks from disk (combineChunksNative scans filesystem)
         const result = await recordingStore.stopRecording();
 
         if (result.success) {
-          console.log('Recovery successful - recording saved');
+          console.log('Recovery successful - recording saved from disk chunks');
           return {
             success: true,
             filePath: result.filePath,
-            warning: 'Recording recovered after interruption. Some audio may be missing.',
+            warning: 'Recording recovered after interruption.',
             recovered: true
           };
         } else {
@@ -357,7 +374,7 @@ export function useNativeRecorder() {
           return {
             success: false,
             error: 'Recording interrupted. ' + (result.error || 'Could not recover audio file.'),
-            partialRecovery: recordingStore.chunkIndex > 0
+            partialRecovery: true
           };
         }
       }
