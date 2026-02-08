@@ -44,6 +44,7 @@ class ForegroundRecordingService : Service() {
         const val ACTION_STOP = "ch.suissenotes.app.STOP_RECORDING"
         const val ACTION_PAUSE = "ch.suissenotes.app.PAUSE_RECORDING"
         const val ACTION_RESUME = "ch.suissenotes.app.RESUME_RECORDING"
+        const val ACTION_NOTIFICATION_ONLY = "ch.suissenotes.app.NOTIFICATION_ONLY"
 
         // Extras
         const val EXTRA_RECORD_ID = "record_id"
@@ -98,9 +99,19 @@ class ForegroundRecordingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
+        val action = intent?.action
+
+        if (action == ACTION_NOTIFICATION_ONLY) {
+            // Just show notification and start foreground — no native recording
+            // Used when WebView MediaRecorder handles audio but we need foreground service protection
+            createNotificationChannel()
+            startForeground(NOTIFICATION_ID, createNotification("Recording in progress..."))
+            return START_STICKY
+        }
+
+        when (action) {
             ACTION_START -> {
-                val recordId = intent.getStringExtra(EXTRA_RECORD_ID)
+                val recordId = intent?.getStringExtra(EXTRA_RECORD_ID)
                 if (recordId != null) {
                     startRecording(recordId)
                 }
@@ -111,6 +122,15 @@ class ForegroundRecordingService : Service() {
         }
 
         return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        if (isRecording) {
+            broadcastRecordingDeath("task_removed")
+        }
+        stopRecording()
+        stopSelf()
     }
 
     override fun onDestroy() {

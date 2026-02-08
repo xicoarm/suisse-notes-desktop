@@ -308,14 +308,10 @@ public class BackgroundRecordingPlugin: CAPPlugin {
             .appendingPathComponent("recordings")
             .appendingPathComponent(recordId)
             .appendingPathComponent("chunks")
-        let outputURL = documentsPath
-            .appendingPathComponent("recordings")
-            .appendingPathComponent(recordId)
-            .appendingPathComponent("combined.m4a")
 
-        // List and sort chunk files
+        // List and sort chunk files — accept both .m4a and .webm
         guard let chunkFiles = try? FileManager.default.contentsOfDirectory(at: chunksDirectory, includingPropertiesForKeys: nil)
-            .filter({ $0.lastPathComponent.hasPrefix("chunk_") && $0.pathExtension == "m4a" })
+            .filter({ $0.lastPathComponent.hasPrefix("chunk_") && ($0.pathExtension == "m4a" || $0.pathExtension == "webm") })
             .sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) else {
             call.reject("Could not list chunk files")
             return
@@ -326,94 +322,147 @@ public class BackgroundRecordingPlugin: CAPPlugin {
             return
         }
 
-        // Use AVMutableComposition to properly merge M4A/AAC chunks
-        let composition = AVMutableComposition()
-        guard let compositionTrack = composition.addMutableTrack(
-            withMediaType: .audio,
-            preferredTrackID: kCMPersistentTrackID_Invalid
-        ) else {
-            call.reject("Failed to create composition track")
-            return
-        }
+        // Detect format from the chunks found
+        let isWebM = chunkFiles.first?.pathExtension == "webm"
 
-        var insertTime = CMTime.zero
-        var loadedChunkCount = 0
+        if isWebM {
+            // WebM chunks: simple binary concatenation
+            // WebM chunks from the same MediaRecorder session can be concatenated because
+            // the first chunk contains the WebM/EBML header and subsequent chunks contain
+            // Cluster elements that append naturally.
+            let outputURL = documentsPath
+                .appendingPathComponent("recordings")
+                .appendingPathComponent(recordId)
+                .appendingPathComponent("combined.webm")
 
-        for chunkURL in chunkFiles {
-            let asset = AVURLAsset(url: chunkURL)
-            // Load tracks synchronously for background thread
-            let tracks = asset.tracks(withMediaType: .audio)
-            guard let assetTrack = tracks.first else {
-                NSLog("BackgroundRecording: Skipping corrupt chunk: \(chunkURL.lastPathComponent)")
-                continue
-            }
+            // Remove existing output file if present
+            try? FileManager.default.removeItem(at: outputURL)
 
-            let duration = asset.duration
             do {
-                try compositionTrack.insertTimeRange(
-                    CMTimeRange(start: .zero, duration: duration),
-                    of: assetTrack,
-                    at: insertTime
-                )
-                insertTime = CMTimeAdd(insertTime, duration)
-                loadedChunkCount += 1
+                FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+                let outputHandle = try FileHandle(forWritingTo: outputURL)
+                defer { outputHandle.closeFile() }
+
+                var loadedChunkCount = 0
+                for chunkURL in chunkFiles {
+                    let chunkData = try Data(contentsOf: chunkURL)
+                    outputHandle.write(chunkData)
+                    loadedChunkCount += 1
+                }
+
+                if loadedChunkCount == 0 {
+                    call.reject("Could not read any audio chunks")
+                    return
+                }
+
+                let fileSize = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? Int64) ?? 0
+                let relativePath = "recordings/\(recordId)/combined.webm"
+
+                call.resolve([
+                    "success": true,
+                    "outputPath": relativePath,
+                    "fileSize": fileSize,
+                    "chunkCount": loadedChunkCount
+                ])
             } catch {
-                NSLog("BackgroundRecording: Error inserting chunk \(chunkURL.lastPathComponent): \(error)")
-                continue
+                NSLog("BackgroundRecording: WebM combine failed: \(error)")
+                call.reject("Failed to combine WebM chunks: \(error.localizedDescription)")
             }
-        }
+        } else {
+            // M4A chunks: use AVMutableComposition for proper AAC merging
+            let outputURL = documentsPath
+                .appendingPathComponent("recordings")
+                .appendingPathComponent(recordId)
+                .appendingPathComponent("combined.m4a")
 
-        if loadedChunkCount == 0 {
-            call.reject("Could not read any audio chunks")
-            return
-        }
+            let composition = AVMutableComposition()
+            guard let compositionTrack = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ) else {
+                call.reject("Failed to create composition track")
+                return
+            }
 
-        // Remove existing output file if present
-        try? FileManager.default.removeItem(at: outputURL)
+            var insertTime = CMTime.zero
+            var loadedChunkCount = 0
 
-        // Export the composition as M4A
-        guard let exportSession = AVAssetExportSession(
-            asset: composition,
-            presetName: AVAssetExportPresetAppleM4A
-        ) else {
-            call.reject("Failed to create export session")
-            return
-        }
+            for chunkURL in chunkFiles {
+                let asset = AVURLAsset(url: chunkURL)
+                // Load tracks synchronously for background thread
+                let tracks = asset.tracks(withMediaType: .audio)
+                guard let assetTrack = tracks.first else {
+                    NSLog("BackgroundRecording: Skipping corrupt chunk: \(chunkURL.lastPathComponent)")
+                    continue
+                }
 
-        exportSession.outputURL = outputURL
-        exportSession.outputFileType = .m4a
+                let duration = asset.duration
+                do {
+                    try compositionTrack.insertTimeRange(
+                        CMTimeRange(start: .zero, duration: duration),
+                        of: assetTrack,
+                        at: insertTime
+                    )
+                    insertTime = CMTimeAdd(insertTime, duration)
+                    loadedChunkCount += 1
+                } catch {
+                    NSLog("BackgroundRecording: Error inserting chunk \(chunkURL.lastPathComponent): \(error)")
+                    continue
+                }
+            }
 
-        let semaphore = DispatchSemaphore(value: 0)
-        exportSession.exportAsynchronously {
-            semaphore.signal()
-        }
-        semaphore.wait()
+            if loadedChunkCount == 0 {
+                call.reject("Could not read any audio chunks")
+                return
+            }
 
-        switch exportSession.status {
-        case .completed:
-            // Get file size
-            let fileSize = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? Int64) ?? 0
+            // Remove existing output file if present
+            try? FileManager.default.removeItem(at: outputURL)
 
-            // Return relative path for Capacitor compatibility
-            let relativePath = "recordings/\(recordId)/combined.m4a"
+            // Export the composition as M4A
+            guard let exportSession = AVAssetExportSession(
+                asset: composition,
+                presetName: AVAssetExportPresetAppleM4A
+            ) else {
+                call.reject("Failed to create export session")
+                return
+            }
 
-            call.resolve([
-                "success": true,
-                "outputPath": relativePath,
-                "fileSize": fileSize,
-                "chunkCount": loadedChunkCount
-            ])
+            exportSession.outputURL = outputURL
+            exportSession.outputFileType = .m4a
 
-        case .failed:
-            let errorMsg = exportSession.error?.localizedDescription ?? "Export failed"
-            NSLog("BackgroundRecording: Export failed: \(errorMsg)")
-            call.reject("Failed to combine chunks: \(errorMsg)")
+            let semaphore = DispatchSemaphore(value: 0)
+            exportSession.exportAsynchronously {
+                semaphore.signal()
+            }
+            semaphore.wait()
 
-        case .cancelled:
-            call.reject("Export was cancelled")
+            switch exportSession.status {
+            case .completed:
+                // Get file size
+                let fileSize = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? Int64) ?? 0
 
-        default:
-            call.reject("Unexpected export status: \(exportSession.status.rawValue)")
+                // Return relative path for Capacitor compatibility
+                let relativePath = "recordings/\(recordId)/combined.m4a"
+
+                call.resolve([
+                    "success": true,
+                    "outputPath": relativePath,
+                    "fileSize": fileSize,
+                    "chunkCount": loadedChunkCount
+                ])
+
+            case .failed:
+                let errorMsg = exportSession.error?.localizedDescription ?? "Export failed"
+                NSLog("BackgroundRecording: Export failed: \(errorMsg)")
+                call.reject("Failed to combine chunks: \(errorMsg)")
+
+            case .cancelled:
+                call.reject("Export was cancelled")
+
+            default:
+                call.reject("Unexpected export status: \(exportSession.status.rawValue)")
+            }
         }
     }
 
