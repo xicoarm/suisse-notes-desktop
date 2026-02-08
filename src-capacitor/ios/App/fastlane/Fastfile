@@ -42,15 +42,9 @@ platform :ios do
       code_sign_identity: "Apple Distribution"
     )
 
-    # Increment build number based on App Store Connect (searches ALL versions)
-    # latest_testflight_build_number only searches within one version and returns
-    # stale values — use app_store_build_number with live: false instead
-    latest_build = app_store_build_number(
-      app_identifier: "ch.suissenotes.mobile",
-      initial_build_number: 0,
-      live: false
-    )
-    new_build = [latest_build, 28].max + 1
+    # Build number: use a timestamp-based approach to avoid collisions
+    # app_store_build_number returns stale values, causing duplicate uploads
+    new_build = Time.now.strftime("%y%m%d%H%M").to_i
 
     increment_build_number(
       build_number: new_build,
