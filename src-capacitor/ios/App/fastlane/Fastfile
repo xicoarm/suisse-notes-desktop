@@ -42,15 +42,15 @@ platform :ios do
       code_sign_identity: "Apple Distribution"
     )
 
-    # Increment build number based on TestFlight
-    # Use version: "latest" to search ALL versions, not just the current one
-    # (builds may be spread across different MARKETING_VERSION values)
-    latest_build = latest_testflight_build_number(
+    # Increment build number based on App Store Connect (searches ALL versions)
+    # latest_testflight_build_number only searches within one version and returns
+    # stale values — use app_store_build_number with live: false instead
+    latest_build = app_store_build_number(
       app_identifier: "ch.suissenotes.mobile",
       initial_build_number: 0,
-      version: "latest"
+      live: false
     )
-    new_build = [latest_build, 26].max + 1
+    new_build = [latest_build, 27].max + 1
 
     increment_build_number(
       build_number: new_build,
