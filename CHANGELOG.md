@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.34](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.33...v3.7.34) (2026-02-08)
+
+
+### Bug Fixes
+
+* bulletproof audio recording persistence across 10 files ([08726c8](https://github.com/xicoarm/suisse-notes-desktop/commit/08726c810b6da9dfd81d8c83afd08f5686589b7b))
+* bulletproof recording persistence with auto-retry and offline resilience ([874f9e2](https://github.com/xicoarm/suisse-notes-desktop/commit/874f9e2096447a62591835c1bdd536282194a585))
+* bump iOS TestFlight build number floor to 25 ([8cf3278](https://github.com/xicoarm/suisse-notes-desktop/commit/8cf327842b8e2f25fab5ac769e9cd08199bf4a79))
+* mobile CI - Android JVM target mismatch and iOS build number conflict ([9d667ed](https://github.com/xicoarm/suisse-notes-desktop/commit/9d667edef10d39bbb6956a99937e43b8335cbc28))
+* mobile CI - remove duplicate Java/Kotlin classes, fix iOS build floor ([e32b85f](https://github.com/xicoarm/suisse-notes-desktop/commit/e32b85fb2d1537cd55f415c8c077df7400d7f056))
+* mobile recording recovery with filesystem-based chunk detection ([42077dd](https://github.com/xicoarm/suisse-notes-desktop/commit/42077dd62daece109c19d3dbb93ee07a8c294183))
+* native M4A chunk combining, Android path alignment, and history status on failure ([e41601e](https://github.com/xicoarm/suisse-notes-desktop/commit/e41601e2ec84c6e0c6cfca48d033405bafbe44f1))
+* recording persistence with token refresh, background protection, and audio focus handling ([20084d0](https://github.com/xicoarm/suisse-notes-desktop/commit/20084d0ab12d5f4db3e5f3e67f3461221b66d2bc))
+* webm chunk combining, cold-start recovery, and Android foreground service ([5b0a39a](https://github.com/xicoarm/suisse-notes-desktop/commit/5b0a39a62b49288d727c7f0450ee63f266ef0b19))
+
 ### [3.7.33](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.32...v3.7.33) (2026-02-07)
 
 
