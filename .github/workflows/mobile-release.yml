@@ -32,10 +32,13 @@ jobs:
     steps:
       - name: Check if mobile build is needed
         id: check
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
-          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          # Use first line only for pattern matching (multi-line messages break [[ ]])
+          FIRST_LINE=$(echo "$COMMIT_MSG" | head -1)
           # Skip release version bumps (desktop-only) and [skip ci] commits
-          if [[ "$COMMIT_MSG" == *"[skip ci]"* ]] || [[ "$COMMIT_MSG" == chore\(release\):* ]]; then
+          if [[ "$FIRST_LINE" == *"[skip ci]"* ]] || [[ "$FIRST_LINE" == chore\(release\):* ]]; then
             echo "Skipping: commit is a release bump or has [skip ci]"
             echo "should_run=false" >> $GITHUB_OUTPUT
           else
