@@ -12,7 +12,7 @@
     "build": "quasar build -m electron",
     "build:ios": "quasar build -m capacitor -T ios",
     "build:android": "quasar build -m capacitor -T android",
-    "cap:sync": "cd src-capacitor && npx cap sync",
+    "cap:sync": "cd src-capacitor && npx cap sync && node -e \"const fs=require('fs'),p='ios/App/App/capacitor.config.json',c=JSON.parse(fs.readFileSync(p,'utf8'));if(!c.packageClassList)c.packageClassList=[];if(!c.packageClassList.includes('BackgroundRecordingPlugin')){c.packageClassList.push('BackgroundRecordingPlugin');fs.writeFileSync(p,JSON.stringify(c,null,'\\t'))}\"",
     "cap:open:ios": "cd src-capacitor && npx cap open ios",
     "cap:open:android": "cd src-capacitor && npx cap open android",
     "lint": "eslint --ext .js,.vue ./src",

@@ -180,6 +180,20 @@ jobs:
       - name: Sync Capacitor
         run: npm run cap:sync
 
+      - name: Register local iOS plugins
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = 'src-capacitor/ios/App/App/capacitor.config.json';
+            const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+            if (!c.packageClassList) c.packageClassList = [];
+            if (!c.packageClassList.includes('BackgroundRecordingPlugin')) {
+              c.packageClassList.push('BackgroundRecordingPlugin');
+              fs.writeFileSync(p, JSON.stringify(c, null, '\t'));
+              console.log('Added BackgroundRecordingPlugin to packageClassList');
+            }
+          "
+
       # Note: This project uses Swift Package Manager (SPM), not CocoaPods
 
       - name: Install Fastlane dependencies
