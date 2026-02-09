@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.35](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.34...v3.7.35) (2026-02-09)
+
+
+### Bug Fixes
+
+* add BackgroundRecordingPlugin to Xcode project build sources ([bfbf3c2](https://github.com/xicoarm/suisse-notes-desktop/commit/bfbf3c2b504764f376e3b1f24f4d1c0a3d851088))
+* bump iOS build number floor to 28 to avoid duplicate ([4df7cb9](https://github.com/xicoarm/suisse-notes-desktop/commit/4df7cb99ab8276638d94e8846d0cc20705273491))
+* mobile release check handles multi-line commit messages ([8d24a5d](https://github.com/xicoarm/suisse-notes-desktop/commit/8d24a5d35acf96ad47e368e0f1df346341557718))
+* recording duration always showing 00:00 on mobile ([9833b65](https://github.com/xicoarm/suisse-notes-desktop/commit/9833b653246e68c5a827e8fa793973f351d1ff47))
+* register BackgroundRecordingPlugin after cap sync ([038210e](https://github.com/xicoarm/suisse-notes-desktop/commit/038210e0ccecf0e23a81defc852c8c07c1af616d))
+* resolve Apple App Store review issues (crash + account deletion) ([b415394](https://github.com/xicoarm/suisse-notes-desktop/commit/b4153947ac8b3a6624c006341358aa70eca5ce2e))
+* search all TestFlight versions for latest build number ([a74c7ee](https://github.com/xicoarm/suisse-notes-desktop/commit/a74c7ee3845f167708fc1899d00e2334e763d846))
+* use app_store_build_number to search all versions ([80e82b3](https://github.com/xicoarm/suisse-notes-desktop/commit/80e82b3685cc424075b63cbe44c22d29039777ad))
+* use timestamp-based iOS build numbers to avoid collisions ([e5aec0e](https://github.com/xicoarm/suisse-notes-desktop/commit/e5aec0e44c99f5cd9f1bd0fd8f391a269291e623))
+
 ### [3.7.34](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.33...v3.7.34) (2026-02-08)
 
 
