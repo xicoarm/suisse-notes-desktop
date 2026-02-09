@@ -117,6 +117,8 @@ export default function (ctx) {
         },
         nsis: {
           oneClick: true,  // Silent auto-updates (no wizard prompts)
+          perMachine: false,  // Install per-user (no admin rights needed)
+          allowElevation: false,  // Prevent silent UAC relaunch that causes "nothing happens" on first run
           allowToChangeInstallationDirectory: false,  // Required for oneClick
           createDesktopShortcut: true,
           createStartMenuShortcut: true,
