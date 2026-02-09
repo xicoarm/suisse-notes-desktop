@@ -60,6 +60,25 @@
             @click="handleLogout"
           />
         </div>
+
+        <div class="setting-row danger-zone account-danger-zone">
+          <div class="setting-info">
+            <div class="setting-label danger-label">
+              {{ $t('deleteAccount') }}
+            </div>
+            <div class="setting-description">
+              {{ $t('deleteAccountWarning') }}
+            </div>
+          </div>
+          <q-btn
+            flat
+            color="negative"
+            :label="$t('deleteAccount')"
+            icon="person_remove"
+            :loading="isDeletingAccount"
+            @click="showDeleteAccountConfirmation = true"
+          />
+        </div>
       </div>
 
       <!-- Language Section -->
@@ -234,6 +253,62 @@
         </q-card>
       </q-dialog>
 
+      <!-- Delete Account Confirmation Dialog -->
+      <q-dialog
+        v-model="showDeleteAccountConfirmation"
+        persistent
+      >
+        <q-card class="delete-dialog">
+          <q-card-section class="dialog-header">
+            <q-icon
+              name="warning"
+              color="negative"
+              size="48px"
+            />
+            <div class="dialog-title">
+              {{ $t('deleteAccountTitle') }}
+            </div>
+          </q-card-section>
+
+          <q-card-section class="dialog-content">
+            <p><strong>{{ $t('deleteAccountWarning') }}</strong></p>
+            <p>{{ $t('deleteAccountMessage') }}</p>
+
+            <div class="confirm-input">
+              <p>{{ $t('deleteAccountConfirm') }}</p>
+              <q-input
+                v-model="deleteAccountConfirmText"
+                outlined
+                dense
+                placeholder="DELETE"
+                :error="deleteAccountConfirmText.length > 0 && deleteAccountConfirmText !== 'DELETE'"
+              />
+            </div>
+          </q-card-section>
+
+          <q-card-actions
+            align="right"
+            class="dialog-actions"
+          >
+            <q-btn
+              v-close-popup
+              flat
+              label="Cancel"
+              color="primary"
+              @click="deleteAccountConfirmText = ''"
+            />
+            <q-btn
+              flat
+              :label="$t('deleteAccountButton')"
+              color="negative"
+              :disable="deleteAccountConfirmText !== 'DELETE'"
+              :loading="isDeletingAccount"
+              @click="handleDeleteAccount"
+            />
+          </q-card-actions>
+        </q-card>
+      </q-dialog>
+
       <!-- About Section -->
       <div class="settings-section">
         <div class="section-title">
@@ -277,6 +352,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useQuasar } from 'quasar';
+import { useI18n } from 'vue-i18n';
 import { useConfigStore } from '../stores/config';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
@@ -285,6 +361,7 @@ import { useLanguage } from '../composables/useLanguage';
 import CustomVocabularyInput from '../components/CustomVocabularyInput.vue';
 
 const $q = useQuasar();
+const { t } = useI18n();
 const router = useRouter();
 const configStore = useConfigStore();
 const authStore = useAuthStore();
@@ -300,6 +377,11 @@ const storagePreference = ref('keep');
 const showDeleteConfirmation = ref(false);
 const deleteConfirmText = ref('');
 const isDeleting = ref(false);
+
+// Delete account state
+const showDeleteAccountConfirmation = ref(false);
+const deleteAccountConfirmText = ref('');
+const isDeletingAccount = ref(false);
 
 const recordingsCount = computed(() => historyStore.recordings.length);
 
@@ -385,6 +467,41 @@ const handleDeleteAll = async () => {
     });
   } finally {
     isDeleting.value = false;
+  }
+};
+
+const handleDeleteAccount = async () => {
+  if (deleteAccountConfirmText.value !== 'DELETE') return;
+
+  isDeletingAccount.value = true;
+  try {
+    const result = await authStore.deleteAccount();
+
+    if (result.success) {
+      showDeleteAccountConfirmation.value = false;
+      deleteAccountConfirmText.value = '';
+
+      $q.notify({
+        type: 'positive',
+        message: t('deleteAccountSuccess'),
+        icon: 'check_circle'
+      });
+
+      router.push('/login');
+    } else {
+      $q.notify({
+        type: 'negative',
+        message: result.error || t('deleteAccountError')
+      });
+    }
+  } catch (error) {
+    console.error('Error deleting account:', error);
+    $q.notify({
+      type: 'negative',
+      message: t('deleteAccountError')
+    });
+  } finally {
+    isDeletingAccount.value = false;
   }
 };
 
@@ -549,6 +666,15 @@ const handleLogout = async () => {
 }
 
 // Danger zone styling
+.settings-section .setting-row.account-danger-zone {
+  margin: 0 -24px -24px -24px;
+  border-top: 1px solid #fecaca;
+
+  @media (max-width: 600px) {
+    margin: 0 -16px -16px -16px;
+  }
+}
+
 .settings-section .setting-row.danger-zone {
   border-top: 1px solid #fecaca;
   border-bottom: none;

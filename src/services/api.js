@@ -58,7 +58,10 @@ export const API_ENDPOINTS = {
 
   // Custom Spelling
   customSpellingMerged: '/api/custom-spelling/merged',
-  customSpellingUser: '/api/custom-spelling/user'
+  customSpellingUser: '/api/custom-spelling/user',
+
+  // Account
+  deleteAccount: '/api/user/delete-account'
 };
 
 /**

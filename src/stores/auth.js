@@ -433,6 +433,35 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
+    async deleteAccount() {
+      const apiUrl = getApiUrlSync();
+      try {
+        const response = await fetch(`${apiUrl}${API_ENDPOINTS.deleteAccount}`, {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.token}`
+          }
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          return { success: false, error: data.error || data.message || 'Failed to delete account' };
+        }
+
+        // Account deleted successfully - clean up local state
+        await this.logout();
+        return { success: true };
+      } catch (error) {
+        console.error('Delete account error:', error);
+        if (error.message === 'Failed to fetch' || error.name === 'TypeError') {
+          return { success: false, error: 'Unable to connect to server. Please check your internet connection and try again.' };
+        }
+        return { success: false, error: error.message || 'An error occurred while deleting your account' };
+      }
+    },
+
     async logout() {
       // Stop token refresh timer
       this.stopTokenRefreshTimer();
