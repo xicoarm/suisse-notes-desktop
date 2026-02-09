@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.36](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.35...v3.7.36) (2026-02-09)
+
+
+### Bug Fixes
+
+* prevent Windows installer "nothing happens" on first run ([a40364d](https://github.com/xicoarm/suisse-notes-desktop/commit/a40364df5439b1bda9cd18320b96e808a065ed15))
+
 ### [3.7.35](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.34...v3.7.35) (2026-02-09)
 
 
