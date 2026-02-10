@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.37](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.36...v3.7.37) (2026-02-10)
+
+
+### Bug Fixes
+
+* use GH_PAT for macOS release upload to fix permission error ([4dcbe34](https://github.com/xicoarm/suisse-notes-desktop/commit/4dcbe3433f8e71077106f49536180f94a5e6cf41))
+
 ### [3.7.36](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.35...v3.7.36) (2026-02-09)
 
 
