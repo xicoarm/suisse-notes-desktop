@@ -905,7 +905,10 @@ onMounted(async () => {
   await loadMicrophones();
 
   // Load system audio state (desktop only - mobile doesn't support system audio capture)
-  if (isElectron()) {
+  // Skip when recording is active — the service already holds the correct state
+  // and useRecorder.onMounted restores it. Loading from config would overwrite it
+  // because config:getSystemAudioEnabled defaults to false each session.
+  if (isElectron() && !recordingStore.isRecording && !recordingStore.isPaused) {
     await loadSystemAudioState();
   }
 
