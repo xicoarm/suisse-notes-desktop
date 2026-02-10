@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.38](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.37...v3.7.38) (2026-02-10)
+
+
+### Bug Fixes
+
+* preserve system audio indicator when navigating back during recording ([2ad756f](https://github.com/xicoarm/suisse-notes-desktop/commit/2ad756fc21d7018c1ee74b5594183c0f5f3622f8))
+
 ### [3.7.37](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.36...v3.7.37) (2026-02-10)
 
 
