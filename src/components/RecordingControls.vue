@@ -43,7 +43,7 @@
         size="md"
         color="dark"
         icon="stop"
-        @click="confirmStop"
+        @click="showStopDialog = true"
       >
         <q-tooltip>Stop Recording</q-tooltip>
       </q-btn>
@@ -79,7 +79,7 @@
         size="md"
         color="dark"
         icon="stop"
-        @click="confirmStop"
+        @click="showStopDialog = true"
       >
         <q-tooltip>Stop Recording</q-tooltip>
       </q-btn>
@@ -106,44 +106,120 @@
         Paused
       </q-chip>
     </div>
+
+    <!-- Stop Recording Dialog -->
+    <q-dialog
+      v-model="showStopDialog"
+      persistent
+    >
+      <q-card style="min-width: 320px">
+        <q-card-section>
+          <div class="text-h6">
+            {{ t('stopRecordingTitle') }}
+          </div>
+        </q-card-section>
+
+        <q-card-section class="q-pt-none">
+          {{ t('stopRecordingMessage') }}
+        </q-card-section>
+
+        <q-card-actions
+          align="right"
+          class="q-px-md q-pb-md"
+        >
+          <q-btn
+            flat
+            :label="t('continueRecording')"
+            color="primary"
+            @click="showStopDialog = false"
+          />
+          <q-btn
+            unelevated
+            :label="t('endRecording')"
+            color="primary"
+            @click="handleEndRecording"
+          />
+          <q-btn
+            flat
+            :label="t('cancelAndDelete')"
+            color="negative"
+            icon="delete_forever"
+            @click="handleCancelClick"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Cancel Confirmation Dialog -->
+    <q-dialog
+      v-model="showCancelConfirm"
+      persistent
+    >
+      <q-card style="min-width: 320px">
+        <q-card-section>
+          <div class="text-h6">
+            {{ t('cancelRecordingTitle') }}
+          </div>
+        </q-card-section>
+
+        <q-card-section class="q-pt-none">
+          {{ t('cancelRecordingMessage') }}
+        </q-card-section>
+
+        <q-card-actions
+          align="right"
+          class="q-px-md q-pb-md"
+        >
+          <q-btn
+            flat
+            :label="t('cancel')"
+            color="primary"
+            @click="showCancelConfirm = false"
+          />
+          <q-btn
+            unelevated
+            :label="t('confirmCancelAndDelete')"
+            color="negative"
+            icon="delete_forever"
+            @click="handleConfirmCancel"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </div>
 </template>
 
 <script setup>
-import { useQuasar } from 'quasar';
+import { ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRecordingStore } from '../stores/recording';
 
-const $q = useQuasar();
 const { t } = useI18n();
 const recordingStore = useRecordingStore();
+
+const showStopDialog = ref(false);
+const showCancelConfirm = ref(false);
 
 const props = defineProps({
   audioLevel: { type: Number, default: 0 },
   isMicMuted: { type: Boolean, default: false }
 });
 
-const emit = defineEmits(['start', 'pause', 'resume', 'stop', 'toggleMute']);
+const emit = defineEmits(['start', 'pause', 'resume', 'stop', 'cancel', 'toggleMute']);
 
-const confirmStop = () => {
-  $q.dialog({
-    title: t('stopRecordingTitle'),
-    message: t('stopRecordingMessage'),
-    ok: {
-      label: t('endRecording'),
-      color: 'negative',
-      flat: false,
-      unelevated: true
-    },
-    cancel: {
-      label: t('continueRecording'),
-      color: 'primary',
-      flat: true
-    },
-    persistent: true
-  }).onOk(() => {
-    emit('stop');
-  });
+const handleEndRecording = () => {
+  showStopDialog.value = false;
+  emit('stop');
+};
+
+const handleCancelClick = () => {
+  showStopDialog.value = false;
+  showCancelConfirm.value = true;
+};
+
+const handleConfirmCancel = () => {
+  showCancelConfirm.value = false;
+  emit('cancel');
 };
 </script>
 

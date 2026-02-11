@@ -288,7 +288,7 @@ export const useRecordingStore = defineStore('recording', {
 
           if (result.success) {
             this.audioFilePath = result.outputPath;
-            return { success: true, filePath: result.outputPath, warning: result.warning };
+            return { success: true, filePath: result.outputPath, duration: result.duration || null, warning: result.warning };
           } else {
             throw new Error(result.error || 'Failed to combine recording chunks');
           }
@@ -297,9 +297,9 @@ export const useRecordingStore = defineStore('recording', {
           const result = await this.combineChunksNative();
           if (result.success) {
             this.audioFilePath = result.outputPath;
-            // Use native-reported duration as fallback if JS timer duration is 0
+            // Always prefer native-reported duration over JS timer
             const nativeDuration = result.duration || null;
-            if (nativeDuration && (!this.duration || this.duration === 0)) {
+            if (nativeDuration) {
               this.duration = nativeDuration;
             }
             return { success: true, filePath: result.outputPath, fileSize: result.fileSize, duration: nativeDuration };
