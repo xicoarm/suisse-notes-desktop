@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.40](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.39...v3.7.40) (2026-02-11)
+
+
+### Bug Fixes
+
+* cancel upload now actually aborts the request and shows confirmation dialog ([2981a7a](https://github.com/xicoarm/suisse-notes-desktop/commit/2981a7a3c5bf499f01a503c3b6ba438fa239f3e2))
+* mic health monitoring with separate analyzer and deduplicated warnings ([23c5acb](https://github.com/xicoarm/suisse-notes-desktop/commit/23c5acb48cf882f1c86eecf135dbccfe30ae2c59))
+* monitor actual recording stream for volume indicator and detect voice-less recordings ([49c1438](https://github.com/xicoarm/suisse-notes-desktop/commit/49c14387ffbd387ef98638a862aa180b20484cc6))
+* stop/cancel dialogs, native duration preference, and capacitor version sync ([4fc891a](https://github.com/xicoarm/suisse-notes-desktop/commit/4fc891a54d308a28662a65a6739da90c9c08e60b))
+
 ### [3.7.39](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.38...v3.7.39) (2026-02-11)
 
 
