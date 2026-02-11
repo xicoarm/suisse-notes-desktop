@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.41](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.40...v3.7.41) (2026-02-11)
+
+
+### Bug Fixes
+
+* minutes badge mobile production readiness — 7 bug fixes ([46de7c0](https://github.com/xicoarm/suisse-notes-desktop/commit/46de7c00ce2e2c4bf3452f6a8313ecbe68500ce7))
+
 ### [3.7.40](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.39...v3.7.40) (2026-02-11)
 
 
