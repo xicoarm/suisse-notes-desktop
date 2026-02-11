@@ -238,9 +238,25 @@
 
           <!-- Audio Level Meter -->
           <div class="level-section">
+            <div class="mic-health-row">
+              <div class="mic-health-label">
+                <q-icon
+                  name="mic"
+                  size="16px"
+                  :color="micHealthBadgeColor"
+                />
+                <span>{{ $t('micInputStatus') }}</span>
+              </div>
+              <q-badge :color="micHealthBadgeColor">
+                {{ micHealthBadgeText }}
+              </q-badge>
+            </div>
+            <div class="mic-health-message">
+              {{ micHealthMessage }}
+            </div>
             <AudioLevelMeter
               :level="audioLevel"
-              :label="systemAudioEnabled ? $t('microphone') : 'Audio Level'"
+              :label="$t('recordedSignal')"
             />
           </div>
 
@@ -258,9 +274,27 @@
             />
           </div>
 
-          <!-- P0 Data Loss Fix: Silence Warning Display -->
           <div
-            v-if="silenceWarning"
+            v-if="showMicCriticalBanner"
+            class="critical-section"
+          >
+            <q-banner
+              class="critical-banner"
+              rounded
+            >
+              <template #avatar>
+                <q-icon
+                  name="warning"
+                  color="negative"
+                />
+              </template>
+              {{ micHealthMessage }}
+            </q-banner>
+          </div>
+
+          <!-- P0 Data Loss Fix: Silence Warning Display (hidden when critical banner already shows the message) -->
+          <div
+            v-if="silenceWarning && !showMicCriticalBanner"
             class="warning-section"
           >
             <q-banner
@@ -296,9 +330,9 @@
             </q-banner>
           </div>
 
-          <!-- Microphone Capture Error Warning -->
+          <!-- Microphone Capture Error Warning (hidden when critical banner already shows the failure) -->
           <div
-            v-if="micCaptureError"
+            v-if="micCaptureError && !showMicCriticalBanner"
             class="warning-section"
           >
             <q-banner
@@ -736,6 +770,9 @@ const {
   systemAudioCaptureError,
   // Microphone capture error (e.g., mic in use by another app)
   micCaptureError,
+  recordingHealth,
+  isMicHealthy,
+  recordingHealthMessage,
   // Minutes limit tracking
   minutesLimitWarning,
   minutesLimitReached,
@@ -769,6 +806,42 @@ const isMac = computed(() => {
 const showMacPermissionNotice = computed(() => {
   return isMac.value && systemAudioPermissionStatus.value !== 'granted' && systemAudioEnabled.value;
 });
+
+const micHealthStatus = computed(() => recordingHealth.value?.status || 'ok');
+
+const micHealthBadgeColor = computed(() => {
+  if (micHealthStatus.value === 'critical') return 'negative';
+  if (micHealthStatus.value === 'degraded') return 'warning';
+  return 'positive';
+});
+
+const micHealthBadgeText = computed(() => {
+  if (micHealthStatus.value === 'critical') return t('micHealthCritical');
+  if (micHealthStatus.value === 'degraded') return t('micHealthDegraded');
+  return t('micHealthOk');
+});
+
+const micHealthMessage = computed(() => {
+  const reasonCode = recordingHealth.value?.reasonCode || null;
+  switch (reasonCode) {
+    case 'no_audio_detected':
+      return t('micHealthNoAudio');
+    case 'no_voice_detected':
+      return t('micHealthNoVoice');
+    case 'mic_capture_failed':
+      return t('micHealthCaptureFailed');
+    case 'track_ended':
+      return t('micHealthTrackEnded');
+    case 'system_audio_only':
+      return t('micHealthSystemOnly');
+    case 'monitoring_error':
+      return t('micHealthMonitoringError');
+    default:
+      return recordingHealthMessage.value || t('micHealthReady');
+  }
+});
+
+const showMicCriticalBanner = computed(() => micHealthStatus.value === 'critical');
 
 // Auto-save countdown for dead recordings
 const autoSaveCountdown = ref(0);
@@ -849,6 +922,7 @@ const statusText = computed(() => {
   if (isProcessing.value) return 'Processing...';
   if (isAutoUploading.value) return retryAttempt.value > 0 ? `Retrying upload (${retryAttempt.value})...` : 'Uploading...';
   if (uploadError.value) return 'Upload failed';
+  if (recordingStore.isRecording && !isMicHealthy.value) return t('micHealthStatusIssue');
 
   switch (recordingStore.status) {
     case 'idle': return 'Ready to record';
@@ -1931,8 +2005,38 @@ const removeSessionWord = (word) => {
   gap: 12px;
 }
 
+.mic-health-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mic-health-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.mic-health-message {
+  font-size: 11px;
+  color: #64748b;
+}
+
 .controls-section {
   text-align: center;
+}
+
+.critical-section {
+  margin-top: 20px;
+
+  .critical-banner {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.25);
+    color: #991b1b;
+  }
 }
 
 .warning-section {
@@ -2529,6 +2633,14 @@ const removeSessionWord = (word) => {
 
   .system-audio-indicator .indicator-text {
     font-size: 13px;
+  }
+
+  .mic-health-label {
+    font-size: 13px;
+  }
+
+  .mic-health-message {
+    font-size: 12px;
   }
 
   .upload-content {

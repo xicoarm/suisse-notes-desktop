@@ -1,4 +1,4 @@
-import { ref, onUnmounted, onMounted } from 'vue';
+import { ref, computed, onUnmounted, onMounted } from 'vue';
 import { useRecordingStore } from '../stores/recording';
 import { useAuthStore } from '../stores/auth';
 import { useMinutesStore } from '../stores/minutes';
@@ -45,6 +45,9 @@ export function useRecorder() {
   const micCaptureError = ref(null);
   const isAutoSplitting = ref(false);
   const isMicMuted = ref(false);
+  const recordingHealth = ref(recordingService.getMicHealthState());
+  const isMicHealthy = computed(() => recordingHealth.value?.status === 'ok');
+  const recordingHealthMessage = computed(() => recordingHealth.value?.message || null);
 
   // Minutes limit tracking
   const minutesLimitWarning = ref(null); // Number of minutes remaining when warning triggered
@@ -113,6 +116,10 @@ export function useRecorder() {
 
   const handleMicError = (message) => {
     micCaptureError.value = message;
+  };
+
+  const handleHealthChange = (health) => {
+    recordingHealth.value = health;
   };
 
   // Recording death handler (desktop) - recording service detected MediaRecorder death
@@ -241,6 +248,9 @@ export function useRecorder() {
     recordingService.addEventListener('systemAudioError', handleSystemAudioError);
     recordingService.addEventListener('micError', handleMicError);
     recordingService.addEventListener('recordingDead', handleRecordingDead);
+    recordingService.addEventListener('healthChange', handleHealthChange);
+    recordingService.addEventListener('criticalWarning', handleHealthChange);
+    recordingService.addEventListener('healthRecovered', handleHealthChange);
 
     // Set up visibility and beforeunload handlers
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -251,6 +261,7 @@ export function useRecorder() {
     audioLevel.value = state.audioLevel;
     silenceWarning.value = state.silenceWarning;
     isMicMuted.value = state.micMuted;
+    recordingHealth.value = state.recordingHealth || recordingService.getMicHealthState();
 
     // Restore system audio toggle state from recording service when recording is active
     if (state.isActive || state.isRecording || state.isPaused) {
@@ -296,6 +307,9 @@ export function useRecorder() {
     recordingService.removeEventListener('systemAudioError', handleSystemAudioError);
     recordingService.removeEventListener('micError', handleMicError);
     recordingService.removeEventListener('recordingDead', handleRecordingDead);
+    recordingService.removeEventListener('healthChange', handleHealthChange);
+    recordingService.removeEventListener('criticalWarning', handleHealthChange);
+    recordingService.removeEventListener('healthRecovered', handleHealthChange);
 
     // Remove visibility and beforeunload handlers
     document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -325,6 +339,9 @@ export function useRecorder() {
     silenceWarning,
     systemAudioCaptureError,
     micCaptureError,
+    recordingHealth,
+    isMicHealthy,
+    recordingHealthMessage,
     minutesLimitWarning,
     minutesLimitReached,
     minutesStore,
