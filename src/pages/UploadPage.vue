@@ -780,9 +780,8 @@ const confirmAndStartUpload = async () => {
     await startUpload(currentFilePath.value, currentFileSize.value, currentFilename.value, currentDuration.value);
   }
 
-  // Clear preview state after starting upload
+  // Clear preview UI but keep selectedFile for retry
   hasSelectedFile.value = false;
-  selectedFile.value = null;
 };
 
 const startUpload = async (filePath, fileSize, filename, duration) => {
@@ -875,11 +874,16 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
         message: 'File uploaded successfully'
       });
     } else {
-      uploadError.value = uploadResult.error;
-      $q.notify({
-        type: 'negative',
-        message: uploadResult.error || 'Upload failed'
-      });
+      const errMsg = uploadResult.error || 'Upload failed';
+      const isMinutesError = /insufficient|minutes|credit|balance/i.test(errMsg);
+      if (isMinutesError) {
+        uploadError.value = t('insufficientMinutesUpload');
+        minutesStore.syncWithServer(authStore.token).catch(() => {});
+        $q.notify({ type: 'warning', message: t('insufficientMinutesUpload'), icon: 'schedule', timeout: 8000 });
+      } else {
+        uploadError.value = errMsg;
+        $q.notify({ type: 'negative', message: errMsg });
+      }
     }
   } catch (error) {
     isUploading.value = false;
@@ -965,11 +969,16 @@ const startMobileUpload = async (file, fileSize, filename) => {
         message: 'File uploaded successfully'
       });
     } else {
-      uploadError.value = uploadResult.error;
-      $q.notify({
-        type: 'negative',
-        message: uploadResult.error || 'Upload failed'
-      });
+      const errMsg = uploadResult.error || 'Upload failed';
+      const isMinutesError = /insufficient|minutes|credit|balance/i.test(errMsg);
+      if (isMinutesError) {
+        uploadError.value = t('insufficientMinutesUpload');
+        minutesStore.syncWithServer(authStore.token).catch(() => {});
+        $q.notify({ type: 'warning', message: t('insufficientMinutesUpload'), icon: 'schedule', timeout: 8000 });
+      } else {
+        uploadError.value = errMsg;
+        $q.notify({ type: 'negative', message: errMsg });
+      }
     }
   } catch (error) {
     isUploading.value = false;

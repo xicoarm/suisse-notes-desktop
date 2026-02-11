@@ -212,6 +212,7 @@ const messages = {
 
     // Minutes / Trial Credits
     trialCredits: 'Trial Credits',
+    unlimited: 'Unlimited',
     minutesRemaining: '{minutes} remaining',
     hoursRemaining: '{hours}h {minutes}m remaining',
     noMinutesRemaining: 'No credits remaining',
@@ -219,6 +220,7 @@ const messages = {
     minutesLimitWarning: 'Only {minutes} minute(s) of recording time left',
     minutesLimitReached: 'Recording time limit reached. Saving your recording...',
     insufficientMinutes: 'Insufficient credits for this file',
+    insufficientMinutesUpload: 'Not enough recording minutes. Visit app.suisse-notes.ch to upgrade your plan.',
     fileTooLong: 'This file is {duration} min, but you only have {remaining} min remaining',
     contactSalesTitle: 'Trial Credits Used',
     contactSalesSubtitle: 'Contact our sales team to continue using Suisse Notes',
@@ -451,6 +453,7 @@ const messages = {
 
     // Minutes / Trial Credits
     trialCredits: 'Testguthaben',
+    unlimited: 'Unbegrenzt',
     minutesRemaining: '{minutes} verbleibend',
     hoursRemaining: '{hours} Std. {minutes} Min. verbleibend',
     noMinutesRemaining: 'Kein Guthaben mehr',
@@ -458,6 +461,7 @@ const messages = {
     minutesLimitWarning: 'Nur noch {minutes} Minute(n) Aufnahmezeit',
     minutesLimitReached: 'Zeitlimit erreicht. Aufnahme wird gespeichert...',
     insufficientMinutes: 'Unzureichendes Guthaben für diese Datei',
+    insufficientMinutesUpload: 'Nicht genug Aufnahmeminuten. Besuchen Sie app.suisse-notes.ch, um Ihr Abo zu upgraden.',
     fileTooLong: 'Diese Datei ist {duration} Min., aber Sie haben nur noch {remaining} Min.',
     contactSalesTitle: 'Testguthaben aufgebraucht',
     contactSalesSubtitle: 'Kontaktieren Sie unser Vertriebsteam, um Suisse Notes weiter zu nutzen',
@@ -690,6 +694,7 @@ const messages = {
 
     // Minutes / Trial Credits
     trialCredits: 'Crédits d\'essai',
+    unlimited: 'Illimité',
     minutesRemaining: '{minutes} restantes',
     hoursRemaining: '{hours}h {minutes}m restantes',
     noMinutesRemaining: 'Plus de crédits',
@@ -697,6 +702,7 @@ const messages = {
     minutesLimitWarning: 'Seulement {minutes} minute(s) d\'enregistrement restantes',
     minutesLimitReached: 'Limite de temps atteinte. Sauvegarde en cours...',
     insufficientMinutes: 'Crédits insuffisants pour ce fichier',
+    insufficientMinutesUpload: 'Pas assez de minutes d\'enregistrement. Visitez app.suisse-notes.ch pour mettre à niveau.',
     fileTooLong: 'Ce fichier fait {duration} min, mais il vous reste seulement {remaining} min',
     contactSalesTitle: 'Crédits d\'essai épuisés',
     contactSalesSubtitle: 'Contactez notre équipe commerciale pour continuer à utiliser Suisse Notes',
@@ -929,6 +935,7 @@ const messages = {
 
     // Minutes / Trial Credits
     trialCredits: 'Crediti di prova',
+    unlimited: 'Illimitato',
     minutesRemaining: '{minutes} rimanenti',
     hoursRemaining: '{hours}h {minutes}m rimanenti',
     noMinutesRemaining: 'Nessun credito rimanente',
@@ -936,6 +943,7 @@ const messages = {
     minutesLimitWarning: 'Solo {minutes} minuto/i di registrazione rimanenti',
     minutesLimitReached: 'Limite di tempo raggiunto. Salvataggio in corso...',
     insufficientMinutes: 'Crediti insufficienti per questo file',
+    insufficientMinutesUpload: 'Minuti di registrazione insufficienti. Visita app.suisse-notes.ch per aggiornare il tuo piano.',
     fileTooLong: 'Questo file è di {duration} min, ma hai solo {remaining} min rimanenti',
     contactSalesTitle: 'Crediti di prova esauriti',
     contactSalesSubtitle: 'Contatta il nostro team vendite per continuare a utilizzare Suisse Notes',

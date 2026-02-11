@@ -106,7 +106,8 @@ const mobileAuth = {
         return {
           success: true,
           token: data.token,
-          user: data.user || { email: username, name: username }
+          user: data.user || { email: username, name: username },
+          minutes: data.minutes || null
         };
       }
 
@@ -349,11 +350,18 @@ export const useAuthStore = defineStore('auth', {
           // Start proactive token refresh
           this.startTokenRefreshTimer();
 
-          // Fetch user's minutes balance
+          // Set minutes from login response (avoids extra API call)
           const minutesStore = useMinutesStore();
-          minutesStore.fetchMinutes(result.token).catch(err => {
-            console.warn('Failed to fetch minutes on login:', err);
-          });
+          if (result.minutes) {
+            minutesStore.setFromServer(result.minutes);
+          } else {
+            // Fallback: fetch separately if not in login response
+            minutesStore.fetchMinutes(result.token).catch(err => {
+              console.warn('Failed to fetch minutes on login:', err);
+            });
+          }
+          // Start auto-refresh every 60s
+          minutesStore.startAutoRefresh(() => this.token);
 
           return { success: true };
         } else {
@@ -414,11 +422,13 @@ export const useAuthStore = defineStore('auth', {
           // Start proactive token refresh
           this.startTokenRefreshTimer();
 
-          // Fetch user's minutes balance (new users get 60 free minutes)
+          // Fetch minutes balance (new users get 180 free minutes)
           const minutesStore = useMinutesStore();
           minutesStore.fetchMinutes(result.token).catch(err => {
             console.warn('Failed to fetch minutes on register:', err);
           });
+          // Start auto-refresh every 60s
+          minutesStore.startAutoRefresh(() => this.token);
 
           return { success: true };
         } else {
@@ -510,11 +520,12 @@ export const useAuthStore = defineStore('auth', {
           // Start proactive token refresh for existing session
           this.startTokenRefreshTimer();
 
-          // Fetch user's minutes balance
+          // Fetch minutes balance and start auto-refresh
           const minutesStore = useMinutesStore();
           minutesStore.fetchMinutes(token).catch(err => {
             console.warn('Failed to fetch minutes on session restore:', err);
           });
+          minutesStore.startAutoRefresh(() => this.token);
         } else if (token) {
           console.warn('Token found but no user info - requiring re-login');
           await auth.clearToken();

@@ -47,6 +47,7 @@ export const API_ENDPOINTS = {
   userSettings: '/api/user/settings',
 
   // Minutes
+  desktopMinutes: '/api/desktop/minutes',
   userMinutes: '/api/user/minutes',
   consumeMinutes: '/api/user/minutes/consume',
 
@@ -252,12 +253,12 @@ export const authenticatedRequest = async (endpoint, token, options = {}) => {
 };
 
 /**
- * Get user's remaining minutes
+ * Get user's remaining minutes from the desktop-specific endpoint
  * @param {string} token - Authentication token
- * @returns {Promise<{freeMinutes: number, bonusMinutes: number, usedMinutes: number, remainingMinutes: number}>}
+ * @returns {Promise<{remaining: number, unlimited: boolean, total: number, used: number}>}
  */
 export const getUserMinutes = async (token) => {
-  const response = await authenticatedRequest(API_ENDPOINTS.userMinutes, token);
+  const response = await authenticatedRequest(API_ENDPOINTS.desktopMinutes, token);
   if (!response.ok) {
     const data = await response.json();
     throw new Error(data.error || 'Failed to fetch minutes');

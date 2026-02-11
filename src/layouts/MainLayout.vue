@@ -189,18 +189,21 @@
         <!-- Right Section: Language + User Menu -->
         <div class="header-right">
           <template v-if="authStore.isAuthenticated">
-            <!-- Trial Credits / Minutes Display -->
+            <!-- Minutes Display -->
             <div
               v-if="!minutesStore.loading"
               class="minutes-chip"
-              :class="{ 'low-minutes': minutesStore.remainingMinutes <= 10, 'no-minutes': minutesStore.remainingMinutes <= 0 }"
+              :class="minutesBadgeClass"
               @click="goTo('/record')"
             >
               <q-icon
-                name="schedule"
+                :name="minutesStore.unlimited ? 'all_inclusive' : 'schedule'"
                 size="14px"
               />
               <span class="minutes-value">{{ formattedRemainingTime }}</span>
+              <q-tooltip v-if="!minutesStore.unlimited">
+                {{ Math.round(minutesStore.remainingMinutes) }} {{ $t('minutesRemaining') }}
+              </q-tooltip>
             </div>
 
             <!-- Language Switcher - Compact Dropdown -->
@@ -355,11 +358,11 @@
     <div
       v-if="isMobile() && authStore.isAuthenticated && !recordingStore.isRecording && !recordingStore.isPaused && !minutesStore.loading"
       class="mobile-minutes-indicator"
-      :class="{ 'low-minutes': minutesStore.remainingMinutes <= 10, 'no-minutes': minutesStore.remainingMinutes <= 0 }"
+      :class="minutesBadgeClass"
       @click="goTo('/record')"
     >
       <q-icon
-        name="schedule"
+        :name="minutesStore.unlimited ? 'all_inclusive' : 'schedule'"
         size="14px"
       />
       <span>{{ formattedRemainingTime }}</span>
@@ -441,6 +444,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useQuasar } from 'quasar';
+import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingStore } from '../stores/recording';
 import { useMinutesStore } from '../stores/minutes';
@@ -449,6 +453,7 @@ import { isElectron, isMobile, isCapacitor } from '../utils/platform';
 import { useLanguage } from '../composables/useLanguage';
 
 const $q = useQuasar();
+const { t } = useI18n();
 const authStore = useAuthStore();
 const recordingStore = useRecordingStore();
 const minutesStore = useMinutesStore();
@@ -461,15 +466,24 @@ const currentTab = ref('record');
 const isMaximized = ref(false);
 const isOffline = ref(!navigator.onLine);
 
-// Formatted remaining time for display - simple "X Min." format
+// Formatted remaining time for display
 const formattedRemainingTime = computed(() => {
+  if (minutesStore.unlimited) {
+    return t('unlimited') || 'Unlimited';
+  }
   const totalMinutes = minutesStore.remainingMinutes;
-
   if (totalMinutes <= 0) {
     return '0 Min.';
   }
-
   return `${Math.round(totalMinutes)} Min.`;
+});
+
+// CSS class for minutes badge based on state
+const minutesBadgeClass = computed(() => {
+  if (minutesStore.unlimited) return 'unlimited-minutes';
+  if (minutesStore.remainingMinutes <= 0) return 'no-minutes';
+  if (minutesStore.remainingMinutes <= 30) return 'low-minutes';
+  return '';
 });
 
 // Offline tracking handlers
@@ -793,6 +807,12 @@ onUnmounted(() => {
     font-weight: 600;
   }
 
+  &.unlimited-minutes {
+    background: rgba(16, 185, 129, 0.08);
+    border-color: rgba(16, 185, 129, 0.2);
+    color: #059669;
+  }
+
   &.low-minutes {
     background: rgba(245, 158, 11, 0.1);
     border-color: rgba(245, 158, 11, 0.3);
@@ -803,7 +823,13 @@ onUnmounted(() => {
     background: rgba(239, 68, 68, 0.1);
     border-color: rgba(239, 68, 68, 0.3);
     color: #dc2626;
+    animation: pulse-no-minutes 2s ease-in-out infinite;
   }
+}
+
+@keyframes pulse-no-minutes {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
 }
 
 // User Menu

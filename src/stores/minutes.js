@@ -1,24 +1,29 @@
 /**
- * Minutes Store - Manages user's free/bonus transcription minutes
+ * Minutes Store - Manages user's transcription minutes balance
  *
- * This store tracks:
- * - freeMinutes: Initial free minutes (60 for new users)
- * - bonusMinutes: Admin-assigned bonus minutes
- * - usedMinutes: Total minutes consumed
- * - remainingMinutes: Available minutes for recording
+ * Tracks the server-provided minutes shape:
+ * - remaining: Minutes left (or -1 for unlimited)
+ * - unlimited: Whether user has unlimited minutes (enterprise)
+ * - total: Total allocated minutes (or -1 for unlimited)
+ * - used: Total minutes consumed
+ *
+ * Auto-refreshes every 60 seconds while authenticated.
  */
 
 import { defineStore } from 'pinia';
-import { getUserMinutes } from '../services/api';
+import { authenticatedRequest, API_ENDPOINTS } from '../services/api';
 
-// Cache duration for minutes data (1 hour)
-const CACHE_DURATION_MS = 60 * 60 * 1000;
+// Auto-refresh interval (60 seconds)
+const REFRESH_INTERVAL_MS = 60 * 1000;
+
+let refreshTimer = null;
 
 export const useMinutesStore = defineStore('minutes', {
   state: () => ({
-    freeMinutes: 0,
-    bonusMinutes: 0,
-    usedMinutes: 0,
+    remaining: 0,
+    unlimited: false,
+    total: 0,
+    used: 0,
     loading: false,
     error: null,
     lastFetchedAt: null
@@ -26,63 +31,70 @@ export const useMinutesStore = defineStore('minutes', {
 
   getters: {
     /**
-     * Total available minutes (free + bonus - used)
+     * Remaining minutes for display (0 if unlimited, clamped to 0 minimum)
      */
     remainingMinutes: (state) => {
-      const remaining = state.freeMinutes + state.bonusMinutes - state.usedMinutes;
-      return Math.max(0, remaining);
+      if (state.unlimited) return Infinity;
+      return Math.max(0, state.remaining);
     },
 
     /**
-     * Remaining minutes converted to seconds (for recording limit)
+     * Remaining seconds (for recording limit checks)
      */
     remainingSeconds: (state) => {
-      const remaining = state.freeMinutes + state.bonusMinutes - state.usedMinutes;
-      return Math.max(0, Math.floor(remaining * 60));
+      if (state.unlimited) return Infinity;
+      return Math.max(0, Math.floor(state.remaining * 60));
     },
 
     /**
-     * Whether user has any minutes remaining
+     * Whether user has any minutes remaining (always true for unlimited)
      */
     hasMinutesRemaining: (state) => {
-      const remaining = state.freeMinutes + state.bonusMinutes - state.usedMinutes;
-      return remaining > 0;
+      if (state.unlimited) return true;
+      return state.remaining > 0;
     },
 
     /**
-     * Check if cached data is still valid
-     */
-    isCacheValid: (state) => {
-      if (!state.lastFetchedAt) return false;
-      return Date.now() - state.lastFetchedAt < CACHE_DURATION_MS;
-    },
-
-    /**
-     * Total minutes allocated (free + bonus)
+     * Total allocated minutes
      */
     totalMinutes: (state) => {
-      return state.freeMinutes + state.bonusMinutes;
+      if (state.unlimited) return Infinity;
+      return state.total;
     },
 
     /**
-     * Usage percentage (0-100)
+     * Usage percentage (0-100), 0 for unlimited users
      */
     usagePercentage: (state) => {
-      const total = state.freeMinutes + state.bonusMinutes;
-      if (total === 0) return 100;
-      return Math.min(100, (state.usedMinutes / total) * 100);
+      if (state.unlimited || state.total <= 0) return 0;
+      return Math.min(100, (state.used / state.total) * 100);
     }
   },
 
   actions: {
     /**
-     * Fetch user's minutes from the server
+     * Set minutes data directly from a server response (login or refresh).
+     * Also restarts the auto-refresh timer.
+     * @param {{ remaining: number, unlimited: boolean, total: number, used: number }} data
+     */
+    setFromServer(data) {
+      if (!data) return;
+      this.remaining = data.remaining ?? 0;
+      this.unlimited = data.unlimited ?? false;
+      this.total = data.total ?? 0;
+      this.used = data.used ?? 0;
+      this.lastFetchedAt = Date.now();
+      this.error = null;
+    },
+
+    /**
+     * Fetch minutes from the server via GET /api/desktop/minutes
      * @param {string} token - Auth token
-     * @param {boolean} force - Force refresh even if cache is valid
+     * @param {boolean} force - Force refresh even if recently fetched
      */
     async fetchMinutes(token, force = false) {
-      // Skip if cache is valid and not forcing refresh
-      if (!force && this.isCacheValid) {
+      // Skip if fetched within the last 10 seconds and not forcing
+      if (!force && this.lastFetchedAt && (Date.now() - this.lastFetchedAt < 10000)) {
         return { success: true, cached: true };
       }
 
@@ -95,13 +107,34 @@ export const useMinutesStore = defineStore('minutes', {
       this.error = null;
 
       try {
-        const data = await getUserMinutes(token);
-
-        this.freeMinutes = data.freeMinutes || 0;
-        this.bonusMinutes = data.bonusMinutes || 0;
-        this.usedMinutes = data.usedMinutes || 0;
-        this.lastFetchedAt = Date.now();
-
+        const response = await authenticatedRequest(API_ENDPOINTS.desktopMinutes, token);
+        if (!response.ok) {
+          // Handle 401 — attempt token refresh and retry once
+          if (response.status === 401) {
+            try {
+              const { useAuthStore } = await import('./auth');
+              const authStore = useAuthStore();
+              const refreshResult = await authStore.handleAuthError();
+              if (refreshResult.success) {
+                const retryResponse = await authenticatedRequest(API_ENDPOINTS.desktopMinutes, authStore.token);
+                if (retryResponse.ok) {
+                  const retryData = await retryResponse.json();
+                  this.setFromServer(retryData);
+                  return { success: true };
+                }
+              }
+              if (refreshResult.shouldLogout) {
+                return { success: false, error: 'Session expired' };
+              }
+            } catch (refreshErr) {
+              console.warn('Token refresh failed during fetchMinutes:', refreshErr);
+            }
+          }
+          const data = await response.json();
+          throw new Error(data.error || 'Failed to fetch minutes');
+        }
+        const data = await response.json();
+        this.setFromServer(data);
         return { success: true };
       } catch (error) {
         console.error('Failed to fetch minutes:', error);
@@ -113,17 +146,41 @@ export const useMinutesStore = defineStore('minutes', {
     },
 
     /**
-     * Update minutes after recording (optimistic update)
-     * Server will deduct actual minutes after transcription
-     * @param {number} durationSeconds - Recording duration in seconds
+     * Start auto-refresh polling (every 60 seconds)
+     * @param {Function} getToken - Function that returns the current auth token
      */
-    deductMinutesLocally(durationSeconds) {
-      const minutesToDeduct = durationSeconds / 60;
-      this.usedMinutes += minutesToDeduct;
+    startAutoRefresh(getToken) {
+      this.stopAutoRefresh();
+      refreshTimer = setInterval(async () => {
+        // Skip fetch when app is backgrounded or offline to avoid wasted requests
+        try {
+          const { useRecordingStore } = await import('./recording');
+          const recordingStore = useRecordingStore();
+          if (recordingStore.appInBackground || !recordingStore.networkConnected) return;
+        } catch {
+          // Fallback for desktop: check document visibility and navigator.onLine
+          if (document.hidden || !navigator.onLine) return;
+        }
+
+        const token = typeof getToken === 'function' ? getToken() : getToken;
+        if (token) {
+          await this.fetchMinutes(token, true);
+        }
+      }, REFRESH_INTERVAL_MS);
     },
 
     /**
-     * Sync with server after transcription completes
+     * Stop auto-refresh polling
+     */
+    stopAutoRefresh() {
+      if (refreshTimer) {
+        clearInterval(refreshTimer);
+        refreshTimer = null;
+      }
+    },
+
+    /**
+     * Sync with server (force refresh)
      * @param {string} token - Auth token
      */
     async syncWithServer(token) {
@@ -136,6 +193,7 @@ export const useMinutesStore = defineStore('minutes', {
      * @returns {boolean}
      */
     canRecordFor(durationSeconds) {
+      if (this.unlimited) return true;
       return this.remainingSeconds >= durationSeconds;
     },
 
@@ -144,6 +202,7 @@ export const useMinutesStore = defineStore('minutes', {
      * @returns {number} Maximum seconds user can record
      */
     getMaxRecordingDuration() {
+      if (this.unlimited) return Infinity;
       return this.remainingSeconds;
     },
 
@@ -151,22 +210,14 @@ export const useMinutesStore = defineStore('minutes', {
      * Reset store state (on logout)
      */
     reset() {
-      this.freeMinutes = 0;
-      this.bonusMinutes = 0;
-      this.usedMinutes = 0;
+      this.stopAutoRefresh();
+      this.remaining = 0;
+      this.unlimited = false;
+      this.total = 0;
+      this.used = 0;
       this.loading = false;
       this.error = null;
       this.lastFetchedAt = null;
-    },
-
-    /**
-     * Set minutes data directly (for testing or initialization)
-     */
-    setMinutes({ freeMinutes, bonusMinutes, usedMinutes }) {
-      if (freeMinutes !== undefined) this.freeMinutes = freeMinutes;
-      if (bonusMinutes !== undefined) this.bonusMinutes = bonusMinutes;
-      if (usedMinutes !== undefined) this.usedMinutes = usedMinutes;
-      this.lastFetchedAt = Date.now();
     }
   }
 });

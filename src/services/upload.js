@@ -23,6 +23,9 @@ const MOBILE_UPLOAD_QUEUE_TMP_KEY = MOBILE_UPLOAD_QUEUE_KEY + '_tmp';
 // Re-entry guard for processMobileUploadQueue
 let isProcessingMobileQueue = false;
 
+// Staleness threshold: 7 days
+const QUEUE_ITEM_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
 /**
  * Safely write queue to localStorage using write-ahead pattern (V12)
  * Writes to _tmp first, then overwrites main key
@@ -159,15 +162,22 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
     }
   }
 
-  let i = 0;
-  while (i < queue.length) {
-    const item = queue[i];
-
-    if (item.retries >= MAX_QUEUE_RETRIES) {
+  // Purge stale items (older than 7 days) and items that exceeded max retries
+  for (let j = queue.length - 1; j >= 0; j--) {
+    const item = queue[j];
+    const isStale = item.addedAt && (Date.now() - item.addedAt > QUEUE_ITEM_MAX_AGE_MS);
+    if (isStale || item.retries >= MAX_QUEUE_RETRIES) {
+      console.warn(`Removing expired queue item ${item.recordId} (retries: ${item.retries}, age: ${item.addedAt ? Math.round((Date.now() - item.addedAt) / 86400000) + 'd' : 'unknown'})`);
+      removeFromMobileUploadQueue(item.recordId);
       failed++;
-      i++;
-      continue;
     }
+  }
+
+  // Re-read queue after purge
+  const activeQueue = getMobileUploadQueue();
+  let i = 0;
+  while (i < activeQueue.length) {
+    const item = activeQueue[i];
 
     try {
       const result = await uploadWithVerification({
@@ -238,7 +248,7 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
     }
   }
 
-  return { processed: queue.length, succeeded, failed };
+  return { processed: activeQueue.length, succeeded, failed };
   } finally {
     isProcessingMobileQueue = false;
   }

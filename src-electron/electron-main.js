@@ -1198,7 +1198,8 @@ ipcMain.handle('auth:login', async (event, email, password) => {
       return {
         success: true,
         token: response.data.token,
-        user: response.data.user
+        user: response.data.user,
+        minutes: response.data.minutes || null
       };
     } else if (response.data && response.data.error) {
       return {
@@ -2583,6 +2584,20 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
           error: errorMessage,
           status: 401,
           canRetry: false
+        };
+      }
+
+      // Check for insufficient minutes (402/403 with minutes error) - don't retry these
+      if (error.response && (error.response.status === 402 ||
+          (error.response.data?.error && /insufficient|minutes|credit|balance/i.test(error.response.data.error)))) {
+        const errorMessage = error.response.data?.error || 'Insufficient minutes';
+        log.warn('Upload failed due to insufficient minutes:', errorMessage);
+        return {
+          success: false,
+          error: errorMessage,
+          status: error.response.status,
+          canRetry: false,
+          insufficientMinutes: true
         };
       }
 

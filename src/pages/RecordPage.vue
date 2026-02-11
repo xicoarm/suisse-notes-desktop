@@ -1084,6 +1084,12 @@ const handleStartClick = async () => {
   uploadError.value = null;
   retryAttempt.value = 0;
 
+  // Sync minutes with server before checking (3s timeout, fallback to cached)
+  await Promise.race([
+    minutesStore.syncWithServer(authStore.token),
+    new Promise((_, reject) => setTimeout(() => reject(), 3000))
+  ]).catch(() => {});
+
   // Check if user has minutes remaining
   if (!minutesStore.hasMinutesRemaining) {
     // Show contact sales dialog instead of starting recording
@@ -1449,6 +1455,23 @@ const handleUploadError = async (errorMessage) => {
     uploadStatus: 'failed',
     uploadError: errorMessage
   });
+
+  // Detect insufficient minutes errors BEFORE queuing for retry (would never succeed)
+  const isMinutesError = errorMessage &&
+    /insufficient|minutes|credit|balance/i.test(errorMessage);
+
+  if (isMinutesError) {
+    // Refresh minutes to update the header badge
+    minutesStore.syncWithServer(authStore.token).catch(() => {});
+    uploadError.value = t('insufficientMinutesUpload');
+    $q.notify({
+      type: 'warning',
+      message: t('insufficientMinutesUpload'),
+      icon: 'schedule',
+      timeout: 8000
+    });
+    return;
+  }
 
   // On mobile, add to persistent upload queue for automatic retry
   if (isCapacitor() && currentFilePath.value) {

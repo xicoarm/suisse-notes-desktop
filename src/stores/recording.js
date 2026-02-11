@@ -123,6 +123,18 @@ export const useRecordingStore = defineStore('recording', {
           },
           onForeground: async () => {
             this.appInBackground = false;
+            // Refresh minutes balance when returning to foreground
+            try {
+              const { useMinutesStore } = await import('./minutes');
+              const { useAuthStore } = await import('./auth');
+              const minutesStore = useMinutesStore();
+              const authStore = useAuthStore();
+              if (authStore.token) {
+                minutesStore.fetchMinutes(authStore.token, true).catch(() => {});
+              }
+            } catch (e) {
+              console.warn('Could not refresh minutes on foreground:', e);
+            }
             // Check for recovery needs when coming back
             await this._processRecovery('foreground');
           },
