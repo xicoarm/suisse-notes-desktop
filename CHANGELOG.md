@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.39](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.38...v3.7.39) (2026-02-11)
+
+
+### Bug Fixes
+
+* decouple mic and system audio capture so one failing doesn't block the other ([c2fd3ad](https://github.com/xicoarm/suisse-notes-desktop/commit/c2fd3ad86bb652bed9842c6ae411706aca4f5ca7))
+
 ### [3.7.38](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.37...v3.7.38) (2026-02-10)
 
 
