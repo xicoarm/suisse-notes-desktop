@@ -26,7 +26,7 @@ export const pickAudioFile = async () => {
     return new Promise((resolve) => {
       const input = document.createElement('input');
       input.type = 'file';
-      input.accept = 'audio/*,.mp3,.mp4,.wav,.m4a,.webm,.ogg,.flac,.aac,.mov';
+      input.accept = '.mp3,.mp4,.wav,.m4a,.webm,.ogg,.flac,.aac,.mov,.m4v,.mpeg,.mpga,.opus,.oga,.wma,.amr,.3gp,.avi,.mkv';
 
       input.onchange = async (e) => {
         const file = e.target.files?.[0];

@@ -23,7 +23,7 @@
             v-if="isMobile"
             ref="mobileCardFileInput"
             type="file"
-            accept="audio/*,.mp3,.mp4,.wav,.m4a,.webm,.ogg,.flac,.aac,.mov"
+            accept=".mp3,.mp4,.wav,.m4a,.webm,.ogg,.flac,.aac,.mov,.m4v,.mpeg,.mpga,.opus,.oga,.wma,.amr,.3gp,.avi,.mkv"
             class="mobile-card-file-input"
             @click="() => console.log('File input clicked!')"
             @change="handleMobileFileSelect"
@@ -64,7 +64,7 @@
               <input
                 ref="mobileFileInput"
                 type="file"
-                accept="audio/*,.mp3,.mp4,.wav,.m4a,.webm,.ogg,.flac,.aac,.mov"
+                accept=".mp3,.mp4,.wav,.m4a,.webm,.ogg,.flac,.aac,.mov,.m4v,.mpeg,.mpga,.opus,.oga,.wma,.amr,.3gp,.avi,.mkv"
                 class="mobile-file-input"
                 @change="handleMobileFileSelect"
               >

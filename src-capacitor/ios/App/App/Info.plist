@@ -56,6 +56,9 @@
 	<!-- Microphone Permission -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Suisse Notes needs access to your microphone to record meetings and conversations for transcription.</string>
+	<!-- Camera Permission (required by iOS when file picker shows "Take Video" option) -->
+	<key>NSCameraUsageDescription</key>
+	<string>Suisse Notes may use the camera if you choose to record a video for transcription.</string>
 	<!-- Bluetooth Permission (for Bluetooth headsets/microphones) -->
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Suisse Notes uses Bluetooth to connect to wireless microphones and headsets for high-quality audio recording.</string>
