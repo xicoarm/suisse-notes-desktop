@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.42](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.41...v3.7.42) (2026-02-11)
+
+
+### Bug Fixes
+
+* prevent iOS crash when file picker shows "Take Video" option ([51c5cd5](https://github.com/xicoarm/suisse-notes-desktop/commit/51c5cd54516b10154c6060aab2d5eb23c07cd799))
+* reframe minutes/credits language as enterprise-managed for Apple Guideline 3.1.3(c) ([5da454b](https://github.com/xicoarm/suisse-notes-desktop/commit/5da454b4cb178bd974fd5fff64a90bfbe08870d7))
+* upload error feedback UX and no-microphone warning ([019e0a7](https://github.com/xicoarm/suisse-notes-desktop/commit/019e0a76dbce7b6b4f12662802096da86ba0b093))
+
 ### [3.7.41](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.40...v3.7.41) (2026-02-11)
 
 
