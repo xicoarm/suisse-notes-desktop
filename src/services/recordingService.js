@@ -151,8 +151,10 @@ function createMixingPipeline(micStream, sysStream) {
   });
   const dest = ctx.createMediaStreamDestination();
 
-  micSourceNode = ctx.createMediaStreamSource(micStream);
-  micSourceNode.connect(dest);
+  if (micStream) {
+    micSourceNode = ctx.createMediaStreamSource(micStream);
+    micSourceNode.connect(dest);
+  }
 
   if (sysStream) {
     systemSourceNode = ctx.createMediaStreamSource(sysStream);
@@ -524,11 +526,26 @@ export async function startRecording(options = {}) {
     maxRecordingSeconds = null
   } = options;
 
+  let sysStream = null;
   try {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error('Microphone access is not available.');
     }
 
+    // Capture system audio first (independent of mic)
+    if (systemAudioEnabled && captureSystemAudio) {
+      try {
+        sysStream = await captureSystemAudio();
+      } catch (e) {
+        console.warn('Could not capture system audio:', e);
+        emit('systemAudioError', e.message || 'System audio capture failed');
+      }
+      if (!sysStream) {
+        emit('systemAudioError', 'System audio capture returned no stream');
+      }
+    }
+
+    // Capture microphone
     const audioConstraints = {
       echoCancellation: true,
       noiseSuppression: true,
@@ -539,9 +556,21 @@ export async function startRecording(options = {}) {
       audioConstraints.deviceId = { exact: deviceId };
     }
 
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: audioConstraints
-    });
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: audioConstraints
+      });
+    } catch (micError) {
+      if (sysStream) {
+        // Mic failed but system audio is available — continue without mic
+        console.warn('Microphone capture failed, continuing with system audio only:', micError);
+        emit('micError', micError.message || 'Microphone capture failed');
+        stream = null;
+      } else {
+        // Both mic and system audio unavailable — rethrow
+        throw micError;
+      }
+    }
 
     // Start recording session in store (pass userId for multi-account handling)
     const userId = authStore?.user?.id || null;
@@ -552,16 +581,6 @@ export async function startRecording(options = {}) {
 
     // Reset mute state for new recording
     micMuted = false;
-
-    // Capture system audio if enabled
-    let sysStream = null;
-    if (systemAudioEnabled && captureSystemAudio) {
-      try {
-        sysStream = await captureSystemAudio();
-      } catch (e) {
-        console.warn('Could not capture system audio:', e);
-      }
-    }
 
     // Always use mixing pipeline so system audio can be added/removed dynamically
     const recordingStream = createMixingPipeline(stream, sysStream);
@@ -656,8 +675,10 @@ export async function startRecording(options = {}) {
     // P0 Data Loss Fix: Reduced from 5s to 3s to minimize crash data loss (V8)
     mediaRecorder.start(3000);
 
-    // Start monitoring
-    startLevelMonitoring(stream, recordingStore);
+    // Start monitoring (only if mic stream exists — no level meter without mic)
+    if (stream) {
+      startLevelMonitoring(stream, recordingStore);
+    }
     startDurationTracking(recordingStore, isAutoSplitting, maxRecordingSeconds);
 
     // Show notification on Android
@@ -704,6 +725,11 @@ export async function startRecording(options = {}) {
     if (stream) {
       stream.getTracks().forEach(track => track.stop());
       stream = null;
+    }
+
+    // Clean up system audio if it was captured before the error
+    if (sysStream) {
+      sysStream.getTracks().forEach(track => track.stop());
     }
 
     let errorMessage = error.message;

@@ -41,6 +41,7 @@ export function useRecorder() {
   // Reactive refs for UI binding (synced with service)
   const audioLevel = ref(0);
   const silenceWarning = ref(null);
+  const systemAudioCaptureError = ref(null);
   const isAutoSplitting = ref(false);
   const isMicMuted = ref(false);
 
@@ -105,6 +106,10 @@ export function useRecorder() {
     systemAudioEnabled.value = active;
   };
 
+  const handleSystemAudioError = (message) => {
+    systemAudioCaptureError.value = message;
+  };
+
   // Recording death handler (desktop) - recording service detected MediaRecorder death
   const handleRecordingDead = (data) => {
     console.warn('Recording dead event from service:', data);
@@ -151,6 +156,7 @@ export function useRecorder() {
     // Reset limit tracking state
     minutesLimitWarning.value = null;
     minutesLimitReached.value = false;
+    systemAudioCaptureError.value = null;
 
     // Use user's remaining minutes as max duration if not specified
     const maxSeconds = maxRecordingSeconds ?? minutesStore.remainingSeconds;
@@ -221,6 +227,7 @@ export function useRecorder() {
     recordingService.addEventListener('limitReached', handleLimitReached);
     recordingService.addEventListener('micMuteChange', handleMicMuteChange);
     recordingService.addEventListener('systemAudioChange', handleSystemAudioChange);
+    recordingService.addEventListener('systemAudioError', handleSystemAudioError);
     recordingService.addEventListener('recordingDead', handleRecordingDead);
 
     // Set up visibility and beforeunload handlers
@@ -274,6 +281,7 @@ export function useRecorder() {
     recordingService.removeEventListener('limitReached', handleLimitReached);
     recordingService.removeEventListener('micMuteChange', handleMicMuteChange);
     recordingService.removeEventListener('systemAudioChange', handleSystemAudioChange);
+    recordingService.removeEventListener('systemAudioError', handleSystemAudioError);
     recordingService.removeEventListener('recordingDead', handleRecordingDead);
 
     // Remove visibility and beforeunload handlers
@@ -302,6 +310,7 @@ export function useRecorder() {
     systemAudioEnabled,
     systemAudioPermissionStatus: permissionStatus,
     silenceWarning,
+    systemAudioCaptureError,
     minutesLimitWarning,
     minutesLimitReached,
     minutesStore,

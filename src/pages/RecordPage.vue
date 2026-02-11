@@ -275,6 +275,25 @@
             </q-banner>
           </div>
 
+          <!-- System Audio Capture Error Warning -->
+          <div
+            v-if="systemAudioCaptureError"
+            class="warning-section"
+          >
+            <q-banner
+              class="warning-banner"
+              rounded
+            >
+              <template #avatar>
+                <q-icon
+                  name="volume_off"
+                  color="warning"
+                />
+              </template>
+              {{ $t('systemAudioCaptureError') }}
+            </q-banner>
+          </div>
+
           <!-- P0 Data Loss Fix: Chunk Save Failure Warning (V1/V7) -->
           <div
             v-if="recordingStore.chunkSaveErrorWarning"
@@ -690,6 +709,8 @@ const {
   systemAudioPermissionStatus,
   // P0 Data Loss Fix: Silence detection warning
   silenceWarning,
+  // System audio capture error
+  systemAudioCaptureError,
   // Minutes limit tracking
   minutesLimitWarning,
   minutesLimitReached,

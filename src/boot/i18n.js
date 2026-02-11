@@ -16,6 +16,7 @@ const messages = {
     systemAudioEnabled: 'System audio will be captured',
     systemAudioOff: 'System audio off',
     macPermissionNotice: 'macOS requires "Screen Recording" permission to capture system audio. No video is recorded.',
+    systemAudioCaptureError: 'Could not capture system audio. Only microphone will be recorded.',
 
     // Recording states
     readyToRecord: 'Ready to record',
@@ -233,6 +234,7 @@ const messages = {
     systemAudioEnabled: 'Systemaudio wird aufgenommen',
     systemAudioOff: 'Systemaudio aus',
     macPermissionNotice: 'macOS benötigt die Berechtigung "Bildschirmaufnahme" für Systemaudio. Es wird kein Video aufgenommen.',
+    systemAudioCaptureError: 'Systemaudio konnte nicht aufgenommen werden. Nur das Mikrofon wird aufgenommen.',
 
     // Recording states
     readyToRecord: 'Bereit zur Aufnahme',
@@ -450,6 +452,7 @@ const messages = {
     systemAudioEnabled: "L'audio système sera capturé",
     systemAudioOff: 'Audio système désactivé',
     macPermissionNotice: "macOS nécessite l'autorisation « Enregistrement de l'écran » pour capturer l'audio système. Aucune vidéo n'est enregistrée.",
+    systemAudioCaptureError: "Impossible de capturer l'audio système. Seul le microphone sera enregistré.",
 
     // Recording states
     readyToRecord: "Prêt à enregistrer",
@@ -667,6 +670,7 @@ const messages = {
     systemAudioEnabled: "L'audio di sistema verrà catturato",
     systemAudioOff: 'Audio di sistema disattivato',
     macPermissionNotice: 'macOS richiede il permesso "Registrazione schermo" per catturare l\'audio di sistema. Non viene registrato alcun video.',
+    systemAudioCaptureError: "Impossibile catturare l'audio di sistema. Verrà registrato solo il microfono.",
 
     // Recording states
     readyToRecord: 'Pronto per registrare',
