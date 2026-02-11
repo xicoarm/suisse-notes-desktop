@@ -28,6 +28,7 @@
               @pause="handlePause"
               @resume="handleResume"
               @stop="handleStop"
+              @cancel="handleCancel"
             />
           </div>
 
@@ -252,6 +253,7 @@
               @pause="handlePause"
               @resume="handleResume"
               @stop="handleStop"
+              @cancel="handleCancel"
               @toggle-mute="toggleMicMute"
             />
           </div>
@@ -683,6 +685,8 @@ import { useRecorder } from '../composables/useRecorder';
 import { isElectron, isCapacitor } from '../utils/platform';
 import { uploadWithVerification } from '../services/upload';
 import { getApiUrlSync } from '../services/api';
+import { stopStorageMonitor } from '../services/storageMonitor';
+import { setRecordingActive } from '../boot/lifecycle';
 import { useAuthStore } from '../stores/auth';
 import ModeTabSwitcher from '../components/ModeTabSwitcher.vue';
 import TranscriptionOptions from '../components/TranscriptionOptions.vue';
@@ -722,6 +726,7 @@ const {
   pauseRecording,
   resumeRecording,
   stopRecording,
+  cancelRecording,
   toggleSystemAudioDuringRecording,
   toggleMicMute
 } = useRecorder();
@@ -948,9 +953,8 @@ onMounted(async () => {
     isAutoUploading.value = true;
     isProcessing.value = false;
   } else if (recordingStore.status === 'uploaded') {
-    // This was a recording upload - restore the UI state
-    isAutoUploading.value = false;
-    isProcessing.value = false;
+    // Recording already finished — reset to idle so the user sees a fresh Record tab
+    recordingStore.reset();
   }
 
   // Set up upload listeners (Electron only)
@@ -1090,8 +1094,8 @@ const handleStop = async () => {
         });
       }
 
-      // Use native duration as fallback if JS timer gave 0
-      if ((!finalDuration.value || finalDuration.value === 0) && result.duration) {
+      // Always prefer actual audio duration (from ffprobe/native) over JS timer
+      if (result.duration) {
         recordingStore.setFinalDuration(result.duration);
       }
 
@@ -1153,6 +1157,65 @@ const handleStop = async () => {
       type: 'negative',
       message: error.message || 'Error processing recording'
     });
+  }
+};
+
+const handleCancel = async () => {
+  try {
+    // Stop recording service (cleanup streams, timers) without combining chunks
+    await cancelRecording();
+
+    // Stop storage monitoring and lifecycle tracking
+    stopStorageMonitor();
+    setRecordingActive(false);
+
+    const recordId = recordingStore.recordId;
+
+    // Delete recording chunks from disk
+    if (isElectron() && recordId) {
+      try {
+        await window.electronAPI.recording.deleteRecording(recordId);
+      } catch (e) {
+        console.warn('Failed to delete recording files:', e);
+      }
+    } else if (isCapacitor() && recordId) {
+      try {
+        const storage = await import('../services/storage');
+        await storage.deleteDirectory(`recordings/${recordId}`);
+      } catch (e) {
+        console.warn('Failed to delete recording files:', e);
+      }
+    }
+
+    // Remove from history
+    if (recordId) {
+      try {
+        await historyStore.deleteRecording(recordId, true);
+      } catch (e) {
+        // Entry may not exist yet, that's ok
+      }
+    }
+
+    // Reset all state
+    recordingStore.reset();
+    isProcessing.value = false;
+    isAutoUploading.value = false;
+    uploadError.value = null;
+    retryAttempt.value = 0;
+    currentFilePath.value = '';
+    currentFileSize.value = 0;
+
+    $q.notify({
+      type: 'info',
+      message: t('recordingCancelled'),
+      timeout: 3000
+    });
+  } catch (error) {
+    console.error('Error cancelling recording:', error);
+    // Force reset even on error
+    recordingStore.reset();
+    isProcessing.value = false;
+    isAutoUploading.value = false;
   }
 };
 
@@ -1395,8 +1458,8 @@ const handleSaveDeadRecording = async () => {
         timeout: 8000
       });
 
-      // Use native duration as fallback if JS timer gave 0
-      if ((!finalDuration.value || finalDuration.value === 0) && result.duration) {
+      // Always prefer actual audio duration (from ffprobe/native) over JS timer
+      if (result.duration) {
         recordingStore.setFinalDuration(result.duration);
       }
 
@@ -1494,48 +1557,56 @@ const startNewWhileUploading = () => {
   recordingStore.finalDuration = 0;
 };
 
-// Cancel the current upload
-const cancelUpload = async () => {
-  try {
-    if (recordingStore.recordId && isElectron()) {
-      await window.electronAPI.upload.cancel(recordingStore.recordId);
-    }
-
-    // On mobile, cancel the active XHR upload
-    if (recordingStore.recordId && isCapacitor()) {
-      try {
-        const { cancelUpload: cancelMobileUpload } = await import('../services/upload');
-        await cancelMobileUpload(recordingStore.recordId);
-      } catch (e) {
-        console.warn('Could not cancel mobile upload:', e);
+// Cancel the current upload (with confirmation dialog)
+const cancelUpload = () => {
+  $q.dialog({
+    title: t('cancelUploadTitle'),
+    message: t('cancelUploadConfirm'),
+    cancel: { flat: true, label: t('cancel') },
+    ok: { color: 'negative', label: t('confirmCancelUpload') },
+    persistent: true
+  }).onOk(async () => {
+    try {
+      if (recordingStore.recordId && isElectron()) {
+        await window.electronAPI.upload.cancel(recordingStore.recordId);
       }
+
+      // On mobile, cancel the active XHR upload
+      if (recordingStore.recordId && isCapacitor()) {
+        try {
+          const { cancelUpload: cancelMobileUpload } = await import('../services/upload');
+          await cancelMobileUpload(recordingStore.recordId);
+        } catch (e) {
+          console.warn('Could not cancel mobile upload:', e);
+        }
+      }
+
+      // Update history entry to pending so it's not stuck on 'uploading'
+      if (recordingStore.recordId) {
+        await historyStore.updateRecording(recordingStore.recordId, { uploadStatus: 'pending' });
+      }
+
+      // Reset UI state
+      isProcessing.value = false;
+      isAutoUploading.value = false;
+      uploadError.value = null;
+      retryAttempt.value = 0;
+
+      // Reset store
+      recordingStore.status = 'idle';
+      recordingStore.uploadProgress = 0;
+      recordingStore.bytesUploaded = 0;
+      recordingStore.bytesTotal = 0;
+      recordingStore.error = null;
+
+      $q.notify({
+        type: 'info',
+        message: t('cancelUpload')
+      });
+    } catch (error) {
+      console.error('Error cancelling upload:', error);
     }
-
-    // Update history entry to pending so it's not stuck on 'uploading'
-    if (recordingStore.recordId) {
-      await historyStore.updateRecording(recordingStore.recordId, { uploadStatus: 'pending' });
-    }
-
-    // Reset UI state
-    isProcessing.value = false;
-    isAutoUploading.value = false;
-    uploadError.value = null;
-    retryAttempt.value = 0;
-
-    // Reset store
-    recordingStore.status = 'idle';
-    recordingStore.uploadProgress = 0;
-    recordingStore.bytesUploaded = 0;
-    recordingStore.bytesTotal = 0;
-    recordingStore.error = null;
-
-    $q.notify({
-      type: 'info',
-      message: 'Upload cancelled'
-    });
-  } catch (error) {
-    console.error('Error cancelling upload:', error);
-  }
+  });
 };
 
 const generateTranscriptUrl = async () => {

@@ -624,6 +624,11 @@ if (app.isPackaged) {
 // Active uploads map for pause/resume/cancel
 const activeUploads = new Map();
 
+// AbortControllers for axios-based uploads (used by upload:cancel)
+const activeAbortControllers = new Map();
+// Track recordIds that were cancelled so we suppress post-cancel completion events
+const cancelledUploads = new Set();
+
 // Track if upload is in progress to prevent window close
 let isUploadInProgress = false;
 let pendingUploadsCount = 0;
@@ -1936,17 +1941,27 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
             await fs.promises.rm(chunksPath, { recursive: true, force: true });
           }
 
+          // Get actual audio duration via ffprobe
+          let audioDuration = 0;
+          try {
+            const metadata = await getAudioMetadata(outputPath);
+            audioDuration = Math.round(parseFloat(metadata.format.duration) || 0);
+          } catch (e) {
+            console.warn('Could not get audio duration for single session:', e.message);
+          }
+
           // Clear active recording state - successfully combined
           clearActiveRecording();
 
           // Update metadata.json with completion info
-          updateRecordingMetadataOnCompletion(validRecordId, 0, true);
+          updateRecordingMetadataOnCompletion(validRecordId, audioDuration, true);
 
           return {
             success: true,
             outputPath,
             filename: outputFile,
-            fileSizeMb: (singleSessionValidation.size / (1024 * 1024)).toFixed(2)
+            fileSizeMb: (singleSessionValidation.size / (1024 * 1024)).toFixed(2),
+            duration: audioDuration
           };
         }
 
@@ -2000,6 +2015,15 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           return { success: false, error: `Output validation failed: ${multiSessionValidation.error}` };
         }
 
+        // Get actual audio duration via ffprobe
+        let multiAudioDuration = 0;
+        try {
+          const metadata = await getAudioMetadata(outputPath);
+          multiAudioDuration = Math.round(parseFloat(metadata.format.duration) || 0);
+        } catch (e) {
+          console.warn('Could not get audio duration for multi session:', e.message);
+        }
+
         await fs.promises.rm(sessionsPath, { recursive: true, force: true });
         if (fs.existsSync(chunksPath)) {
           await fs.promises.rm(chunksPath, { recursive: true, force: true });
@@ -2009,13 +2033,14 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
         clearActiveRecording();
 
         // Update metadata.json with completion info
-        updateRecordingMetadataOnCompletion(validRecordId, 0, true);
+        updateRecordingMetadataOnCompletion(validRecordId, multiAudioDuration, true);
 
         return {
           success: true,
           outputPath,
           filename: outputFile,
-          fileSizeMb: (multiSessionValidation.size / (1024 * 1024)).toFixed(2)
+          fileSizeMb: (multiSessionValidation.size / (1024 * 1024)).toFixed(2),
+          duration: multiAudioDuration
         };
       }
     }
@@ -2046,6 +2071,15 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           return { success: false, error: `Output validation failed: ${directConcatValidation.error}` };
         }
 
+        // Get actual audio duration via ffprobe
+        let directAudioDuration = 0;
+        try {
+          const metadata = await getAudioMetadata(outputPath);
+          directAudioDuration = Math.round(parseFloat(metadata.format.duration) || 0);
+        } catch (e) {
+          console.warn('Could not get audio duration for direct concat:', e.message);
+        }
+
         // Cleanup
         await fs.promises.rm(chunksPath, { recursive: true, force: true });
 
@@ -2053,13 +2087,14 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
         clearActiveRecording();
 
         // Update metadata.json with completion info
-        updateRecordingMetadataOnCompletion(validRecordId, 0, true);
+        updateRecordingMetadataOnCompletion(validRecordId, directAudioDuration, true);
 
         return {
           success: true,
           outputPath,
           filename: outputFile,
           fileSizeMb: (directConcatValidation.size / (1024 * 1024)).toFixed(2),
+          duration: directAudioDuration,
           warning: sequenceCheck.message || undefined
         };
       }
@@ -2322,6 +2357,11 @@ async function pollServerStatus(audioFileId, maxAttempts = 15) {
 async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
   const retryDelays = [0, 2000, 5000, 10000]; // Exponential backoff
 
+  // Create an AbortController so upload:cancel can abort this request
+  const abortController = new AbortController();
+  activeAbortControllers.set(recordId, abortController);
+
+  try {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     // Define progress tracking variables at loop scope so catch block can access them
     let progressInterval = null;
@@ -2449,7 +2489,8 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
         },
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
-        timeout: uploadTimeout  // Dynamic timeout based on file size
+        timeout: uploadTimeout,  // Dynamic timeout based on file size
+        signal: abortController.signal
       });
       log.info('Upload response received:', response.status);
 
@@ -2517,6 +2558,13 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
       }
     } catch (error) {
       stopProgressUpdates();
+
+      // If the upload was cancelled via AbortController, exit immediately
+      if (abortController.signal.aborted) {
+        log.info(`Upload cancelled for ${recordId}`);
+        return { success: false, error: 'Upload cancelled', cancelled: true, canRetry: false };
+      }
+
       log.error(`Upload attempt ${attempt + 1} failed:`, {
         message: error.message,
         code: error.code,
@@ -2570,6 +2618,10 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
   }
 
   return { success: false, error: 'Upload failed after all retry attempts', canRetry: true };
+  } finally {
+    // Always clean up the abort controller
+    activeAbortControllers.delete(recordId);
+  }
 }
 
 ipcMain.handle('upload:start', async (event, params) => {
@@ -2588,11 +2640,20 @@ ipcMain.handle('upload:start', async (event, params) => {
       mainWindow.webContents.send('upload:started', { recordId });
     }
 
+    // Clear any previous cancelled state for this recordId (e.g. from a retry)
+    cancelledUploads.delete(recordId);
+
     const result = await uploadWithRetry(recordId, filePath, metadata);
 
     // Remove from queue on success
     if (result.success) {
       removeFromUploadQueue(recordId);
+    }
+
+    // Suppress completion event if the upload was cancelled by the user
+    if (cancelledUploads.has(recordId)) {
+      cancelledUploads.delete(recordId);
+      return result;
     }
 
     // Notify renderer of completion
@@ -2706,6 +2767,17 @@ ipcMain.handle('upload:resume', async (event, recordId) => {
 });
 
 ipcMain.handle('upload:cancel', async (event, recordId) => {
+  // Mark as cancelled so upload:start suppresses the completion event
+  cancelledUploads.add(recordId);
+
+  // Abort the axios-based upload (current flow)
+  const controller = activeAbortControllers.get(recordId);
+  if (controller) {
+    controller.abort();
+    activeAbortControllers.delete(recordId);
+  }
+
+  // Also handle legacy TUS-based uploads
   const upload = activeUploads.get(recordId);
   if (upload) {
     try {
@@ -2714,9 +2786,12 @@ ipcMain.handle('upload:cancel', async (event, recordId) => {
       console.warn('Error aborting upload:', e);
     }
     activeUploads.delete(recordId);
-    return { success: true };
   }
-  return { success: false, error: 'Upload not found' };
+
+  // Remove from persistent upload queue
+  removeFromUploadQueue(recordId);
+
+  return { success: true };
 });
 
 // Get pending uploads in queue
