@@ -552,6 +552,25 @@ onMounted(() => {
         recordingStore.updateBackgroundUploadProgress(data.recordId, data.progress, data.bytesUploaded, data.bytesTotal);
       }
     });
+
+    // Listen for upload retry events — reset progress + show retry state
+    window.electronAPI.upload.onRetry((data) => {
+      if (data.recordId === recordingStore.recordId) {
+        recordingStore.updateUploadRetry(data.attempt, data.maxRetries);
+      }
+    });
+
+    // Listen for background upload completion (from processPendingUploads)
+    window.electronAPI.upload.onComplete((data) => {
+      if (data.success && data.background) {
+        $q.notify({
+          type: 'positive',
+          message: t('backgroundUploadSuccess'),
+          icon: 'cloud_done',
+          timeout: 5000
+        });
+      }
+    });
   }
 
   // Set up auth expired listener (Electron only) - Auto-logout on expiration

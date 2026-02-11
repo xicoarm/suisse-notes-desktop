@@ -240,7 +240,11 @@ const messages = {
     autoSavingIn: 'Auto-saving in {seconds}s...',
     uploadFailedNoInternet: 'No internet connection. Your recording is safe and will upload automatically when you reconnect.',
     uploadFailedServer: 'Server error. Your recording is saved locally and will retry automatically.',
-    recordingSavedLocally: 'Your recording is saved locally'
+    recordingSavedLocally: 'Your recording is saved locally',
+    uploadRetrying: 'Connection issue, retrying ({attempt}/{max})...',
+    backgroundUploadSuccess: 'A pending recording was uploaded successfully!',
+    noMicrophoneDetected: 'No microphone detected. You can still record system audio.',
+    noMicrophoneNoSystemAudio: 'No microphone detected. Enable system audio to record, or connect a microphone.'
   },
   de: {
     // Record Page
@@ -481,7 +485,11 @@ const messages = {
     autoSavingIn: 'Automatisches Speichern in {seconds}s...',
     uploadFailedNoInternet: 'Keine Internetverbindung. Ihre Aufnahme ist sicher und wird automatisch hochgeladen, wenn Sie wieder verbunden sind.',
     uploadFailedServer: 'Serverfehler. Ihre Aufnahme ist lokal gespeichert und wird automatisch erneut versucht.',
-    recordingSavedLocally: 'Ihre Aufnahme ist lokal gespeichert'
+    recordingSavedLocally: 'Ihre Aufnahme ist lokal gespeichert',
+    uploadRetrying: 'Verbindungsproblem, Versuch {attempt}/{max}...',
+    backgroundUploadSuccess: 'Eine ausstehende Aufnahme wurde erfolgreich hochgeladen!',
+    noMicrophoneDetected: 'Kein Mikrofon erkannt. Sie können trotzdem Systemaudio aufnehmen.',
+    noMicrophoneNoSystemAudio: 'Kein Mikrofon erkannt. Aktivieren Sie Systemaudio oder schließen Sie ein Mikrofon an.'
   },
   fr: {
     // Record Page
@@ -722,7 +730,11 @@ const messages = {
     autoSavingIn: 'Sauvegarde automatique dans {seconds}s...',
     uploadFailedNoInternet: 'Pas de connexion internet. Votre enregistrement est en sécurité et sera téléchargé automatiquement lorsque vous vous reconnecterez.',
     uploadFailedServer: 'Erreur serveur. Votre enregistrement est sauvegardé localement et sera réessayé automatiquement.',
-    recordingSavedLocally: 'Votre enregistrement est sauvegardé localement'
+    recordingSavedLocally: 'Votre enregistrement est sauvegardé localement',
+    uploadRetrying: 'Problème de connexion, tentative {attempt}/{max}...',
+    backgroundUploadSuccess: 'Un enregistrement en attente a été téléchargé avec succès !',
+    noMicrophoneDetected: 'Aucun microphone détecté. Vous pouvez enregistrer l\'audio système.',
+    noMicrophoneNoSystemAudio: 'Aucun microphone détecté. Activez l\'audio système ou connectez un microphone.'
   },
   it: {
     // Record Page
@@ -963,7 +975,11 @@ const messages = {
     autoSavingIn: 'Salvataggio automatico tra {seconds}s...',
     uploadFailedNoInternet: 'Nessuna connessione internet. La tua registrazione è al sicuro e verrà caricata automaticamente quando ti riconnetti.',
     uploadFailedServer: 'Errore del server. La tua registrazione è salvata localmente e verrà ritentata automaticamente.',
-    recordingSavedLocally: 'La tua registrazione è salvata localmente'
+    recordingSavedLocally: 'La tua registrazione è salvata localmente',
+    uploadRetrying: 'Problema di connessione, tentativo {attempt}/{max}...',
+    backgroundUploadSuccess: 'Una registrazione in sospeso è stata caricata con successo!',
+    noMicrophoneDetected: 'Nessun microfono rilevato. Puoi comunque registrare l\'audio di sistema.',
+    noMicrophoneNoSystemAudio: 'Nessun microfono rilevato. Attiva l\'audio di sistema o collega un microfono.'
   }
 };
 

@@ -473,7 +473,7 @@
           <div class="upload-progress-section">
             <div class="progress-info">
               <span class="progress-text">
-                {{ displayProgress >= 100 ? 'Processing on server...' : (retryAttempt > 0 ? `Retry attempt ${retryAttempt}...` : 'Uploading...') }}
+                {{ displayProgress >= 100 ? 'Processing on server...' : (recordingStore.uploadRetryAttempt > 0 ? $t('uploadRetrying', { attempt: recordingStore.uploadRetryAttempt, max: recordingStore.uploadRetryMaxRetries }) : $t('uploading')) }}
               </span>
               <span class="progress-percent">{{ Math.min(displayProgress, 99) }}%</span>
             </div>
@@ -1025,6 +1025,16 @@ onMounted(async () => {
   // This enables selection of Bluetooth headsets, wired mics, etc. on mobile
   await loadMicrophones();
 
+  // Warn if no microphone detected
+  if (availableMicrophones.value.length === 0) {
+    $q.notify({
+      type: 'warning',
+      message: t('noMicrophoneDetected'),
+      icon: 'mic_off',
+      timeout: 8000
+    });
+  }
+
   // Load system audio state (desktop only - mobile doesn't support system audio capture)
   // Skip when recording is active — the service already holds the correct state
   // and useRecorder.onMounted restores it. Loading from config would overwrite it
@@ -1052,26 +1062,9 @@ onMounted(async () => {
     recordingStore.reset();
   }
 
-  // Set up upload listeners (Electron only)
-  if (isElectron() && window.electronAPI?.upload) {
-    window.electronAPI.upload.onProgress((data) => {
-      if (data.recordId === recordingStore.recordId) {
-        recordingStore.updateUploadProgress(data.progress, data.bytesUploaded, data.bytesTotal);
-      }
-    });
-
-    window.electronAPI.upload.onRetry((data) => {
-      if (data.recordId === recordingStore.recordId) {
-        retryAttempt.value = data.attempt;
-      }
-    });
-  }
 });
 
 onUnmounted(() => {
-  if (isElectron() && window.electronAPI?.upload?.removeAllListeners) {
-    window.electronAPI.upload.removeAllListeners();
-  }
   // Clear auto-save timer
   if (autoSaveTimer.value) {
     clearInterval(autoSaveTimer.value);
@@ -1106,6 +1099,17 @@ const handleStartClick = async () => {
       icon: 'schedule',
       timeout: 4000
     });
+  }
+
+  // Check if no microphone and no system audio — cannot record
+  if (availableMicrophones.value.length === 0 && !systemAudioEnabled.value) {
+    $q.notify({
+      type: 'warning',
+      message: t('noMicrophoneNoSystemAudio'),
+      icon: 'mic_off',
+      timeout: 8000
+    });
+    return;
   }
 
   // Check if we should show storage dialog

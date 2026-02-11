@@ -587,6 +587,16 @@ async function processPendingUploads() {
           historyStore.set('recordings', recordings);
         }
         log.info(`Successfully uploaded pending recording: ${upload.recordId}`);
+
+        // Notify renderer about background upload success
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('upload:complete', {
+            recordId: upload.recordId,
+            success: true,
+            audioFileId: result.audioFileId,
+            background: true
+          });
+        }
       }
     } catch (e) {
       log.error(`Failed to upload ${upload.recordId}:`, e.message);

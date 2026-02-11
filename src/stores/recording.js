@@ -18,6 +18,8 @@ export const useRecordingStore = defineStore('recording', {
     uploadProgress: 0,
     bytesUploaded: 0,
     bytesTotal: 0,
+    uploadRetryAttempt: 0,
+    uploadRetryMaxRetries: 0,
     error: null,
     // Uploaded file info (persists for navigation)
     audioFileId: null,
@@ -787,9 +789,18 @@ export const useRecordingStore = defineStore('recording', {
       this.bytesTotal = bytesTotal;
     },
 
+    updateUploadRetry(attempt, maxRetries) {
+      this.uploadRetryAttempt = attempt;
+      this.uploadRetryMaxRetries = maxRetries;
+      this.uploadProgress = 0;
+      this.bytesUploaded = 0;
+    },
+
     setUploading(metadata = {}) {
       this.status = 'uploading';
       this.uploadProgress = 0;
+      this.uploadRetryAttempt = 0;
+      this.uploadRetryMaxRetries = 0;
       if (metadata.createdAt) this.uploadMetadata.createdAt = metadata.createdAt;
       if (metadata.fileSize) this.uploadMetadata.fileSize = metadata.fileSize;
       if (metadata.finalDuration !== undefined) this.uploadMetadata.finalDuration = metadata.finalDuration;
@@ -856,6 +867,8 @@ export const useRecordingStore = defineStore('recording', {
       this.uploadProgress = 0;
       this.bytesUploaded = 0;
       this.bytesTotal = 0;
+      this.uploadRetryAttempt = 0;
+      this.uploadRetryMaxRetries = 0;
       this.error = null;
       this.audioFileId = null;
       this.finalDuration = 0;
