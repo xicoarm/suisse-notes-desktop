@@ -62,6 +62,14 @@ let silenceCounter = 0;
 let silenceWarningShown = false;
 let silenceError = null;
 
+// Voice detection state (detects noise-only recordings with no actual voice)
+let noVoiceCounter = 0;
+let noVoiceWarningShown = false;
+const NO_VOICE_WARNING_SECONDS = 5;
+const VOICE_FREQ_LOW_BIN = 3;    // ~563Hz (bin * 48000/256) — above mains hum harmonics
+const VOICE_FREQ_HIGH_BIN = 40;  // ~7500Hz — covers voice formants F1-F3
+const VOICE_ENERGY_THRESHOLD = 5;
+
 // Configuration
 const SILENCE_THRESHOLD = 1;
 const SILENCE_WARNING_SECONDS = 10;
@@ -230,10 +238,12 @@ export function toggleMicMute() {
 
   emit('micMuteChange', micMuted);
 
-  // Reset silence detection when intentionally muted to avoid false warnings
+  // Reset all silence/voice detection when intentionally muted to avoid false warnings
   if (micMuted) {
     silenceCounter = 0;
     silenceWarningShown = false;
+    noVoiceCounter = 0;
+    noVoiceWarningShown = false;
     if (silenceError) {
       silenceError = null;
       emit('silenceWarning', null);
@@ -252,7 +262,9 @@ function startLevelMonitoring(mediaStream, recordingStore) {
   stopLevelMonitoring();
 
   try {
-    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 48000 // Must match mixingContext to ensure correct frequency bins
+    });
     analyser = audioContext.createAnalyser();
     const source = audioContext.createMediaStreamSource(mediaStream);
     source.connect(analyser);
@@ -263,6 +275,8 @@ function startLevelMonitoring(mediaStream, recordingStore) {
 
     silenceCounter = 0;
     silenceWarningShown = false;
+    noVoiceCounter = 0;
+    noVoiceWarningShown = false;
     silenceError = null;
 
     levelInterval = setInterval(async () => {
@@ -274,22 +288,62 @@ function startLevelMonitoring(mediaStream, recordingStore) {
         // Emit level update
         emit('levelChange', currentAudioLevel);
 
-        // Silence detection (suppress when mic is intentionally muted)
-        if (currentAudioLevel < SILENCE_THRESHOLD && !micMuted) {
-          silenceCounter++;
-          const silenceSeconds = silenceCounter / 10;
+        // Two-tier detection (suppress when mic is intentionally muted)
+        if (!micMuted) {
+          if (currentAudioLevel < SILENCE_THRESHOLD) {
+            // Tier 1: Complete silence
+            silenceCounter++;
+            noVoiceCounter = 0;
+            noVoiceWarningShown = false;
+            const silenceSeconds = silenceCounter / 10;
 
-          if (silenceSeconds >= SILENCE_WARNING_SECONDS && !silenceWarningShown) {
-            silenceWarningShown = true;
-            silenceError = 'No audio detected - check if your microphone is connected and not muted';
-            emit('silenceWarning', silenceError);
-          }
-        } else {
-          if (silenceCounter > 0) {
-            silenceCounter = 0;
-            silenceWarningShown = false;
-            silenceError = null;
-            emit('silenceWarning', null);
+            if (silenceSeconds >= SILENCE_WARNING_SECONDS && !silenceWarningShown) {
+              silenceWarningShown = true;
+              silenceError = 'No audio detected - check if your microphone is connected and not muted';
+              emit('silenceWarning', silenceError);
+            }
+          } else {
+            // Audio is present — clear silence counter
+            if (silenceCounter > 0 || silenceWarningShown) {
+              silenceCounter = 0;
+              silenceWarningShown = false;
+            }
+
+            // Tier 2: Voice detection (only when mic is active — skip for system-audio-only)
+            if (stream) {
+              let voiceEnergy = 0;
+              const highBin = Math.min(VOICE_FREQ_HIGH_BIN, bufferLength);
+              for (let i = VOICE_FREQ_LOW_BIN; i < highBin; i++) {
+                voiceEnergy += dataArray[i];
+              }
+              voiceEnergy /= (highBin - VOICE_FREQ_LOW_BIN);
+
+              if (voiceEnergy < VOICE_ENERGY_THRESHOLD) {
+                // Audio present but no voice frequencies
+                noVoiceCounter++;
+                const noVoiceSeconds = noVoiceCounter / 10;
+
+                if (noVoiceSeconds >= NO_VOICE_WARNING_SECONDS && !noVoiceWarningShown) {
+                  noVoiceWarningShown = true;
+                  silenceError = 'Audio detected but no voice — your microphone may not be capturing properly. Try selecting a different microphone.';
+                  emit('silenceWarning', silenceError);
+                }
+              } else {
+                // Voice detected — clear all warnings
+                if (noVoiceCounter > 0 || noVoiceWarningShown) {
+                  noVoiceCounter = 0;
+                  noVoiceWarningShown = false;
+                  silenceError = null;
+                  emit('silenceWarning', null);
+                }
+              }
+            } else {
+              // System-audio-only: clear any prior silence warning since audio is present
+              if (silenceError) {
+                silenceError = null;
+                emit('silenceWarning', null);
+              }
+            }
           }
         }
       }
@@ -315,6 +369,8 @@ function stopLevelMonitoring() {
   currentAudioLevel = 0;
   silenceCounter = 0;
   silenceWarningShown = false;
+  noVoiceCounter = 0;
+  noVoiceWarningShown = false;
   silenceError = null;
   emit('levelChange', 0);
   emit('silenceWarning', null);
@@ -561,10 +617,43 @@ export async function startRecording(options = {}) {
         audio: audioConstraints
       });
     } catch (micError) {
-      if (sysStream) {
+      // Retry with relaxed constraints for shared mic scenarios
+      if (micError.name === 'NotReadableError' || micError.name === 'OverconstrainedError') {
+        console.warn(`Mic failed with ${micError.name}, retrying with relaxed constraints`);
+        try {
+          const relaxedConstraints = { noiseSuppression: true };
+          if (deviceId) {
+            relaxedConstraints.deviceId = { ideal: deviceId };
+          }
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: relaxedConstraints
+          });
+          console.log('Mic retry with relaxed constraints succeeded');
+        } catch (retryError) {
+          console.warn('Mic retry also failed:', retryError);
+          // Fall through to the existing fallback logic below
+          if (sysStream) {
+            console.warn('Microphone capture failed after retry, continuing with system audio only');
+            let micErrorMsg = 'Microphone is in use by another application. Recording with system audio only.';
+            if (retryError.name === 'OverconstrainedError') {
+              micErrorMsg = 'Microphone does not support required settings. Recording with system audio only.';
+            }
+            emit('micError', micErrorMsg);
+            stream = null;
+          } else {
+            throw retryError;
+          }
+        }
+      } else if (sysStream) {
         // Mic failed but system audio is available — continue without mic
         console.warn('Microphone capture failed, continuing with system audio only:', micError);
-        emit('micError', micError.message || 'Microphone capture failed');
+        let micErrorMsg = micError.message || 'Microphone capture failed';
+        if (micError.name === 'NotReadableError') {
+          micErrorMsg = 'Microphone is in use by another application. Recording with system audio only.';
+        } else if (micError.name === 'OverconstrainedError') {
+          micErrorMsg = 'Microphone does not support required settings. Recording with system audio only.';
+        }
+        emit('micError', micErrorMsg);
         stream = null;
       } else {
         // Both mic and system audio unavailable — rethrow
@@ -585,6 +674,11 @@ export async function startRecording(options = {}) {
     // Always use mixing pipeline so system audio can be added/removed dynamically
     const recordingStream = createMixingPipeline(stream, sysStream);
     mixedStream = recordingStream;
+
+    // Resume AudioContext if suspended (suspended contexts produce silence)
+    if (mixingContext && mixingContext.state === 'suspended') {
+      await mixingContext.resume();
+    }
 
     // Determine supported mime type
     const codecPreference = [
@@ -675,9 +769,9 @@ export async function startRecording(options = {}) {
     // P0 Data Loss Fix: Reduced from 5s to 3s to minimize crash data loss (V8)
     mediaRecorder.start(3000);
 
-    // Start monitoring (only if mic stream exists — no level meter without mic)
-    if (stream) {
-      startLevelMonitoring(stream, recordingStore);
+    // Start monitoring the mixed recording stream (what actually gets recorded)
+    if (stream || sysStream) {
+      startLevelMonitoring(recordingStream, recordingStore);
     }
     startDurationTracking(recordingStore, isAutoSplitting, maxRecordingSeconds);
 
@@ -726,6 +820,19 @@ export async function startRecording(options = {}) {
       stream.getTracks().forEach(track => track.stop());
       stream = null;
     }
+    if (mixedStream) {
+      mixedStream.getTracks().forEach(track => track.stop());
+      mixedStream = null;
+    }
+    if (mixingContext) {
+      mixingContext.close().catch(() => {});
+      mixingContext = null;
+    }
+    mixingDest = null;
+    micSourceNode = null;
+    systemSourceNode = null;
+    systemStream = null;
+    systemAudioActive = false;
 
     // Clean up system audio if it was captured before the error
     if (sysStream) {
@@ -737,6 +844,10 @@ export async function startRecording(options = {}) {
       errorMessage = 'Microphone access denied.';
     } else if (error.name === 'NotFoundError') {
       errorMessage = 'No microphone found.';
+    } else if (error.name === 'NotReadableError') {
+      errorMessage = 'Microphone is in use by another application. Try closing Teams/Zoom or selecting a different microphone.';
+    } else if (error.name === 'OverconstrainedError') {
+      errorMessage = 'Selected microphone does not support required settings. Try a different microphone.';
     }
 
     recordingStore.reset();
@@ -984,6 +1095,76 @@ export async function stopRecording(recordingStore, stopSystemAudio) {
       recordingStore.stopRecording().then(resolve);
     }
   });
+}
+
+/**
+ * Cancel recording - stops MediaRecorder and cleans up without combining chunks
+ * Used when user wants to discard the recording entirely
+ */
+export async function cancelRecording(recordingStore, stopSystemAudio) {
+  // Stop level monitoring, duration tracking, auth keepalive
+  stopLevelMonitoring();
+  stopDurationTracking();
+  stopAuthKeepAlive();
+
+  if (stateVerificationInterval) {
+    clearInterval(stateVerificationInterval);
+    stateVerificationInterval = null;
+  }
+
+  // Stop MediaRecorder without waiting for final chunk
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    // Remove handlers to avoid processing the final chunk
+    mediaRecorder.ondataavailable = null;
+    mediaRecorder.onstop = null;
+    try {
+      mediaRecorder.stop();
+    } catch (e) {
+      // Ignore errors from stopping
+    }
+  }
+  mediaRecorder = null;
+
+  // Clean up all audio streams and contexts
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop());
+    stream = null;
+  }
+  if (mixedStream) {
+    mixedStream.getTracks().forEach(track => track.stop());
+    mixedStream = null;
+  }
+  if (systemStream) {
+    systemStream.getTracks().forEach(track => track.stop());
+    systemStream = null;
+  }
+  if (mixingContext) {
+    mixingContext.close().catch(() => {});
+    mixingContext = null;
+  }
+  mixingDest = null;
+  micSourceNode = null;
+  systemSourceNode = null;
+  systemAudioActive = false;
+  micMuted = false;
+  silenceError = null;
+
+  if (stopSystemAudio) stopSystemAudio();
+
+  emit('stateChange', { isRecording: false, isPaused: false });
+
+  // Hide notification on Android
+  await hideRecordingNotification();
+
+  // Mark recording as no longer in progress (Electron)
+  if (recordingStore && window.electronAPI?.recording) {
+    try {
+      await window.electronAPI.recording.setInProgress(false);
+      await window.electronAPI.recording.setProcessing(false);
+    } catch (e) {
+      // Ignore
+    }
+  }
 }
 
 /**

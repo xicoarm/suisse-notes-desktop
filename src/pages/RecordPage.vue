@@ -296,6 +296,25 @@
             </q-banner>
           </div>
 
+          <!-- Microphone Capture Error Warning -->
+          <div
+            v-if="micCaptureError"
+            class="warning-section"
+          >
+            <q-banner
+              class="warning-banner"
+              rounded
+            >
+              <template #avatar>
+                <q-icon
+                  name="mic_off"
+                  color="negative"
+                />
+              </template>
+              {{ micCaptureError }}
+            </q-banner>
+          </div>
+
           <!-- P0 Data Loss Fix: Chunk Save Failure Warning (V1/V7) -->
           <div
             v-if="recordingStore.chunkSaveErrorWarning"
@@ -715,6 +734,8 @@ const {
   silenceWarning,
   // System audio capture error
   systemAudioCaptureError,
+  // Microphone capture error (e.g., mic in use by another app)
+  micCaptureError,
   // Minutes limit tracking
   minutesLimitWarning,
   minutesLimitReached,
