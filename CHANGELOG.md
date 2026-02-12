@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.43](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.42...v3.7.43) (2026-02-12)
+
+
+### Bug Fixes
+
+* allow workflow_dispatch to bypass commit message skip filter ([ae94f1d](https://github.com/xicoarm/suisse-notes-desktop/commit/ae94f1d5f7cba11a4a09e3dc8620a7f9423f477e))
+
 ### [3.7.42](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.41...v3.7.42) (2026-02-11)
 
 
