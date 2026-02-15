@@ -747,9 +747,18 @@ const confirmAndStartUpload = async () => {
 
   // Check if user has minutes remaining
   if (!minutesStore.hasMinutesRemaining) {
-    // Show contact sales dialog
-    contactSalesReason.value = 'no_minutes';
-    showContactSalesDialog.value = true;
+    if (isCapacitor()) {
+      // Apple Guideline 3.1.1: simple notification on mobile
+      $q.notify({
+        type: 'warning',
+        message: t('noMinutesRemaining'),
+        icon: 'schedule',
+        timeout: 5000
+      });
+    } else {
+      contactSalesReason.value = 'no_minutes';
+      showContactSalesDialog.value = true;
+    }
     return;
   }
 
@@ -766,8 +775,10 @@ const confirmAndStartUpload = async () => {
         }),
         timeout: 5000
       });
-      contactSalesReason.value = 'no_minutes';
-      showContactSalesDialog.value = true;
+      if (!isCapacitor()) {
+        contactSalesReason.value = 'no_minutes';
+        showContactSalesDialog.value = true;
+      }
       return;
     }
   }

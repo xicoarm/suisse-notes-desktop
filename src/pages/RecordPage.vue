@@ -886,9 +886,19 @@ watch(minutesLimitReached, async (reached) => {
     // Stop the recording
     await handleStop();
 
-    // Show contact sales dialog after stopping
-    contactSalesReason.value = 'limit_reached';
-    showContactSalesDialog.value = true;
+    // On mobile: simple notification (Apple Guideline 3.1.1)
+    // On desktop: show contact sales dialog
+    if (isCapacitor()) {
+      $q.notify({
+        type: 'warning',
+        message: t('noMinutesRemaining'),
+        icon: 'schedule',
+        timeout: 5000
+      });
+    } else {
+      contactSalesReason.value = 'limit_reached';
+      showContactSalesDialog.value = true;
+    }
   }
 });
 
@@ -1085,9 +1095,18 @@ const handleStartClick = async () => {
 
   // Check if user has minutes remaining
   if (!minutesStore.hasMinutesRemaining) {
-    // Show contact sales dialog instead of starting recording
-    contactSalesReason.value = 'no_minutes';
-    showContactSalesDialog.value = true;
+    if (isCapacitor()) {
+      // Apple Guideline 3.1.1: simple notification on mobile
+      $q.notify({
+        type: 'warning',
+        message: t('noMinutesRemaining'),
+        icon: 'schedule',
+        timeout: 5000
+      });
+    } else {
+      contactSalesReason.value = 'no_minutes';
+      showContactSalesDialog.value = true;
+    }
     return;
   }
 

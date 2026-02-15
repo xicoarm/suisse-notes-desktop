@@ -1,6 +1,6 @@
 import { createRouter, createMemoryHistory, createWebHistory, createWebHashHistory } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
-import { isMobile } from '../utils/platform';
+import { isMobile, isCapacitor } from '../utils/platform';
 
 const routes = [
   {
@@ -31,7 +31,16 @@ const routes = [
         path: 'register',
         name: 'register',
         component: () => import('../pages/RegisterPage.vue'),
-        meta: { requiresAuth: false }
+        meta: { requiresAuth: false },
+        beforeEnter: (to, from, next) => {
+          // Apple Guideline 3.1.1: hide registration on mobile to avoid
+          // "external mechanism for purchases" rejection
+          if (isCapacitor()) {
+            next({ name: 'login' });
+          } else {
+            next();
+          }
+        }
       },
       {
         path: 'record',

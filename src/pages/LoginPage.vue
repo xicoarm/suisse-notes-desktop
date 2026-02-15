@@ -138,7 +138,7 @@
 
         <!-- Links -->
         <div class="login-links">
-          <p>
+          <p v-if="!isMobileApp">
             {{ $t('noAccount') }}
             <router-link
               to="/register"
@@ -201,6 +201,7 @@ import { useLanguage } from '../composables/useLanguage';
 const router = useRouter();
 const authStore = useAuthStore();
 const { languages, currentLang, currentLangShort, setLanguage, initLanguage } = useLanguage();
+const isMobileApp = isCapacitor();
 
 // Set white status bar icons for purple background on mobile
 onMounted(async () => {
