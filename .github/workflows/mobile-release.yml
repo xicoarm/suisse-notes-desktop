@@ -91,6 +91,9 @@ jobs:
         run: npx quasar build -m capacitor -T android --skip-pkg
         env:
           NODE_ENV: production
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
 
       - name: Sync Capacitor
         run: npm run cap:sync
@@ -182,6 +185,9 @@ jobs:
         run: npx quasar build -m capacitor -T ios --skip-pkg
         env:
           NODE_ENV: production
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
 
       - name: Sync Capacitor
         run: npm run cap:sync
@@ -237,6 +243,18 @@ jobs:
             -archivePath build/App.xcarchive \
             archive \
             CODE_SIGNING_ALLOWED=NO
+
+      - name: Upload dSYMs to Sentry
+        if: env.SENTRY_AUTH_TOKEN != ''
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+        run: |
+          npx @sentry/cli debug-files upload \
+            --org "$SENTRY_ORG" \
+            --project "$SENTRY_PROJECT" \
+            src-capacitor/ios/App/build/ || echo "dSYM upload failed (non-blocking)"
 
       - name: Upload iOS artifacts
         uses: actions/upload-artifact@v4

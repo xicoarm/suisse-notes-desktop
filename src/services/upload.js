@@ -12,6 +12,7 @@
 import { isElectron, isCapacitor, isMobile, PlatformConstants } from '../utils/platform';
 import { calculateUploadChecksum, verifyUploadChecksum } from './integrity';
 import { readFile, deleteFile } from './storage';
+import { sentryUploadStart, sentryUploadSuccess, sentryUploadFail } from './sentryHelpers';
 
 // --- Persistent Mobile Upload Queue (localStorage-based) ---
 const MOBILE_UPLOAD_QUEUE_KEY = 'mobile_upload_queue';
@@ -463,6 +464,8 @@ export const uploadWithVerification = async (options) => {
   let audioFileId = null;
   let localChecksum = null;
 
+  sentryUploadStart(recordId);
+
   try {
     // Phase 1a: Calculate local checksum before upload
     // Skip on mobile — reading the file for checksumming is expensive (base64 decode)
@@ -571,6 +574,7 @@ export const uploadWithVerification = async (options) => {
 
     // Upload successful and verified (or trust-based)
     onStatusChange('complete');
+    sentryUploadSuccess(recordId, audioFileId);
     return {
       success: true,
       audioFileId,
@@ -581,6 +585,7 @@ export const uploadWithVerification = async (options) => {
   } catch (error) {
     console.error('Upload failed:', error);
     onStatusChange('error');
+    sentryUploadFail(recordId, error);
     return {
       success: false,
       audioFileId,

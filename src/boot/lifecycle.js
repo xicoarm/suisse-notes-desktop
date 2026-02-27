@@ -5,6 +5,7 @@
  */
 
 import { isCapacitor, isMobile, PlatformConstants } from '../utils/platform';
+import { sentryAppBackground, sentryAppForeground, sentryNetworkChange, sentryLowBattery } from '../services/sentryHelpers';
 
 // Module-level state for lifecycle management
 let lifecycleInitialized = false;
@@ -55,11 +56,13 @@ export const initializeLifecycle = async () => {
     appStateListener = await App.addListener('appStateChange', async ({ isActive }) => {
       if (isActive) {
         console.log('Lifecycle: App came to foreground');
+        sentryAppForeground();
         if (onAppForeground) {
           try { await onAppForeground(); } catch (e) { console.error('Lifecycle: onAppForeground error:', e); }
         }
       } else {
         console.log('Lifecycle: App went to background');
+        sentryAppBackground();
         if (onAppBackground) {
           try { await onAppBackground(); } catch (e) { console.error('Lifecycle: onAppBackground error:', e); }
         }
@@ -68,6 +71,7 @@ export const initializeLifecycle = async () => {
 
     // Listen for network changes
     networkListener = await Network.addListener('networkStatusChange', async (status) => {
+      sentryNetworkChange(status.connected, status.connectionType);
       if (status.connected) {
         console.log('Lifecycle: Network connected', status.connectionType);
         if (onNetworkOnline) {
@@ -151,9 +155,11 @@ const startBatteryMonitoring = async () => {
 
         if (batteryPercent <= PlatformConstants.CRITICAL_BATTERY_PERCENT && onCriticalBattery) {
           console.warn(`Lifecycle: CRITICAL battery level (${batteryPercent}%)`);
+          sentryLowBattery(batteryPercent);
           try { await onCriticalBattery(batteryPercent); } catch (e) { console.error('Lifecycle: onCriticalBattery error:', e); }
         } else if (batteryPercent <= PlatformConstants.LOW_BATTERY_PERCENT && onLowBattery) {
           console.warn(`Lifecycle: Low battery level (${batteryPercent}%)`);
+          sentryLowBattery(batteryPercent);
           try { await onLowBattery(batteryPercent); } catch (e) { console.error('Lifecycle: onLowBattery error:', e); }
         }
       } catch (error) {

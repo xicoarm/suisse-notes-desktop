@@ -3,6 +3,9 @@
 // Configuration for your app
 // https://v2.quasar.dev/quasar-cli-vite/quasar-config-file
 
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+
 export default function (ctx) {
   return {
     eslint: {
@@ -13,6 +16,8 @@ export default function (ctx) {
     boot: [
       'axios',
       'i18n',
+      // Load Sentry before lifecycle so it catches errors from lifecycle init
+      ctx.mode.capacitor ? 'sentry' : '',
       // Load lifecycle boot file only on Capacitor (mobile)
       ctx.mode.capacitor ? 'lifecycle' : ''
     ].filter(Boolean),
@@ -33,7 +38,29 @@ export default function (ctx) {
       },
       vueRouterMode: 'hash',
       // Use our custom Quasar variables for brand colors
-      sassVariables: 'src/css/quasar.variables.scss'
+      sassVariables: 'src/css/quasar.variables.scss',
+      // Enable source maps in CI for Sentry (when SENTRY_AUTH_TOKEN is set)
+      ...(process.env.SENTRY_AUTH_TOKEN && ctx.mode.capacitor ? { sourcemap: true } : {}),
+      extendViteConf(viteConf) {
+        // Upload source maps to Sentry during CI mobile builds
+        if (process.env.SENTRY_AUTH_TOKEN && ctx.mode.capacitor) {
+          const { sentryVitePlugin } = require('@sentry/vite-plugin');
+          viteConf.plugins = viteConf.plugins || [];
+          viteConf.plugins.push(
+            sentryVitePlugin({
+              org: process.env.SENTRY_ORG || 'suisse-it-gmbh',
+              project: process.env.SENTRY_PROJECT || 'capacitor',
+              authToken: process.env.SENTRY_AUTH_TOKEN,
+              release: {
+                name: `ch.suissenotes.mobile@${require('./package.json').version}`,
+              },
+              sourcemaps: {
+                assets: './dist/capacitor/www/**',
+              },
+            })
+          );
+        }
+      }
     },
 
     devServer: {

@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { isElectron, isCapacitor } from '../utils/platform';
 import { getApiUrlSync, API_ENDPOINTS } from '../services/api';
 import { useMinutesStore } from './minutes';
+import { sentryLoginSuccess, sentryLoginFail, sentryLogout, sentrySetUser } from '../services/sentryHelpers';
 
 // Capacitor Preferences (lazy loaded)
 let Preferences = null;
@@ -347,6 +348,9 @@ export const useAuthStore = defineStore('auth', {
           this.token = result.token;
           this.isAuthenticated = true;
 
+          sentrySetUser(result.user);
+          sentryLoginSuccess(result.user?.id);
+
           // Start proactive token refresh
           this.startTokenRefreshTimer();
 
@@ -366,10 +370,12 @@ export const useAuthStore = defineStore('auth', {
           return { success: true };
         } else {
           this.error = result.error || 'Login failed';
+          sentryLoginFail(this.error);
           return { success: false, error: this.error };
         }
       } catch (error) {
         this.error = error.message || 'An unexpected error occurred';
+        sentryLoginFail(this.error);
         return { success: false, error: this.error };
       } finally {
         this.loading = false;
@@ -476,6 +482,8 @@ export const useAuthStore = defineStore('auth', {
       // Stop token refresh timer
       this.stopTokenRefreshTimer();
 
+      sentryLogout();
+
       // Track logout event (mobile only - desktop tracks in clearToken handler)
       if (isCapacitor()) {
         trackAuthEvent('logout', { userId: this.user?.id, userEmail: this.user?.email });
@@ -516,6 +524,8 @@ export const useAuthStore = defineStore('auth', {
           this.token = token;
           this.user = userInfo;
           this.isAuthenticated = true;
+
+          sentrySetUser(userInfo);
 
           // Start proactive token refresh for existing session
           this.startTokenRefreshTimer();

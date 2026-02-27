@@ -5,6 +5,7 @@ import * as storage from '../services/storage';
 import { createChunkIntegrity, createRecordingIntegrity, addChunkToRecordingIntegrity } from '../services/integrity';
 import { startStorageMonitor, stopStorageMonitor, checkStorageBeforeRecording } from '../services/storageMonitor';
 import { setLifecycleCallbacks, clearLifecycleCallbacks, setRecordingActive } from '../boot/lifecycle';
+import { sentryRecordingStart, sentryRecordingStop, sentryRecordingPause, sentryRecordingResume, sentryRecordingError } from '../services/sentryHelpers';
 
 export const useRecordingStore = defineStore('recording', {
   state: () => ({
@@ -261,10 +262,12 @@ export const useRecordingStore = defineStore('recording', {
           }
         });
 
+        sentryRecordingStart(this.recordId);
         return { success: true, recordId: this.recordId, storageWarning: storageCheck.message };
       } catch (error) {
         this.error = error.message;
         this.status = 'error';
+        sentryRecordingError(this.recordId, error);
         if (isElectron()) {
           await window.electronAPI.recording.setInProgress(false);
         }
@@ -275,12 +278,14 @@ export const useRecordingStore = defineStore('recording', {
     pauseRecording() {
       if (this.status === 'recording') {
         this.status = 'paused';
+        sentryRecordingPause(this.recordId);
       }
     },
 
     resumeRecording() {
       if (this.status === 'paused') {
         this.status = 'recording';
+        sentryRecordingResume(this.recordId);
       }
     },
 
@@ -302,6 +307,7 @@ export const useRecordingStore = defineStore('recording', {
 
           if (result.success) {
             this.audioFilePath = result.outputPath;
+            sentryRecordingStop(this.recordId, this.duration);
             return { success: true, filePath: result.outputPath, duration: result.duration || null, warning: result.warning };
           } else {
             throw new Error(result.error || 'Failed to combine recording chunks');
@@ -316,6 +322,7 @@ export const useRecordingStore = defineStore('recording', {
             if (nativeDuration) {
               this.duration = nativeDuration;
             }
+            sentryRecordingStop(this.recordId, this.duration);
             return { success: true, filePath: result.outputPath, fileSize: result.fileSize, duration: nativeDuration };
           } else {
             throw new Error(result.error || 'Failed to combine recording chunks');
@@ -326,6 +333,7 @@ export const useRecordingStore = defineStore('recording', {
       } catch (error) {
         this.error = error.message;
         this.status = 'error';
+        sentryRecordingError(this.recordId, error);
         if (isElectron()) {
           await window.electronAPI.recording.setInProgress(false);
           await window.electronAPI.recording.setProcessing(false);
