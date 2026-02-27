@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.44](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.42...v3.7.44) (2026-02-27)
+
+
+### Features
+
+* add Sentry error tracking for mobile app (iOS + Android) ([f8d4f79](https://github.com/xicoarm/suisse-notes-desktop/commit/f8d4f793c1523c0b6b2c09954efbf4b65d1abb65))
+
+
+### Bug Fixes
+
+* allow workflow_dispatch to bypass commit message skip filter ([ae94f1d](https://github.com/xicoarm/suisse-notes-desktop/commit/ae94f1d5f7cba11a4a09e3dc8620a7f9423f477e))
+* remove registration and sales inquiry on mobile for Apple Guideline 3.1.1 ([b2b8868](https://github.com/xicoarm/suisse-notes-desktop/commit/b2b8868906b4bdf9771ba7cd4e6e8bd02512a69e))
+
 ### [3.7.43](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.42...v3.7.43) (2026-02-12)
 
 
