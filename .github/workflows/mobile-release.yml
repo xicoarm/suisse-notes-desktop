@@ -136,12 +136,12 @@ jobs:
           bundle exec fastlane internal
           rm play-store-key.json
 
-      - name: Build APK (without Play Store deploy)
+      - name: Build AAB and APK (without Play Store deploy)
         if: env.PLAY_STORE_JSON_KEY == ''
         working-directory: src-capacitor/android
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleRelease
+          ./gradlew bundleRelease assembleRelease
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
