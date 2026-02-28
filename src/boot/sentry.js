@@ -1,6 +1,7 @@
 /**
  * Sentry error tracking boot file
  * Loaded only on Capacitor (mobile) builds via quasar.config.js
+ * Native crash reporting disabled until Capacitor 7 upgrade
  * Desktop uses @sentry/electron initialized in electron-main.js
  *
  * Imports are dynamic to avoid resolution failures in test/desktop environments
