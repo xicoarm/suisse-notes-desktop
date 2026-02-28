@@ -12,8 +12,7 @@
     "@capacitor/ios": "^6.0.0",
     "@capacitor/network": "^6.0.4",
     "@capacitor/preferences": "^6.0.4",
-    "@capacitor/status-bar": "^6.0.3",
-    "@sentry/capacitor": "^2.4.1"
+    "@capacitor/status-bar": "^6.0.3"
   },
   "author": "Suisse AI Group GmbH"
 }

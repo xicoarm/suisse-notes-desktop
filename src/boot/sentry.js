@@ -78,8 +78,8 @@ export default async ({ app, router }) => {
         environment: import.meta.env.DEV ? 'development' : 'production',
         release: `ch.suissenotes.mobile@${appVersion}`,
         dist: platform,
-        enableNative: true,
-        enableNativeCrashHandling: true,
+        enableNative: false,
+        enableNativeCrashHandling: false,
         integrations: [
           SentryVue.vueIntegration({
             app,
