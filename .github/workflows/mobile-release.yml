@@ -106,7 +106,9 @@ jobs:
         env:
           ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
         run: |
-          echo "$ANDROID_KEYSTORE" | tr -d '[:space:]' | base64 --decode > src-capacitor/android/app/release.keystore
+          echo "$ANDROID_KEYSTORE" | tr -d '\n\r ' | base64 -d > src-capacitor/android/app/release.keystore
+          echo "Keystore size: $(wc -c < src-capacitor/android/app/release.keystore) bytes"
+          file src-capacitor/android/app/release.keystore
 
       - name: Create keystore.properties
         if: env.ANDROID_KEYSTORE_PASSWORD != ''
