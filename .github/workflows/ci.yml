@@ -8,7 +8,7 @@ on:
 
 jobs:
   lint-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout code
@@ -30,7 +30,7 @@ jobs:
         run: npm run test
 
   build-validation:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: lint-and-test
 
     steps:

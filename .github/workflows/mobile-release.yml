@@ -26,7 +26,7 @@ jobs:
   # Check if mobile release should run
   # =============================================================================
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
     steps:
@@ -59,7 +59,7 @@ jobs:
     if: |
       needs.check.outputs.should_run == 'true' &&
       (github.event_name == 'push' || github.event.inputs.platform == 'both' || github.event.inputs.platform == 'android')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout code
