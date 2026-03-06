@@ -140,6 +140,14 @@ const configStore = new Store({
   }
 });
 
+// Restore Sentry user context from stored session (so crash reports identify the user)
+try {
+  const storedUser = configStore.get('userInfo');
+  if (storedUser) {
+    Sentry.setUser({ id: storedUser.id, email: storedUser.email });
+  }
+} catch (e) { /* ignore */ }
+
 // History store for recording history
 const historyStore = new Store({
   name: 'recordings-history',
@@ -1238,6 +1246,14 @@ ipcMain.handle('auth:login', async (event, email, password) => {
       errorMessage = error.message || 'Unknown error occurred';
     }
 
+    // Report network/server errors to Sentry (not user auth failures)
+    if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED' || error.code === 'ENOTFOUND' || (error.response && error.response.status >= 500)) {
+      Sentry.captureException(error, {
+        tags: { operation: 'login' },
+        extra: { errorCode: error.code, httpStatus: error.response?.status },
+      });
+    }
+
     return {
       success: false,
       error: errorMessage
@@ -1345,6 +1361,7 @@ ipcMain.handle('auth:getToken', async () => {
 ipcMain.handle('auth:clearToken', async () => {
   configStore.delete('authToken');
   configStore.delete('userInfo');  // Also clear user info on logout
+  Sentry.setUser(null);  // Clear Sentry user context on logout
   return { success: true };
 });
 
@@ -1352,6 +1369,10 @@ ipcMain.handle('auth:clearToken', async () => {
 ipcMain.handle('auth:saveUserInfo', async (event, userInfo) => {
   try {
     configStore.set('userInfo', userInfo);
+    // Set Sentry user context so main process errors are attributed to this user
+    if (userInfo) {
+      Sentry.setUser({ id: userInfo.id, email: userInfo.email });
+    }
     return { success: true };
   } catch (error) {
     return { success: false, error: error.message };
@@ -1600,11 +1621,18 @@ function calculateUploadTimeout(fileSizeBytes) {
 // FFmpeg operation timeout (5 minutes default)
 const FFMPEG_TIMEOUT_MS = 5 * 60 * 1000;
 
-// Execute FFmpeg command with timeout
+// Execute FFmpeg command with timeout + Sentry tracking
 function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operationName = 'FFmpeg') {
+  const startTime = Date.now();
   return new Promise((resolve, reject) => {
     const timeoutId = setTimeout(() => {
+      const elapsed = Date.now() - startTime;
       log.warn(`${operationName} operation timed out after ${timeoutMs}ms`);
+      Sentry.captureMessage(`FFmpeg timeout: ${operationName} after ${(elapsed / 1000).toFixed(1)}s`, {
+        level: 'error',
+        tags: { operation: operationName },
+        extra: { timeoutMs, elapsedMs: elapsed },
+      });
       try {
         ffmpegCommand.kill('SIGKILL');
       } catch (e) {
@@ -1620,6 +1648,10 @@ function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operati
       })
       .on('error', (err) => {
         clearTimeout(timeoutId);
+        Sentry.captureException(err, {
+          tags: { operation: operationName },
+          extra: { elapsedMs: Date.now() - startTime },
+        });
         reject(err);
       })
       .run();
@@ -2399,6 +2431,11 @@ async function pollServerStatus(audioFileId, maxAttempts = 15) {
 
   // Timeout - server didn't confirm in time
   log.error(`Upload verification timeout for ${audioFileId} after ${maxAttempts} attempts`);
+  Sentry.captureMessage(`Upload verification timeout: ${audioFileId}`, {
+    level: 'error',
+    tags: { operation: 'upload_verification' },
+    extra: { audioFileId, maxAttempts },
+  });
   return { persisted: false, verified: false, error: 'Server confirmation timeout' };
 }
 
@@ -2673,6 +2710,19 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
         } else {
           errorMessage = error.message || 'Unknown error';
         }
+
+        // Report upload failure to Sentry (retries exhausted or non-retryable)
+        Sentry.captureException(error, {
+          tags: { operation: 'upload', recordId },
+          extra: {
+            attempt: attempt + 1,
+            maxRetries,
+            errorCode: error.code,
+            httpStatus: status,
+            isRetryable,
+            isTimeout: error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED',
+          },
+        });
 
         return { success: false, error: errorMessage, status, canRetry: isRetryable };
       }

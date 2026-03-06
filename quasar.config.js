@@ -16,8 +16,8 @@ export default function (ctx) {
     boot: [
       'axios',
       'i18n',
-      // Load Sentry before lifecycle so it catches errors from lifecycle init
-      ctx.mode.capacitor ? 'sentry' : '',
+      // Load Sentry for both desktop (Electron renderer) and mobile (Capacitor)
+      (ctx.mode.capacitor || ctx.mode.electron) ? 'sentry' : '',
       // Load lifecycle boot file only on Capacitor (mobile)
       ctx.mode.capacitor ? 'lifecycle' : ''
     ].filter(Boolean),
@@ -40,10 +40,12 @@ export default function (ctx) {
       // Use our custom Quasar variables for brand colors
       sassVariables: 'src/css/quasar.variables.scss',
       // Enable source maps in CI for Sentry (when SENTRY_AUTH_TOKEN is set)
-      ...(process.env.SENTRY_AUTH_TOKEN && ctx.mode.capacitor ? { sourcemap: true } : {}),
+      ...(process.env.SENTRY_AUTH_TOKEN && (ctx.mode.capacitor || ctx.mode.electron) ? { sourcemap: true } : {}),
       extendViteConf(viteConf) {
-        // Upload source maps to Sentry during CI mobile builds
-        if (process.env.SENTRY_AUTH_TOKEN && ctx.mode.capacitor) {
+        if (!process.env.SENTRY_AUTH_TOKEN) return;
+
+        // Upload source maps to Sentry during CI builds (mobile + desktop)
+        if (ctx.mode.capacitor) {
           const { sentryVitePlugin } = require('@sentry/vite-plugin');
           viteConf.plugins = viteConf.plugins || [];
           viteConf.plugins.push(
@@ -56,6 +58,22 @@ export default function (ctx) {
               },
               sourcemaps: {
                 assets: './dist/capacitor/www/**',
+              },
+            })
+          );
+        } else if (ctx.mode.electron) {
+          const { sentryVitePlugin } = require('@sentry/vite-plugin');
+          viteConf.plugins = viteConf.plugins || [];
+          viteConf.plugins.push(
+            sentryVitePlugin({
+              org: process.env.SENTRY_ORG || 'suisse-it-gmbh',
+              project: process.env.SENTRY_PROJECT_DESKTOP || 'electron',
+              authToken: process.env.SENTRY_AUTH_TOKEN,
+              release: {
+                name: `suisse-notes@${require('./package.json').version}`,
+              },
+              sourcemaps: {
+                assets: './dist/electron/**',
               },
             })
           );
