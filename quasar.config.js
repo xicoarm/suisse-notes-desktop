@@ -61,13 +61,13 @@ export default function (ctx) {
               },
             })
           );
-        } else if (ctx.mode.electron) {
+        } else if (ctx.mode.electron && process.env.SENTRY_PROJECT_DESKTOP) {
           const { sentryVitePlugin } = require('@sentry/vite-plugin');
           viteConf.plugins = viteConf.plugins || [];
           viteConf.plugins.push(
             sentryVitePlugin({
               org: process.env.SENTRY_ORG || 'suisse-it-gmbh',
-              project: process.env.SENTRY_PROJECT_DESKTOP || 'electron',
+              project: process.env.SENTRY_PROJECT_DESKTOP,
               authToken: process.env.SENTRY_AUTH_TOKEN,
               release: {
                 name: `suisse-notes@${require('./package.json').version}`,
