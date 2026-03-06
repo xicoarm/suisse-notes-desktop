@@ -89,33 +89,26 @@ async function initElectronRenderer(app, router) {
   }
 
   try {
-    // @sentry/electron/renderer provides init + IPC bridge to main process
-    // @sentry/vue provides Vue-specific integrations (vueIntegration, etc.)
-    const SentryElectron = await import('@sentry/electron/renderer');
+    // Use @sentry/vue directly — sends events via HTTPS to Sentry ingest
+    // (@sentry/electron/renderer uses sentry-ipc: protocol which fails with contextIsolation)
     const SentryVue = await import('@sentry/vue');
-    SentryModule = SentryElectron;
+    SentryModule = SentryVue;
 
-    SentryElectron.init({
+    SentryVue.init({
       app,
       dsn,
       environment: import.meta.env.DEV ? 'development' : 'production',
       release: `suisse-notes@${appVersion}`,
-      // Let main process handle sessions — avoid double-counting
       autoSessionTracking: false,
       sendClientReports: false,
       integrations: [
-        // Bridge renderer scope to main process via Electron IPC
-        SentryElectron.scopeToMainIntegration(),
-        // Vue-specific error tracking
         SentryVue.vueIntegration({
           app,
           attachProps: true,
           logErrors: true,
           trackComponents: true,
         }),
-        // Navigation / network performance
         SentryVue.browserTracingIntegration({ router }),
-        // Session Replay — DOM-based replay of user interactions
         SentryVue.replayIntegration({
           maskAllText: false,
           maskAllInputs: true,
@@ -124,19 +117,18 @@ async function initElectronRenderer(app, router) {
           networkCaptureBodies: false,
         }),
       ],
-      // Sample 10% of transactions for performance
       tracesSampleRate: 0.1,
-      // Session Replay sample rates
-      replaysSessionSampleRate: 0.1,   // 10% of normal sessions
-      replaysOnErrorSampleRate: 1.0,   // 100% of sessions with errors
+      replaysSessionSampleRate: 0.1,
+      replaysOnErrorSampleRate: 1.0,
       beforeSend: scrubSensitiveData,
       beforeBreadcrumb: filterBreadcrumbs,
     });
 
     sentryInitialized = true;
 
-    SentryElectron.setTag('platform', 'electron');
-    SentryElectron.setTag('app.version', appVersion);
+    SentryVue.setTag('platform', 'electron');
+    SentryVue.setTag('app.version', appVersion);
+    SentryVue.setTag('process', 'renderer');
 
     console.log(`Sentry: Initialized desktop renderer (v${appVersion}) with Session Replay`);
   } catch (error) {
