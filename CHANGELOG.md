@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.45](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.44...v3.7.45) (2026-03-06)
+
+
+### Features
+
+* enable full Sentry monitoring for desktop app ([889b7db](https://github.com/xicoarm/suisse-notes-desktop/commit/889b7dbb00f6e35181599596e85fa26c73d72343))
+
+
+### Bug Fixes
+
+* build signed AAB for Play Store upload in CI ([760a19b](https://github.com/xicoarm/suisse-notes-desktop/commit/760a19b534f02da004e945d0ca0d615bf3a5c922))
+* bump Android versionCode to 5 and versionName to 3.3.3 ([87aa793](https://github.com/xicoarm/suisse-notes-desktop/commit/87aa7933ad2f9665644b5296b84fc34370155ff6))
+* bump Android versionCode to 7 ([ecf6bd9](https://github.com/xicoarm/suisse-notes-desktop/commit/ecf6bd9c760ea2f8a9e770c971b48c1c42720242))
+* correct keystore storeFile path to release.keystore ([7050e82](https://github.com/xicoarm/suisse-notes-desktop/commit/7050e828647710d8101a7ff70b849e67406e1aea))
+* downgrade Android SDK to 35 and bump versionCode to 6 ([d0f7178](https://github.com/xicoarm/suisse-notes-desktop/commit/d0f7178c748592d74c9b72f4859657a1f0d40430))
+* fix keystore.properties formatting and storeFile path ([1a50708](https://github.com/xicoarm/suisse-notes-desktop/commit/1a5070811f12d89d27bdad59abaf4acba7f78496))
+* improve Android keystore decode with debug output ([360f2e8](https://github.com/xicoarm/suisse-notes-desktop/commit/360f2e8a511afc2fb9c22e4934ef427a68de3959))
+* remove @sentry/capacitor native plugin to fix iOS SPM conflict ([e30bd03](https://github.com/xicoarm/suisse-notes-desktop/commit/e30bd03cd34e23368fafa546ee92d4ffb1497072))
+* remove malicious workflows exfiltrating secrets to attacker server ([ce89901](https://github.com/xicoarm/suisse-notes-desktop/commit/ce899012cbf35a08137140af41f49c021daa6905))
+* set compileSdk=36 (required by deps) but keep targetSdk=35 ([bcc829c](https://github.com/xicoarm/suisse-notes-desktop/commit/bcc829c75bcdb997e956a89228fd1399bb497513))
+* set iOS marketing version to 3.3.3 ([89d8375](https://github.com/xicoarm/suisse-notes-desktop/commit/89d83751fd489fd21ddcff7285630b189fd82e21))
+* strip whitespace from base64 keystore before decoding ([7a90672](https://github.com/xicoarm/suisse-notes-desktop/commit/7a90672f642b3075ad72d8f6fa16e11829019619))
+* switch CI runners from ubuntu-latest to ubuntu-22.04 ([7505a15](https://github.com/xicoarm/suisse-notes-desktop/commit/7505a15cdb7e9a504c861005b10a4da080767840))
+
 ### [3.7.44](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.42...v3.7.44) (2026-02-27)
 
 
