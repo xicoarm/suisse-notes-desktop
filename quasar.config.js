@@ -40,12 +40,10 @@ export default function (ctx) {
       // Use our custom Quasar variables for brand colors
       sassVariables: 'src/css/quasar.variables.scss',
       // Enable source maps in CI for Sentry (when SENTRY_AUTH_TOKEN is set)
-      ...(process.env.SENTRY_AUTH_TOKEN && (ctx.mode.capacitor || ctx.mode.electron) ? { sourcemap: true } : {}),
+      ...(process.env.SENTRY_AUTH_TOKEN && ctx.mode.capacitor ? { sourcemap: true } : {}),
       extendViteConf(viteConf) {
-        if (!process.env.SENTRY_AUTH_TOKEN) return;
-
-        // Upload source maps to Sentry during CI builds (mobile + desktop)
-        if (ctx.mode.capacitor) {
+        // Upload source maps to Sentry during CI mobile builds
+        if (process.env.SENTRY_AUTH_TOKEN && ctx.mode.capacitor) {
           const { sentryVitePlugin } = require('@sentry/vite-plugin');
           viteConf.plugins = viteConf.plugins || [];
           viteConf.plugins.push(
@@ -61,23 +59,8 @@ export default function (ctx) {
               },
             })
           );
-        } else if (ctx.mode.electron && process.env.SENTRY_PROJECT_DESKTOP) {
-          const { sentryVitePlugin } = require('@sentry/vite-plugin');
-          viteConf.plugins = viteConf.plugins || [];
-          viteConf.plugins.push(
-            sentryVitePlugin({
-              org: process.env.SENTRY_ORG || 'suisse-it-gmbh',
-              project: process.env.SENTRY_PROJECT_DESKTOP,
-              authToken: process.env.SENTRY_AUTH_TOKEN,
-              release: {
-                name: `suisse-notes@${require('./package.json').version}`,
-              },
-              sourcemaps: {
-                assets: './dist/electron/**',
-              },
-            })
-          );
         }
+        // Desktop source map upload: TODO — add once Sentry 'electron' project is verified
       }
     },
 

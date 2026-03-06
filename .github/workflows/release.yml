@@ -45,9 +45,6 @@ jobs:
       - name: Build and publish Electron app
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-          SENTRY_PROJECT_DESKTOP: ${{ secrets.SENTRY_PROJECT_DESKTOP }}
         run: npm run build
 
       - name: Verify auto-update files exist
@@ -160,9 +157,6 @@ jobs:
         env:
           # GH_TOKEN is needed by electron-builder to resolve GitHub publish provider
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-          SENTRY_PROJECT_DESKTOP: ${{ secrets.SENTRY_PROJECT_DESKTOP }}
         run: |
           # -P never: generate latest-mac.yml but don't upload artifacts
           # We upload manually after notarization via action-gh-release
