@@ -1431,6 +1431,44 @@ ipcMain.handle('auth:createWebSession', async () => {
   }
 });
 
+// --- Minutes / Credits ---
+
+ipcMain.handle('minutes:fetch', async () => {
+  try {
+    const authToken = await getAuthToken();
+    if (!authToken) {
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    const response = await axios.get(`${API_BASE_URL}/api/desktop/minutes`, {
+      headers: {
+        'Authorization': `Bearer ${authToken}`
+      },
+      timeout: 15000
+    });
+
+    if (response.data) {
+      return {
+        success: true,
+        minutes: {
+          remaining: response.data.remaining,
+          unlimited: response.data.unlimited,
+          total: response.data.total,
+          used: response.data.used
+        }
+      };
+    }
+
+    return { success: false, error: 'Invalid response' };
+  } catch (error) {
+    console.error('Fetch minutes error:', error.message);
+    return {
+      success: false,
+      error: error.response?.data?.error || error.message || 'Failed to fetch minutes'
+    };
+  }
+});
+
 // --- Recording (WhisperTranscribe Patterns) ---
 
 // Helper: Get sessions path

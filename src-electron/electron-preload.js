@@ -50,6 +50,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   },
 
+  // Minutes / Credits
+  minutes: {
+    fetch: () =>
+      withTimeout(
+        ipcRenderer.invoke('minutes:fetch'),
+        IPC_TIMEOUTS.auth,
+        'Fetch minutes'
+      )
+  },
+
   // Recording (WhisperTranscribe pattern)
   recording: {
     createSession: (id, ext, userId) =>

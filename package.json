@@ -3,7 +3,7 @@
   "version": "3.7.44",
   "description": "Desktop app for recording and transcribing meetings",
   "productName": "Suisse Notes",
-  "author": "Suisse AI Group GmbH",
+  "author": "Suisse IT GmbH",
   "private": true,
   "scripts": {
     "dev": "quasar dev -m electron",

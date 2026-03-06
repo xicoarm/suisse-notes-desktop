@@ -1471,7 +1471,15 @@ const startAutoUpload = async () => {
 };
 
 const handleUploadError = async (errorMessage) => {
-  uploadError.value = errorMessage;
+  // Make "Insufficient minutes" error more user-friendly
+  if (errorMessage && errorMessage.includes('Insufficient minutes')) {
+    uploadError.value = 'No recording minutes remaining. Please upgrade your plan or purchase more minutes at app.suisse-notes.ch';
+    // Refresh minutes display
+    const authStore = (await import('../stores/auth')).useAuthStore();
+    authStore.fetchMinutes();
+  } else {
+    uploadError.value = errorMessage;
+  }
 
   // Update history entry as failed (already added before upload started)
   await historyStore.updateRecording(recordingStore.recordId, {
