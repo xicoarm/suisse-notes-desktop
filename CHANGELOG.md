@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.46](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.45...v3.7.46) (2026-03-06)
+
+
+### Bug Fixes
+
+* use @sentry/vue instead of @sentry/electron/renderer for desktop ([e844c97](https://github.com/xicoarm/suisse-notes-desktop/commit/e844c97ee60685d7a44ac9398f2ec1d37fe3631d))
+
 ### [3.7.45](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.44...v3.7.45) (2026-03-06)
 
 
