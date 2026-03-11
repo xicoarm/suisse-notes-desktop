@@ -179,6 +179,17 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Build web assets for Capacitor
+        run: npx quasar build -m capacitor -T ios --skip-pkg
+        env:
+          NODE_ENV: production
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+
+      - name: Sync Capacitor
+        run: npm run cap:sync
+
       - name: Create SPM Package.swift for BLE plugin
         run: |
           node -e "
@@ -211,17 +222,6 @@ jobs:
             fs.writeFileSync(dir + '/Package.swift', pkg);
             console.log('Created Package.swift for BLE plugin');
           "
-
-      - name: Build web assets for Capacitor
-        run: npx quasar build -m capacitor -T ios --skip-pkg
-        env:
-          NODE_ENV: production
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
-
-      - name: Sync Capacitor
-        run: npm run cap:sync
 
       - name: Register local iOS plugins
         run: |
