@@ -1,5 +1,5 @@
 /**
- * BLE Service for Recording Device Communication
+ * BLE Service for T240 Recording Device Communication
  * Implements the binary protocol for scanning, pairing, file listing,
  * and file download over Bluetooth Low Energy.
  *
