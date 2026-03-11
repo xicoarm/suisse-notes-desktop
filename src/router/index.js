@@ -65,6 +65,12 @@ const routes = [
         name: 'settings',
         component: () => import('../pages/SettingsPage.vue'),
         meta: { requiresAuth: true }
+      },
+      {
+        path: 'device',
+        name: 'device',
+        component: () => import('../pages/DevicePage.vue'),
+        meta: { requiresAuth: true }
       }
     ]
   },

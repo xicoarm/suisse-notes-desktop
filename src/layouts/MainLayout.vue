@@ -50,6 +50,13 @@
               :label="$t('history')"
               @click="goTo('/history')"
             />
+            <q-tab
+              v-if="isMobileApp"
+              name="device"
+              icon="bluetooth"
+              :label="$t('device')"
+              @click="goTo('/device')"
+            />
           </q-tabs>
         </div>
 
@@ -101,6 +108,7 @@
           </q-btn-dropdown>
 
           <q-btn
+            v-if="!isMobileApp"
             flat
             round
             dense
@@ -166,6 +174,7 @@ import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingStore } from '../stores/recording';
 import { useRouter, useRoute } from 'vue-router';
+import { isElectron, isCapacitor } from '../utils/platform';
 
 const { locale } = useI18n();
 const authStore = useAuthStore();
@@ -175,6 +184,7 @@ const route = useRoute();
 
 const currentTab = ref('record');
 const isMaximized = ref(false);
+const isMobileApp = isCapacitor();
 
 // Language switcher
 const languages = [
@@ -219,6 +229,8 @@ const toggleMaximize = async () => {
 watch(() => route.path, (path) => {
   if (path.includes('/history')) {
     currentTab.value = 'history';
+  } else if (path.includes('/device')) {
+    currentTab.value = 'device';
   } else if (path.includes('/record')) {
     currentTab.value = 'record';
   }
@@ -235,22 +247,26 @@ const handleLogout = async () => {
 
 // Global upload progress listeners (persist across page navigation)
 onMounted(() => {
-  checkMaximizeState();
+  if (isElectron()) {
+    checkMaximizeState();
 
-  window.electronAPI.upload.onProgress((data) => {
-    // Update current upload
-    if (data.recordId === recordingStore.recordId) {
-      recordingStore.updateUploadProgress(data.progress, data.bytesUploaded, data.bytesTotal);
-    }
-    // Update background upload
-    if (recordingStore.backgroundUpload.active && data.recordId === recordingStore.backgroundUpload.recordId) {
-      recordingStore.updateBackgroundUploadProgress(data.recordId, data.progress, data.bytesUploaded, data.bytesTotal);
-    }
-  });
+    window.electronAPI.upload.onProgress((data) => {
+      // Update current upload
+      if (data.recordId === recordingStore.recordId) {
+        recordingStore.updateUploadProgress(data.progress, data.bytesUploaded, data.bytesTotal);
+      }
+      // Update background upload
+      if (recordingStore.backgroundUpload.active && data.recordId === recordingStore.backgroundUpload.recordId) {
+        recordingStore.updateBackgroundUploadProgress(data.recordId, data.progress, data.bytesUploaded, data.bytesTotal);
+      }
+    });
+  }
 });
 
 onUnmounted(() => {
-  window.electronAPI.upload.removeAllListeners();
+  if (isElectron() && window.electronAPI?.upload?.removeAllListeners) {
+    window.electronAPI.upload.removeAllListeners();
+  }
 });
 </script>
 

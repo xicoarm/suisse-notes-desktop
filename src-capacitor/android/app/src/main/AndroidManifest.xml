@@ -9,10 +9,12 @@
     <!-- Wake lock for recording during device sleep (FIX 6) -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <!-- Bluetooth permissions (for Bluetooth headsets/microphones) -->
+    <!-- Bluetooth permissions (for recording device sync and wireless audio) -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <!-- Storage permissions for file picking -->
