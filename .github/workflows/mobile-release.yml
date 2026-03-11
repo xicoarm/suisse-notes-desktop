@@ -194,7 +194,23 @@ jobs:
         run: |
           node -e "
             const fs = require('fs');
+            const path = require('path');
             const dir = 'src-capacitor/node_modules/@capacitor-community/bluetooth-le';
+            // SPM does not support mixed Swift/ObjC in one target.
+            // Move ObjC files to a separate directory for a clang target.
+            const objcDir = path.join(dir, 'ios', 'PluginObjC');
+            fs.mkdirSync(objcDir, { recursive: true });
+            for (const f of ['Plugin.m', 'Plugin.h']) {
+              const src = path.join(dir, 'ios', 'Plugin', f);
+              const dst = path.join(objcDir, f);
+              if (fs.existsSync(src)) {
+                fs.copyFileSync(src, dst);
+                fs.unlinkSync(src);
+              }
+            }
+            // Also remove Info.plist from Swift target (SPM ignores it)
+            const plist = path.join(dir, 'ios', 'Plugin', 'Info.plist');
+            if (fs.existsSync(plist)) fs.unlinkSync(plist);
             const pkg = [
               '// swift-tools-version: 5.9',
               'import PackageDescription',
@@ -203,12 +219,20 @@ jobs:
               '    name: \"CapacitorCommunityBluetoothLe\",',
               '    platforms: [.iOS(.v13)],',
               '    products: [',
-              '        .library(name: \"CapacitorCommunityBluetoothLe\", targets: [\"BluetoothLePlugin\"])',
+              '        .library(name: \"CapacitorCommunityBluetoothLe\", targets: [\"BluetoothLePlugin\", \"BluetoothLePluginObjC\"])',
               '    ],',
               '    dependencies: [',
               '        .package(url: \"https://github.com/ionic-team/capacitor-swift-pm.git\", from: \"6.0.0\")',
               '    ],',
               '    targets: [',
+              '        .target(',
+              '            name: \"BluetoothLePluginObjC\",',
+              '            dependencies: [',
+              '                .product(name: \"Capacitor\", package: \"capacitor-swift-pm\"),',
+              '                .product(name: \"Cordova\", package: \"capacitor-swift-pm\")',
+              '            ],',
+              '            path: \"ios/PluginObjC\",',
+              '            publicHeadersPath: \".\"),',
               '        .target(',
               '            name: \"BluetoothLePlugin\",',
               '            dependencies: [',
@@ -218,9 +242,9 @@ jobs:
               '            path: \"ios/Plugin\")',
               '    ]',
               ')',
-            ].join('\n');
+            ].join(String.fromCharCode(10));
             fs.writeFileSync(dir + '/Package.swift', pkg);
-            console.log('Created Package.swift for BLE plugin');
+            console.log('Created Package.swift and separated ObjC files for BLE plugin');
           "
 
       - name: Register local iOS plugins
