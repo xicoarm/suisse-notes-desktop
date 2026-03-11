@@ -179,6 +179,39 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Create SPM Package.swift for BLE plugin
+        run: |
+          node -e "
+            const fs = require('fs');
+            const dir = 'src-capacitor/node_modules/@capacitor-community/bluetooth-le';
+            const pkg = [
+              '// swift-tools-version: 5.9',
+              'import PackageDescription',
+              '',
+              'let package = Package(',
+              '    name: \"CapacitorCommunityBluetoothLe\",',
+              '    platforms: [.iOS(.v13)],',
+              '    products: [',
+              '        .library(name: \"CapacitorCommunityBluetoothLe\", targets: [\"BluetoothLePlugin\"])',
+              '    ],',
+              '    dependencies: [',
+              '        .package(url: \"https://github.com/ionic-team/capacitor-swift-pm.git\", from: \"6.0.0\")',
+              '    ],',
+              '    targets: [',
+              '        .target(',
+              '            name: \"BluetoothLePlugin\",',
+              '            dependencies: [',
+              '                .product(name: \"Capacitor\", package: \"capacitor-swift-pm\"),',
+              '                .product(name: \"Cordova\", package: \"capacitor-swift-pm\")',
+              '            ],',
+              '            path: \"ios/Plugin\")',
+              '    ]',
+              ')',
+            ].join('\n');
+            fs.writeFileSync(dir + '/Package.swift', pkg);
+            console.log('Created Package.swift for BLE plugin');
+          "
+
       - name: Build web assets for Capacitor
         run: npx quasar build -m capacitor -T ios --skip-pkg
         env:
