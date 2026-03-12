@@ -184,7 +184,10 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
               }
               return serverRec;
             });
-            this.recordings = merged;
+            // Preserve local-only recordings (e.g. device recordings pending upload)
+            const serverIds = new Set(serverRecordings.map(r => r.id));
+            const localOnly = cached.filter(r => r.id && !serverIds.has(r.id));
+            this.recordings = [...merged, ...localOnly];
             _setCachedRecordings(userId, merged);
           }
         } catch (error) {
