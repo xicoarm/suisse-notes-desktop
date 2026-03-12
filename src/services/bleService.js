@@ -472,7 +472,7 @@ export class BleDeviceManager {
   /**
    * Perform the 3-step handshake with the device
    */
-  async _handshake(appUuid) {
+  async _handshake(appUuid, isRetry = false) {
     // Helper to format bytes for logging
     const hexDump = (data, maxLen = 20) => {
       const bytes = Array.from(data.slice(0, maxLen)).map(b => '0x' + b.toString(16).padStart(2, '0'));
@@ -483,7 +483,28 @@ export class BleDeviceManager {
     await this._write(buildCmd(CMD_HANDSHAKE));
     const step1 = await this._readNotification(5000);
 
-    captureMessage(`BLE handshake step1 raw: ${hexDump(step1, 30)} text=${new TextDecoder().decode(step1.slice(3))}`, 'info');
+    captureMessage(`BLE handshake step1 raw: ${hexDump(step1, 30)}`, 'info');
+
+    // Device may skip to step 3 (byte[3]=0x02) if it has an existing pairing.
+    // In that case, send unpair command to clear it, then retry the handshake.
+    if (step1[3] === 0x02 && !isRetry) {
+      const status = step1[4];
+      captureMessage(`BLE device has existing pairing (step3 at step1, status=0x${status.toString(16)}). Sending unpair and retrying.`, 'warning');
+
+      // Send unpair to clear the device's stored pairing
+      try {
+        await this._write(buildCmd(CMD_UNPAIR));
+        await this._readNotification(3000);
+      } catch {
+        // Unpair response may not come, that's ok
+      }
+
+      // Brief pause to let the device reset its pairing state
+      await new Promise(r => setTimeout(r, 500));
+
+      // Retry handshake once
+      return this._handshake(appUuid, true);
+    }
 
     // Response: 0x01 0x01 0x00 0x00 {json with uuid}
     if (step1[3] !== 0x00) {
