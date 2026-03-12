@@ -124,6 +124,28 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
       return null;
     },
 
+    // Retry syncing local-only recordings to server
+    async syncUnsyncedToServer() {
+      const userId = this._getUserId(null, { forWrite: true });
+      if (!userId) return;
+
+      const unsynced = this.recordings.filter(r => r._serverSynced === false);
+      for (const recording of unsynced) {
+        try {
+          await _serverFetch('/api/desktop/history', {
+            method: 'POST',
+            body: JSON.stringify(recording)
+          });
+          recording._serverSynced = true;
+        } catch {
+          // Still failed, will retry next time
+        }
+      }
+      if (unsynced.length > 0) {
+        _setCachedRecordings(userId, this.recordings);
+      }
+    },
+
     // Load recordings (platform-aware)
     async loadRecordings() {
       if (this.loading) return;
@@ -188,8 +210,11 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
             const serverIds = new Set(serverRecordings.map(r => r.id));
             const localOnly = cached.filter(r => r.id && !serverIds.has(r.id));
             this.recordings = [...merged, ...localOnly];
-            _setCachedRecordings(userId, merged);
+            _setCachedRecordings(userId, this.recordings);
           }
+
+          // Retry syncing any local-only recordings to server
+          this.syncUnsyncedToServer();
         } catch (error) {
           console.warn('Could not fetch history from server, using cache:', error);
           // Cache already loaded above, so UI still works
@@ -233,12 +258,14 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
             });
 
             const saved = data.recording || recordingWithUser;
+            saved._serverSynced = true;
             this.recordings.unshift(saved);
             _setCachedRecordings(userId, this.recordings);
             return { success: true, recording: saved };
           } catch (error) {
             // Server failed — save to local cache only so history isn't lost
             console.warn('Could not save recording to server, caching locally:', error);
+            recordingWithUser._serverSynced = false;
             this.recordings.unshift(recordingWithUser);
             _setCachedRecordings(userId, this.recordings);
             return { success: true, recording: recordingWithUser };
