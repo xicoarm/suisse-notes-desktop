@@ -10,6 +10,7 @@
  */
 
 import { isCapacitor } from '../utils/platform';
+import { addBreadcrumb, captureException, captureMessage } from '../boot/sentry';
 
 // BLE GATT UUIDs
 const BLE_SERVICE_UUID = '00001910-0000-1000-8000-00805f9b34fb';
@@ -104,10 +105,26 @@ export class BleDeviceManager {
   async scan(duration = 5000, onFound = null) {
     if (!this.ble) await this.initialize();
 
+    let devicesFound = 0;
+
+    addBreadcrumb({
+      category: 'ble',
+      message: `BLE scan starting (${duration}ms, service filter: ${BLE_SERVICE_UUID})`,
+      level: 'info'
+    });
+
+    // First pass: scan WITH service UUID filter (fast, precise)
     await this.ble.requestLEScan(
       { services: [BLE_SERVICE_UUID] },
       (result) => {
         if (onFound && result.device) {
+          devicesFound++;
+          addBreadcrumb({
+            category: 'ble',
+            message: `BLE device found (filtered): ${result.device.name || 'unnamed'}`,
+            data: { deviceId: result.device.deviceId, rssi: result.rssi },
+            level: 'info'
+          });
           onFound({
             deviceId: result.device.deviceId,
             name: result.device.name || result.localName || null,
@@ -117,9 +134,56 @@ export class BleDeviceManager {
       }
     );
 
-    // Auto-stop after duration
+    // Wait for filtered scan
     await new Promise(r => setTimeout(r, duration));
     await this.stopScan();
+
+    // If no devices found with service filter, retry WITHOUT filter
+    // Some devices don't advertise service UUIDs in their advertisement packet
+    if (devicesFound === 0) {
+      addBreadcrumb({
+        category: 'ble',
+        message: 'No devices found with service filter, retrying unfiltered scan',
+        level: 'warning'
+      });
+
+      await this.ble.requestLEScan(
+        {},
+        (result) => {
+          if (onFound && result.device) {
+            // Accept devices with a name (filters out anonymous BLE peripherals)
+            const name = result.device.name || result.localName || null;
+            if (name) {
+              devicesFound++;
+              addBreadcrumb({
+                category: 'ble',
+                message: `BLE device found (unfiltered): ${name}`,
+                data: { deviceId: result.device.deviceId, rssi: result.rssi },
+                level: 'info'
+              });
+              onFound({
+                deviceId: result.device.deviceId,
+                name,
+                rssi: result.rssi
+              });
+            }
+          }
+        }
+      );
+
+      await new Promise(r => setTimeout(r, duration));
+      await this.stopScan();
+    }
+
+    addBreadcrumb({
+      category: 'ble',
+      message: `BLE scan complete: ${devicesFound} device(s) found`,
+      level: 'info'
+    });
+
+    if (devicesFound === 0) {
+      captureMessage('BLE scan completed with 0 devices found', 'warning');
+    }
   }
 
   /**
@@ -141,6 +205,12 @@ export class BleDeviceManager {
    */
   async connect(bleDeviceId, appUuid) {
     if (!this.ble) await this.initialize();
+
+    addBreadcrumb({
+      category: 'ble',
+      message: `BLE connecting to device ${bleDeviceId}`,
+      level: 'info'
+    });
 
     this.deviceId = bleDeviceId;
     this._notifyQueue = [];

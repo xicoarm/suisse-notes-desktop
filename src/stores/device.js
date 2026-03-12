@@ -7,6 +7,7 @@ import { defineStore } from 'pinia';
 import { v4 as uuidv4 } from 'uuid';
 import { isCapacitor } from '../utils/platform';
 import { getBleManager } from '../services/bleService';
+import { addBreadcrumb, captureException } from '../boot/sentry';
 import { uploadWithVerification } from '../services/upload';
 import { getApiUrlSync } from '../services/api';
 import { useAuthStore } from './auth';
@@ -125,7 +126,14 @@ export const useDeviceStore = defineStore('device', {
             this.scanResults.push(device);
           }
         });
+        addBreadcrumb({
+          category: 'ble',
+          message: `Scan finished: ${this.scanResults.length} unique device(s)`,
+          data: { devices: this.scanResults.map(d => d.name || d.deviceId) },
+          level: 'info'
+        });
       } catch (e) {
+        captureException(e, { tags: { action: 'ble_scan' } });
         this.error = e.message;
         throw e;
       } finally {
@@ -178,6 +186,7 @@ export const useDeviceStore = defineStore('device', {
 
         return deviceInfo;
       } catch (e) {
+        captureException(e, { tags: { action: 'ble_pair' }, extra: { bleDeviceId } });
         this.connectionState = 'disconnected';
         this.error = e.message;
         throw e;

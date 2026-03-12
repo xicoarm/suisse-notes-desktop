@@ -1,7 +1,8 @@
 import { defineStore } from 'pinia';
-import { isElectron } from '../utils/platform';
+import { isElectron, getPlatform } from '../utils/platform';
 import { storeToken, getToken, clearToken, storeUserCredentials, getUserCredentials, clearAllCredentials } from '../services/secureStorage';
 import { apiRequest, authenticatedRequest, API_ENDPOINTS } from '../services/api';
+import { addBreadcrumb, captureException, setUser } from '../boot/sentry';
 
 /**
  * Platform-aware auth helpers.
@@ -9,6 +10,9 @@ import { apiRequest, authenticatedRequest, API_ENDPOINTS } from '../services/api
  * On Capacitor/web, we call the backend directly via fetch.
  */
 async function platformLogin(username, password) {
+  const platform = getPlatform();
+  addBreadcrumb({ category: 'auth', message: `Login attempt on ${platform}`, level: 'info' });
+
   if (isElectron()) {
     return window.electronAPI.auth.login(username, password);
   }
@@ -19,8 +23,10 @@ async function platformLogin(username, password) {
   });
   const data = await response.json();
   if (!response.ok) {
+    addBreadcrumb({ category: 'auth', message: `Login failed: ${data.error || response.status}`, level: 'warning' });
     return { success: false, error: data.error || 'Login failed' };
   }
+  addBreadcrumb({ category: 'auth', message: 'Login successful', level: 'info' });
   return { success: true, token: data.token, user: data.user, minutes: data.minutes };
 }
 
@@ -129,6 +135,9 @@ export const useAuthStore = defineStore('auth', {
           await platformSaveToken(result.token);
           await platformSaveUserInfo(result.user);
 
+          // Set Sentry user context
+          setUser(result.user);
+
           // Start periodic minutes refresh
           this.startMinutesRefresh();
 
@@ -138,6 +147,7 @@ export const useAuthStore = defineStore('auth', {
           return { success: false, error: this.error };
         }
       } catch (error) {
+        captureException(error, { tags: { action: 'login' } });
         this.error = error.message || 'An unexpected error occurred';
         return { success: false, error: this.error };
       } finally {
@@ -194,6 +204,9 @@ export const useAuthStore = defineStore('auth', {
       // Stop minutes refresh
       this.stopMinutesRefresh();
 
+      // Clear Sentry user context
+      setUser(null);
+
       this.user = null;
       this.token = null;
       this.isAuthenticated = false;
@@ -213,6 +226,9 @@ export const useAuthStore = defineStore('auth', {
           this.token = token;
           this.user = userInfo;
           this.isAuthenticated = true;
+
+          // Set Sentry user context on session restore
+          setUser(userInfo);
 
           // Fetch minutes on session restore
           this.fetchMinutes();
