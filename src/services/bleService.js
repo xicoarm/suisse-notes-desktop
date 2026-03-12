@@ -147,21 +147,15 @@ export class BleDeviceManager {
         level: 'warning'
       });
 
+      const allSeen = [];
       await this.ble.requestLEScan(
         {},
         (result) => {
           if (onFound && result.device) {
             const name = result.device.name || result.localName || null;
-            // Only show devices matching known recording device name patterns
-            // T240(BLE), MeCho, Record Card, etc.
-            if (name && /^(T240|MeCho|Record\s*Card)/i.test(name)) {
+            if (name) {
+              allSeen.push(name);
               devicesFound++;
-              addBreadcrumb({
-                category: 'ble',
-                message: `BLE device found (name-filtered): ${name}`,
-                data: { deviceId: result.device.deviceId, rssi: result.rssi },
-                level: 'info'
-              });
               onFound({
                 deviceId: result.device.deviceId,
                 name,
@@ -171,6 +165,12 @@ export class BleDeviceManager {
           }
         }
       );
+
+      await new Promise(r => setTimeout(r, duration));
+      await this.stopScan();
+
+      // Log all discovered device names to Sentry for debugging
+      captureMessage(`BLE unfiltered scan results: [${allSeen.join(', ')}]`, 'info');
 
       await new Promise(r => setTimeout(r, duration));
       await this.stopScan();
@@ -218,31 +218,51 @@ export class BleDeviceManager {
     this._notifyWaiter = null;
 
     // Connect
-    await this.ble.connect(bleDeviceId, (deviceId) => {
-      this.connected = false;
-      this.deviceId = null;
-      if (this._onDisconnectCallback) {
-        this._onDisconnectCallback(deviceId);
-      }
-    });
+    try {
+      await this.ble.connect(bleDeviceId, (deviceId) => {
+        this.connected = false;
+        this.deviceId = null;
+        addBreadcrumb({ category: 'ble', message: `BLE disconnected: ${deviceId}`, level: 'warning' });
+        if (this._onDisconnectCallback) {
+          this._onDisconnectCallback(deviceId);
+        }
+      });
+      addBreadcrumb({ category: 'ble', message: 'BLE connected, starting notifications', level: 'info' });
+    } catch (e) {
+      captureException(e, { tags: { action: 'ble_connect' }, extra: { bleDeviceId } });
+      throw new Error(`Connection failed: ${e.message}`);
+    }
 
     // Start notifications
-    await this.ble.startNotifications(
-      bleDeviceId,
-      BLE_SERVICE_UUID,
-      BLE_NOTIFY_CHAR,
-      (value) => this._onNotify(value)
-    );
+    try {
+      await this.ble.startNotifications(
+        bleDeviceId,
+        BLE_SERVICE_UUID,
+        BLE_NOTIFY_CHAR,
+        (value) => this._onNotify(value)
+      );
+      addBreadcrumb({ category: 'ble', message: 'BLE notifications started, performing handshake', level: 'info' });
+    } catch (e) {
+      captureException(e, { tags: { action: 'ble_notifications' }, extra: { bleDeviceId } });
+      throw new Error(`Notification setup failed: ${e.message}`);
+    }
 
     // Perform handshake
-    const deviceInfo = await this._handshake(appUuid);
-    this.connected = true;
-    this.deviceInfo = deviceInfo;
+    try {
+      const deviceInfo = await this._handshake(appUuid);
+      this.connected = true;
+      this.deviceInfo = deviceInfo;
+      addBreadcrumb({ category: 'ble', message: `BLE handshake OK: ${deviceInfo.name || 'unknown'}`, level: 'info' });
 
-    // Sync phone time to device
-    await this.syncTime();
+      // Sync phone time to device
+      await this.syncTime();
 
-    return deviceInfo;
+      return deviceInfo;
+    } catch (e) {
+      captureException(e, { tags: { action: 'ble_handshake' }, extra: { bleDeviceId } });
+      await this.disconnect();
+      throw new Error(`Handshake failed: ${e.message}`);
+    }
   }
 
   /**
