@@ -218,6 +218,15 @@ export class BleDeviceManager {
     this._notifyQueue = [];
     this._notifyWaiter = null;
 
+    // Ensure the BLE plugin knows about this device (needed for reconnection
+    // to previously paired devices without a fresh scan)
+    try {
+      await this.ble.getDevices([bleDeviceId]);
+      addBreadcrumb({ category: 'ble', message: 'BLE getDevices OK', level: 'info' });
+    } catch (e) {
+      addBreadcrumb({ category: 'ble', message: `BLE getDevices failed: ${e.message}, will try connect anyway`, level: 'warning' });
+    }
+
     // Connect
     try {
       await this.ble.connect(bleDeviceId, (deviceId) => {
