@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.47](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.46...v3.7.47) (2026-03-12)
+
+
+### Features
+
+* add BLE recording device sync for mobile app ([9267d03](https://github.com/xicoarm/suisse-notes-desktop/commit/9267d03950a2d4b72d0499f6d87282a1202ea2ae))
+
+
+### Bug Fixes
+
+* add missing UIKit imports to BLE plugin Swift files for SPM ([1d37dc5](https://github.com/xicoarm/suisse-notes-desktop/commit/1d37dc5cdf2544795e40f08ca5637cae07ae16d5))
+* bump iOS marketing version to 3.7.46 ([db640ec](https://github.com/xicoarm/suisse-notes-desktop/commit/db640ec5bc4119beb6184aaa76b361676963bd5d))
+* commit cap sync generated files for BLE plugin registration ([40bc263](https://github.com/xicoarm/suisse-notes-desktop/commit/40bc26322412f38d6a61d6383c7a1e1bafe78c52))
+* create SPM Package.swift for BLE plugin in iOS CI build ([2c5f2b6](https://github.com/xicoarm/suisse-notes-desktop/commit/2c5f2b6fe60c82839eb2575c9f7940f7ed709563))
+* make auth store platform-aware to fix mobile login crash ([483a309](https://github.com/xicoarm/suisse-notes-desktop/commit/483a309bfa4f70213820f10987b9651d6f0dca53))
+* move BLE Package.swift creation to after cap sync ([feee58c](https://github.com/xicoarm/suisse-notes-desktop/commit/feee58c85ea354e8609afafb4d673d0ba434b394))
+* patch BLE plugin before quasar build to prevent overwrite ([7a7db9d](https://github.com/xicoarm/suisse-notes-desktop/commit/7a7db9df4aeb328c95d20f711483d7cfa3fcbd62))
+* separate ObjC and Swift files for BLE plugin SPM compatibility ([9b1a3d5](https://github.com/xicoarm/suisse-notes-desktop/commit/9b1a3d53db277b6411312fb2a27d1c16e6f2fbcd))
+* sync package-lock.json with BLE dependency addition ([b972e14](https://github.com/xicoarm/suisse-notes-desktop/commit/b972e14012934a027eaf84aaa235ac73d1d4bc84))
+* trigger mobile release for BLE device sync ([2473d0b](https://github.com/xicoarm/suisse-notes-desktop/commit/2473d0bfb7b02b3139f06d6d6cb7b2527b6b67d1))
+
 ### [3.7.46](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.45...v3.7.46) (2026-03-06)
 
 
