@@ -1,6 +1,6 @@
 <template>
   <div
-    v-if="!hidden"
+    v-if="!hidden && !isMobile"
     class="mode-tab-switcher"
   >
     <q-tabs
@@ -33,6 +33,7 @@
 <script setup>
 import { computed } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
+import { isCapacitor } from '../utils/platform';
 
 const props = defineProps({
   disabled: {
@@ -44,6 +45,9 @@ const props = defineProps({
     default: false
   }
 });
+
+// On mobile, header tabs handle Record/Upload switching
+const isMobile = isCapacitor();
 
 const router = useRouter();
 const route = useRoute();

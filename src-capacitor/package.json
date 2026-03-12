@@ -1,6 +1,6 @@
 {
   "name": "Suisse Notes",
-  "version": "3.7.38",
+  "version": "3.7.47",
   "description": "Desktop app for recording and transcribing meetings",
   "private": true,
   "dependencies": {
@@ -15,5 +15,5 @@
     "@capacitor/preferences": "^6.0.4",
     "@capacitor/status-bar": "^6.0.3"
   },
-  "author": "Suisse AI Group GmbH"
+  "author": "Suisse IT GmbH"
 }

@@ -52,10 +52,10 @@
             />
             <q-tab
               v-if="isMobileApp"
-              name="device"
-              icon="bluetooth"
-              :label="$t('device')"
-              @click="goTo('/device')"
+              name="upload"
+              icon="cloud_upload"
+              :label="$t('uploadFileTab')"
+              @click="goTo('/upload')"
             />
           </q-tabs>
         </div>
@@ -229,8 +229,8 @@ const toggleMaximize = async () => {
 watch(() => route.path, (path) => {
   if (path.includes('/history')) {
     currentTab.value = 'history';
-  } else if (path.includes('/device')) {
-    currentTab.value = 'device';
+  } else if (path.includes('/upload')) {
+    currentTab.value = 'upload';
   } else if (path.includes('/record')) {
     currentTab.value = 'record';
   }

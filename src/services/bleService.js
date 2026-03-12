@@ -151,13 +151,14 @@ export class BleDeviceManager {
         {},
         (result) => {
           if (onFound && result.device) {
-            // Accept devices with a name (filters out anonymous BLE peripherals)
             const name = result.device.name || result.localName || null;
-            if (name) {
+            // Only show devices matching known recording device name patterns
+            // T240(BLE), MeCho, Record Card, etc.
+            if (name && /^(T240|MeCho|Record\s*Card)/i.test(name)) {
               devicesFound++;
               addBreadcrumb({
                 category: 'ble',
-                message: `BLE device found (unfiltered): ${name}`,
+                message: `BLE device found (name-filtered): ${name}`,
                 data: { deviceId: result.device.deviceId, rssi: result.rssi },
                 level: 'info'
               });
