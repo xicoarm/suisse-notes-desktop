@@ -81,6 +81,139 @@
         </div>
       </div>
 
+      <!-- Recording Device Section (Mobile only) -->
+      <div
+        v-if="isMobileApp"
+        class="settings-section"
+      >
+        <div class="section-title">
+          {{ $t('deviceTitle') }}
+        </div>
+
+        <!-- Paired device card -->
+        <div
+          v-if="deviceStore.hasPairedDevice"
+          class="device-setting-card"
+        >
+          <div class="device-setting-row">
+            <div class="device-setting-icon">
+              <q-icon
+                name="bluetooth"
+                size="20px"
+                color="white"
+              />
+            </div>
+            <div class="device-setting-info">
+              <div class="device-setting-name">
+                {{ deviceStore.deviceName || deviceStore.pairedDevice?.name }}
+              </div>
+              <div class="device-setting-status">
+                <span
+                  class="status-dot-small"
+                  :class="{ connected: deviceStore.isConnected }"
+                />
+                {{ deviceStore.isConnected ? $t('connected') : $t('disconnected') }}
+              </div>
+            </div>
+            <div class="device-setting-actions">
+              <q-btn
+                v-if="!deviceStore.isConnected && !deviceStore.isConnecting"
+                flat
+                dense
+                color="primary"
+                icon="bluetooth"
+                :label="$t('connectDevice')"
+                no-caps
+                @click="reconnectDevice"
+              />
+              <q-spinner-dots
+                v-if="deviceStore.isConnecting"
+                color="primary"
+                size="20px"
+              />
+              <q-btn
+                v-if="deviceStore.isConnected"
+                flat
+                dense
+                color="grey-6"
+                icon="bluetooth_disabled"
+                :label="$t('disconnectDevice')"
+                no-caps
+                @click="disconnectDevice"
+              />
+            </div>
+          </div>
+          <div class="device-setting-footer">
+            <q-btn
+              flat
+              dense
+              color="negative"
+              icon="delete_outline"
+              :label="$t('forgetDevice')"
+              no-caps
+              size="sm"
+              @click="confirmForgetDevice"
+            />
+          </div>
+        </div>
+
+        <!-- No paired device — scan UI -->
+        <div
+          v-else
+          class="device-scan-section"
+        >
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-label">
+                {{ $t('connectRecorder') }}
+              </div>
+              <div class="setting-description">
+                {{ $t('connectRecorderDesc') }}
+              </div>
+            </div>
+          </div>
+          <q-btn
+            unelevated
+            class="gradient-btn full-width q-mt-sm"
+            :icon="deviceStore.isScanning ? undefined : 'bluetooth_searching'"
+            :label="deviceStore.isScanning ? $t('scanning') : $t('scanForDevices')"
+            :loading="deviceStore.isScanning"
+            @click="deviceStore.isScanning ? deviceStore.stopScan() : startDeviceScan()"
+          />
+
+          <!-- Scan Results -->
+          <div
+            v-if="deviceStore.scanResults.length > 0"
+            class="scan-results-settings"
+          >
+            <div class="scan-results-title">
+              {{ $t('devicesFound') }}
+            </div>
+            <div
+              v-for="device in deviceStore.scanResults"
+              :key="device.deviceId"
+              class="scan-result-row"
+              @click="pairDevice(device)"
+            >
+              <q-icon
+                name="bluetooth"
+                color="primary"
+                size="18px"
+              />
+              <div class="scan-result-info">
+                <span class="scan-result-name">{{ device.name || $t('unknownDevice') }}</span>
+                <span class="scan-result-rssi">{{ device.rssi ? `${device.rssi} dBm` : '' }}</span>
+              </div>
+              <q-icon
+                name="chevron_right"
+                color="grey-5"
+                size="18px"
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Language Section -->
       <div class="settings-section">
         <div class="section-title">
@@ -357,7 +490,9 @@ import { useConfigStore } from '../stores/config';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
+import { useDeviceStore } from '../stores/device';
 import { useLanguage } from '../composables/useLanguage';
+import { isCapacitor, isElectron } from '../utils/platform';
 import CustomVocabularyInput from '../components/CustomVocabularyInput.vue';
 
 const $q = useQuasar();
@@ -368,6 +503,8 @@ const authStore = useAuthStore();
 const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
 const { languages, currentLang, setLanguage, initLanguage } = useLanguage();
+const deviceStore = useDeviceStore();
+const isMobileApp = isCapacitor();
 
 const appVersion = ref('1.0.0');
 const userDataPath = ref('');
@@ -405,8 +542,14 @@ onMounted(async () => {
 
   // Get app info
   try {
-    appVersion.value = await window.electronAPI.app.getVersion();
-    userDataPath.value = await window.electronAPI.app.getUserDataPath();
+    if (isElectron()) {
+      appVersion.value = await window.electronAPI.app.getVersion();
+      userDataPath.value = await window.electronAPI.app.getUserDataPath();
+    } else if (isCapacitor()) {
+      const { App: CapApp } = await import('@capacitor/app');
+      const appInfo = await CapApp.getInfo();
+      appVersion.value = appInfo.version || '1.0.0';
+    }
   } catch (e) {
     console.warn('Could not get app info:', e);
   }
@@ -419,6 +562,15 @@ onMounted(async () => {
 
   // Load transcription settings
   await transcriptionStore.loadGlobalSettings();
+
+  // Initialize BLE device store on mobile
+  if (isMobileApp) {
+    try {
+      await deviceStore.initialize();
+    } catch (e) {
+      console.warn('BLE initialization failed:', e);
+    }
+  }
 });
 
 const updateStoragePreference = async (value) => {
@@ -439,7 +591,14 @@ const handleDeleteAll = async () => {
       return;
     }
 
-    const result = await window.electronAPI.history.deleteAll(userId);
+    let result;
+    if (isElectron()) {
+      result = await window.electronAPI.history.deleteAll(userId);
+    } else {
+      // Mobile: clear via history store
+      await historyStore.deleteAll();
+      result = { success: true, deletedCount: recordingsCount.value };
+    }
 
     if (result.success) {
       // Reload the history store to reflect changes
@@ -503,6 +662,47 @@ const handleDeleteAccount = async () => {
   } finally {
     isDeletingAccount.value = false;
   }
+};
+
+// ========== Device Methods ==========
+const startDeviceScan = async () => {
+  try {
+    await deviceStore.startScan();
+  } catch (e) {
+    $q.notify({ type: 'warning', message: e.message });
+  }
+};
+
+const pairDevice = async (device) => {
+  try {
+    await deviceStore.connectAndPair(device.deviceId);
+    $q.notify({ type: 'positive', message: t('deviceConnected') });
+  } catch (e) {
+    $q.notify({ type: 'negative', message: t('pairingFailed'), caption: e.message, timeout: 5000 });
+  }
+};
+
+const reconnectDevice = async () => {
+  try {
+    await deviceStore.autoConnect();
+  } catch (e) {
+    $q.notify({ type: 'negative', message: t('connectionFailed'), caption: e.message, timeout: 5000 });
+  }
+};
+
+const disconnectDevice = async () => {
+  await deviceStore.disconnect();
+};
+
+const confirmForgetDevice = () => {
+  $q.dialog({
+    title: t('forgetDeviceTitle'),
+    message: t('forgetDeviceMessage'),
+    cancel: { flat: true, label: t('cancel') },
+    ok: { color: 'negative', label: t('forgetDevice'), flat: true }
+  }).onOk(async () => {
+    await deviceStore.forgetDevice();
+  });
 };
 
 const handleLogout = async () => {
@@ -657,6 +857,120 @@ const handleLogout = async () => {
   .settings-section .setting-row.danger-zone {
     margin: 16px -16px -16px -16px;
     padding: 20px 16px;
+  }
+}
+
+// ========== Device Settings ==========
+.device-setting-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px;
+  background: #f8fafc;
+}
+
+.device-setting-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.device-setting-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #6366F1, #8B5CF6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.device-setting-info {
+  flex: 1;
+  min-width: 0;
+
+  .device-setting-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: #1e293b;
+  }
+
+  .device-setting-status {
+    font-size: 12px;
+    color: #64748b;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
+  }
+}
+
+.status-dot-small {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #94a3b8;
+  display: inline-block;
+
+  &.connected {
+    background: #22c55e;
+  }
+}
+
+.device-setting-actions {
+  flex-shrink: 0;
+}
+
+.device-setting-footer {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.scan-results-settings {
+  margin-top: 16px;
+
+  .scan-results-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #64748b;
+    margin-bottom: 8px;
+  }
+}
+
+.scan-result-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+
+  &:hover, &:active {
+    background: #f8fafc;
+    border-color: #6366F1;
+  }
+
+  .scan-result-info {
+    flex: 1;
+    min-width: 0;
+
+    .scan-result-name {
+      font-size: 14px;
+      font-weight: 500;
+      color: #1e293b;
+      display: block;
+    }
+
+    .scan-result-rssi {
+      font-size: 11px;
+      color: #94a3b8;
+    }
   }
 }
 
