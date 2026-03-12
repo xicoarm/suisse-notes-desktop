@@ -211,6 +211,17 @@ jobs:
             // Also remove Info.plist from Swift target (SPM ignores it)
             const plist = path.join(dir, 'ios', 'Plugin', 'Info.plist');
             if (fs.existsSync(plist)) fs.unlinkSync(plist);
+            // Fix missing imports for SPM (CocoaPods auto-linked these)
+            const pluginDir = path.join(dir, 'ios', 'Plugin');
+            for (const file of fs.readdirSync(pluginDir)) {
+              if (!file.endsWith('.swift')) continue;
+              const fp = path.join(pluginDir, file);
+              let content = fs.readFileSync(fp, 'utf8');
+              if (!content.includes('import UIKit')) {
+                content = 'import UIKit\n' + content;
+                fs.writeFileSync(fp, content);
+              }
+            }
             const pkg = [
               '// swift-tools-version: 5.9',
               'import PackageDescription',
