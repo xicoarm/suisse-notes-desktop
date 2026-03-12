@@ -208,6 +208,45 @@ export class BleDeviceManager {
   async connect(bleDeviceId, appUuid) {
     if (!this.ble) await this.initialize();
 
+    const result = await this._connectAndHandshake(bleDeviceId, appUuid);
+
+    // If the device had an existing pairing, it rejects and disconnects.
+    // We try: send unpair → wait for device to disconnect → reconnect fresh.
+    if (result.needsUnpair) {
+      captureMessage('BLE device has existing pairing, attempting unpair + reconnect', 'warning');
+
+      // Send unpair command before the device disconnects us (~68ms window)
+      try {
+        await this._write(buildCmd(CMD_UNPAIR));
+        await this._readNotification(2000);
+      } catch {
+        // Device may disconnect before responding — that's expected
+      }
+
+      // Ensure we're fully disconnected
+      await this.disconnect();
+
+      // Wait for the device to reset its pairing state
+      await new Promise(r => setTimeout(r, 1500));
+
+      // Reconnect from scratch
+      const retry = await this._connectAndHandshake(bleDeviceId, appUuid);
+      if (retry.needsUnpair) {
+        await this.disconnect();
+        throw new Error('Device still has existing pairing after unpair. Please power-cycle the device and try again.');
+      }
+      return retry.deviceInfo;
+    }
+
+    return result.deviceInfo;
+  }
+
+  /**
+   * Internal: establish BLE connection, start notifications, perform handshake.
+   * Returns { deviceInfo } on success, or { needsUnpair: true } if device rejects
+   * with an existing pairing.
+   */
+  async _connectAndHandshake(bleDeviceId, appUuid) {
     addBreadcrumb({
       category: 'ble',
       message: `BLE connecting to device ${bleDeviceId}`,
@@ -250,15 +289,20 @@ export class BleDeviceManager {
 
     // Perform handshake
     try {
-      const deviceInfo = await this._handshake(appUuid);
+      const handshakeResult = await this._handshake(appUuid);
+
+      if (handshakeResult.needsUnpair) {
+        return { needsUnpair: true };
+      }
+
       this.connected = true;
-      this.deviceInfo = deviceInfo;
-      addBreadcrumb({ category: 'ble', message: `BLE handshake OK: ${deviceInfo.name || 'unknown'}`, level: 'info' });
+      this.deviceInfo = handshakeResult.deviceInfo;
+      addBreadcrumb({ category: 'ble', message: `BLE handshake OK: ${handshakeResult.deviceInfo.name || 'unknown'}`, level: 'info' });
 
       // Sync phone time to device
       await this.syncTime();
 
-      return deviceInfo;
+      return { deviceInfo: handshakeResult.deviceInfo };
     } catch (e) {
       captureException(e, { tags: { action: 'ble_handshake' }, extra: { bleDeviceId } });
       await this.disconnect();
@@ -472,7 +516,7 @@ export class BleDeviceManager {
   /**
    * Perform the 3-step handshake with the device
    */
-  async _handshake(appUuid, isRetry = false) {
+  async _handshake(appUuid) {
     // Helper to format bytes for logging
     const hexDump = (data, maxLen = 20) => {
       const bytes = Array.from(data.slice(0, maxLen)).map(b => '0x' + b.toString(16).padStart(2, '0'));
@@ -485,25 +529,12 @@ export class BleDeviceManager {
 
     captureMessage(`BLE handshake step1 raw: ${hexDump(step1, 30)}`, 'info');
 
-    // Device may skip to step 3 (byte[3]=0x02) if it has an existing pairing.
-    // In that case, send unpair command to clear it, then retry the handshake.
-    if (step1[3] === 0x02 && !isRetry) {
+    // Device skips to step 3 (byte[3]=0x02) when it has an existing pairing.
+    // Signal the caller to handle unpair + full reconnect.
+    if (step1[3] === 0x02) {
       const status = step1[4];
-      captureMessage(`BLE device has existing pairing (step3 at step1, status=0x${status.toString(16)}). Sending unpair and retrying.`, 'warning');
-
-      // Send unpair to clear the device's stored pairing
-      try {
-        await this._write(buildCmd(CMD_UNPAIR));
-        await this._readNotification(3000);
-      } catch {
-        // Unpair response may not come, that's ok
-      }
-
-      // Brief pause to let the device reset its pairing state
-      await new Promise(r => setTimeout(r, 500));
-
-      // Retry handshake once
-      return this._handshake(appUuid, true);
+      captureMessage(`BLE device rejected at step1 with step3 response: status=0x${status.toString(16)}`, 'warning');
+      return { needsUnpair: true };
     }
 
     // Response: 0x01 0x01 0x00 0x00 {json with uuid}
@@ -550,7 +581,7 @@ export class BleDeviceManager {
     // Parse device info from successful handshake
     const info = parseJsonFromBuffer(step3, 5);
     captureMessage(`BLE handshake OK: name=${info.name}, SN=${info.SN}, model=${info.model}`, 'info');
-    return info;
+    return { deviceInfo: info };
   }
 
   /**
