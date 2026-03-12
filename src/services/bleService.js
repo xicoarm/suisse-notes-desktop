@@ -539,7 +539,7 @@ export class BleDeviceManager {
     // Parse device info from successful handshake
     const info = parseJsonFromBuffer(step3, 5);
     captureMessage(`BLE handshake OK: name=${info.name}, SN=${info.SN}, model=${info.model}`, 'info');
-    return { deviceInfo: info };
+    return info;
   }
 
   /**
