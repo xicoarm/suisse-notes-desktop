@@ -13,7 +13,8 @@ const STORAGE_KEYS = {
   AUTH_TOKEN: 'authToken',
   REFRESH_TOKEN: 'refreshToken',
   USER_ID: 'userId',
-  USER_EMAIL: 'userEmail'
+  USER_EMAIL: 'userEmail',
+  USER_INFO: 'userInfo'
 };
 
 // Lazy load Capacitor Preferences
@@ -232,10 +233,17 @@ export const storeUserCredentials = async (credentials) => {
     if (isCapacitor()) {
       await initCapacitorPreferences();
 
-      if (credentials.userId) {
+      // Store the full user object as JSON so all fields survive round-trip
+      await Preferences.set({
+        key: STORAGE_KEYS.USER_INFO,
+        value: JSON.stringify(credentials)
+      });
+
+      // Also store individual fields for backward compatibility
+      if (credentials.userId || credentials.id) {
         await Preferences.set({
           key: STORAGE_KEYS.USER_ID,
-          value: credentials.userId
+          value: credentials.userId || credentials.id
         });
       }
 
@@ -272,6 +280,17 @@ export const getUserCredentials = async () => {
     if (isCapacitor()) {
       await initCapacitorPreferences();
 
+      // Try full user object first (new format)
+      const userInfoRaw = await Preferences.get({ key: STORAGE_KEYS.USER_INFO });
+      if (userInfoRaw.value) {
+        try {
+          return JSON.parse(userInfoRaw.value);
+        } catch (e) {
+          // fall through to legacy keys
+        }
+      }
+
+      // Fallback to individual keys (legacy)
       const userId = await Preferences.get({ key: STORAGE_KEYS.USER_ID });
       const email = await Preferences.get({ key: STORAGE_KEYS.USER_EMAIL });
 
@@ -312,6 +331,7 @@ export const clearAllCredentials = async () => {
       await Preferences.remove({ key: STORAGE_KEYS.REFRESH_TOKEN });
       await Preferences.remove({ key: STORAGE_KEYS.USER_ID });
       await Preferences.remove({ key: STORAGE_KEYS.USER_EMAIL });
+      await Preferences.remove({ key: STORAGE_KEYS.USER_INFO });
 
       return { success: true };
     }
