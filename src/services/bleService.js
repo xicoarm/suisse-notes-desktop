@@ -102,78 +102,78 @@ export class BleDeviceManager {
    * @param {Function} onFound - Callback for each device found
    * @returns {Promise<void>}
    */
-  async scan(duration = 5000, onFound = null) {
+  async scan(duration = 7000, onFound = null) {
     if (!this.ble) await this.initialize();
 
     let devicesFound = 0;
+    const seen = new Set();
+    const allSeen = [];
 
     addBreadcrumb({
       category: 'ble',
-      message: `BLE scan starting (${duration}ms, service filter: ${BLE_SERVICE_UUID})`,
+      message: `BLE scan starting (${duration}ms)`,
       level: 'info'
     });
 
-    // First pass: scan WITH service UUID filter (fast, precise)
-    await this.ble.requestLEScan(
-      { services: [BLE_SERVICE_UUID] },
-      (result) => {
-        if (onFound && result.device) {
-          devicesFound++;
-          addBreadcrumb({
-            category: 'ble',
-            message: `BLE device found (filtered): ${result.device.name || 'unnamed'}`,
-            data: { deviceId: result.device.deviceId, rssi: result.rssi },
-            level: 'info'
-          });
-          onFound({
-            deviceId: result.device.deviceId,
-            name: result.device.name || result.localName || null,
-            rssi: result.rssi
-          });
-        }
-      }
-    );
+    const handleDevice = (result, source) => {
+      if (!onFound || !result.device) return;
+      const id = result.device.deviceId;
+      if (seen.has(id)) return;
+      seen.add(id);
 
-    // Wait for filtered scan
-    await new Promise(r => setTimeout(r, duration));
-    await this.stopScan();
+      const name = result.device.name || result.localName || null;
+      devicesFound++;
 
-    // If no devices found with service filter, retry WITHOUT filter
-    // Some devices don't advertise service UUIDs in their advertisement packet
+      addBreadcrumb({
+        category: 'ble',
+        message: `BLE device found (${source}): ${name || 'unnamed'} [${id}]`,
+        data: { rssi: result.rssi },
+        level: 'info'
+      });
+
+      onFound({ deviceId: id, name, rssi: result.rssi });
+    };
+
+    // Step 1: Scan WITH service UUID filter (finds devices advertising our service)
+    try {
+      await this.ble.requestLEScan(
+        { services: [BLE_SERVICE_UUID], allowDuplicates: false },
+        (result) => handleDevice(result, 'service-filter')
+      );
+      await new Promise(r => setTimeout(r, duration));
+      await this.stopScan();
+    } catch (e) {
+      addBreadcrumb({ category: 'ble', message: `Service-filtered scan error: ${e.message}`, level: 'error' });
+      await this.stopScan();
+    }
+
+    // Step 2: If no devices found, retry WITHOUT filter but log ALL names
+    // Many BLE devices don't advertise service UUIDs in their advertisement packets
     if (devicesFound === 0) {
       addBreadcrumb({
         category: 'ble',
-        message: 'No devices found with service filter, retrying unfiltered scan',
+        message: 'No devices with service UUID, trying name-based scan',
         level: 'warning'
       });
 
-      const allSeen = [];
       await this.ble.requestLEScan(
-        {},
+        { allowDuplicates: false },
         (result) => {
-          if (onFound && result.device) {
-            const name = result.device.name || result.localName || null;
-            if (name) {
-              allSeen.push(name);
-              devicesFound++;
-              onFound({
-                deviceId: result.device.deviceId,
-                name,
-                rssi: result.rssi
-              });
-            }
+          if (!result.device) return;
+          const name = result.device.name || result.localName || null;
+          if (name) allSeen.push(name);
+
+          // Only show devices matching known T240 recording device patterns
+          if (name && /T240|MeCho|Record.?Card/i.test(name)) {
+            handleDevice(result, 'name-filter');
           }
         }
       );
-
       await new Promise(r => setTimeout(r, duration));
       await this.stopScan();
 
-      // Log all discovered device names to Sentry for debugging
-      captureMessage(`BLE unfiltered scan results: [${allSeen.join(', ')}]`, 'info');
-
-      await new Promise(r => setTimeout(r, duration));
-      await this.stopScan();
+      // Log ALL discovered names to Sentry so we can identify the device's advertisement name
+      captureMessage(`BLE name-scan: found=[${[...seen].length}] all_nearby=[${allSeen.join(', ')}]`, 'info');
     }
 
     addBreadcrumb({
@@ -183,7 +183,7 @@ export class BleDeviceManager {
     });
 
     if (devicesFound === 0) {
-      captureMessage('BLE scan completed with 0 devices found', 'warning');
+      captureMessage(`BLE scan: 0 T240 devices found. All nearby: [${allSeen.join(', ')}]`, 'warning');
     }
   }
 
