@@ -210,30 +210,25 @@ export class BleDeviceManager {
 
     const result = await this._connectAndHandshake(bleDeviceId, appUuid);
 
-    // If the device had an existing pairing, it rejects and disconnects.
-    // We try: send unpair → wait for device to disconnect → reconnect fresh.
+    // If the device had an existing pairing, it rejects and disconnects us.
+    // We wait for the device to settle, then reconnect and retry.
+    // The device may accept us on a fresh connection if its pairing state resets,
+    // or it may still reject — in which case the user needs to clear pairing
+    // from the original app or power-cycle the device.
     if (result.needsUnpair) {
-      captureMessage('BLE device has existing pairing, attempting unpair + reconnect', 'warning');
+      captureMessage('BLE device has existing pairing, waiting and reconnecting', 'warning');
 
-      // Send unpair command before the device disconnects us (~68ms window)
-      try {
-        await this._write(buildCmd(CMD_UNPAIR));
-        await this._readNotification(2000);
-      } catch {
-        // Device may disconnect before responding — that's expected
-      }
-
-      // Ensure we're fully disconnected
+      // Ensure we're fully disconnected (device likely already disconnected us)
       await this.disconnect();
 
-      // Wait for the device to reset its pairing state
-      await new Promise(r => setTimeout(r, 1500));
+      // Wait for the device to be ready for a new connection
+      await new Promise(r => setTimeout(r, 2000));
 
       // Reconnect from scratch
       const retry = await this._connectAndHandshake(bleDeviceId, appUuid);
       if (retry.needsUnpair) {
         await this.disconnect();
-        throw new Error('Device still has existing pairing after unpair. Please power-cycle the device and try again.');
+        throw new Error('Device is paired to another app. Please unpair from the original app or power-cycle the device, then try again.');
       }
       return retry.deviceInfo;
     }
