@@ -473,15 +473,28 @@ export class BleDeviceManager {
    * Perform the 3-step handshake with the device
    */
   async _handshake(appUuid) {
+    // Helper to format bytes for logging
+    const hexDump = (data, maxLen = 20) => {
+      const bytes = Array.from(data.slice(0, maxLen)).map(b => '0x' + b.toString(16).padStart(2, '0'));
+      return `[${bytes.join(' ')}]${data.length > maxLen ? `... (${data.length} bytes total)` : ''}`;
+    };
+
     // Step 1: Send handshake command, device responds with its UUID
     await this._write(buildCmd(CMD_HANDSHAKE));
     const step1 = await this._readNotification(5000);
+
+    captureMessage(`BLE handshake step1 raw: ${hexDump(step1, 30)} text=${new TextDecoder().decode(step1.slice(3))}`, 'info');
+
     // Response: 0x01 0x01 0x00 0x00 {json with uuid}
     if (step1[3] !== 0x00) {
-      throw new Error('Unexpected handshake response at step 1');
+      const err = new Error(`Unexpected handshake step1: byte[3]=0x${step1[3].toString(16)}, raw=${hexDump(step1, 30)}`);
+      captureException(err, { tags: { action: 'ble_handshake_step1' }, extra: { rawHex: hexDump(step1, 50) } });
+      throw err;
     }
     const deviceJson = parseJsonFromBuffer(step1, 4);
     this.deviceUuid = deviceJson.uuid;
+
+    captureMessage(`BLE handshake step1 OK: uuid=${deviceJson.uuid}`, 'info');
 
     // Step 2: Send app UUID + timestamp
     const timestamp = Math.floor(Date.now() / 1000);
@@ -491,9 +504,14 @@ export class BleDeviceManager {
 
     // Step 3: Wait for device verification
     const step3 = await this._readNotification(5000);
+
+    captureMessage(`BLE handshake step3 raw: ${hexDump(step3, 30)}`, 'info');
+
     // Response: 0x01 0x01 0x00 0x02 <status> [json if status=0x00]
     if (step3[3] !== 0x02) {
-      throw new Error('Unexpected handshake response at step 3');
+      const err = new Error(`Unexpected handshake step3: byte[3]=0x${step3[3].toString(16)}, raw=${hexDump(step3, 30)}`);
+      captureException(err, { tags: { action: 'ble_handshake_step3' }, extra: { rawHex: hexDump(step3, 50) } });
+      throw err;
     }
     const status = step3[4];
     if (status !== 0x00) {
@@ -503,11 +521,14 @@ export class BleDeviceManager {
         0x03: 'Handshake not initiated',
         0x04: 'Handshake timeout'
       };
-      throw new Error(errors[status] || `Handshake failed with code 0x${status.toString(16)}`);
+      const errMsg = errors[status] || `Handshake failed with code 0x${status.toString(16)}`;
+      captureMessage(`BLE handshake step3 rejected: status=0x${status.toString(16)} (${errMsg})`, 'warning');
+      throw new Error(errMsg);
     }
 
     // Parse device info from successful handshake
     const info = parseJsonFromBuffer(step3, 5);
+    captureMessage(`BLE handshake OK: name=${info.name}, SN=${info.SN}, model=${info.model}`, 'info');
     return info;
   }
 
