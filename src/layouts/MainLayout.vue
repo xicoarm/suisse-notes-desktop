@@ -449,7 +449,7 @@ import { useAuthStore } from '../stores/auth';
 import { useRecordingStore } from '../stores/recording';
 import { useMinutesStore } from '../stores/minutes';
 import { useRouter, useRoute } from 'vue-router';
-import { isElectron, isMobile, isCapacitor } from '../utils/platform';
+import { isElectron, isMobile } from '../utils/platform';
 import { useLanguage } from '../composables/useLanguage';
 
 const $q = useQuasar();
