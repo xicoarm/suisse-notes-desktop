@@ -163,8 +163,9 @@ export class BleDeviceManager {
           const name = result.device.name || result.localName || null;
           if (name) allSeen.push(name);
 
-          // Only show devices matching known T240 recording device patterns
-          if (name && /T240|MeCho|Record.?Card/i.test(name)) {
+          // Only show devices matching known recording device patterns
+          // M1(BLE), M2(BLE) etc. = BLE advertisement name; T240 = handshake name
+          if (name && /M\d+\(BLE\)|T240|MeCho|Record.?Card/i.test(name)) {
             handleDevice(result, 'name-filter');
           }
         }
