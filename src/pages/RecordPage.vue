@@ -32,47 +32,8 @@
             />
           </div>
 
-          <!-- Recording Source: BLE Device (when connected) -->
-          <div
-            v-if="deviceStore.isConnected"
-            class="mic-section"
-          >
-            <div class="section-label">
-              <q-icon
-                name="bluetooth"
-                size="xs"
-                color="primary"
-              />
-              <span>{{ $t('deviceTitle') }}</span>
-            </div>
-            <div class="device-source-card">
-              <div class="device-source-row">
-                <div class="device-source-icon">
-                  <q-icon
-                    name="mic"
-                    size="18px"
-                    color="white"
-                  />
-                </div>
-                <div class="device-source-info">
-                  <span class="device-source-name">{{ deviceStore.deviceName || deviceStore.pairedDevice?.name }}</span>
-                  <span class="device-source-status">
-                    <span class="status-dot-active" />
-                    {{ $t('connected') }}
-                    <template v-if="deviceStore.batteryLevel">
-                      &middot; {{ deviceStore.batteryLevel }}%
-                    </template>
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Microphone Selection (fallback when no BLE device) -->
-          <div
-            v-else
-            class="mic-section"
-          >
+          <!-- Microphone Selection -->
+          <div class="mic-section">
             <div class="section-label">
               <q-icon
                 name="settings_voice"
@@ -780,7 +741,6 @@ import { getApiUrlSync } from '../services/api';
 import { stopStorageMonitor } from '../services/storageMonitor';
 import { setRecordingActive } from '../boot/lifecycle';
 import { useAuthStore } from '../stores/auth';
-import { useDeviceStore } from '../stores/device';
 import ModeTabSwitcher from '../components/ModeTabSwitcher.vue';
 import TranscriptionOptions from '../components/TranscriptionOptions.vue';
 import RecordingControls from '../components/RecordingControls.vue';
@@ -796,7 +756,6 @@ const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
 const minutesStore = useMinutesStore();
 const authStore = useAuthStore();
-const deviceStore = useDeviceStore();
 
 const {
   audioLevel,
@@ -1975,59 +1934,6 @@ const removeSessionWord = (word) => {
   max-width: 300px;
   display: inline-block;
   font-size: 13px;
-}
-
-// BLE Device Source Card
-.device-source-card {
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(139, 92, 246, 0.08));
-  border: 1px solid rgba(99, 102, 241, 0.2);
-  border-radius: 10px;
-  padding: 12px 14px;
-}
-
-.device-source-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.device-source-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #6366F1, #8B5CF6);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.device-source-info {
-  flex: 1;
-  min-width: 0;
-
-  .device-source-name {
-    font-size: 14px;
-    font-weight: 600;
-    color: #1e293b;
-    display: block;
-  }
-
-  .device-source-status {
-    font-size: 11px;
-    color: #64748b;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-}
-
-.status-dot-active {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #22c55e;
-  display: inline-block;
 }
 
 .system-audio-section {
