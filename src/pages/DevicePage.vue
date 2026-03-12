@@ -389,7 +389,7 @@
 </template>
 
 <script>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useQuasar } from 'quasar';
 import { useI18n } from 'vue-i18n';
 import { useDeviceStore } from '../stores/device';
@@ -535,14 +535,16 @@ export default {
       if (deviceStore.hasPairedDevice && !deviceStore.isConnected) {
         try {
           await deviceStore.autoConnect();
-          // Auto-sync new files
-          if (deviceStore.newFilesCount > 0) {
-            await deviceStore.syncAllNew();
-          }
+          // autoConnect now starts auto-sync polling automatically
         } catch (e) {
           console.log('Auto-connect failed:', e.message);
         }
       }
+    });
+
+    onUnmounted(() => {
+      // Polling continues in background — don't stop it when leaving the page
+      // It will stop on disconnect
     });
 
     return {

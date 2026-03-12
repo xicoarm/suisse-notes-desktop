@@ -73,7 +73,10 @@ export const useDeviceStore = defineStore('device', {
     syncedFiles: [],
 
     // Scan results
-    scanResults: []
+    scanResults: [],
+
+    // Auto-sync polling
+    _autoSyncTimer: null
   }),
 
   getters: {
@@ -102,6 +105,7 @@ export const useDeviceStore = defineStore('device', {
 
       // Set disconnect handler
       manager.onDisconnect(() => {
+        this.stopAutoSync();
         this.connectionState = 'disconnected';
         this.deviceFiles = [];
         this.fileListLoaded = false;
@@ -184,6 +188,9 @@ export const useDeviceStore = defineStore('device', {
         await this._fetchDeviceStatus();
         await this.fetchFileList();
 
+        // Start background auto-sync polling
+        this.startAutoSync();
+
         return deviceInfo;
       } catch (e) {
         captureException(e, { tags: { action: 'ble_pair' }, extra: { bleDeviceId } });
@@ -221,6 +228,9 @@ export const useDeviceStore = defineStore('device', {
         await this._fetchDeviceStatus();
         await this.fetchFileList();
 
+        // Start background auto-sync polling
+        this.startAutoSync();
+
         return deviceInfo;
       } catch (e) {
         this.connectionState = 'disconnected';
@@ -233,6 +243,7 @@ export const useDeviceStore = defineStore('device', {
      * Disconnect from device
      */
     async disconnect() {
+      this.stopAutoSync();
       const manager = getBleManager();
       await manager.disconnect();
       this.connectionState = 'disconnected';
@@ -244,6 +255,7 @@ export const useDeviceStore = defineStore('device', {
      * Forget (unpair) the device
      */
     async forgetDevice() {
+      this.stopAutoSync();
       const manager = getBleManager();
       await manager.unpair();
       this.connectionState = 'disconnected';
@@ -457,6 +469,50 @@ export const useDeviceStore = defineStore('device', {
         this.totalStorageKB = storage.TotalCapacity || 0;
       } catch (e) {
         console.warn('Failed to get storage:', e.message);
+      }
+    },
+
+    // ========== Auto-Sync ==========
+
+    /**
+     * Start polling for new files every 15 seconds while connected.
+     * If device is not recording and new files exist, auto-sync them.
+     */
+    startAutoSync() {
+      this.stopAutoSync();
+      this._autoSyncTimer = setInterval(async () => {
+        if (!this.isConnected || this.isSyncing) return;
+
+        try {
+          await this.fetchFileList();
+          await this._fetchDeviceStatus();
+
+          // Don't sync while device is actively recording
+          if (this.isRecordingOnDevice) return;
+
+          const newFiles = this.deviceFiles.filter(f => !this.syncedFiles.includes(f.file));
+          if (newFiles.length > 0) {
+            addBreadcrumb({
+              category: 'ble',
+              message: `Auto-sync: ${newFiles.length} new file(s) detected`,
+              level: 'info'
+            });
+            await this.syncAllNew();
+          }
+        } catch (e) {
+          // Silent fail — polling will retry next interval
+          console.log('Auto-sync poll error:', e.message);
+        }
+      }, 15000);
+    },
+
+    /**
+     * Stop auto-sync polling
+     */
+    stopAutoSync() {
+      if (this._autoSyncTimer) {
+        clearInterval(this._autoSyncTimer);
+        this._autoSyncTimer = null;
       }
     },
 
