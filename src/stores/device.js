@@ -374,28 +374,27 @@ export const useDeviceStore = defineStore('device', {
 
       const dirPath = 'suissenotes_recordings';
       try {
-        await Filesystem.mkdir({ path: dirPath, directory: Directory.Data, recursive: true });
+        await Filesystem.mkdir({ path: dirPath, directory: Directory.Documents, recursive: true });
       } catch { /* exists */ }
 
       await Filesystem.writeFile({
         path: `${dirPath}/${file.file}`,
         data: base64Data,
-        directory: Directory.Data
+        directory: Directory.Documents
       });
 
-      const uriResult = await Filesystem.getUri({
-        path: `${dirPath}/${file.file}`,
-        directory: Directory.Data
-      });
-      const filePath = uriResult.uri;
+      // Store relative path — readFile uses Directory.Documents as base
+      const filePath = `${dirPath}/${file.file}`;
 
       // Create a recording ID and upload
       const recordId = uuidv4();
       const authStore = useAuthStore();
       const historyStore = useRecordingsHistoryStore();
 
-      // Extract title from filename: R20250311-093012.opus → 2025-03-11 09:30:12
+      // Extract title and date from filename: R20250311-093012.opus → 2025-03-11 09:30
+      // Device clock is synced to phone's local time, so filename timestamps are local
       const title = this._formatTitleFromFilename(file.file);
+      const createdAt = this._parseDateFromFilename(file.file) || new Date(file.creat_time * 1000).toISOString();
       const durationSec = Math.round((file.duration_ms || 0) / 1000);
 
       // Add to history
@@ -404,7 +403,7 @@ export const useDeviceStore = defineStore('device', {
         title,
         duration: durationSec,
         filePath,
-        createdAt: new Date(file.creat_time * 1000).toISOString(),
+        createdAt,
         uploadStatus: 'pending',
         source: 'device'
       });
@@ -461,6 +460,19 @@ export const useDeviceStore = defineStore('device', {
         return `${y}-${m}-${d} ${h}:${min}`;
       }
       return filename.replace(/\.\w+$/, '');
+    },
+
+    /**
+     * Parse a local-timezone Date from device filename
+     * Device clock is synced from phone's local time, so timestamps are local
+     */
+    _parseDateFromFilename(filename) {
+      const match = filename.match(/R(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/);
+      if (match) {
+        const [, y, m, d, h, min, sec] = match;
+        return new Date(+y, +m - 1, +d, +h, +min, +sec).toISOString();
+      }
+      return null;
     },
 
     /**
