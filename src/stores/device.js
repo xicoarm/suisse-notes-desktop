@@ -418,7 +418,8 @@ export const useDeviceStore = defineStore('device', {
           authToken: authStore.token,
           metadata: {
             duration: durationSec.toString(),
-            title
+            title,
+            filename: file.file
           },
           onProgress: () => {},
           getAuthStore: () => authStore
@@ -430,9 +431,18 @@ export const useDeviceStore = defineStore('device', {
             transcriptionId: result.transcriptionId,
             audioFileId: result.audioFileId
           });
+          addBreadcrumb({ category: 'ble', message: `Device file uploaded: ${file.file}`, level: 'info' });
+        } else {
+          captureException(new Error(`Device file upload failed: ${result.error}`), {
+            tags: { action: 'ble_upload' },
+            extra: { filename: file.file, recordId, error: result.error }
+          });
         }
       } catch (uploadErr) {
-        console.warn('Upload failed, file saved locally for retry:', uploadErr.message);
+        captureException(uploadErr, {
+          tags: { action: 'ble_upload' },
+          extra: { filename: file.file, recordId, filePath }
+        });
         // The file is saved locally and in history as 'pending', so it can be retried
       }
 

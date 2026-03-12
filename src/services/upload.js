@@ -751,13 +751,17 @@ const uploadFileMobileSimple = async (filePath, apiUrl, authToken, metadata, onP
       if (!fileResult.success) {
         throw new Error(fileResult.error || 'Failed to read file for upload');
       }
-      fileBlob = new Blob([fileResult.data], { type: 'audio/webm' });
+      // Detect MIME type from file path
+      const mimeType = filePath.endsWith('.opus') ? 'audio/ogg' : 'audio/webm';
+      fileBlob = new Blob([fileResult.data], { type: mimeType });
     } else {
       throw new Error('No file provided for upload');
     }
 
     const formData = new FormData();
-    formData.append('audio', fileBlob, fileObj?.name || 'recording.webm');
+    // Use original filename from metadata if available, or derive from path
+    const fileName = metadata?.filename || fileObj?.name || (filePath ? filePath.split('/').pop() : 'recording.webm');
+    formData.append('audio', fileBlob, fileName);
     formData.append('metadata', JSON.stringify(metadata));
 
     // Calculate timeout based on file size (1 minute per 10MB, minimum 10 minutes)
