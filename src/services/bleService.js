@@ -77,11 +77,13 @@ export class BleDeviceManager {
     this.deviceUuid = null;     // Protocol device UUID
     this.deviceInfo = null;     // Device info from handshake
     this.connected = false;
+    this.isRecording = false;  // Live recording state from device notifications
 
     // Notification queue for async response handling
     this._notifyQueue = [];
     this._notifyWaiter = null;
     this._onDisconnectCallback = null;
+    this._recordingStateCallback = null;
   }
 
   /**
@@ -310,6 +312,13 @@ export class BleDeviceManager {
     this._onDisconnectCallback = callback;
   }
 
+  /**
+   * Set recording state change callback (fired on device-initiated start/stop)
+   */
+  onRecordingStateChange(callback) {
+    this._recordingStateCallback = callback;
+  }
+
   // ========== Device Commands ==========
 
   /**
@@ -362,6 +371,9 @@ export class BleDeviceManager {
    * @returns {Promise<Array>} Array of file info objects
    */
   async getFileList() {
+    // Drain any stale notifications from previous operations
+    this._drainNotifyQueue();
+
     // Enter sync state
     await this._write(buildCmd(CMD_SYNC_STATE, [0x01]));
     await this._readNotification(5000);
@@ -406,6 +418,9 @@ export class BleDeviceManager {
    * @returns {Promise<Uint8Array>} File data
    */
   async downloadFile(filename, onProgress = null, totalSize = 0) {
+    // Drain any stale notifications from previous operations
+    this._drainNotifyQueue();
+
     // Enter sync state
     await this._write(buildCmd(CMD_SYNC_STATE, [0x01]));
     await this._readNotification(5000);
@@ -556,16 +571,55 @@ export class BleDeviceManager {
   }
 
   /**
-   * Handle incoming BLE notification
+   * Handle incoming BLE notification.
+   * Filters unsolicited device-initiated recording notifications so they
+   * don't corrupt the command/response queue used by getFileList/downloadFile.
    */
   _onNotify(dataView) {
     const data = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
+
+    if (data.length >= 3) {
+      // Real-time audio from device-initiated recording (TYPE_AUDIO, cmd 0x14 0x00)
+      // These stream continuously while the device records — discard them
+      if (data[0] === TYPE_AUDIO && data[1] === 0x14 && data[2] === 0x00) {
+        return;
+      }
+
+      // Recording started via device button (TYPE_CMD, cmd 0x14 0x00)
+      if (data[0] === TYPE_CMD && data[1] === 0x14 && data[2] === 0x00) {
+        this.isRecording = true;
+        addBreadcrumb({ category: 'ble', message: 'Device started recording (button)', level: 'info' });
+        if (this._recordingStateCallback) this._recordingStateCallback(true);
+        return;
+      }
+
+      // Recording stopped via device button (TYPE_CMD, cmd 0x17 0x00)
+      if (data[0] === TYPE_CMD && data[1] === 0x17 && data[2] === 0x00) {
+        this.isRecording = false;
+        addBreadcrumb({ category: 'ble', message: 'Device stopped recording (button)', level: 'info' });
+        if (this._recordingStateCallback) this._recordingStateCallback(false);
+        return;
+      }
+    }
+
+    // Normal protocol response — deliver to waiter or queue
     if (this._notifyWaiter) {
       const waiter = this._notifyWaiter;
       this._notifyWaiter = null;
       waiter.resolve(data);
     } else {
       this._notifyQueue.push(data);
+    }
+  }
+
+  /**
+   * Drain any stale notifications from the queue (e.g. after a failed operation)
+   */
+  _drainNotifyQueue() {
+    const drained = this._notifyQueue.length;
+    if (drained > 0) {
+      this._notifyQueue = [];
+      addBreadcrumb({ category: 'ble', message: `Drained ${drained} stale BLE notification(s)`, level: 'warning' });
     }
   }
 

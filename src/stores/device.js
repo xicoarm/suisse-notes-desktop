@@ -110,6 +110,11 @@ export const useDeviceStore = defineStore('device', {
         this.deviceFiles = [];
         this.fileListLoaded = false;
       });
+
+      // Track device recording state from unsolicited BLE notifications
+      manager.onRecordingStateChange((recording) => {
+        this.isRecordingOnDevice = recording;
+      });
     },
 
     /**
@@ -519,10 +524,14 @@ export const useDeviceStore = defineStore('device', {
     async _autoSyncPoll() {
       if (!this.isConnected || this.isSyncing) return;
 
+      // Don't poll while device is recording — entering sync state
+      // disables device buttons and can interfere with active recording
+      if (this.isRecordingOnDevice) return;
+
       try {
         await this.fetchFileList();
 
-        // Don't sync while device is actively recording
+        // Re-check: recording may have started during file list fetch
         if (this.isRecordingOnDevice) return;
 
         const newFiles = this.deviceFiles.filter(f => !this.syncedFiles.includes(f.file));
