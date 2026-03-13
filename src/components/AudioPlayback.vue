@@ -123,7 +123,8 @@ export default {
         } else if (isCapacitor()) {
           const result = await readFile(props.filePath);
           if (result.success) {
-            const blob = new Blob([result.data], { type: 'audio/webm' });
+            const mimeType = props.filePath.endsWith('.opus') ? 'audio/ogg' : 'audio/webm';
+            const blob = new Blob([result.data], { type: mimeType });
             audioUrl.value = URL.createObjectURL(blob);
           } else {
             error.value = result.error || 'Could not load audio file';

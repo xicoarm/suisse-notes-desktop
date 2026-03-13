@@ -362,11 +362,13 @@ export const useDeviceStore = defineStore('device', {
       const manager = getBleManager();
 
       // Download via BLE
+      addBreadcrumb({ category: 'ble', message: `Downloading ${file.file} (${file.size} bytes)`, level: 'info' });
       const fileData = await manager.downloadFile(
         file.file,
         (progress) => { this.syncProgress = progress; },
         file.size
       );
+      addBreadcrumb({ category: 'ble', message: `Downloaded ${file.file}: ${fileData.byteLength} bytes`, level: 'info' });
 
       // Save to device filesystem
       const { Filesystem, Directory } = await import('@capacitor/filesystem');
