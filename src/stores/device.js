@@ -13,11 +13,36 @@ import { getApiUrlSync } from '../services/api';
 import { useAuthStore } from './auth';
 import { useRecordingsHistoryStore } from './recordings-history';
 import { isRawOpusPackets, rawOpusToOgg } from '../utils/rawOpusToOgg';
+import { i18n } from '../boot/i18n';
 
 // Preferences keys
 const PREF_PAIRED_DEVICE = 'ble_paired_device';
 const PREF_APP_UUID = 'ble_app_uuid';
 const PREF_SYNCED_FILES = 'ble_synced_files';
+
+// Notification IDs
+const NOTIF_SYNC_PROGRESS = 9001;
+const NOTIF_SYNC_COMPLETE = 9002;
+
+/**
+ * Send a local notification (fire-and-forget, never blocks sync)
+ */
+async function sendLocalNotification(id, title, body) {
+  if (!isCapacitor()) return;
+  try {
+    const { LocalNotifications } = await import('@capacitor/local-notifications');
+    const { display } = await LocalNotifications.checkPermissions();
+    if (display !== 'granted') {
+      const result = await LocalNotifications.requestPermissions();
+      if (result.display !== 'granted') return;
+    }
+    await LocalNotifications.schedule({
+      notifications: [{ id, title, body, smallIcon: 'ic_stat_icon_config_sample' }]
+    });
+  } catch {
+    // Notifications are best-effort — never fail sync
+  }
+}
 
 /**
  * Get or create a persistent app UUID for BLE pairing
@@ -67,6 +92,9 @@ export const useDeviceStore = defineStore('device', {
     syncCurrent: 0,
     syncTotal: 0,
     syncProgress: 0,
+    syncBytesReceived: 0,
+    syncBytesTotal: 0,
+    syncPhase: 'idle', // idle | detecting | downloading | uploading
     currentSyncFile: null,
     syncError: null,
 
@@ -339,23 +367,31 @@ export const useDeviceStore = defineStore('device', {
      */
     async syncFile(file) {
       if (this.syncedFiles.includes(file.file)) return;
+      const t = i18n.global.t;
 
       this.syncState = 'syncing';
       this.currentSyncFile = file.file;
       this.syncCurrent = 1;
       this.syncTotal = 1;
       this.syncProgress = 0;
+      this.syncBytesReceived = 0;
+      this.syncBytesTotal = 0;
+      this.syncPhase = 'idle';
       this.syncError = null;
+
+      sendLocalNotification(NOTIF_SYNC_PROGRESS, t('bleTransferBanner'), t('syncProgress', { current: 1, total: 1 }));
 
       try {
         await this._downloadAndUpload(file);
         this.syncState = 'complete';
+        sendLocalNotification(NOTIF_SYNC_COMPLETE, t('syncComplete'), t('bleSyncCompleteBody', { count: 1 }));
       } catch (e) {
         this.syncState = 'error';
         this.syncError = e.message;
         throw e;
       } finally {
         this.currentSyncFile = null;
+        this.syncPhase = 'idle';
       }
     },
 
@@ -365,11 +401,17 @@ export const useDeviceStore = defineStore('device', {
     async syncAllNew() {
       const newFiles = this.deviceFiles.filter(f => !this.syncedFiles.includes(f.file));
       if (newFiles.length === 0) return;
+      const t = i18n.global.t;
 
       this.syncState = 'syncing';
       this.syncTotal = newFiles.length;
       this.syncCurrent = 0;
+      this.syncBytesReceived = 0;
+      this.syncBytesTotal = 0;
+      this.syncPhase = 'detecting';
       this.syncError = null;
+
+      sendLocalNotification(NOTIF_SYNC_PROGRESS, t('bleTransferBanner'), t('bleTransferDetecting', { count: newFiles.length }));
 
       try {
         for (const file of newFiles) {
@@ -379,12 +421,14 @@ export const useDeviceStore = defineStore('device', {
           await this._downloadAndUpload(file);
         }
         this.syncState = 'complete';
+        sendLocalNotification(NOTIF_SYNC_COMPLETE, t('syncComplete'), t('bleSyncCompleteBody', { count: newFiles.length }));
       } catch (e) {
         this.syncState = 'error';
         this.syncError = e.message;
         throw e;
       } finally {
         this.currentSyncFile = null;
+        this.syncPhase = 'idle';
       }
     },
 
@@ -395,10 +439,16 @@ export const useDeviceStore = defineStore('device', {
       const manager = getBleManager();
 
       // Download via BLE
+      this.syncPhase = 'downloading';
+      this.syncBytesTotal = file.size || 0;
+      this.syncBytesReceived = 0;
       addBreadcrumb({ category: 'ble', message: `Downloading ${file.file} (${file.size} bytes)`, level: 'info' });
       const fileData = await manager.downloadFile(
         file.file,
-        (progress) => { this.syncProgress = progress; },
+        (data) => {
+          this.syncProgress = data.percent;
+          this.syncBytesReceived = data.bytesReceived;
+        },
         file.size
       );
       const header = Array.from(fileData.slice(0, 8)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
@@ -460,6 +510,7 @@ export const useDeviceStore = defineStore('device', {
       });
 
       // Upload
+      this.syncPhase = 'uploading';
       try {
         const result = await uploadWithVerification({
           filePath,

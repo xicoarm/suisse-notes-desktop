@@ -241,7 +241,22 @@
           color="white"
           size="16px"
         />
-        <span>{{ $t('syncProgress', { current: deviceStore.syncCurrent, total: deviceStore.syncTotal }) }}</span>
+        <span v-if="deviceStore.syncPhase === 'detecting'">
+          {{ $t('bleTransferDetecting', { count: deviceStore.syncTotal }) }}
+        </span>
+        <span v-else-if="deviceStore.syncPhase === 'uploading'">
+          {{ $t('bleTransferUploading') }}
+        </span>
+        <span v-else>
+          {{ $t('syncProgress', { current: deviceStore.syncCurrent, total: deviceStore.syncTotal }) }}
+        </span>
+      </div>
+      <div
+        v-if="deviceStore.syncPhase === 'downloading' && deviceStore.syncBytesTotal > 0"
+        class="sync-bytes-detail"
+      >
+        {{ formatFileSize(deviceStore.syncBytesReceived) }} / {{ formatFileSize(deviceStore.syncBytesTotal) }}
+        <span class="sync-percent-text">{{ deviceStore.syncProgress }}%</span>
       </div>
       <q-linear-progress
         :value="deviceStore.syncProgress / 100"
@@ -839,6 +854,22 @@ export default {
   gap: 10px;
   font-size: 14px;
   font-weight: 500;
+}
+
+.sync-bytes-detail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.8);
+  margin-top: 4px;
+  padding-left: 26px;
+}
+
+.sync-percent-text {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
 }
 
 .sync-status-banner {

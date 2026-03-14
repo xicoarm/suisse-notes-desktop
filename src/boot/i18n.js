@@ -275,6 +275,10 @@ const messages = {
     syncProgress: 'Syncing {current} of {total}...',
     syncComplete: 'Sync complete',
     syncFailed: 'Sync failed',
+    bleTransferBanner: 'Syncing from device',
+    bleTransferDetecting: 'Found {count} new recording(s)...',
+    bleTransferUploading: 'Uploading to cloud...',
+    bleSyncCompleteBody: '{count} recording(s) transferred successfully',
     bleNotAvailable: 'Bluetooth is not available on this device'
   },
   de: {
@@ -551,6 +555,10 @@ const messages = {
     syncProgress: 'Synchronisiere {current} von {total}...',
     syncComplete: 'Synchronisierung abgeschlossen',
     syncFailed: 'Synchronisierung fehlgeschlagen',
+    bleTransferBanner: 'Vom Gerät synchronisieren',
+    bleTransferDetecting: '{count} neue Aufnahme(n) gefunden...',
+    bleTransferUploading: 'Wird in die Cloud hochgeladen...',
+    bleSyncCompleteBody: '{count} Aufnahme(n) erfolgreich übertragen',
     bleNotAvailable: 'Bluetooth ist auf diesem Gerät nicht verfügbar'
   },
   fr: {
@@ -827,6 +835,10 @@ const messages = {
     syncProgress: 'Synchronisation {current} sur {total}...',
     syncComplete: 'Synchronisation terminée',
     syncFailed: 'Échec de la synchronisation',
+    bleTransferBanner: 'Synchronisation depuis l\'appareil',
+    bleTransferDetecting: '{count} nouvel(les) enregistrement(s) trouvé(s)...',
+    bleTransferUploading: 'Envoi vers le cloud...',
+    bleSyncCompleteBody: '{count} enregistrement(s) transféré(s) avec succès',
     bleNotAvailable: 'Bluetooth n\'est pas disponible sur cet appareil'
   },
   it: {
@@ -1103,6 +1115,10 @@ const messages = {
     syncProgress: 'Sincronizzazione {current} di {total}...',
     syncComplete: 'Sincronizzazione completata',
     syncFailed: 'Sincronizzazione fallita',
+    bleTransferBanner: 'Sincronizzazione dal dispositivo',
+    bleTransferDetecting: 'Trovate {count} nuove registrazioni...',
+    bleTransferUploading: 'Caricamento nel cloud...',
+    bleSyncCompleteBody: '{count} registrazione(i) trasferita(e) con successo',
     bleNotAvailable: 'Bluetooth non disponibile su questo dispositivo'
   }
 };

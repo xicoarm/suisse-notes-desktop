@@ -444,7 +444,11 @@ export class BleDeviceManager {
         receivedBytes += audioData.length;
 
         if (onProgress && totalSize > 0) {
-          onProgress(Math.min(99, Math.round((receivedBytes / totalSize) * 100)));
+          onProgress({
+            percent: Math.min(99, Math.round((receivedBytes / totalSize) * 100)),
+            bytesReceived: receivedBytes,
+            bytesTotal: totalSize
+          });
         }
       } else if (data[0] === TYPE_CMD && data[1] === CMD_FILE_DONE[0] && data[2] === CMD_FILE_DONE[1]) {
         // Transfer complete: 0x01 0x1D 0x00 crcL crcH
@@ -467,7 +471,7 @@ export class BleDeviceManager {
           throw new Error(`CRC mismatch: expected 0x${expectedCrc.toString(16)}, got 0x${actualCrc.toString(16)}`);
         }
 
-        if (onProgress) onProgress(100);
+        if (onProgress) onProgress({ percent: 100, bytesReceived: receivedBytes, bytesTotal: totalSize });
 
         // Exit sync state
         await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
