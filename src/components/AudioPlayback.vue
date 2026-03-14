@@ -1,6 +1,18 @@
 <template>
   <div
-    v-if="audioUrl"
+    v-if="isDeviceRecording"
+    class="audio-player-device"
+  >
+    <q-icon
+      name="bluetooth"
+      color="primary"
+      size="sm"
+    />
+    <span>Audio available after processing in Suisse Notes</span>
+  </div>
+
+  <div
+    v-else-if="audioUrl"
     class="audio-player"
   >
     <div class="player-controls">
@@ -78,7 +90,7 @@
 </template>
 
 <script>
-import { ref, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { isElectron, isCapacitor } from '../utils/platform';
 import { readFile, getFileUri } from '../services/storage';
 
@@ -89,10 +101,15 @@ export default {
     filePath: {
       type: String,
       default: ''
+    },
+    source: {
+      type: String,
+      default: ''
     }
   },
 
   setup(props) {
+    const isDeviceRecording = computed(() => props.source === 'device');
     const audioElement = ref(null);
     const audioUrl = ref('');
     const isPlaying = ref(false);
@@ -205,6 +222,7 @@ export default {
 
     // Watch for file path changes
     watch(() => props.filePath, () => {
+      if (isDeviceRecording.value) return;
       if (audioElement.value) {
         audioElement.value.pause();
         isPlaying.value = false;
@@ -213,7 +231,9 @@ export default {
     });
 
     onMounted(() => {
-      loadAudio();
+      if (!isDeviceRecording.value) {
+        loadAudio();
+      }
     });
 
     onUnmounted(() => {
@@ -227,6 +247,7 @@ export default {
     });
 
     return {
+      isDeviceRecording,
       audioElement,
       audioUrl,
       isPlaying,
@@ -291,5 +312,16 @@ export default {
 
 .audio-player-error {
   color: #ef4444;
+}
+
+.audio-player-device {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: #f0f7ff;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #1976d2;
 }
 </style>
