@@ -12,6 +12,7 @@ import { uploadWithVerification } from '../services/upload';
 import { getApiUrlSync } from '../services/api';
 import { useAuthStore } from './auth';
 import { useRecordingsHistoryStore } from './recordings-history';
+import { isRawOpusPackets, rawOpusToOgg } from '../utils/rawOpusToOgg';
 
 // Preferences keys
 const PREF_PAIRED_DEVICE = 'ble_paired_device';
@@ -372,14 +373,21 @@ export const useDeviceStore = defineStore('device', {
       const headerAscii = String.fromCharCode(...fileData.slice(0, 4));
       addBreadcrumb({ category: 'ble', message: `Downloaded ${file.file}: ${fileData.byteLength} bytes, header=[${header}] ascii="${headerAscii}"`, level: 'info' });
 
+      // Convert raw 80-byte Opus packets to Ogg Opus container for playback/transcription
+      let saveData = fileData;
+      if (isRawOpusPackets(fileData)) {
+        saveData = rawOpusToOgg(fileData);
+        addBreadcrumb({ category: 'ble', message: `Converted raw Opus to Ogg: ${fileData.byteLength} → ${saveData.byteLength} bytes`, level: 'info' });
+      }
+
       // Save to device filesystem
       const { Filesystem, Directory } = await import('@capacitor/filesystem');
 
       // Convert Uint8Array to base64
       let binary = '';
-      const len = fileData.byteLength;
+      const len = saveData.byteLength;
       for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(fileData[i]);
+        binary += String.fromCharCode(saveData[i]);
       }
       const base64Data = btoa(binary);
 

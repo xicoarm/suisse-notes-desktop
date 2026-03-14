@@ -104,10 +104,7 @@
         v-if="expanded && recording.filePath"
         class="card-player"
       >
-        <AudioPlayback
-          :file-path="recording.filePath"
-          :source="recording.source || ''"
-        />
+        <AudioPlayback :file-path="recording.filePath" />
       </div>
     </q-slide-transition>
 
