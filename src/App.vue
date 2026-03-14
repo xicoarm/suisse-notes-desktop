@@ -21,6 +21,19 @@ onMounted(async () => {
   if (isMobile()) {
     recordingStore.initializeLifecycle();
 
+    // Initialize BLE device store early so auto-reconnect works app-wide
+    try {
+      const { useDeviceStore } = await import('./stores/device');
+      const deviceStore = useDeviceStore();
+      await deviceStore.initialize();
+      // Auto-connect to paired device on app startup
+      if (deviceStore.hasPairedDevice && !deviceStore.isConnected) {
+        deviceStore.autoConnect().catch(() => {});
+      }
+    } catch (e) {
+      console.warn('Device store init failed:', e);
+    }
+
     // Run startup recovery for orphaned recordings
     try {
       const recovery = await recordingStore.checkRecoveryState();

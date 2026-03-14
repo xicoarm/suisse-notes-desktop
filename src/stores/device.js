@@ -77,7 +77,13 @@ export const useDeviceStore = defineStore('device', {
     scanResults: [],
 
     // Auto-sync polling
-    _autoSyncTimer: null
+    _autoSyncTimer: null,
+
+    // Auto-reconnect
+    _reconnectTimer: null,
+    _intentionalDisconnect: false,
+    _appStateListener: null,
+    _initialized: false
   }),
 
   getters: {
@@ -96,6 +102,8 @@ export const useDeviceStore = defineStore('device', {
      */
     async initialize() {
       if (!isCapacitor()) return;
+      if (this._initialized) return;
+      this._initialized = true;
 
       const manager = getBleManager();
       await manager.initialize();
@@ -104,18 +112,34 @@ export const useDeviceStore = defineStore('device', {
       await this._loadPairedDevice();
       await this._loadSyncedFiles();
 
-      // Set disconnect handler
+      // Set disconnect handler — auto-reconnect unless user explicitly disconnected
       manager.onDisconnect(() => {
         this.stopAutoSync();
         this.connectionState = 'disconnected';
         this.deviceFiles = [];
         this.fileListLoaded = false;
+
+        if (!this._intentionalDisconnect && this.pairedDevice) {
+          addBreadcrumb({ category: 'ble', message: 'Unexpected disconnect — starting reconnect loop', level: 'info' });
+          this._scheduleReconnect();
+        }
       });
 
       // Track device recording state from unsolicited BLE notifications
       manager.onRecordingStateChange((recording) => {
         this.isRecordingOnDevice = recording;
       });
+
+      // Listen for app foreground to reconnect (AirPods-style)
+      if (isCapacitor()) {
+        const { App } = await import('@capacitor/app');
+        this._appStateListener = await App.addListener('appStateChange', async ({ isActive }) => {
+          if (isActive && this.pairedDevice && this.connectionState === 'disconnected' && !this._intentionalDisconnect) {
+            addBreadcrumb({ category: 'ble', message: 'App foregrounded — attempting reconnect', level: 'info' });
+            this._scheduleReconnect(1500);
+          }
+        });
+      }
     },
 
     /**
@@ -181,6 +205,8 @@ export const useDeviceStore = defineStore('device', {
         this.deviceUuid = manager.deviceUuid;
         this.isRecordingOnDevice = deviceInfo.isAudioRecorded === '1';
         this.connectionState = 'connected';
+        this._intentionalDisconnect = false;
+        this._stopReconnect();
 
         // Save paired device
         this.pairedDevice = {
@@ -227,6 +253,8 @@ export const useDeviceStore = defineStore('device', {
         this.deviceUuid = manager.deviceUuid;
         this.isRecordingOnDevice = deviceInfo.isAudioRecorded === '1';
         this.connectionState = 'connected';
+        this._intentionalDisconnect = false;
+        this._stopReconnect();
 
         // Update paired device info
         this.pairedDevice.name = this.deviceName;
@@ -251,6 +279,8 @@ export const useDeviceStore = defineStore('device', {
      * Disconnect from device
      */
     async disconnect() {
+      this._intentionalDisconnect = true;
+      this._stopReconnect();
       this.stopAutoSync();
       const manager = getBleManager();
       await manager.disconnect();
@@ -263,6 +293,8 @@ export const useDeviceStore = defineStore('device', {
      * Forget (unpair) the device
      */
     async forgetDevice() {
+      this._intentionalDisconnect = true;
+      this._stopReconnect();
       this.stopAutoSync();
       const manager = getBleManager();
       await manager.unpair();
@@ -578,6 +610,65 @@ export const useDeviceStore = defineStore('device', {
         clearTimeout(this._autoSyncTimer);
         clearInterval(this._autoSyncTimer);
         this._autoSyncTimer = null;
+      }
+    },
+
+    // ========== Auto-Reconnect (AirPods-style) ==========
+
+    /**
+     * Schedule reconnect attempts with exponential backoff.
+     * Tries to reconnect to paired device after unexpected disconnect
+     * or when app returns to foreground.
+     */
+    _scheduleReconnect(initialDelay = 2000) {
+      this._stopReconnect();
+
+      let attempts = 0;
+      const maxAttempts = 12; // ~3 min of trying before giving up
+
+      const attempt = async () => {
+        // Guard: stop if conditions changed
+        if (this._intentionalDisconnect || !this.pairedDevice ||
+            this.connectionState === 'connected' || this.connectionState === 'connecting') {
+          return;
+        }
+
+        attempts++;
+        addBreadcrumb({
+          category: 'ble',
+          message: `Reconnect attempt ${attempts}/${maxAttempts}`,
+          level: 'info'
+        });
+
+        try {
+          await this.autoConnect();
+          // Success — autoConnect already starts autoSync
+          addBreadcrumb({ category: 'ble', message: 'Auto-reconnect succeeded', level: 'info' });
+        } catch {
+          if (attempts < maxAttempts && !this._intentionalDisconnect) {
+            // Backoff: 5s, 7.5s, 11s, 17s, 25s, 30s (capped)
+            const delay = Math.min(5000 * Math.pow(1.5, attempts - 1), 30000);
+            this._reconnectTimer = setTimeout(attempt, delay);
+          } else {
+            addBreadcrumb({
+              category: 'ble',
+              message: `Reconnect stopped after ${attempts} attempts`,
+              level: 'warning'
+            });
+          }
+        }
+      };
+
+      this._reconnectTimer = setTimeout(attempt, initialDelay);
+    },
+
+    /**
+     * Stop any pending reconnect attempts
+     */
+    _stopReconnect() {
+      if (this._reconnectTimer) {
+        clearTimeout(this._reconnectTimer);
+        this._reconnectTimer = null;
       }
     },
 
