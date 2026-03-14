@@ -507,30 +507,38 @@ export const useDeviceStore = defineStore('device', {
 
     /**
      * Start polling for new files while connected.
-     * Waits 30s after connect, then polls every 60s.
-     * Only fetches file list (lightweight) — skips battery/storage to avoid
-     * overwhelming the BLE device and causing disconnects.
+     * Polls every 30s: sends a lightweight keepalive (battery request) to
+     * prevent the device from disconnecting due to BLE inactivity, and
+     * syncs new files when the device is not recording.
      */
     startAutoSync() {
       this.stopAutoSync();
       // Initial delay: let the connection stabilize before polling
       this._autoSyncTimer = setTimeout(() => {
         this._autoSyncPoll();
-        // Then poll every 60 seconds
         this._autoSyncTimer = setInterval(() => {
           this._autoSyncPoll();
-        }, 60000);
-      }, 30000);
+        }, 30000);
+      }, 15000);
     },
 
     async _autoSyncPoll() {
       if (!this.isConnected || this.isSyncing) return;
 
-      // Don't poll while device is recording — entering sync state
-      // disables device buttons and can interfere with active recording
-      if (this.isRecordingOnDevice) return;
-
       try {
+        // Always send a battery request as BLE keepalive — prevents the
+        // device from disconnecting due to inactivity (even during recording)
+        const manager = getBleManager();
+        try {
+          this.batteryLevel = await manager.getBattery();
+        } catch (e) {
+          console.warn('BLE keepalive (battery) failed:', e.message);
+        }
+
+        // Don't fetch file list or sync while device is recording —
+        // entering sync state disables device buttons
+        if (this.isRecordingOnDevice) return;
+
         await this.fetchFileList();
 
         // Re-check: recording may have started during file list fetch
