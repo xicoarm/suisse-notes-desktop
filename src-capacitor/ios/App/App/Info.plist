@@ -52,6 +52,7 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>bluetooth-central</string>
 	</array>
 	<!-- Microphone Permission -->
 	<key>NSMicrophoneUsageDescription</key>
