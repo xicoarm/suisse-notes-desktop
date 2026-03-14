@@ -368,7 +368,9 @@ export const useDeviceStore = defineStore('device', {
         (progress) => { this.syncProgress = progress; },
         file.size
       );
-      addBreadcrumb({ category: 'ble', message: `Downloaded ${file.file}: ${fileData.byteLength} bytes`, level: 'info' });
+      const header = Array.from(fileData.slice(0, 8)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
+      const headerAscii = String.fromCharCode(...fileData.slice(0, 4));
+      addBreadcrumb({ category: 'ble', message: `Downloaded ${file.file}: ${fileData.byteLength} bytes, header=[${header}] ascii="${headerAscii}"`, level: 'info' });
 
       // Save to device filesystem
       const { Filesystem, Directory } = await import('@capacitor/filesystem');

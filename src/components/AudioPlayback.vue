@@ -80,7 +80,7 @@
 <script>
 import { ref, watch, onMounted, onUnmounted } from 'vue';
 import { isElectron, isCapacitor } from '../utils/platform';
-import { readFile } from '../services/storage';
+import { readFile, getFileUri } from '../services/storage';
 
 export default {
   name: 'AudioPlayback',
@@ -121,13 +121,21 @@ export default {
             error.value = result.error || 'Could not load audio file';
           }
         } else if (isCapacitor()) {
-          const result = await readFile(props.filePath);
-          if (result.success) {
-            const mimeType = props.filePath.endsWith('.opus') ? 'audio/ogg' : 'audio/webm';
-            const blob = new Blob([result.data], { type: mimeType });
-            audioUrl.value = URL.createObjectURL(blob);
+          // Use native file URI so WKWebView handles decoding natively
+          const uriResult = await getFileUri(props.filePath);
+          if (uriResult.success) {
+            const { Capacitor } = await import('@capacitor/core');
+            audioUrl.value = Capacitor.convertFileSrc(uriResult.uri);
           } else {
-            error.value = result.error || 'Could not load audio file';
+            // Fallback to blob URL
+            const result = await readFile(props.filePath);
+            if (result.success) {
+              const mimeType = props.filePath.endsWith('.opus') ? 'audio/ogg' : 'audio/webm';
+              const blob = new Blob([result.data], { type: mimeType });
+              audioUrl.value = URL.createObjectURL(blob);
+            } else {
+              error.value = result.error || 'Could not load audio file';
+            }
           }
         } else {
           error.value = 'Audio playback not supported on this platform';
