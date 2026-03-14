@@ -43,7 +43,7 @@
       <div class="card-actions">
         <!-- Uploading spinner -->
         <q-spinner-dots
-          v-if="uploading"
+          v-if="uploading || recording.uploadStatus === 'uploading'"
           color="primary"
           size="24px"
         />
@@ -208,6 +208,7 @@ export default {
       if (props.uploading) return t('statusUploading');
       const statusKeys = {
         pending: 'statusPending',
+        uploading: 'statusUploading',
         uploaded: 'statusUploaded',
         failed: 'statusFailed',
         recording: 'statusRecording'

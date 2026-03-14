@@ -136,6 +136,15 @@ export const useDeviceStore = defineStore('device', {
       const manager = getBleManager();
       await manager.initialize();
 
+      // Request notification permissions early so sync notifications work in background
+      try {
+        const { LocalNotifications } = await import('@capacitor/local-notifications');
+        const { display } = await LocalNotifications.checkPermissions();
+        if (display !== 'granted') {
+          await LocalNotifications.requestPermissions();
+        }
+      } catch { /* best-effort */ }
+
       // Load persisted data
       await this._loadPairedDevice();
       await this._loadSyncedFiles();
@@ -511,6 +520,7 @@ export const useDeviceStore = defineStore('device', {
 
       // Upload
       this.syncPhase = 'uploading';
+      await historyStore.updateRecording(recordId, { uploadStatus: 'uploading' });
       try {
         const result = await uploadWithVerification({
           filePath,
@@ -534,12 +544,14 @@ export const useDeviceStore = defineStore('device', {
           });
           addBreadcrumb({ category: 'ble', message: `Device file uploaded: ${file.file}`, level: 'info' });
         } else {
+          await historyStore.updateRecording(recordId, { uploadStatus: 'failed' });
           captureException(new Error(`Device file upload failed: ${result.error}`), {
             tags: { action: 'ble_upload' },
             extra: { filename: file.file, recordId, error: result.error }
           });
         }
       } catch (uploadErr) {
+        await historyStore.updateRecording(recordId, { uploadStatus: 'pending' });
         captureException(uploadErr, {
           tags: { action: 'ble_upload' },
           extra: { filename: file.file, recordId, filePath }
