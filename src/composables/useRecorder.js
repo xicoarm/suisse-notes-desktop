@@ -291,6 +291,32 @@ export function useRecorder() {
           }, 5000);
         }
       });
+
+      // Recover system audio after Audio Service crash (macOS ScreenCaptureKit bug)
+      window.electronAPI.system.onAudioServiceCrashed(async () => {
+        const state = recordingService.getState();
+        if (recordingStore.isRecording && state.systemAudioActive) {
+          console.warn('Audio Service crashed during recording — attempting system audio recovery');
+          silenceWarning.value = 'System audio interrupted — reconnecting...';
+          // Brief delay to let Electron respawn the Audio Service process
+          await new Promise(r => setTimeout(r, 1500));
+          try {
+            const sysStream = await captureSystemAudio();
+            if (sysStream) {
+              recordingService.addSystemAudioStream(sysStream);
+              console.log('System audio recovered after Audio Service crash');
+              silenceWarning.value = null;
+            } else {
+              silenceWarning.value = 'System audio could not be recovered — microphone recording continues';
+              setTimeout(() => { silenceWarning.value = null; }, 8000);
+            }
+          } catch (e) {
+            console.error('Failed to recover system audio:', e);
+            silenceWarning.value = 'System audio lost — microphone recording continues';
+            setTimeout(() => { silenceWarning.value = null; }, 8000);
+          }
+        }
+      });
     }
   });
 

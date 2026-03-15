@@ -232,12 +232,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onScreenUnlocked: (callback) => {
       ipcRenderer.on('system:screen-unlocked', (event) => callback());
     },
+    // Listen for Audio Service crash (macOS ScreenCaptureKit bug)
+    onAudioServiceCrashed: (callback) => {
+      ipcRenderer.on('system:audio-service-crashed', (event, data) => callback(data));
+    },
     // Remove all system listeners
     removeAllListeners: () => {
       ipcRenderer.removeAllListeners('recording:suspend');
       ipcRenderer.removeAllListeners('recording:resume');
       ipcRenderer.removeAllListeners('system:screen-locked');
       ipcRenderer.removeAllListeners('system:screen-unlocked');
+      ipcRenderer.removeAllListeners('system:audio-service-crashed');
     },
     // Get recordings path
     getRecordingsPath: () => ipcRenderer.invoke('system:getRecordingsPath')

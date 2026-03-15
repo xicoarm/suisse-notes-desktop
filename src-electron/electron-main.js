@@ -100,6 +100,17 @@ app.on('render-process-gone', (event, webContents, details) => {
 app.on('child-process-gone', (event, details) => {
   log.error('Child process gone:', details);
   Sentry.captureMessage(`Child process crashed: ${details.reason}`, 'error');
+
+  // Detect Audio Service crash (macOS ScreenCaptureKit bug) and notify renderer to recover
+  if (details.serviceName === 'audio.mojom.AudioService' && details.reason === 'crashed') {
+    log.warn('Audio Service crashed — notifying renderer to recover system audio');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('system:audio-service-crashed', {
+        reason: details.reason,
+        exitCode: details.exitCode
+      });
+    }
+  }
 });
 
 // Configure auto-updater logging
