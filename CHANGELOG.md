@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.48](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.47...v3.7.48) (2026-03-15)
+
+
+### Features
+
+* add AirPods-style BLE auto-reconnect for device ([851cf7c](https://github.com/xicoarm/suisse-notes-desktop/commit/851cf7ccaf52c729ffc7a4a4f4b0996a1119ceb3))
+* add auto-sync polling for BLE device recordings ([46038d9](https://github.com/xicoarm/suisse-notes-desktop/commit/46038d91a340af8c6cf3f11c5b60090534d82a64))
+* add BLE transfer progress feedback with floating pill and local notifications ([62d6486](https://github.com/xicoarm/suisse-notes-desktop/commit/62d648698c4c643440414e8e300a10f402c4036e))
+* move device pairing to Settings, show BLE device on Record page ([21ff632](https://github.com/xicoarm/suisse-notes-desktop/commit/21ff63290556e86d698da7ed606cca568aa2efca))
+
+
+### Bug Fixes
+
+* add BLE keepalive to prevent device disconnect during recording ([4cc0a29](https://github.com/xicoarm/suisse-notes-desktop/commit/4cc0a295e54ec119c7d218199d26b088be276375))
+* add M1(BLE) pattern to BLE device name filter ([5b72513](https://github.com/xicoarm/suisse-notes-desktop/commit/5b725131db3407af5e48c930f24da7c33257905a))
+* add raw byte logging to BLE handshake for debugging step1 failure ([029fec3](https://github.com/xicoarm/suisse-notes-desktop/commit/029fec3cbaeae7f51c695a5c9394255fd6f4a8c1))
+* add Sentry logging to BLE scan and auth, fix scan not finding devices ([74663bd](https://github.com/xicoarm/suisse-notes-desktop/commit/74663bdfa521c1e1589fa87f172913dbd4a19e4f))
+* auto-recover system audio after macOS Audio Service crash ([0d9124e](https://github.com/xicoarm/suisse-notes-desktop/commit/0d9124ea4afbc33aedba9e41df7048e8ed146fec))
+* call getDevices before BLE reconnect to prevent "Device not found" error ([027ecbb](https://github.com/xicoarm/suisse-notes-desktop/commit/027ecbb5d80a3173cb42fb9ead46c01224fcef1f))
+* convert raw Opus packets from T240 device to Ogg Opus for playback ([192c36f](https://github.com/xicoarm/suisse-notes-desktop/commit/192c36f491fb18755e86f394375d7ed47c9e9046))
+* correct MIME type for device recordings and add upload error reporting ([2fd693e](https://github.com/xicoarm/suisse-notes-desktop/commit/2fd693e67491bb4b3694c3a48a1e5e7bedbe8c20))
+* don't send command at handshake step 1, just listen for device ([1481959](https://github.com/xicoarm/suisse-notes-desktop/commit/14819592e902e8b63ad8eef365c69fb2cffeca22))
+* enable bluetooth-central background mode for iOS BLE transfers ([dd04702](https://github.com/xicoarm/suisse-notes-desktop/commit/dd047029664e2407cea98fe0541954698b6145ca))
+* filter unsolicited BLE recording notifications to prevent empty files and disconnects ([681b6f9](https://github.com/xicoarm/suisse-notes-desktop/commit/681b6f9cafcf5bd7abebb4066de84a06a21afdef))
+* handle device with existing pairing by sending unpair before retry ([7823985](https://github.com/xicoarm/suisse-notes-desktop/commit/7823985d912c648ead3d9b3ca5d55896e85c1c47))
+* preserve local-only recordings when merging with server history ([511ca4f](https://github.com/xicoarm/suisse-notes-desktop/commit/511ca4f2e56dc0e453dd7c02ec404ecc71f4936e))
+* properly handle existing device pairing with full reconnect cycle ([d48ee43](https://github.com/xicoarm/suisse-notes-desktop/commit/d48ee4374cbaddca28809642e5125d8ce8c04da6))
+* reduce BLE auto-sync aggressiveness to prevent connection drops ([61083f7](https://github.com/xicoarm/suisse-notes-desktop/commit/61083f787dc7cb8bfd6aa50715fe94a17ac750e9))
+* regenerate package-lock.json for clean CI install ([b202dbb](https://github.com/xicoarm/suisse-notes-desktop/commit/b202dbb0184ab05f5ce98be0b92a98eeae1f8e12))
+* remove unpair attempt during 68ms window, just reconnect cleanly ([de2cfd4](https://github.com/xicoarm/suisse-notes-desktop/commit/de2cfd42595888d212559f43d8505a3efd87ae14))
+* rename "Scan for Devices" to "Pair Device" in all languages ([52c039f](https://github.com/xicoarm/suisse-notes-desktop/commit/52c039f5a8125352ad6f30ef10a7c201e3879732))
+* replace Device tab with Upload tab on mobile, filter BLE scan for T240 devices ([298df51](https://github.com/xicoarm/suisse-notes-desktop/commit/298df5157f742a92aaf728704d7a6ccc96182878))
+* restore correct pre-BLE layout, fix minutes display, fix BLE scan ([2efcccc](https://github.com/xicoarm/suisse-notes-desktop/commit/2efcccc555b912b926b4ef01f4958d30aa261389))
+* restore mobile bottom navigation from pre-BLE version (019e0a7) ([4a0335f](https://github.com/xicoarm/suisse-notes-desktop/commit/4a0335f0c52465b9e4fe4b45e6ad5082e91536d1))
+* restore original mobile layout, improve BLE scan logging ([77c73b0](https://github.com/xicoarm/suisse-notes-desktop/commit/77c73b063f42928c5b7db8ad47b26e415a6431e1))
+* retry syncing local-only recordings to server on history load ([b2398db](https://github.com/xicoarm/suisse-notes-desktop/commit/b2398db5abd9dcb5d8dcd9682aa6672bae9a5c9a))
+* revert RecordPage to pre-BLE state, BLE features only in Settings ([9fb7f5b](https://github.com/xicoarm/suisse-notes-desktop/commit/9fb7f5b0645c0ae55cce1b0f885e6d1c14d8b8cf))
+* save device recordings to Documents dir and fix datetime timezone ([26e784b](https://github.com/xicoarm/suisse-notes-desktop/commit/26e784ba2b92f9c2e7455b72adeb76ed104ed417))
+* show info message for device recordings instead of broken player ([ae29b1b](https://github.com/xicoarm/suisse-notes-desktop/commit/ae29b1b9548816d77c8ab6aadaa80bdeba0c2fc1))
+* show uploading status for device recordings and request notification permissions early ([a0bb968](https://github.com/xicoarm/suisse-notes-desktop/commit/a0bb968d9b3a9e6cb455b8965d916fc564e3f5b9))
+* unwrap handshake return value so device info is properly read ([5691abf](https://github.com/xicoarm/suisse-notes-desktop/commit/5691abfdcc7b74222d0b0d8918f8f56d48866da9))
+* use correct MIME type for opus playback and add BLE download diagnostics ([84bac56](https://github.com/xicoarm/suisse-notes-desktop/commit/84bac5686bb718d0efd70582b3c944f77de586b2))
+* use native file serving for audio playback on iOS ([ec8435c](https://github.com/xicoarm/suisse-notes-desktop/commit/ec8435c265c6ee01ba7501981261dac6ef0ebec7))
+
 ### [3.7.47](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.46...v3.7.47) (2026-03-12)
 
 
