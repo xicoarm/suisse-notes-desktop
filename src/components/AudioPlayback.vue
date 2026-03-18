@@ -147,15 +147,26 @@ export default {
       }
     };
 
-    const togglePlay = () => {
+    const togglePlay = async () => {
       if (!audioElement.value) return;
 
       if (isPlaying.value) {
         audioElement.value.pause();
+        isPlaying.value = false;
       } else {
-        audioElement.value.play();
+        try {
+          await audioElement.value.play();
+          isPlaying.value = true;
+        } catch (e) {
+          console.warn('Audio playback failed:', e.message);
+          if (e.name === 'NotSupportedError') {
+            error.value = 'This audio format is not supported on your device';
+          } else if (e.name !== 'AbortError') {
+            error.value = 'Could not play audio';
+          }
+          isPlaying.value = false;
+        }
       }
-      isPlaying.value = !isPlaying.value;
     };
 
     const toggleMute = () => {

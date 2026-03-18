@@ -507,18 +507,28 @@ export class BleDeviceManager {
       return `[${bytes.join(' ')}]${data.length > maxLen ? `... (${data.length} bytes total)` : ''}`;
     };
 
+    // Drain stale notifications that may have flushed from native BLE stack on reconnection
+    this._drainNotifyQueue();
+
     // Step 1: Device automatically sends its UUID after notifications are started.
     // Per protocol: "app opens notification channel, device responds and sends device UUID"
     // We do NOT send a command — just wait for the device's notification.
-    const step1 = await this._readNotification(5000);
+    // On reconnection, native BLE stack may flush stale notifications — retry once if unexpected.
+    let step1 = await this._readNotification(5000);
 
     captureMessage(`BLE handshake step1 raw: ${hexDump(step1, 30)}`, 'info');
 
     // Response: 0x01 0x01 0x00 0x00 {json with uuid}
     if (step1[3] !== 0x00) {
-      const err = new Error(`Unexpected handshake step1: byte[3]=0x${step1[3].toString(16)}, raw=${hexDump(step1, 30)}`);
-      captureException(err, { tags: { action: 'ble_handshake_step1' }, extra: { rawHex: hexDump(step1, 50) } });
-      throw err;
+      addBreadcrumb({ category: 'ble', message: `Discarding stale handshake notification (byte[3]=0x${step1[3].toString(16)}), retrying`, level: 'warning' });
+      step1 = await this._readNotification(5000);
+      captureMessage(`BLE handshake step1 retry raw: ${hexDump(step1, 30)}`, 'info');
+
+      if (step1[3] !== 0x00) {
+        const err = new Error(`Unexpected handshake step1: byte[3]=0x${step1[3].toString(16)}, raw=${hexDump(step1, 30)}`);
+        captureException(err, { tags: { action: 'ble_handshake_step1' }, extra: { rawHex: hexDump(step1, 50) } });
+        throw err;
+      }
     }
     const deviceJson = parseJsonFromBuffer(step1, 4);
     this.deviceUuid = deviceJson.uuid;

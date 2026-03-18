@@ -1163,6 +1163,23 @@ autoUpdater.on('error', (err) => {
       });
     }
   }
+
+  // Detect read-only volume error (macOS: app in Downloads or mounted DMG)
+  if (process.platform === 'darwin' &&
+      (errMsg.includes('read-only') || errMsg.includes('EROFS') || errMsg.includes('EACCES'))) {
+    log.warn('Update failed: app is on a read-only volume');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const { dialog } = require('electron');
+      dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: 'Cannot Update',
+        message: 'The app cannot update because it is running from a read-only location.',
+        detail: 'Please move Suisse Notes to your Applications folder and relaunch it. Updates will then work automatically.',
+        buttons: ['OK'],
+        defaultId: 0
+      });
+    }
+  }
 });
 
 // Quit when all windows are closed
@@ -2703,6 +2720,8 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
                           error.code === 'ENOTFOUND' ||
                           error.code === 'ENETUNREACH' ||
                           error.code === 'EAI_AGAIN' ||
+                          error.code === 'ECONNRESET' ||
+                          (error.message && error.message.includes('socket hang up')) ||
                           (error.response && error.response.status >= 500);
 
       // If we've exhausted retries or error is not retryable
@@ -2718,6 +2737,8 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
           errorMessage = 'Upload timed out. Please try again.';
         } else if (error.code === 'ENOTFOUND' || error.code === 'ENETUNREACH') {
           errorMessage = 'No internet connection. Please check your network.';
+        } else if (error.code === 'ECONNRESET' || (error.message && error.message.includes('socket hang up'))) {
+          errorMessage = 'Connection was interrupted. Please try again.';
         } else {
           errorMessage = error.message || 'Unknown error';
         }
