@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.49](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.48...v3.7.49) (2026-03-18)
+
+
+### Bug Fixes
+
+* handle Sentry-reported errors in audio playback, auto-update, upload, and BLE ([480db0a](https://github.com/xicoarm/suisse-notes-desktop/commit/480db0af07409c11763a4615db42007cb39d483f))
+
 ### [3.7.48](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.47...v3.7.48) (2026-03-15)
 
 
