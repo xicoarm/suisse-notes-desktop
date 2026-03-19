@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.50](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.49...v3.7.50) (2026-03-19)
+
+
+### Bug Fixes
+
+* show unlimited minutes for enterprise users instead of 0 min ([5fdb187](https://github.com/xicoarm/suisse-notes-desktop/commit/5fdb187c66d805f567a77d250fc3ed2cfe458b11))
+* trigger mobile release for Sentry fixes ([4d0db77](https://github.com/xicoarm/suisse-notes-desktop/commit/4d0db774902ab174486381b47b8ce08a97018b50))
+
 ### [3.7.49](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.48...v3.7.49) (2026-03-18)
 
 
