@@ -537,6 +537,14 @@ watch(() => route.path, (path) => {
   }
 }, { immediate: true });
 
+// Re-login: seed minutes store and restart auto-refresh when auth state transitions to authenticated
+watch(() => authStore.isAuthenticated, async (isAuth, wasAuth) => {
+  if (isAuth && !wasAuth) {
+    await minutesStore.fetchMinutes(authStore.token);
+    minutesStore.startAutoRefresh(() => authStore.token);
+  }
+});
+
 const goTo = (path) => {
   router.push(path);
 };

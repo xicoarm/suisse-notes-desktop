@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     clearToken: () => ipcRenderer.invoke('auth:clearToken'),
     saveUserInfo: (userInfo) => ipcRenderer.invoke('auth:saveUserInfo', userInfo),
     getUserInfo: () => ipcRenderer.invoke('auth:getUserInfo'),
+    refreshToken: () => ipcRenderer.invoke('auth:refreshToken'),
     createWebSession: () => ipcRenderer.invoke('auth:createWebSession'),
     // Listen for auth expired events from main process
     onExpired: (callback) => {

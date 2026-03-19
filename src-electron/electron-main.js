@@ -1480,6 +1480,42 @@ ipcMain.handle('auth:createWebSession', async () => {
   }
 });
 
+// --- Token Refresh ---
+
+ipcMain.handle('auth:refreshToken', async () => {
+  try {
+    const authToken = await getAuthToken();
+    if (!authToken) {
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    const response = await axios.post(`${API_BASE_URL}/api/auth/refresh`, {}, {
+      headers: {
+        'Authorization': `Bearer ${authToken}`
+      },
+      timeout: 15000
+    });
+
+    if (response.data?.token) {
+      // Save new token to configStore immediately so main process is in sync
+      if (safeStorage.isEncryptionAvailable()) {
+        configStore.set('authToken', safeStorage.encryptString(response.data.token).toString('base64'));
+      } else {
+        configStore.set('authToken', response.data.token);
+      }
+      log.info('Token refreshed successfully via IPC');
+      return { success: true, token: response.data.token, user: response.data.user };
+    }
+    return { success: false, error: 'No token in refresh response' };
+  } catch (error) {
+    log.warn('Token refresh failed:', error.response?.status, error.message);
+    return {
+      success: false,
+      error: error.response?.data?.error || error.message || 'Token refresh failed'
+    };
+  }
+});
+
 // --- Minutes / Credits ---
 
 ipcMain.handle('minutes:fetch', async () => {
@@ -1497,13 +1533,16 @@ ipcMain.handle('minutes:fetch', async () => {
     });
 
     if (response.data) {
+      const remaining = response.data.remaining ?? response.data.remainingMinutes ?? 0;
+      const total = response.data.total ?? response.data.totalMinutes ?? 0;
       return {
         success: true,
         minutes: {
-          remaining: response.data.remaining,
-          unlimited: response.data.unlimited,
-          total: response.data.total,
-          used: response.data.used
+          remaining,
+          unlimited: response.data.unlimited || remaining === -1 || total === -1
+            || (response.data.freeMinutes != null && response.data.freeMinutes === -1),
+          total,
+          used: response.data.used ?? response.data.usedMinutes ?? 0
         }
       };
     }

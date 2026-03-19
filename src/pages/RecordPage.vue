@@ -1476,7 +1476,9 @@ const handleUploadError = async (errorMessage) => {
     uploadError.value = 'No recording minutes remaining. Please upgrade your plan or purchase more minutes at app.suisse-notes.ch';
     // Refresh minutes display
     const authStore = (await import('../stores/auth')).useAuthStore();
-    authStore.fetchMinutes();
+    const { useMinutesStore } = await import('../stores/minutes');
+    const minutesStore = useMinutesStore();
+    minutesStore.fetchMinutes(authStore.token, true);
   } else {
     uploadError.value = errorMessage;
   }

@@ -82,22 +82,8 @@ async function platformGetUserInfo() {
   return getUserCredentials();
 }
 
-async function platformFetchMinutes(token) {
-  if (isElectron()) {
-    return window.electronAPI.minutes.fetch();
-  }
-  // Mobile / web: direct fetch
-  try {
-    const response = await authenticatedRequest(API_ENDPOINTS.desktopMinutes, token);
-    if (!response.ok) {
-      return { success: false };
-    }
-    const data = await response.json();
-    return { success: true, minutes: data };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
+// Token refresh interval: 6 hours
+const TOKEN_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export const useAuthStore = defineStore('auth', {
   state: () => ({
@@ -107,10 +93,8 @@ export const useAuthStore = defineStore('auth', {
     sessionChecked: false,  // Track if initial session check is complete
     loading: false,
     error: null,
-    // Minutes / credits
-    minutes: null,  // { remaining, unlimited, total, used }
-    minutesLoading: false,
-    _minutesInterval: null,
+    _refreshPromise: null,  // Mutex for token refresh (prevents concurrent stampede)
+    _tokenRefreshInterval: null,
   }),
 
   actions: {
@@ -126,11 +110,6 @@ export const useAuthStore = defineStore('auth', {
           this.token = result.token;
           this.isAuthenticated = true;
 
-          // Save minutes from login response
-          if (result.minutes) {
-            this.minutes = result.minutes;
-          }
-
           // Save token and user info securely
           await platformSaveToken(result.token);
           await platformSaveUserInfo(result.user);
@@ -138,8 +117,15 @@ export const useAuthStore = defineStore('auth', {
           // Set Sentry user context
           setUser(result.user);
 
-          // Start periodic minutes refresh
-          this.startMinutesRefresh();
+          // Seed minutes store from login response
+          if (result.minutes) {
+            const { useMinutesStore } = await import('./minutes');
+            const minutesStore = useMinutesStore();
+            minutesStore.setFromServer(result.minutes);
+          }
+
+          // Start periodic token refresh
+          this.startTokenRefresh();
 
           return { success: true };
         } else {
@@ -171,9 +157,8 @@ export const useAuthStore = defineStore('auth', {
           await platformSaveToken(result.token);
           await platformSaveUserInfo(result.user);
 
-          // Fetch minutes after registration and start refresh
-          this.fetchMinutes();
-          this.startMinutesRefresh();
+          // Start periodic token refresh
+          this.startTokenRefresh();
 
           return { success: true };
         } else {
@@ -201,8 +186,13 @@ export const useAuthStore = defineStore('auth', {
       const historyStore = useRecordingsHistoryStore();
       historyStore.reset();
 
-      // Stop minutes refresh
-      this.stopMinutesRefresh();
+      // Reset minutes store (stops its auto-refresh timer)
+      const { useMinutesStore } = await import('./minutes');
+      const minutesStore = useMinutesStore();
+      minutesStore.reset();
+
+      // Stop token refresh
+      this.stopTokenRefresh();
 
       // Clear Sentry user context
       setUser(null);
@@ -211,7 +201,18 @@ export const useAuthStore = defineStore('auth', {
       this.token = null;
       this.isAuthenticated = false;
       this.error = null;
-      this.minutes = null;
+      this._refreshPromise = null;
+    },
+
+    /**
+     * Force logout with event dispatch for MainLayout navigation.
+     * @param {string} message - Reason for force logout
+     */
+    async forceLogout(message) {
+      await this.logout();
+      window.dispatchEvent(new CustomEvent('auth:forceLogout', {
+        detail: { message: message || 'Session expired' }
+      }));
     },
 
     async checkSession() {
@@ -230,9 +231,8 @@ export const useAuthStore = defineStore('auth', {
           // Set Sentry user context on session restore
           setUser(userInfo);
 
-          // Fetch minutes on session restore
-          this.fetchMinutes();
-          this.startMinutesRefresh();
+          // Start periodic token refresh
+          this.startTokenRefresh();
         } else if (token) {
           // Token exists but no user info - clear and require re-login
           console.warn('Token found but no user info - requiring re-login');
@@ -247,35 +247,109 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
-    async fetchMinutes() {
-      if (!this.isAuthenticated) return;
-      this.minutesLoading = true;
+    /**
+     * Handle 401/auth errors — refresh token or force logout.
+     * Deduplicates concurrent calls via _refreshPromise mutex.
+     * Called from minutes store, upload service, RecordPage, HistoryPage, UploadPage.
+     * @returns {{ success: boolean, token?: string, shouldLogout?: boolean }}
+     */
+    async handleAuthError() {
+      // If a refresh is already in flight, return the same promise
+      if (this._refreshPromise) {
+        return this._refreshPromise;
+      }
+
+      this._refreshPromise = this._doTokenRefresh()
+        .then((result) => {
+          this._refreshPromise = null;
+          if (result.success) {
+            return { success: true, token: result.token };
+          }
+          // Refresh failed — force logout
+          this.forceLogout('Your session has expired. Please log in again.');
+          return { success: false, shouldLogout: true };
+        })
+        .catch((err) => {
+          this._refreshPromise = null;
+          console.error('Token refresh error:', err);
+          this.forceLogout('Your session has expired. Please log in again.');
+          return { success: false, shouldLogout: true };
+        });
+
+      return this._refreshPromise;
+    },
+
+    /**
+     * Internal: perform the actual token refresh via platform-appropriate method.
+     * @returns {{ success: boolean, token?: string, user?: object }}
+     */
+    async _doTokenRefresh() {
+      if (!this.token && !this.isAuthenticated) {
+        return { success: false };
+      }
+
       try {
-        const result = await platformFetchMinutes(this.token);
-        if (result.success && result.minutes) {
-          this.minutes = result.minutes;
+        let result;
+
+        if (isElectron()) {
+          // Electron: use IPC handler (main process has the encrypted token)
+          result = await window.electronAPI.auth.refreshToken();
+        } else {
+          // Mobile / web: direct fetch
+          const response = await authenticatedRequest(API_ENDPOINTS.refreshToken, this.token, {
+            method: 'POST'
+          });
+          if (!response.ok) {
+            return { success: false };
+          }
+          result = await response.json();
+          // Normalize: direct API returns { token, user } at top level
+          result = { success: true, token: result.token, user: result.user };
         }
+
+        if (result.success && result.token) {
+          // Update store state
+          this.token = result.token;
+          if (result.user) {
+            this.user = result.user;
+            await platformSaveUserInfo(result.user);
+          }
+          // Persist new token
+          await platformSaveToken(result.token);
+
+          addBreadcrumb({ category: 'auth', message: 'Token refreshed successfully', level: 'info' });
+          return { success: true, token: result.token };
+        }
+
+        return { success: false };
       } catch (error) {
-        console.warn('Could not fetch minutes:', error);
-      } finally {
-        this.minutesLoading = false;
+        console.warn('Token refresh failed:', error);
+        return { success: false };
       }
     },
 
-    startMinutesRefresh() {
-      this.stopMinutesRefresh();
-      // Refresh minutes every 60 seconds
-      this._minutesInterval = setInterval(() => {
+    /**
+     * Start periodic token refresh (every 6 hours).
+     * Silent — does not force logout on failure (next API call will handle that).
+     */
+    startTokenRefresh() {
+      this.stopTokenRefresh();
+      this._tokenRefreshInterval = setInterval(() => {
         if (this.isAuthenticated) {
-          this.fetchMinutes();
+          this._doTokenRefresh().catch((err) => {
+            console.warn('Periodic token refresh failed (will retry):', err);
+          });
         }
-      }, 60000);
+      }, TOKEN_REFRESH_INTERVAL_MS);
     },
 
-    stopMinutesRefresh() {
-      if (this._minutesInterval) {
-        clearInterval(this._minutesInterval);
-        this._minutesInterval = null;
+    /**
+     * Stop periodic token refresh.
+     */
+    stopTokenRefresh() {
+      if (this._tokenRefreshInterval) {
+        clearInterval(this._tokenRefreshInterval);
+        this._tokenRefreshInterval = null;
       }
     },
 

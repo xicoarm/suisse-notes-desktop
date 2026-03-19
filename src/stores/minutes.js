@@ -79,10 +79,15 @@ export const useMinutesStore = defineStore('minutes', {
      */
     setFromServer(data) {
       if (!data) return;
-      this.remaining = data.remaining ?? 0;
-      this.unlimited = data.unlimited ?? false;
-      this.total = data.total ?? 0;
-      this.used = data.used ?? 0;
+      // Handle both naming conventions (remaining vs remainingMinutes)
+      const remaining = data.remaining ?? data.remainingMinutes ?? 0;
+      const total = data.total ?? data.totalMinutes ?? 0;
+      this.used = data.used ?? data.usedMinutes ?? 0;
+      // Treat -1 as unlimited (enterprise convention) even if unlimited flag is missing
+      this.unlimited = data.unlimited || remaining === -1 || total === -1
+        || (data.freeMinutes != null && data.freeMinutes === -1);
+      this.remaining = remaining;
+      this.total = total;
       this.lastFetchedAt = Date.now();
       this.error = null;
     },
