@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.53](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.52...v3.7.53) (2026-03-21)
+
+
+### Bug Fixes
+
+* date format 24h, share links on mobile, settings i18n, stop dialog redesign ([b628cd7](https://github.com/xicoarm/suisse-notes-desktop/commit/b628cd7cce4b2aedd118fc3009238651344dfce5))
+* trigger mobile release for BLE and upload improvements ([bb8ecbd](https://github.com/xicoarm/suisse-notes-desktop/commit/bb8ecbd2b8947ddebdf2f21bb133c298521b94ae))
+
 ### [3.7.52](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.51...v3.7.52) (2026-03-21)
 
 
