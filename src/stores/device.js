@@ -23,8 +23,8 @@ const PREF_REJECTED_DEVICES = 'ble_rejected_devices';
 const PREF_SKIPPED_FILES = 'ble_skipped_files';
 
 // Background timers
-const RECONNECT_INTERVAL_MS = 30_000;  // Try reconnect every 30s
-const DISCOVERY_INTERVAL_MS = 60_000;  // Scan for new devices every 60s
+const RECONNECT_INTERVAL_MS = 15_000;  // Try reconnect every 15s
+const DISCOVERY_INTERVAL_MS = 15_000;  // Scan for new devices every 15s
 const DISCOVERY_SCAN_DURATION = 5000;  // Quick 5s scan for discovery
 
 // Notification IDs
@@ -716,8 +716,8 @@ export const useDeviceStore = defineStore('device', {
         this._autoSyncPoll();
         this._autoSyncTimer = setInterval(() => {
           this._autoSyncPoll();
-        }, 30000);
-      }, 15000);
+        }, 20000);
+      }, 5000);
     },
 
     async _autoSyncPoll() {
