@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.58](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.57...v3.7.58) (2026-03-21)
+
+
+### Bug Fixes
+
+* bump Android versionCode to 8 for Play Store upload ([65992e1](https://github.com/xicoarm/suisse-notes-desktop/commit/65992e11a0fa8c88e9d72615cc85683ab3233128))
+
 ### [3.7.57](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.56...v3.7.57) (2026-03-21)
 
 
