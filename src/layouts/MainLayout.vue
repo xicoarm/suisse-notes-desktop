@@ -189,23 +189,6 @@
         <!-- Right Section: Language + User Menu -->
         <div class="header-right">
           <template v-if="authStore.isAuthenticated">
-            <!-- Minutes Display -->
-            <div
-              v-if="!minutesStore.loading"
-              class="minutes-chip"
-              :class="minutesBadgeClass"
-              @click="goTo('/record')"
-            >
-              <q-icon
-                :name="minutesStore.unlimited ? 'all_inclusive' : 'schedule'"
-                size="14px"
-              />
-              <span class="minutes-value">{{ formattedRemainingTime }}</span>
-              <q-tooltip v-if="!minutesStore.unlimited">
-                {{ Math.round(minutesStore.remainingMinutes) }} {{ $t('minutesRemaining') }}
-              </q-tooltip>
-            </div>
-
             <!-- Language Switcher - Compact Dropdown -->
             <q-btn-dropdown
               flat
@@ -354,20 +337,6 @@
       <span>{{ recordingStore.formattedDuration }}</span>
     </div>
 
-    <!-- Mobile Minutes Indicator (floating, only when not recording) -->
-    <div
-      v-if="isMobile() && authStore.isAuthenticated && !recordingStore.isRecording && !recordingStore.isPaused && !minutesStore.loading"
-      class="mobile-minutes-indicator"
-      :class="minutesBadgeClass"
-      @click="goTo('/record')"
-    >
-      <q-icon
-        :name="minutesStore.unlimited ? 'all_inclusive' : 'schedule'"
-        size="14px"
-      />
-      <span>{{ formattedRemainingTime }}</span>
-    </div>
-
     <!-- BLE Transfer Sync Pill (floating, mobile, visible on all pages) -->
     <BleTransferBanner v-if="isMobile() && authStore.isAuthenticated" />
 
@@ -473,26 +442,6 @@ const { languages, currentLang, currentLangShort, setLanguage, initLanguage } = 
 const currentTab = ref('record');
 const isMaximized = ref(false);
 const isOffline = ref(!navigator.onLine);
-
-// Formatted remaining time for display
-const formattedRemainingTime = computed(() => {
-  if (minutesStore.unlimited) {
-    return t('unlimited') || 'Unlimited';
-  }
-  const totalMinutes = minutesStore.remainingMinutes;
-  if (totalMinutes <= 0) {
-    return '0 Min.';
-  }
-  return `${Math.round(totalMinutes)} Min.`;
-});
-
-// CSS class for minutes badge based on state
-const minutesBadgeClass = computed(() => {
-  if (minutesStore.unlimited) return 'unlimited-minutes';
-  if (minutesStore.remainingMinutes <= 0) return 'no-minutes';
-  if (minutesStore.remainingMinutes <= 30) return 'low-minutes';
-  return '';
-});
 
 // Offline tracking handlers
 const handleOnline = () => { isOffline.value = false; };

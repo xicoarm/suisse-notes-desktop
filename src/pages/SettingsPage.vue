@@ -2,9 +2,9 @@
   <q-page class="settings-page">
     <div class="settings-container">
       <div class="page-header">
-        <h1>Settings</h1>
+        <h1>{{ $t('settingsTitle') }}</h1>
         <p class="text-subtitle">
-          Manage your app preferences
+          {{ $t('settingsSubtitle') }}
         </p>
       </div>
 
@@ -14,12 +14,12 @@
         class="settings-section"
       >
         <div class="section-title">
-          Account
+          {{ $t('accountSection') }}
         </div>
 
         <div class="setting-row">
           <div class="setting-label">
-            Signed in as
+            {{ $t('signedInAs') }}
           </div>
           <div class="setting-value">
             {{ authStore.user?.email }}
@@ -31,7 +31,7 @@
           class="setting-row"
         >
           <div class="setting-label">
-            Name
+            {{ $t('nameLabel') }}
           </div>
           <div class="setting-value">
             {{ authStore.user?.name }}
@@ -43,10 +43,31 @@
           class="setting-row"
         >
           <div class="setting-label">
-            Organization
+            {{ $t('organizationLabel') }}
           </div>
           <div class="setting-value">
             {{ authStore.user.organizationName }}
+          </div>
+        </div>
+
+        <!-- Credits / Minutes -->
+        <div class="setting-row">
+          <div class="setting-label">
+            {{ $t('remainingCredits') }}
+          </div>
+          <div class="setting-value">
+            <template v-if="minutesStore.loading">
+              <q-spinner-dots
+                size="16px"
+                color="grey-5"
+              />
+            </template>
+            <template v-else-if="minutesStore.unlimited">
+              {{ $t('unlimited') }}
+            </template>
+            <template v-else>
+              {{ Math.round(minutesStore.remainingMinutes) }} {{ $t('minutesUnit') }}
+            </template>
           </div>
         </div>
 
@@ -54,7 +75,7 @@
           <q-btn
             flat
             color="negative"
-            label="Sign Out"
+            :label="$t('signOut')"
             icon="logout"
             class="btn-danger"
             @click="handleLogout"
@@ -247,16 +268,16 @@
       <!-- Storage Preferences Section -->
       <div class="settings-section">
         <div class="section-title">
-          Storage
+          {{ $t('storageSection') }}
         </div>
 
         <div class="setting-row">
           <div class="setting-info">
             <div class="setting-label">
-              Default storage preference
+              {{ $t('storagePreference') }}
             </div>
             <div class="setting-description">
-              Choose what happens to recordings after upload
+              {{ $t('storagePreferenceDesc') }}
             </div>
           </div>
           <q-select
@@ -273,7 +294,7 @@
 
         <div class="setting-row">
           <div class="setting-label">
-            Data location
+            {{ $t('dataLocation') }}
           </div>
           <div class="setting-value path-value">
             {{ userDataPath }}
@@ -283,16 +304,16 @@
         <div class="setting-row danger-zone">
           <div class="setting-info">
             <div class="setting-label danger-label">
-              Delete all recordings
+              {{ $t('deleteAllRecordings') }}
             </div>
             <div class="setting-description">
-              Permanently delete all local recordings. This cannot be undone.
+              {{ $t('deleteAllRecordingsDesc') }}
             </div>
           </div>
           <q-btn
             flat
             color="negative"
-            label="Delete All"
+            :label="$t('deleteAll')"
             icon="delete_forever"
             :loading="isDeleting"
             @click="showDeleteConfirmation = true"
@@ -341,24 +362,24 @@
               size="48px"
             />
             <div class="dialog-title">
-              Delete All Recordings?
+              {{ $t('deleteAllRecordingsTitle') }}
             </div>
           </q-card-section>
 
           <q-card-section class="dialog-content">
-            <p><strong>This action is irreversible.</strong></p>
-            <p>All {{ recordingsCount }} local recording(s) will be permanently deleted from this device.</p>
+            <p><strong>{{ $t('actionIrreversible') }}</strong></p>
+            <p>{{ $t('deleteAllRecordingsMessage', { count: recordingsCount }) }}</p>
             <p class="warning-text">
-              Recordings that have been uploaded to Suisse Notes will still be available in the web app.
+              {{ $t('deleteAllRecordingsWarning') }}
             </p>
 
             <div class="confirm-input">
-              <p>Type <strong>DELETE</strong> to confirm:</p>
+              <p>{{ $t('typeDeleteToConfirm') }}</p>
               <q-input
                 v-model="deleteConfirmText"
                 outlined
                 dense
-                placeholder="Type DELETE"
+                placeholder="DELETE"
                 :error="deleteConfirmText.length > 0 && deleteConfirmText !== 'DELETE'"
               />
             </div>
@@ -371,12 +392,12 @@
             <q-btn
               v-close-popup
               flat
-              label="Cancel"
+              :label="$t('cancel')"
               color="primary"
             />
             <q-btn
               flat
-              label="Delete All Recordings"
+              :label="$t('deleteAllRecordings')"
               color="negative"
               :disable="deleteConfirmText !== 'DELETE'"
               :loading="isDeleting"
@@ -426,7 +447,7 @@
             <q-btn
               v-close-popup
               flat
-              label="Cancel"
+              :label="$t('cancel')"
               color="primary"
               @click="deleteAccountConfirmText = ''"
             />
@@ -445,12 +466,12 @@
       <!-- About Section -->
       <div class="settings-section">
         <div class="section-title">
-          About
+          {{ $t('aboutSection') }}
         </div>
 
         <div class="setting-row">
           <div class="setting-label">
-            App version
+            {{ $t('appVersion') }}
           </div>
           <div class="setting-value">
             {{ appVersion }}
@@ -459,7 +480,7 @@
 
         <div class="setting-row">
           <div class="setting-label">
-            Connected server
+            {{ $t('connectedServer') }}
           </div>
           <div class="setting-value">
             {{ configStore.apiUrl }}
@@ -472,7 +493,7 @@
         <q-btn
           flat
           color="primary"
-          label="Back to Recording"
+          :label="$t('backToRecording')"
           icon="arrow_back"
           to="/record"
         />
@@ -488,6 +509,7 @@ import { useQuasar } from 'quasar';
 import { useI18n } from 'vue-i18n';
 import { useConfigStore } from '../stores/config';
 import { useAuthStore } from '../stores/auth';
+import { useMinutesStore } from '../stores/minutes';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
 import { useDeviceStore } from '../stores/device';
@@ -500,6 +522,7 @@ const { t } = useI18n();
 const router = useRouter();
 const configStore = useConfigStore();
 const authStore = useAuthStore();
+const minutesStore = useMinutesStore();
 const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
 const { languages, currentLang, setLanguage, initLanguage } = useLanguage();
@@ -522,10 +545,10 @@ const isDeletingAccount = ref(false);
 
 const recordingsCount = computed(() => historyStore.recordings.length);
 
-const storageOptions = [
-  { value: 'keep', label: 'Keep locally' },
-  { value: 'delete_after_upload', label: 'Delete after upload' }
-];
+const storageOptions = computed(() => [
+  { value: 'keep', label: t('keepLocally') },
+  { value: 'delete_after_upload', label: t('deleteAfterUpload') }
+]);
 
 const globalVocabulary = computed(() => transcriptionStore.globalVocabulary);
 

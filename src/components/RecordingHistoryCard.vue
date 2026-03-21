@@ -11,12 +11,6 @@
           <span :class="['status-badge', currentStatus]">
             {{ statusLabel }}
           </span>
-          <q-icon
-            v-if="isUploaded"
-            name="open_in_new"
-            size="11px"
-            class="open-hint-icon"
-          />
         </div>
 
         <div class="recording-meta">
@@ -47,6 +41,18 @@
             />
             <span>{{ $t('autoDelete') }}</span>
           </div>
+        </div>
+
+        <!-- Visible "View transcript" link for uploaded recordings -->
+        <div
+          v-if="isUploaded"
+          class="view-transcript-link"
+        >
+          <q-icon
+            name="open_in_new"
+            size="12px"
+          />
+          <span>{{ $t('viewTranscript') }}</span>
         </div>
       </div>
 
@@ -261,12 +267,6 @@ export default {
 
     const formattedDate = computed(() => {
       const data = historyStore.formatDateData(props.recording.createdAt);
-      if (data.type === 'today') {
-        return t('dateToday', { time: data.time });
-      }
-      if (data.type === 'yesterday') {
-        return t('dateYesterday', { time: data.time });
-      }
       return data.formatted || '';
     });
 
@@ -450,12 +450,19 @@ export default {
   }
 }
 
-.open-hint-icon {
-  color: #94a3b8;
+.view-transcript-link {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #6366f1;
   transition: color 0.15s ease;
 
   .clickable:hover & {
-    color: #6366f1;
+    color: #4f46e5;
+    text-decoration: underline;
   }
 }
 

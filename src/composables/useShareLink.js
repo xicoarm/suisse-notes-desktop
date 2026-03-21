@@ -74,8 +74,13 @@ export function useShareLink() {
       }
       window.electronAPI.shell.openExternal(url);
     } else if (isCapacitor()) {
-      // Open in the actual system browser (Safari/Chrome), not the in-app browser
-      window.open(url, '_blank');
+      try {
+        const { Browser } = await import('@capacitor/browser');
+        await Browser.open({ url });
+      } catch {
+        // Fallback
+        window.open(url, '_blank');
+      }
     }
   };
 

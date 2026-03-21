@@ -564,59 +564,25 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
       return `${minutes}:${secs.toString().padStart(2, '0')}`;
     },
 
-    // Format date for display - returns structured data for i18n
+    // Format date for display — always DD.MM.YYYY HH:mm (24h)
     formatDateData(dateString) {
-      if (!dateString) return { type: 'empty', time: '', formatted: '' };
+      if (!dateString) return { type: 'date', time: '', formatted: '' };
 
       const date = new Date(dateString);
-      const now = new Date();
-      const diff = now - date;
-      const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const day = String(date.getDate()).padStart(2, '0');
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const year = date.getFullYear();
+      const hours = String(date.getHours()).padStart(2, '0');
+      const minutes = String(date.getMinutes()).padStart(2, '0');
 
-      // Today
-      if (date.toDateString() === now.toDateString()) {
-        return { type: 'today', time };
-      }
+      const formatted = `${day}.${month}.${year} ${hours}:${minutes}`;
 
-      // Yesterday
-      const yesterday = new Date(now);
-      yesterday.setDate(yesterday.getDate() - 1);
-      if (date.toDateString() === yesterday.toDateString()) {
-        return { type: 'yesterday', time };
-      }
-
-      // Within last 7 days
-      if (diff < 7 * 24 * 60 * 60 * 1000) {
-        return {
-          type: 'weekday',
-          time,
-          formatted: date.toLocaleDateString([], {
-            weekday: 'long',
-            hour: '2-digit',
-            minute: '2-digit'
-          })
-        };
-      }
-
-      // Older
-      return {
-        type: 'older',
-        time,
-        formatted: date.toLocaleDateString([], {
-          year: 'numeric',
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit'
-        })
-      };
+      return { type: 'date', time: `${hours}:${minutes}`, formatted };
     },
 
     // Legacy format date for display (backwards compatibility)
     formatDate(dateString) {
       const data = this.formatDateData(dateString);
-      if (data.type === 'today') return `Today at ${data.time}`;
-      if (data.type === 'yesterday') return `Yesterday at ${data.time}`;
       return data.formatted || '';
     }
   }

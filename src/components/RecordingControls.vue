@@ -111,42 +111,80 @@
     <q-dialog
       v-model="showStopDialog"
       persistent
+      position="bottom"
     >
-      <q-card style="min-width: 320px">
-        <q-card-section>
-          <div class="text-h6">
-            {{ t('stopRecordingTitle') }}
-          </div>
-        </q-card-section>
+      <q-card class="stop-dialog-card">
+        <div class="stop-dialog-handle" />
 
-        <q-card-section class="q-pt-none">
-          {{ t('stopRecordingMessage') }}
-        </q-card-section>
+        <div class="stop-dialog-title">
+          {{ t('stopRecordingTitle') }}
+        </div>
 
-        <q-card-actions
-          align="right"
-          class="q-px-md q-pb-md"
-        >
-          <q-btn
-            flat
-            :label="t('continueRecording')"
-            color="primary"
-            @click="showStopDialog = false"
-          />
-          <q-btn
-            unelevated
-            :label="t('endRecording')"
-            color="primary"
+        <div class="stop-dialog-actions">
+          <div
+            class="stop-action-item action-primary"
             @click="handleEndRecording"
-          />
-          <q-btn
-            flat
-            :label="t('cancelAndDelete')"
-            color="negative"
-            icon="delete_forever"
+          >
+            <div class="action-icon-wrap primary-bg">
+              <q-icon
+                name="cloud_upload"
+                size="20px"
+                color="white"
+              />
+            </div>
+            <div class="action-content">
+              <div class="action-label">
+                {{ t('endRecording') }}
+              </div>
+              <div class="action-desc">
+                {{ t('stopRecordingMessage') }}
+              </div>
+            </div>
+            <q-icon
+              name="chevron_right"
+              size="20px"
+              color="grey-5"
+            />
+          </div>
+
+          <div
+            class="stop-action-item"
+            @click="showStopDialog = false"
+          >
+            <div class="action-icon-wrap continue-bg">
+              <q-icon
+                name="play_arrow"
+                size="20px"
+                color="white"
+              />
+            </div>
+            <div class="action-content">
+              <div class="action-label">
+                {{ t('continueRecording') }}
+              </div>
+            </div>
+          </div>
+
+          <div class="stop-action-divider" />
+
+          <div
+            class="stop-action-item action-danger"
             @click="handleCancelClick"
-          />
-        </q-card-actions>
+          >
+            <div class="action-icon-wrap danger-bg">
+              <q-icon
+                name="delete_outline"
+                size="20px"
+                color="white"
+              />
+            </div>
+            <div class="action-content">
+              <div class="action-label">
+                {{ t('cancelAndDelete') }}
+              </div>
+            </div>
+          </div>
+        </div>
       </q-card>
     </q-dialog>
 
@@ -223,7 +261,7 @@ const handleConfirmCancel = () => {
 };
 </script>
 
-<style scoped>
+<style lang="scss" scoped>
 .recording-controls {
   display: flex;
   flex-direction: column;
@@ -245,5 +283,107 @@ const handleConfirmCancel = () => {
   100% {
     box-shadow: 0 0 0 0 rgba(255, 152, 0, 0);
   }
+}
+
+// Stop Recording Dialog — modern bottom sheet style
+.stop-dialog-card {
+  border-radius: 16px 16px 0 0;
+  padding: 8px 0 16px;
+  width: 100%;
+  max-width: 480px;
+}
+
+.stop-dialog-handle {
+  width: 36px;
+  height: 4px;
+  background: #d1d5db;
+  border-radius: 2px;
+  margin: 4px auto 12px;
+}
+
+.stop-dialog-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1e293b;
+  padding: 0 20px 12px;
+}
+
+.stop-dialog-actions {
+  padding: 0 12px;
+}
+
+.stop-action-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+
+  &:hover {
+    background: #f8fafc;
+  }
+
+  &:active {
+    background: #f1f5f9;
+  }
+
+  &.action-primary {
+    .action-label {
+      font-weight: 600;
+    }
+  }
+
+  &.action-danger {
+    .action-label {
+      color: #ef4444;
+    }
+  }
+}
+
+.action-icon-wrap {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+
+  &.primary-bg {
+    background: #6366f1;
+  }
+
+  &.continue-bg {
+    background: #22c55e;
+  }
+
+  &.danger-bg {
+    background: #ef4444;
+  }
+}
+
+.action-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.action-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: #1e293b;
+}
+
+.action-desc {
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 2px;
+}
+
+.stop-action-divider {
+  height: 1px;
+  background: #f1f5f9;
+  margin: 4px 12px;
 }
 </style>
