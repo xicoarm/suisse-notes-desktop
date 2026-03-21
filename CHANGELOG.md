@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.57](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.56...v3.7.57) (2026-03-21)
+
+
+### Bug Fixes
+
+* enable offline recording by caching minutes balance to localStorage ([f1e7e23](https://github.com/xicoarm/suisse-notes-desktop/commit/f1e7e2395f0179c8b9207982349b2241242fa646))
+
 ### [3.7.56](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.55...v3.7.56) (2026-03-21)
 
 
