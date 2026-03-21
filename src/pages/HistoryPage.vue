@@ -137,6 +137,7 @@
         @retry="handleUpload"
         @deleted="onRecordingDeleted"
         @cancel-transfer="handleCancelTransfer"
+        @resync="handleResync"
       />
     </div>
   </q-page>
@@ -146,6 +147,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useQuasar } from 'quasar';
+import { useI18n } from 'vue-i18n';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingStore } from '../stores/recording';
@@ -164,6 +166,7 @@ export default {
   setup() {
     const router = useRouter();
     const $q = useQuasar();
+    const { t } = useI18n();
     const historyStore = useRecordingsHistoryStore();
     const authStore = useAuthStore();
     const recordingStore = useRecordingStore();
@@ -323,6 +326,44 @@ export default {
       }
     };
 
+    const handleResync = async (recording) => {
+      try {
+        const { useDeviceStore } = await import('../stores/device');
+        const deviceStore = useDeviceStore();
+
+        if (!deviceStore.isConnected) {
+          $q.notify({
+            type: 'warning',
+            message: t('connectDeviceFirst'),
+            timeout: 3000
+          });
+          return;
+        }
+
+        // Remove from skipped files so sync can proceed
+        const filename = recording.deviceFilename;
+        if (filename) {
+          await deviceStore._removeSkippedFile(filename);
+
+          // Find the file on the device and sync it
+          const deviceFile = deviceStore.deviceFiles.find(f => f.file === filename);
+          if (deviceFile) {
+            // Delete the cancelled history entry — a new one will be created during sync
+            await historyStore.deleteRecording(recording.id, false);
+            await deviceStore.syncFile(deviceFile);
+          } else {
+            $q.notify({
+              type: 'warning',
+              message: t('fileNotOnDevice'),
+              timeout: 3000
+            });
+          }
+        }
+      } catch (e) {
+        console.warn('Resync error:', e);
+      }
+    };
+
     const handleCancelTransfer = async () => {
       try {
         const { useDeviceStore } = await import('../stores/device');
@@ -385,6 +426,7 @@ export default {
       goToRecord,
       formatDuration,
       handleUpload,
+      handleResync,
       handleCancelTransfer,
       onRecordingDeleted
     };

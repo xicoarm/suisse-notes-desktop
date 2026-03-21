@@ -37,6 +37,7 @@ const messages = {
     recordingPaused: 'Recording paused',
     recordingStopped: 'Recording stopped',
     uploading: 'Uploading...',
+    processingOnServer: 'Processing on server...',
     uploadComplete: 'Upload complete',
     processing: 'Processing...',
 
@@ -278,6 +279,9 @@ const messages = {
     statusCancelled: 'Cancelled',
     statusTransferring: 'Transferring',
     reUpload: 'Upload',
+    resyncFromDevice: 'Re-sync from device',
+    connectDeviceFirst: 'Connect the recording device first',
+    fileNotOnDevice: 'File not found on device. It may have been deleted.',
     skipped: 'Skipped',
 
     // Offline Banner & Auto-save
@@ -362,6 +366,7 @@ const messages = {
     recordingPaused: 'Aufnahme pausiert',
     recordingStopped: 'Aufnahme gestoppt',
     uploading: 'Wird hochgeladen...',
+    processingOnServer: 'Wird auf dem Server verarbeitet...',
     uploadComplete: 'Upload abgeschlossen',
     processing: 'Wird verarbeitet...',
 
@@ -603,6 +608,9 @@ const messages = {
     statusCancelled: 'Abgebrochen',
     statusTransferring: 'Übertragung',
     reUpload: 'Hochladen',
+    resyncFromDevice: 'Vom Gerät erneut synchronisieren',
+    connectDeviceFirst: 'Verbinden Sie zuerst das Aufnahmegerät',
+    fileNotOnDevice: 'Datei nicht auf dem Gerät gefunden. Sie wurde möglicherweise gelöscht.',
     skipped: 'Übersprungen',
 
     // Offline Banner & Auto-save
@@ -687,6 +695,7 @@ const messages = {
     recordingPaused: 'Enregistrement en pause',
     recordingStopped: 'Enregistrement arrêté',
     uploading: 'Téléchargement...',
+    processingOnServer: 'Traitement sur le serveur...',
     uploadComplete: 'Téléchargement terminé',
     processing: 'Traitement...',
 
@@ -928,6 +937,9 @@ const messages = {
     statusCancelled: 'Annulé',
     statusTransferring: 'Transfert',
     reUpload: 'Télécharger',
+    resyncFromDevice: 'Re-synchroniser depuis l\'appareil',
+    connectDeviceFirst: 'Connectez d\'abord l\'appareil d\'enregistrement',
+    fileNotOnDevice: 'Fichier introuvable sur l\'appareil. Il a peut-être été supprimé.',
     skipped: 'Ignoré',
 
     // Offline Banner & Auto-save
@@ -1012,6 +1024,7 @@ const messages = {
     recordingPaused: 'Registrazione in pausa',
     recordingStopped: 'Registrazione terminata',
     uploading: 'Caricamento...',
+    processingOnServer: 'Elaborazione sul server...',
     uploadComplete: 'Caricamento completato',
     processing: 'Elaborazione...',
 
@@ -1253,6 +1266,9 @@ const messages = {
     statusCancelled: 'Annullato',
     statusTransferring: 'Trasferimento',
     reUpload: 'Carica',
+    resyncFromDevice: 'Risincronizza dal dispositivo',
+    connectDeviceFirst: 'Collega prima il dispositivo di registrazione',
+    fileNotOnDevice: 'File non trovato sul dispositivo. Potrebbe essere stato eliminato.',
     skipped: 'Ignorato',
 
     // Offline Banner & Auto-save

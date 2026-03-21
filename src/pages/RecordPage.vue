@@ -473,13 +473,16 @@
           <div class="upload-progress-section">
             <div class="progress-info">
               <span class="progress-text">
-                {{ displayProgress >= 100 ? 'Processing on server...' : (recordingStore.uploadRetryAttempt > 0 ? $t('uploadRetrying', { attempt: recordingStore.uploadRetryAttempt, max: recordingStore.uploadRetryMaxRetries }) : $t('uploading')) }}
+                {{ displayProgress >= 100 ? $t('processingOnServer') : (recordingStore.uploadRetryAttempt > 0 ? $t('uploadRetrying', { attempt: recordingStore.uploadRetryAttempt, max: recordingStore.uploadRetryMaxRetries }) : $t('uploading')) }}
               </span>
-              <span class="progress-percent">{{ Math.min(displayProgress, 99) }}%</span>
+              <span
+                v-if="displayProgress > 0 && displayProgress < 100"
+                class="progress-percent"
+              >{{ displayProgress }}%</span>
             </div>
             <q-linear-progress
-              v-if="displayProgress < 100"
-              :value="Math.min(displayProgress, 99) / 100"
+              v-if="displayProgress > 0 && displayProgress < 100"
+              :value="displayProgress / 100"
               color="primary"
               size="8px"
               rounded
@@ -860,7 +863,6 @@ const uploadError = ref(null);
 const retryAttempt = ref(0);
 const currentFilePath = ref('');
 const currentFileSize = ref(0);
-const transcriptUrl = ref('');
 
 // Watch for minutes limit warning
 watch(minutesLimitWarning, (minutesRemaining) => {

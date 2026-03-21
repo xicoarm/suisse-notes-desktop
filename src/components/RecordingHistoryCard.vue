@@ -113,7 +113,7 @@
           <q-tooltip>{{ $t('upload') }}</q-tooltip>
         </q-btn>
 
-        <!-- Cancelled: re-upload option -->
+        <!-- Cancelled: re-upload (has local file) or re-sync (needs device) -->
         <q-btn
           v-else-if="recording.uploadStatus === 'cancelled' && recording.filePath"
           flat
@@ -124,6 +124,17 @@
           @click="$emit('upload', recording)"
         >
           <q-tooltip>{{ $t('reUpload') }}</q-tooltip>
+        </q-btn>
+        <q-btn
+          v-else-if="recording.uploadStatus === 'cancelled' && !recording.filePath"
+          flat
+          round
+          icon="sync"
+          color="primary"
+          size="sm"
+          @click="$emit('resync', recording)"
+        >
+          <q-tooltip>{{ $t('resyncFromDevice') }}</q-tooltip>
         </q-btn>
 
         <q-btn
@@ -252,7 +263,7 @@ export default {
     }
   },
 
-  emits: ['upload', 'retry', 'deleted', 'cancel-transfer'],
+  emits: ['upload', 'retry', 'deleted', 'cancel-transfer', 'resync'],
 
   setup(props, { emit }) {
     const { t } = useI18n();
