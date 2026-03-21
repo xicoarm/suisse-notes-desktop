@@ -15,19 +15,46 @@ import { authenticatedRequest, API_ENDPOINTS } from '../services/api';
 
 // Auto-refresh interval (60 seconds)
 const REFRESH_INTERVAL_MS = 60 * 1000;
+const MINUTES_CACHE_KEY = 'minutes_cache';
 
 let refreshTimer = null;
 
+// Persist minutes to localStorage so offline recording works
+function _cacheMinutes(data) {
+  try {
+    localStorage.setItem(MINUTES_CACHE_KEY, JSON.stringify({
+      remaining: data.remaining,
+      unlimited: data.unlimited,
+      total: data.total,
+      used: data.used,
+      cachedAt: Date.now()
+    }));
+  } catch { /* ignore */ }
+}
+
+function _loadCachedMinutes() {
+  try {
+    const raw = localStorage.getItem(MINUTES_CACHE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 export const useMinutesStore = defineStore('minutes', {
-  state: () => ({
-    remaining: 0,
-    unlimited: false,
-    total: 0,
-    used: 0,
-    loading: false,
-    error: null,
-    lastFetchedAt: null
-  }),
+  state: () => {
+    // Load cached minutes immediately so offline users have a balance
+    const cached = _loadCachedMinutes();
+    return {
+      remaining: cached?.remaining ?? 0,
+      unlimited: cached?.unlimited ?? false,
+      total: cached?.total ?? 0,
+      used: cached?.used ?? 0,
+      loading: false,
+      error: null,
+      lastFetchedAt: cached ? cached.cachedAt : null
+    };
+  },
 
   getters: {
     /**
@@ -90,6 +117,9 @@ export const useMinutesStore = defineStore('minutes', {
       this.total = total;
       this.lastFetchedAt = Date.now();
       this.error = null;
+
+      // Cache to localStorage so offline recording works
+      _cacheMinutes(this.$state);
     },
 
     /**
@@ -223,6 +253,7 @@ export const useMinutesStore = defineStore('minutes', {
       this.loading = false;
       this.error = null;
       this.lastFetchedAt = null;
+      try { localStorage.removeItem(MINUTES_CACHE_KEY); } catch { /* ignore */ }
     }
   }
 });
