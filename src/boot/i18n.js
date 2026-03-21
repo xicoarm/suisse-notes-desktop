@@ -101,6 +101,11 @@ const messages = {
     statusFailed: 'Failed',
     statusRecording: 'Recording',
     autoDelete: 'Auto-delete',
+    openInBrowser: 'Open in browser',
+    copyLinkTooltip: 'Copy link',
+    linkCopied: 'Link copied to clipboard',
+    linkCopyFailed: 'Failed to copy link',
+    sessionCreationFailed: 'Could not create session. You may need to log in on the web.',
 
     // Common
     cancel: 'Cancel',
@@ -381,6 +386,11 @@ const messages = {
     statusFailed: 'Fehlgeschlagen',
     statusRecording: 'Aufnahme',
     autoDelete: 'Auto-Löschen',
+    openInBrowser: 'Im Browser öffnen',
+    copyLinkTooltip: 'Link kopieren',
+    linkCopied: 'Link in Zwischenablage kopiert',
+    linkCopyFailed: 'Link konnte nicht kopiert werden',
+    sessionCreationFailed: 'Sitzung konnte nicht erstellt werden. Möglicherweise müssen Sie sich im Web anmelden.',
 
     // Common
     cancel: 'Abbrechen',
@@ -661,6 +671,11 @@ const messages = {
     statusFailed: 'Échoué',
     statusRecording: 'Enregistrement',
     autoDelete: 'Suppression auto',
+    openInBrowser: 'Ouvrir dans le navigateur',
+    copyLinkTooltip: 'Copier le lien',
+    linkCopied: 'Lien copié dans le presse-papiers',
+    linkCopyFailed: 'Impossible de copier le lien',
+    sessionCreationFailed: 'Impossible de créer la session. Vous devrez peut-être vous connecter sur le web.',
 
     // Common
     cancel: 'Annuler',
@@ -941,6 +956,11 @@ const messages = {
     statusFailed: 'Fallito',
     statusRecording: 'Registrazione',
     autoDelete: 'Auto-elimina',
+    openInBrowser: 'Apri nel browser',
+    copyLinkTooltip: 'Copia link',
+    linkCopied: 'Link copiato negli appunti',
+    linkCopyFailed: 'Impossibile copiare il link',
+    sessionCreationFailed: 'Impossibile creare la sessione. Potrebbe essere necessario accedere dal web.',
 
     // Common
     cancel: 'Annulla',

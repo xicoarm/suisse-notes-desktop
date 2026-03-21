@@ -1,12 +1,22 @@
 <template>
-  <div :class="['history-card', 'status-card', `status-${currentStatus}`]">
+  <div :class="['history-card', 'status-card', `status-${currentStatus}`, { 'clickable-card': isUploaded }]">
     <div class="card-header">
-      <div class="card-info">
+      <div
+        class="card-info"
+        :class="{ clickable: isUploaded }"
+        @click="onCardClick"
+      >
         <div class="card-title">
           <span class="recording-date">{{ formattedDate }}</span>
           <span :class="['status-badge', currentStatus]">
             {{ statusLabel }}
           </span>
+          <q-icon
+            v-if="isUploaded"
+            name="open_in_new"
+            size="11px"
+            class="open-hint-icon"
+          />
         </div>
 
         <div class="recording-meta">
@@ -41,9 +51,16 @@
       </div>
 
       <div class="card-actions">
+        <!-- Loading spinner while generating link -->
+        <q-spinner-dots
+          v-if="linkLoading"
+          color="primary"
+          size="24px"
+        />
+
         <!-- Uploading spinner -->
         <q-spinner-dots
-          v-if="uploading || recording.uploadStatus === 'uploading'"
+          v-else-if="uploading || recording.uploadStatus === 'uploading'"
           color="primary"
           size="24px"
         />
@@ -70,6 +87,19 @@
           @click="$emit('retry', recording)"
         >
           <q-tooltip>{{ $t('retryUpload') }}</q-tooltip>
+        </q-btn>
+
+        <!-- Copy link button for uploaded recordings -->
+        <q-btn
+          v-if="isUploaded && !linkLoading"
+          flat
+          round
+          icon="content_copy"
+          color="grey-7"
+          size="sm"
+          @click="onCopyLink"
+        >
+          <q-tooltip>{{ $t('copyLinkTooltip') }}</q-tooltip>
         </q-btn>
 
         <q-btn
@@ -151,6 +181,7 @@
 import { ref, computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
+import { useShareLink } from '../composables/useShareLink';
 import AudioPlayback from './AudioPlayback.vue';
 
 export default {
@@ -176,10 +207,12 @@ export default {
   setup(props, { emit }) {
     const { t } = useI18n();
     const historyStore = useRecordingsHistoryStore();
+    const { openInBrowser, copyLink } = useShareLink();
 
     const expanded = ref(false);
     const showDeleteDialog = ref(false);
     const deleteFile = ref(true);
+    const linkLoading = ref(false);
 
     const formattedDate = computed(() => {
       const data = historyStore.formatDateData(props.recording.createdAt);
@@ -204,6 +237,10 @@ export default {
       props.uploading ? 'uploading' : props.recording.uploadStatus
     );
 
+    const isUploaded = computed(() =>
+      props.recording.uploadStatus === 'uploaded' && !!props.recording.audioFileId
+    );
+
     const statusLabel = computed(() => {
       if (props.uploading) return t('statusUploading');
       const statusKeys = {
@@ -216,6 +253,26 @@ export default {
       const key = statusKeys[props.recording.uploadStatus];
       return key ? t(key) : 'Unknown';
     });
+
+    const onCardClick = async () => {
+      if (!isUploaded.value || linkLoading.value) return;
+      linkLoading.value = true;
+      try {
+        await openInBrowser(props.recording.audioFileId);
+      } finally {
+        linkLoading.value = false;
+      }
+    };
+
+    const onCopyLink = async () => {
+      if (!isUploaded.value || linkLoading.value) return;
+      linkLoading.value = true;
+      try {
+        await copyLink(props.recording.audioFileId);
+      } finally {
+        linkLoading.value = false;
+      }
+    };
 
     const onDelete = () => {
       showDeleteDialog.value = true;
@@ -231,11 +288,15 @@ export default {
       expanded,
       showDeleteDialog,
       deleteFile,
+      linkLoading,
       formattedDate,
       formattedDuration,
       formattedSize,
       currentStatus,
+      isUploaded,
       statusLabel,
+      onCardClick,
+      onCopyLink,
       onDelete,
       confirmDelete
     };
@@ -254,6 +315,11 @@ export default {
 
   &:hover {
     box-shadow: 0 2px 4px -1px rgba(0, 0, 0, 0.08);
+  }
+
+  &.clickable-card:hover {
+    box-shadow: 0 2px 8px -2px rgba(0, 0, 0, 0.12);
+    border-color: #cbd5e1;
   }
 
   // Status border colors
@@ -286,6 +352,22 @@ export default {
 
 .card-info {
   flex: 1;
+
+  &.clickable {
+    cursor: pointer;
+    border-radius: 6px;
+    padding: 2px 4px;
+    margin: -2px -4px;
+    transition: background-color 0.15s ease;
+
+    &:hover {
+      background-color: rgba(99, 102, 241, 0.04);
+    }
+
+    &:active {
+      background-color: rgba(99, 102, 241, 0.08);
+    }
+  }
 }
 
 .card-title {
@@ -298,6 +380,15 @@ export default {
     font-weight: 500;
     font-size: 12px;
     color: #1e293b;
+  }
+}
+
+.open-hint-icon {
+  color: #94a3b8;
+  transition: color 0.15s ease;
+
+  .clickable:hover & {
+    color: #6366f1;
   }
 }
 

@@ -485,6 +485,7 @@ import { isElectron, isCapacitor, isMobile as isMobilePlatform } from '../utils/
 import { pickAudioFile } from '../services/filePicker';
 import { uploadWithVerification, cancelUpload as cancelMobileUpload } from '../services/upload';
 import { getApiUrlSync } from '../services/api';
+import { useShareLink } from '../composables/useShareLink';
 import ModeTabSwitcher from '../components/ModeTabSwitcher.vue';
 import TranscriptionOptions from '../components/TranscriptionOptions.vue';
 import ContactSalesDialog from '../components/ContactSalesDialog.vue';
@@ -530,6 +531,7 @@ const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
 const minutesStore = useMinutesStore();
 const authStore = useAuthStore();
+const { openInBrowser, copyLink } = useShareLink();
 
 // Contact sales dialog state
 const showContactSalesDialog = ref(false);
@@ -1086,75 +1088,15 @@ const formatBytes = (bytes) => {
   return `${size.toFixed(1)} ${units[unitIndex]}`;
 };
 
-const generateTranscriptUrl = async () => {
-  if (!currentAudioFileId.value) return '';
-
-  let url = `https://app.suisse-notes.ch/meeting/audio/${currentAudioFileId.value}`;
-
-  if (isElectron()) {
-    try {
-      const result = await window.electronAPI.auth.createWebSession();
-      if (result.success && result.sessionToken) {
-        url += `?session=${encodeURIComponent(result.sessionToken)}`;
-      }
-    } catch (error) {
-      console.warn('Could not create web session:', error);
-    }
-  } else if (isCapacitor()) {
-    try {
-      if (authStore.token) {
-        const response = await fetch(`${getApiUrlSync()}/api/auth/desktop/create-web-session`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${authStore.token}`
-          }
-        });
-        const data = await response.json();
-        if (data.success && data.sessionToken) {
-          url += `?session=${encodeURIComponent(data.sessionToken)}`;
-        }
-      }
-    } catch (error) {
-      console.warn('Could not create web session for mobile:', error);
-    }
-  }
-
-  return url;
-};
-
-const openInSuisseNotes = async () => {
+const openInSuisseNotes = () => {
   if (currentAudioFileId.value) {
-    const url = await generateTranscriptUrl();
-
-    if (isElectron()) {
-      window.electronAPI.shell.openExternal(url);
-    } else if (isCapacitor()) {
-      // On mobile, open in system browser using Capacitor Browser plugin
-      const { Browser } = await import('@capacitor/browser');
-      await Browser.open({ url });
-    }
+    openInBrowser(currentAudioFileId.value);
   }
 };
 
-const copyTranscriptUrl = async () => {
+const copyTranscriptUrl = () => {
   if (currentAudioFileId.value) {
-    const url = await generateTranscriptUrl();
-
-    try {
-      await navigator.clipboard.writeText(url);
-      $q.notify({
-        type: 'positive',
-        message: 'Link copied to clipboard',
-        timeout: 2000
-      });
-    } catch (error) {
-      $q.notify({
-        type: 'negative',
-        message: 'Failed to copy link',
-        timeout: 2000
-      });
-    }
+    copyLink(currentAudioFileId.value);
   }
 };
 
