@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.54](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.53...v3.7.54) (2026-03-21)
+
+
+### Bug Fixes
+
+* add resync button for cancelled transfers, fix upload progress display ([d18f918](https://github.com/xicoarm/suisse-notes-desktop/commit/d18f9183538b02bd31692e0b5171c25fedf626f5))
+
 ### [3.7.53](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.52...v3.7.53) (2026-03-21)
 
 
