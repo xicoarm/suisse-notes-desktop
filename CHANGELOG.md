@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.55](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.54...v3.7.55) (2026-03-21)
+
+
+### Performance Improvements
+
+* speed up BLE device detection and sync timers ([1dcdef7](https://github.com/xicoarm/suisse-notes-desktop/commit/1dcdef742f5d66aa46b4e793d08f4da12942d051))
+
 ### [3.7.54](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.53...v3.7.54) (2026-03-21)
 
 
