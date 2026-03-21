@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.51](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.50...v3.7.51) (2026-03-21)
+
+
+### Features
+
+* add shareable links to all recordings in history ([c9907c0](https://github.com/xicoarm/suisse-notes-desktop/commit/c9907c04af257a3e35dc61f638d9623550c0ef05))
+
 ### [3.7.50](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.49...v3.7.50) (2026-03-19)
 
 
