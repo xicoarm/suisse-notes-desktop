@@ -240,6 +240,17 @@ const messages = {
     inquirySubmitted: 'Your request has been submitted. We will contact you soon.',
     contactInfoText: 'Our team will contact you at {email} within 24 hours.',
 
+    // BLE Device Discovery & Sync
+    newDeviceFound: 'Recording device found',
+    reject: 'Ignore',
+    cancelSync: 'Cancel Sync',
+    cancelSyncTitle: 'Cancel Sync?',
+    cancelSyncMessage: 'Are you sure? The file can still be synced manually from the device later.',
+    statusCancelled: 'Cancelled',
+    statusTransferring: 'Transferring',
+    reUpload: 'Upload',
+    skipped: 'Skipped',
+
     // Offline Banner & Auto-save
     offlineBanner: 'You are offline. Recordings are saved locally and will upload when connected.',
     autoSavingIn: 'Auto-saving in {seconds}s...',
@@ -524,6 +535,17 @@ const messages = {
     maybeLater: 'Vielleicht später',
     inquirySubmitted: 'Ihre Anfrage wurde übermittelt. Wir werden Sie in Kürze kontaktieren.',
     contactInfoText: 'Unser Team wird Sie unter {email} innerhalb von 24 Stunden kontaktieren.',
+
+    // BLE Device Discovery & Sync
+    newDeviceFound: 'Aufnahmegerät gefunden',
+    reject: 'Ignorieren',
+    cancelSync: 'Sync abbrechen',
+    cancelSyncTitle: 'Sync abbrechen?',
+    cancelSyncMessage: 'Sind Sie sicher? Die Datei kann später manuell vom Gerät synchronisiert werden.',
+    statusCancelled: 'Abgebrochen',
+    statusTransferring: 'Übertragung',
+    reUpload: 'Hochladen',
+    skipped: 'Übersprungen',
 
     // Offline Banner & Auto-save
     offlineBanner: 'Sie sind offline. Aufnahmen werden lokal gespeichert und hochgeladen, sobald Sie verbunden sind.',
@@ -810,6 +832,17 @@ const messages = {
     inquirySubmitted: 'Votre demande a été soumise. Nous vous contacterons bientôt.',
     contactInfoText: 'Notre équipe vous contactera à {email} dans les 24 heures.',
 
+    // BLE Device Discovery & Sync
+    newDeviceFound: 'Appareil d\'enregistrement trouvé',
+    reject: 'Ignorer',
+    cancelSync: 'Annuler la sync',
+    cancelSyncTitle: 'Annuler la synchronisation?',
+    cancelSyncMessage: 'Êtes-vous sûr? Le fichier pourra être synchronisé manuellement depuis l\'appareil plus tard.',
+    statusCancelled: 'Annulé',
+    statusTransferring: 'Transfert',
+    reUpload: 'Télécharger',
+    skipped: 'Ignoré',
+
     // Offline Banner & Auto-save
     offlineBanner: 'Vous êtes hors ligne. Les enregistrements sont sauvegardés localement et seront téléchargés une fois connecté.',
     autoSavingIn: 'Sauvegarde automatique dans {seconds}s...',
@@ -1094,6 +1127,17 @@ const messages = {
     maybeLater: 'Forse dopo',
     inquirySubmitted: 'La tua richiesta è stata inviata. Ti contatteremo presto.',
     contactInfoText: 'Il nostro team ti contatterà a {email} entro 24 ore.',
+
+    // BLE Device Discovery & Sync
+    newDeviceFound: 'Dispositivo di registrazione trovato',
+    reject: 'Ignora',
+    cancelSync: 'Annulla sync',
+    cancelSyncTitle: 'Annullare la sincronizzazione?',
+    cancelSyncMessage: 'Sei sicuro? Il file potrà essere sincronizzato manualmente dal dispositivo in seguito.',
+    statusCancelled: 'Annullato',
+    statusTransferring: 'Trasferimento',
+    reUpload: 'Carica',
+    skipped: 'Ignorato',
 
     // Offline Banner & Auto-save
     offlineBanner: 'Sei offline. Le registrazioni vengono salvate localmente e caricate quando sei connesso.',

@@ -371,6 +371,9 @@
     <!-- BLE Transfer Sync Pill (floating, mobile, visible on all pages) -->
     <BleTransferBanner v-if="isMobile() && authStore.isAuthenticated" />
 
+    <!-- New BLE Device Discovery Popup (floating, mobile, visible on all pages) -->
+    <NewDevicePopup v-if="isMobile() && authStore.isAuthenticated" />
+
     <!-- Offline Banner -->
     <div
       v-if="isOffline || (isMobile() && !recordingStore.networkConnected)"
@@ -455,6 +458,7 @@ import { useRouter, useRoute } from 'vue-router';
 import { isElectron, isMobile } from '../utils/platform';
 import { useLanguage } from '../composables/useLanguage';
 import BleTransferBanner from '../components/BleTransferBanner.vue';
+import NewDevicePopup from '../components/NewDevicePopup.vue';
 
 const $q = useQuasar();
 const { t } = useI18n();

@@ -546,6 +546,9 @@ export default {
         return;
       }
 
+      // User visited DevicePage → BLE permissions are granted (or will be prompted)
+      deviceStore.markBlePermissionsGranted();
+
       // Auto-connect if we have a paired device
       if (deviceStore.hasPairedDevice && !deviceStore.isConnected) {
         try {

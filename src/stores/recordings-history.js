@@ -4,6 +4,11 @@ import { useRecordingStore } from './recording';
 import { isElectron, isCapacitor } from '../utils/platform';
 import { getApiUrlSync } from '../services/api';
 
+// Auto-retry constants
+const RETRY_INITIAL_DELAY_MS = 60_000;   // 1 minute
+const RETRY_MAX_DELAY_MS = 1_800_000;    // 30 minutes
+const _retryingIds = new Set(); // Track currently retrying uploads to prevent concurrent retries
+
 // localStorage cache helpers for mobile
 const CACHE_KEY = 'recordings_history_cache';
 const PREF_KEY = 'recordings_storage_preference';
@@ -429,6 +434,105 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
         uploadStatus: 'failed',
         uploadError: error
       });
+    },
+
+    /**
+     * Auto-retry all failed/pending uploads that have a local file.
+     * Uses exponential backoff based on retryCount per recording.
+     * Called periodically from App.vue.
+     */
+    async retryFailedUploads() {
+      const authStore = useAuthStore();
+      if (!authStore.isAuthenticated) return;
+
+      const retryable = this.recordings.filter(r =>
+        (r.uploadStatus === 'failed' || r.uploadStatus === 'pending') &&
+        r.filePath &&
+        !_retryingIds.has(r.id)
+      );
+
+      if (retryable.length === 0) return;
+
+      for (const recording of retryable) {
+        // Exponential backoff: check if enough time has passed since last retry
+        const retryCount = recording.retryCount || 0;
+        const backoffMs = Math.min(RETRY_INITIAL_DELAY_MS * Math.pow(2, retryCount), RETRY_MAX_DELAY_MS);
+        const lastRetryAt = recording.lastRetryAt ? new Date(recording.lastRetryAt).getTime() : 0;
+        if (Date.now() - lastRetryAt < backoffMs) continue;
+
+        _retryingIds.add(recording.id);
+        try {
+          await this.updateRecording(recording.id, {
+            uploadStatus: 'uploading',
+            retryCount: retryCount + 1,
+            lastRetryAt: new Date().toISOString()
+          });
+
+          let result;
+          if (isElectron()) {
+            result = await window.electronAPI.upload.start({
+              recordId: recording.id,
+              filePath: recording.filePath,
+              metadata: {
+                duration: recording.duration?.toString(),
+                title: recording.title
+              }
+            });
+
+            // Token expired — attempt refresh and retry once
+            if (!result.success && result.status === 401) {
+              const refreshResult = await authStore.handleAuthError();
+              if (refreshResult.success) {
+                result = await window.electronAPI.upload.start({
+                  recordId: recording.id,
+                  filePath: recording.filePath,
+                  metadata: {
+                    duration: recording.duration?.toString(),
+                    title: recording.title
+                  }
+                });
+              }
+            }
+          } else if (isCapacitor()) {
+            const { uploadWithVerification } = await import('../services/upload');
+            result = await uploadWithVerification({
+              filePath: recording.filePath,
+              recordId: recording.id,
+              apiUrl: getApiUrlSync(),
+              authToken: authStore.token,
+              metadata: {
+                duration: recording.duration?.toString(),
+                title: recording.title
+              },
+              onProgress: () => {},
+              getAuthStore: () => authStore
+            });
+          }
+
+          if (result?.success) {
+            await this.updateRecording(recording.id, {
+              uploadStatus: 'uploaded',
+              transcriptionId: result.transcriptionId,
+              audioFileId: result.audioFileId,
+              uploadError: null,
+              retryCount: 0
+            });
+            console.log(`Auto-retry succeeded for recording ${recording.id}`);
+          } else {
+            await this.updateRecording(recording.id, {
+              uploadStatus: 'failed',
+              uploadError: result?.error || 'Upload failed'
+            });
+          }
+        } catch (error) {
+          await this.updateRecording(recording.id, {
+            uploadStatus: 'failed',
+            uploadError: error.message
+          });
+        } finally {
+          _retryingIds.delete(recording.id);
+        }
+      }
     },
 
     // Format file size for display

@@ -11,6 +11,7 @@ import { isMobile } from './utils/platform';
 const configStore = useConfigStore();
 const recordingStore = useRecordingStore();
 const mobileRetryInterval = ref(null);
+const failedRetryInterval = ref(null);
 
 onMounted(async () => {
   // Load configuration on app start
@@ -105,6 +106,59 @@ onMounted(async () => {
       console.warn('Could not set up upload queue processing:', e);
     }
   }
+
+  // Auto-retry failed/pending uploads (works on both desktop and mobile)
+  const startFailedRetry = async (authStore) => {
+    try {
+      const { useRecordingsHistoryStore } = await import('./stores/recordings-history');
+      const historyStore = useRecordingsHistoryStore();
+
+      // Ensure recordings are loaded before retrying
+      if (!historyStore.loaded) {
+        await historyStore.loadRecordings();
+      }
+
+      // Initial retry attempt after 30s
+      setTimeout(() => {
+        if (authStore.isAuthenticated && !document.hidden) {
+          historyStore.retryFailedUploads().catch(e => {
+            console.warn('Initial failed upload retry failed:', e);
+          });
+        }
+      }, 30000);
+
+      // Periodic retry every 60 seconds
+      failedRetryInterval.value = setInterval(() => {
+        if (!authStore.isAuthenticated || document.hidden) return;
+        historyStore.retryFailedUploads().catch(e => {
+          console.warn('Periodic failed upload retry failed:', e);
+        });
+      }, 60000);
+    } catch (e) {
+      console.warn('Could not set up failed upload retry:', e);
+    }
+  };
+
+  try {
+    const { useAuthStore } = await import('./stores/auth');
+    const authStore = useAuthStore();
+
+    if (authStore.isAuthenticated) {
+      startFailedRetry(authStore);
+    } else {
+      let unwatch = null;
+      const timeout = setTimeout(() => { if (unwatch) unwatch(); }, 15000);
+      unwatch = watch(() => authStore.isAuthenticated, (isAuth) => {
+        if (isAuth) {
+          unwatch();
+          clearTimeout(timeout);
+          startFailedRetry(authStore);
+        }
+      });
+    }
+  } catch (e) {
+    console.warn('Could not set up failed upload retry:', e);
+  }
 });
 
 onUnmounted(() => {
@@ -114,6 +168,10 @@ onUnmounted(() => {
   if (mobileRetryInterval.value) {
     clearInterval(mobileRetryInterval.value);
     mobileRetryInterval.value = null;
+  }
+  if (failedRetryInterval.value) {
+    clearInterval(failedRetryInterval.value);
+    failedRetryInterval.value = null;
   }
 });
 </script>

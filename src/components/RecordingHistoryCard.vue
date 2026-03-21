@@ -58,12 +58,42 @@
           size="24px"
         />
 
-        <!-- Uploading spinner -->
-        <q-spinner-dots
-          v-else-if="uploading || recording.uploadStatus === 'uploading'"
-          color="primary"
-          size="24px"
-        />
+        <!-- Transferring from device: spinner + cancel -->
+        <template v-if="recording.uploadStatus === 'transferring'">
+          <q-spinner-dots
+            color="primary"
+            size="24px"
+          />
+          <q-btn
+            flat
+            round
+            icon="close"
+            color="negative"
+            size="sm"
+            @click="onCancelTransfer"
+          >
+            <q-tooltip>{{ $t('cancelSync') }}</q-tooltip>
+          </q-btn>
+        </template>
+
+        <!-- Uploading spinner + cancel -->
+        <template v-else-if="uploading || recording.uploadStatus === 'uploading'">
+          <q-spinner-dots
+            color="primary"
+            size="24px"
+          />
+          <q-btn
+            v-if="recording.source === 'device'"
+            flat
+            round
+            icon="close"
+            color="negative"
+            size="sm"
+            @click="onCancelTransfer"
+          >
+            <q-tooltip>{{ $t('cancelSync') }}</q-tooltip>
+          </q-btn>
+        </template>
 
         <q-btn
           v-else-if="recording.uploadStatus === 'pending' && recording.filePath"
@@ -75,6 +105,19 @@
           @click="$emit('upload', recording)"
         >
           <q-tooltip>{{ $t('upload') }}</q-tooltip>
+        </q-btn>
+
+        <!-- Cancelled: re-upload option -->
+        <q-btn
+          v-else-if="recording.uploadStatus === 'cancelled' && recording.filePath"
+          flat
+          round
+          icon="cloud_upload"
+          color="primary"
+          size="sm"
+          @click="$emit('upload', recording)"
+        >
+          <q-tooltip>{{ $t('reUpload') }}</q-tooltip>
         </q-btn>
 
         <q-btn
@@ -180,6 +223,7 @@
 <script>
 import { ref, computed } from 'vue';
 import { useI18n } from 'vue-i18n';
+import { useQuasar } from 'quasar';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useShareLink } from '../composables/useShareLink';
 import AudioPlayback from './AudioPlayback.vue';
@@ -202,10 +246,11 @@ export default {
     }
   },
 
-  emits: ['upload', 'retry', 'deleted'],
+  emits: ['upload', 'retry', 'deleted', 'cancel-transfer'],
 
   setup(props, { emit }) {
     const { t } = useI18n();
+    const $q = useQuasar();
     const historyStore = useRecordingsHistoryStore();
     const { openInBrowser, copyLink } = useShareLink();
 
@@ -248,7 +293,9 @@ export default {
         uploading: 'statusUploading',
         uploaded: 'statusUploaded',
         failed: 'statusFailed',
-        recording: 'statusRecording'
+        recording: 'statusRecording',
+        cancelled: 'statusCancelled',
+        transferring: 'statusTransferring'
       };
       const key = statusKeys[props.recording.uploadStatus];
       return key ? t(key) : 'Unknown';
@@ -274,6 +321,17 @@ export default {
       }
     };
 
+    const onCancelTransfer = () => {
+      $q.dialog({
+        title: t('cancelSyncTitle'),
+        message: t('cancelSyncMessage'),
+        cancel: { flat: true, label: t('cancel'), color: 'grey-7' },
+        ok: { flat: true, label: t('cancelSync'), color: 'negative' }
+      }).onOk(() => {
+        emit('cancel-transfer', props.recording);
+      });
+    };
+
     const onDelete = () => {
       showDeleteDialog.value = true;
     };
@@ -297,6 +355,7 @@ export default {
       statusLabel,
       onCardClick,
       onCopyLink,
+      onCancelTransfer,
       onDelete,
       confirmDelete
     };
@@ -341,6 +400,14 @@ export default {
 
   &.status-recording {
     border-left: 3px solid #ef4444;
+  }
+
+  &.status-cancelled {
+    border-left: 3px solid #94a3b8;
+  }
+
+  &.status-transferring {
+    border-left: 3px solid #6366f1;
   }
 }
 
@@ -423,6 +490,16 @@ export default {
   &.recording {
     background: rgba(239, 68, 68, 0.1);
     color: #ef4444;
+  }
+
+  &.cancelled {
+    background: rgba(148, 163, 184, 0.1);
+    color: #64748b;
+  }
+
+  &.transferring {
+    background: rgba(99, 102, 241, 0.1);
+    color: #6366f1;
   }
 }
 

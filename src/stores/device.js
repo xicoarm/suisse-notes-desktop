@@ -19,6 +19,13 @@ import { i18n } from '../boot/i18n';
 const PREF_PAIRED_DEVICE = 'ble_paired_device';
 const PREF_APP_UUID = 'ble_app_uuid';
 const PREF_SYNCED_FILES = 'ble_synced_files';
+const PREF_REJECTED_DEVICES = 'ble_rejected_devices';
+const PREF_SKIPPED_FILES = 'ble_skipped_files';
+
+// Background timers
+const RECONNECT_INTERVAL_MS = 30_000;  // Try reconnect every 30s
+const DISCOVERY_INTERVAL_MS = 60_000;  // Scan for new devices every 60s
+const DISCOVERY_SCAN_DURATION = 5000;  // Quick 5s scan for discovery
 
 // Notification IDs
 const NOTIF_SYNC_PROGRESS = 9001;
@@ -101,6 +108,12 @@ export const useDeviceStore = defineStore('device', {
     // Already synced files (persisted)
     syncedFiles: [],
 
+    // Skipped files — cancelled by user, auto-sync ignores these (persisted)
+    skippedFiles: [],
+
+    // Cancel flag for in-progress sync
+    _cancelRequested: false,
+
     // Scan results
     scanResults: [],
 
@@ -111,7 +124,16 @@ export const useDeviceStore = defineStore('device', {
     _reconnectTimer: null,
     _intentionalDisconnect: false,
     _appStateListener: null,
-    _initialized: false
+    _initialized: false,
+
+    // Persistent reconnect & discovery
+    _persistentReconnectTimer: null,
+    _discoveryTimer: null,
+    _blePermissionsGranted: false,
+
+    // New device discovery
+    discoveredDevice: null, // { deviceId, name, rssi } — triggers global popup
+    rejectedDeviceIds: []   // Persisted list of rejected device IDs
   }),
 
   getters: {
@@ -121,7 +143,12 @@ export const useDeviceStore = defineStore('device', {
     isConnected: (state) => state.connectionState === 'connected',
     isSyncing: (state) => state.syncState === 'syncing',
     newFiles: (state) => state.deviceFiles.filter(f => !state.syncedFiles.includes(f.file)),
-    newFilesCount() { return this.newFiles.length; }
+    newFilesCount() { return this.newFiles.length; },
+    // Files eligible for auto-sync (excludes both synced and skipped)
+    autoSyncableFiles: (state) => state.deviceFiles.filter(
+      f => !state.syncedFiles.includes(f.file) && !state.skippedFiles.includes(f.file)
+    ),
+    isFileSkipped: (state) => (filename) => state.skippedFiles.includes(filename)
   },
 
   actions: {
@@ -148,6 +175,7 @@ export const useDeviceStore = defineStore('device', {
       // Load persisted data
       await this._loadPairedDevice();
       await this._loadSyncedFiles();
+      await this._loadSkippedFiles();
 
       // Set disconnect handler — auto-reconnect unless user explicitly disconnected
       manager.onDisconnect(() => {
@@ -167,6 +195,9 @@ export const useDeviceStore = defineStore('device', {
         this.isRecordingOnDevice = recording;
       });
 
+      // Load rejected devices for discovery filtering
+      await this._loadRejectedDevices();
+
       // Listen for app foreground to reconnect (AirPods-style)
       if (isCapacitor()) {
         const { App } = await import('@capacitor/app');
@@ -177,6 +208,10 @@ export const useDeviceStore = defineStore('device', {
           }
         });
       }
+
+      // Start persistent background timers
+      this._startPersistentReconnect();
+      this._startBackgroundDiscovery();
     },
 
     /**
@@ -186,6 +221,7 @@ export const useDeviceStore = defineStore('device', {
       this.connectionState = 'scanning';
       this.scanResults = [];
       this.error = null;
+      this._blePermissionsGranted = true; // User initiated scan = permissions granted
 
       const manager = getBleManager();
       const seen = new Set();
@@ -244,6 +280,7 @@ export const useDeviceStore = defineStore('device', {
         this.connectionState = 'connected';
         this._intentionalDisconnect = false;
         this._stopReconnect();
+        this._startPersistentReconnect(); // Ensure persistent timer is running for next disconnect
 
         // Save paired device
         this.pairedDevice = {
@@ -292,6 +329,7 @@ export const useDeviceStore = defineStore('device', {
         this.connectionState = 'connected';
         this._intentionalDisconnect = false;
         this._stopReconnect();
+        this._startPersistentReconnect(); // Ensure persistent timer is running for next disconnect
 
         // Update paired device info
         this.pairedDevice.name = this.deviceName;
@@ -318,6 +356,7 @@ export const useDeviceStore = defineStore('device', {
     async disconnect() {
       this._intentionalDisconnect = true;
       this._stopReconnect();
+      this._stopPersistentReconnect();
       this.stopAutoSync();
       const manager = getBleManager();
       await manager.disconnect();
@@ -332,6 +371,7 @@ export const useDeviceStore = defineStore('device', {
     async forgetDevice() {
       this._intentionalDisconnect = true;
       this._stopReconnect();
+      this._stopPersistentReconnect();
       this.stopAutoSync();
       const manager = getBleManager();
       await manager.unpair();
@@ -376,8 +416,14 @@ export const useDeviceStore = defineStore('device', {
      */
     async syncFile(file) {
       if (this.syncedFiles.includes(file.file)) return;
-      const t = i18n.global.t;
 
+      // Remove from skipped if manually syncing a previously skipped file
+      if (this.skippedFiles.includes(file.file)) {
+        await this._removeSkippedFile(file.file);
+      }
+
+      const t = i18n.global.t;
+      this._cancelRequested = false;
       this.syncState = 'syncing';
       this.currentSyncFile = file.file;
       this.syncCurrent = 1;
@@ -395,6 +441,10 @@ export const useDeviceStore = defineStore('device', {
         this.syncState = 'complete';
         sendLocalNotification(NOTIF_SYNC_COMPLETE, t('syncComplete'), t('bleSyncCompleteBody', { count: 1 }));
       } catch (e) {
+        if (e.message === 'cancelled') {
+          this.syncState = 'idle';
+          return; // Cancellation is intentional, don't throw
+        }
         this.syncState = 'error';
         this.syncError = e.message;
         throw e;
@@ -408,10 +458,11 @@ export const useDeviceStore = defineStore('device', {
      * Sync all new (un-synced) files
      */
     async syncAllNew() {
-      const newFiles = this.deviceFiles.filter(f => !this.syncedFiles.includes(f.file));
+      const newFiles = this.autoSyncableFiles;
       if (newFiles.length === 0) return;
       const t = i18n.global.t;
 
+      this._cancelRequested = false;
       this.syncState = 'syncing';
       this.syncTotal = newFiles.length;
       this.syncCurrent = 0;
@@ -424,14 +475,23 @@ export const useDeviceStore = defineStore('device', {
 
       try {
         for (const file of newFiles) {
+          if (this._cancelRequested) break;
           this.syncCurrent++;
           this.currentSyncFile = file.file;
           this.syncProgress = 0;
           await this._downloadAndUpload(file);
         }
-        this.syncState = 'complete';
-        sendLocalNotification(NOTIF_SYNC_COMPLETE, t('syncComplete'), t('bleSyncCompleteBody', { count: newFiles.length }));
+        if (this._cancelRequested) {
+          this.syncState = 'idle';
+        } else {
+          this.syncState = 'complete';
+          sendLocalNotification(NOTIF_SYNC_COMPLETE, t('syncComplete'), t('bleSyncCompleteBody', { count: newFiles.length }));
+        }
       } catch (e) {
+        if (e.message === 'cancelled') {
+          this.syncState = 'idle';
+          return;
+        }
         this.syncState = 'error';
         this.syncError = e.message;
         throw e;
@@ -446,82 +506,85 @@ export const useDeviceStore = defineStore('device', {
      */
     async _downloadAndUpload(file) {
       const manager = getBleManager();
-
-      // Download via BLE
-      this.syncPhase = 'downloading';
-      this.syncBytesTotal = file.size || 0;
-      this.syncBytesReceived = 0;
-      addBreadcrumb({ category: 'ble', message: `Downloading ${file.file} (${file.size} bytes)`, level: 'info' });
-      const fileData = await manager.downloadFile(
-        file.file,
-        (data) => {
-          this.syncProgress = data.percent;
-          this.syncBytesReceived = data.bytesReceived;
-        },
-        file.size
-      );
-      const header = Array.from(fileData.slice(0, 8)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
-      const headerAscii = String.fromCharCode(...fileData.slice(0, 4));
-      addBreadcrumb({ category: 'ble', message: `Downloaded ${file.file}: ${fileData.byteLength} bytes, header=[${header}] ascii="${headerAscii}"`, level: 'info' });
-
-      // Convert raw 80-byte Opus packets to Ogg Opus container for playback/transcription
-      let saveData = fileData;
-      if (isRawOpusPackets(fileData)) {
-        saveData = rawOpusToOgg(fileData);
-        addBreadcrumb({ category: 'ble', message: `Converted raw Opus to Ogg: ${fileData.byteLength} → ${saveData.byteLength} bytes`, level: 'info' });
-      }
-
-      // Save to device filesystem
-      const { Filesystem, Directory } = await import('@capacitor/filesystem');
-
-      // Convert Uint8Array to base64
-      let binary = '';
-      const len = saveData.byteLength;
-      for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(saveData[i]);
-      }
-      const base64Data = btoa(binary);
-
-      const dirPath = 'suissenotes_recordings';
-      try {
-        await Filesystem.mkdir({ path: dirPath, directory: Directory.Documents, recursive: true });
-      } catch { /* exists */ }
-
-      await Filesystem.writeFile({
-        path: `${dirPath}/${file.file}`,
-        data: base64Data,
-        directory: Directory.Documents
-      });
-
-      // Store relative path — readFile uses Directory.Documents as base
-      const filePath = `${dirPath}/${file.file}`;
-
-      // Create a recording ID and upload
-      const recordId = uuidv4();
-      const authStore = useAuthStore();
       const historyStore = useRecordingsHistoryStore();
+      const authStore = useAuthStore();
 
-      // Extract title and date from filename: R20250311-093012.opus → 2025-03-11 09:30
-      // Device clock is synced to phone's local time, so filename timestamps are local
+      // Extract metadata early for history entry
       const title = this._formatTitleFromFilename(file.file);
       const createdAt = this._parseDateFromFilename(file.file) || new Date(file.creat_time * 1000).toISOString();
       const durationSec = Math.round((file.duration_ms || 0) / 1000);
+      const recordId = uuidv4();
 
-      // Add to history
+      // Add to history immediately so it's visible in the History tab during transfer
       await historyStore.addRecording({
         id: recordId,
         title,
         duration: durationSec,
-        filePath,
+        filePath: null, // No local file yet
+        fileSize: file.size || 0,
         createdAt,
-        uploadStatus: 'pending',
-        source: 'device'
+        uploadStatus: 'transferring',
+        source: 'device',
+        deviceFilename: file.file
       });
 
-      // Upload
-      this.syncPhase = 'uploading';
-      await historyStore.updateRecording(recordId, { uploadStatus: 'uploading' });
       try {
+        // Phase 1: BLE download
+        if (this._cancelRequested) throw new Error('cancelled');
+
+        this.syncPhase = 'downloading';
+        this.syncBytesTotal = file.size || 0;
+        this.syncBytesReceived = 0;
+        addBreadcrumb({ category: 'ble', message: `Downloading ${file.file} (${file.size} bytes)`, level: 'info' });
+        const fileData = await manager.downloadFile(
+          file.file,
+          (data) => {
+            this.syncProgress = data.percent;
+            this.syncBytesReceived = data.bytesReceived;
+          },
+          file.size
+        );
+        const header = Array.from(fileData.slice(0, 8)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
+        const headerAscii = String.fromCharCode(...fileData.slice(0, 4));
+        addBreadcrumb({ category: 'ble', message: `Downloaded ${file.file}: ${fileData.byteLength} bytes, header=[${header}] ascii="${headerAscii}"`, level: 'info' });
+
+        // Phase 2: Save to filesystem
+        if (this._cancelRequested) throw new Error('cancelled');
+
+        let saveData = fileData;
+        if (isRawOpusPackets(fileData)) {
+          saveData = rawOpusToOgg(fileData);
+          addBreadcrumb({ category: 'ble', message: `Converted raw Opus to Ogg: ${fileData.byteLength} → ${saveData.byteLength} bytes`, level: 'info' });
+        }
+
+        const { Filesystem, Directory } = await import('@capacitor/filesystem');
+        let binary = '';
+        const len = saveData.byteLength;
+        for (let i = 0; i < len; i++) {
+          binary += String.fromCharCode(saveData[i]);
+        }
+        const base64Data = btoa(binary);
+
+        const dirPath = 'suissenotes_recordings';
+        try {
+          await Filesystem.mkdir({ path: dirPath, directory: Directory.Documents, recursive: true });
+        } catch { /* exists */ }
+
+        await Filesystem.writeFile({
+          path: `${dirPath}/${file.file}`,
+          data: base64Data,
+          directory: Directory.Documents
+        });
+
+        const filePath = `${dirPath}/${file.file}`;
+        await historyStore.updateRecording(recordId, { filePath, uploadStatus: 'pending' });
+
+        // Phase 3: Upload to server
+        if (this._cancelRequested) throw new Error('cancelled');
+
+        this.syncPhase = 'uploading';
+        await historyStore.updateRecording(recordId, { uploadStatus: 'uploading' });
+
         const result = await uploadWithVerification({
           filePath,
           recordId,
@@ -544,23 +607,43 @@ export const useDeviceStore = defineStore('device', {
           });
           addBreadcrumb({ category: 'ble', message: `Device file uploaded: ${file.file}`, level: 'info' });
         } else {
-          await historyStore.updateRecording(recordId, { uploadStatus: 'failed' });
+          await historyStore.updateRecording(recordId, {
+            uploadStatus: 'failed',
+            uploadError: result.error || 'Upload failed'
+          });
           captureException(new Error(`Device file upload failed: ${result.error}`), {
             tags: { action: 'ble_upload' },
             extra: { filename: file.file, recordId, error: result.error }
           });
         }
-      } catch (uploadErr) {
-        await historyStore.updateRecording(recordId, { uploadStatus: 'pending' });
-        captureException(uploadErr, {
-          tags: { action: 'ble_upload' },
-          extra: { filename: file.file, recordId, filePath }
-        });
-        // The file is saved locally and in history as 'pending', so it can be retried
-      }
 
-      // Mark as synced regardless of upload success (file is on phone now)
-      await this._addSyncedFile(file.file);
+        // Mark as synced (file is on phone now)
+        await this._addSyncedFile(file.file);
+
+      } catch (err) {
+        const isCancelled = this._cancelRequested ||
+          err.message === 'BLE download cancelled' ||
+          err.message === 'cancelled';
+
+        if (isCancelled) {
+          await historyStore.updateRecording(recordId, { uploadStatus: 'cancelled' });
+          await this._addSkippedFile(file.file);
+          // If file was saved to phone, mark as synced so BLE doesn't re-download
+          const rec = historyStore.getRecordingById(recordId);
+          if (rec?.filePath) {
+            await this._addSyncedFile(file.file);
+          }
+          throw new Error('cancelled');
+        }
+
+        // Non-cancel error: keep as pending for auto-retry
+        await historyStore.updateRecording(recordId, { uploadStatus: 'pending' });
+        await this._addSyncedFile(file.file);
+        captureException(err, {
+          tags: { action: 'ble_upload' },
+          extra: { filename: file.file, recordId }
+        });
+      }
     },
 
     /**
@@ -608,6 +691,16 @@ export const useDeviceStore = defineStore('device', {
       }
     },
 
+    /**
+     * Cancel the current sync operation
+     */
+    async cancelSync() {
+      if (!this.isSyncing) return;
+      this._cancelRequested = true;
+      const manager = getBleManager();
+      manager.abortDownload();
+    },
+
     // ========== Auto-Sync ==========
 
     /**
@@ -649,7 +742,7 @@ export const useDeviceStore = defineStore('device', {
         // Re-check: recording may have started during file list fetch
         if (this.isRecordingOnDevice) return;
 
-        const newFiles = this.deviceFiles.filter(f => !this.syncedFiles.includes(f.file));
+        const newFiles = this.autoSyncableFiles;
         if (newFiles.length > 0) {
           addBreadcrumb({
             category: 'ble',
@@ -687,7 +780,6 @@ export const useDeviceStore = defineStore('device', {
       this._stopReconnect();
 
       let attempts = 0;
-      const maxAttempts = 12; // ~3 min of trying before giving up
 
       const attempt = async () => {
         // Guard: stop if conditions changed
@@ -699,7 +791,7 @@ export const useDeviceStore = defineStore('device', {
         attempts++;
         addBreadcrumb({
           category: 'ble',
-          message: `Reconnect attempt ${attempts}/${maxAttempts}`,
+          message: `Reconnect attempt ${attempts}`,
           level: 'info'
         });
 
@@ -708,16 +800,10 @@ export const useDeviceStore = defineStore('device', {
           // Success — autoConnect already starts autoSync
           addBreadcrumb({ category: 'ble', message: 'Auto-reconnect succeeded', level: 'info' });
         } catch {
-          if (attempts < maxAttempts && !this._intentionalDisconnect) {
+          if (!this._intentionalDisconnect) {
             // Backoff: 5s, 7.5s, 11s, 17s, 25s, 30s (capped)
             const delay = Math.min(5000 * Math.pow(1.5, attempts - 1), 30000);
             this._reconnectTimer = setTimeout(attempt, delay);
-          } else {
-            addBreadcrumb({
-              category: 'ble',
-              message: `Reconnect stopped after ${attempts} attempts`,
-              level: 'warning'
-            });
           }
         }
       };
@@ -733,6 +819,152 @@ export const useDeviceStore = defineStore('device', {
         clearTimeout(this._reconnectTimer);
         this._reconnectTimer = null;
       }
+    },
+
+    // ========== Persistent Reconnect ==========
+
+    /**
+     * Persistent reconnect timer — runs every 30s as a safety net.
+     * Unlike _scheduleReconnect (fast backoff after disconnect), this
+     * ensures we always keep trying even if the fast reconnect gave up.
+     */
+    _startPersistentReconnect() {
+      this._stopPersistentReconnect();
+      this._persistentReconnectTimer = setInterval(async () => {
+        if (!this.pairedDevice || this._intentionalDisconnect) return;
+        if (this.connectionState !== 'disconnected') return;
+        if (document.hidden) return; // Only when app is in foreground
+
+        try {
+          addBreadcrumb({ category: 'ble', message: 'Persistent reconnect attempt', level: 'info' });
+          await this.autoConnect();
+          addBreadcrumb({ category: 'ble', message: 'Persistent reconnect succeeded', level: 'info' });
+        } catch {
+          // Will try again on next interval
+        }
+      }, RECONNECT_INTERVAL_MS);
+    },
+
+    _stopPersistentReconnect() {
+      if (this._persistentReconnectTimer) {
+        clearInterval(this._persistentReconnectTimer);
+        this._persistentReconnectTimer = null;
+      }
+    },
+
+    // ========== Background Discovery ==========
+
+    /**
+     * Background discovery — scans for new T240 devices every 60s
+     * when no device is currently paired. Shows a global popup if found.
+     */
+    _startBackgroundDiscovery() {
+      this._stopBackgroundDiscovery();
+      this._discoveryTimer = setInterval(() => {
+        this._discoveryPoll();
+      }, DISCOVERY_INTERVAL_MS);
+    },
+
+    _stopBackgroundDiscovery() {
+      if (this._discoveryTimer) {
+        clearInterval(this._discoveryTimer);
+        this._discoveryTimer = null;
+      }
+    },
+
+    async _discoveryPoll() {
+      // Only discover when no device is paired
+      if (this.pairedDevice) return;
+      // Only in foreground
+      if (document.hidden) return;
+      // Don't scan if already scanning or connecting
+      if (this.connectionState !== 'disconnected') return;
+      // Don't scan if there's already a discovered device pending user action
+      if (this.discoveredDevice) return;
+      // Don't scan if BLE permissions haven't been granted yet
+      if (!this._blePermissionsGranted) return;
+
+      // Lock connectionState to prevent concurrent BLE operations (e.g. reconnect timer)
+      this.connectionState = 'scanning';
+
+      try {
+        const manager = getBleManager();
+        const found = [];
+
+        await manager.scan(DISCOVERY_SCAN_DURATION, (device) => {
+          // Only consider devices we haven't rejected
+          if (!this.rejectedDeviceIds.includes(device.deviceId)) {
+            found.push(device);
+          }
+        });
+
+        if (found.length > 0) {
+          // Show the first discovered device (strongest signal or first found)
+          const device = found[0];
+          this.discoveredDevice = {
+            deviceId: device.deviceId,
+            name: device.name || 'Recording Device',
+            rssi: device.rssi || null
+          };
+          addBreadcrumb({
+            category: 'ble',
+            message: `Background discovery found device: ${device.name || device.deviceId}`,
+            level: 'info'
+          });
+        }
+      } catch {
+        // Scan failed — silently ignore, will retry next interval
+      } finally {
+        if (this.connectionState === 'scanning') {
+          this.connectionState = 'disconnected';
+        }
+      }
+    },
+
+    /**
+     * Mark that BLE permissions have been granted (called after first manual scan
+     * or when DevicePage mounts). This prevents background discovery from
+     * triggering the system permission prompt unexpectedly.
+     */
+    markBlePermissionsGranted() {
+      this._blePermissionsGranted = true;
+    },
+
+    /**
+     * Accept a discovered device — connect and pair
+     */
+    async acceptDiscoveredDevice() {
+      if (!this.discoveredDevice) return;
+      const deviceId = this.discoveredDevice.deviceId;
+      this.discoveredDevice = null;
+
+      try {
+        await this.connectAndPair(deviceId);
+      } catch (e) {
+        this.error = e.message;
+        captureException(e, { tags: { action: 'ble_accept_discovered' } });
+      }
+    },
+
+    /**
+     * Reject a discovered device — won't show popup for this device again
+     */
+    async rejectDiscoveredDevice() {
+      if (!this.discoveredDevice) return;
+      const deviceId = this.discoveredDevice.deviceId;
+      this.discoveredDevice = null;
+
+      if (!this.rejectedDeviceIds.includes(deviceId)) {
+        this.rejectedDeviceIds.push(deviceId);
+        await this._saveRejectedDevices();
+      }
+    },
+
+    /**
+     * Dismiss popup without rejecting (will show again on next discovery)
+     */
+    dismissDiscoveredDevice() {
+      this.discoveredDevice = null;
     },
 
     // ========== Persistence ==========
@@ -783,6 +1015,68 @@ export const useDeviceStore = defineStore('device', {
             value: JSON.stringify(this.syncedFiles)
           });
         }
+      }
+    },
+
+    async _loadSkippedFiles() {
+      if (isCapacitor()) {
+        const { Preferences } = await import('@capacitor/preferences');
+        const { value } = await Preferences.get({ key: PREF_SKIPPED_FILES });
+        if (value) {
+          try {
+            this.skippedFiles = JSON.parse(value);
+          } catch {
+            this.skippedFiles = [];
+          }
+        }
+      }
+    },
+
+    async _addSkippedFile(filename) {
+      if (!this.skippedFiles.includes(filename)) {
+        this.skippedFiles.push(filename);
+        if (isCapacitor()) {
+          const { Preferences } = await import('@capacitor/preferences');
+          await Preferences.set({
+            key: PREF_SKIPPED_FILES,
+            value: JSON.stringify(this.skippedFiles)
+          });
+        }
+      }
+    },
+
+    async _removeSkippedFile(filename) {
+      this.skippedFiles = this.skippedFiles.filter(f => f !== filename);
+      if (isCapacitor()) {
+        const { Preferences } = await import('@capacitor/preferences');
+        await Preferences.set({
+          key: PREF_SKIPPED_FILES,
+          value: JSON.stringify(this.skippedFiles)
+        });
+      }
+    },
+
+    async _loadRejectedDevices() {
+      if (isCapacitor()) {
+        const { Preferences } = await import('@capacitor/preferences');
+        const { value } = await Preferences.get({ key: PREF_REJECTED_DEVICES });
+        if (value) {
+          try {
+            this.rejectedDeviceIds = JSON.parse(value);
+          } catch {
+            this.rejectedDeviceIds = [];
+          }
+        }
+      }
+    },
+
+    async _saveRejectedDevices() {
+      if (isCapacitor()) {
+        const { Preferences } = await import('@capacitor/preferences');
+        await Preferences.set({
+          key: PREF_REJECTED_DEVICES,
+          value: JSON.stringify(this.rejectedDeviceIds)
+        });
       }
     }
   }

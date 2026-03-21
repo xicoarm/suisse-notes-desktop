@@ -136,6 +136,7 @@
         @upload="handleUpload"
         @retry="handleUpload"
         @deleted="onRecordingDeleted"
+        @cancel-transfer="handleCancelTransfer"
       />
     </div>
   </q-page>
@@ -322,6 +323,16 @@ export default {
       }
     };
 
+    const handleCancelTransfer = async () => {
+      try {
+        const { useDeviceStore } = await import('../stores/device');
+        const deviceStore = useDeviceStore();
+        await deviceStore.cancelSync();
+      } catch (e) {
+        console.warn('Cancel sync error:', e);
+      }
+    };
+
     const onRecordingDeleted = () => {
       $q.notify({
         type: 'info',
@@ -374,6 +385,7 @@ export default {
       goToRecord,
       formatDuration,
       handleUpload,
+      handleCancelTransfer,
       onRecordingDeleted
     };
   }

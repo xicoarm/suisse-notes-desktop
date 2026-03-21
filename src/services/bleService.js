@@ -84,6 +84,7 @@ export class BleDeviceManager {
     this._notifyWaiter = null;
     this._onDisconnectCallback = null;
     this._recordingStateCallback = null;
+    this._downloadAborted = false;
   }
 
   /**
@@ -417,7 +418,21 @@ export class BleDeviceManager {
    * @param {number} totalSize - Expected file size in bytes (for progress)
    * @returns {Promise<Uint8Array>} File data
    */
+  /**
+   * Abort an in-progress download. Causes downloadFile() to reject.
+   */
+  abortDownload() {
+    this._downloadAborted = true;
+    if (this._notifyWaiter && this._notifyWaiter.reject) {
+      const waiter = this._notifyWaiter;
+      this._notifyWaiter = null;
+      waiter.reject(new Error('BLE download cancelled'));
+    }
+  }
+
   async downloadFile(filename, onProgress = null, totalSize = 0) {
+    this._downloadAborted = false;
+
     // Drain any stale notifications from previous operations
     this._drainNotifyQueue();
 
@@ -433,52 +448,61 @@ export class BleDeviceManager {
     const chunks = [];
     let receivedBytes = 0;
 
-    let transferring = true;
-    while (transferring) {
-      const data = await this._readNotification(30000);
+    try {
+      let transferring = true;
+      while (transferring) {
+        const data = await this._readNotification(30000);
 
-      if (data[0] === TYPE_AUDIO) {
-        // Audio data frame: type(1) + cmd(2) + index(2) + audio(N)
-        const audioData = data.slice(5);
-        chunks.push(audioData);
-        receivedBytes += audioData.length;
+        if (data[0] === TYPE_AUDIO) {
+          // Audio data frame: type(1) + cmd(2) + index(2) + audio(N)
+          const audioData = data.slice(5);
+          chunks.push(audioData);
+          receivedBytes += audioData.length;
 
-        if (onProgress && totalSize > 0) {
-          onProgress({
-            percent: Math.min(99, Math.round((receivedBytes / totalSize) * 100)),
-            bytesReceived: receivedBytes,
-            bytesTotal: totalSize
-          });
-        }
-      } else if (data[0] === TYPE_CMD && data[1] === CMD_FILE_DONE[0] && data[2] === CMD_FILE_DONE[1]) {
-        // Transfer complete: 0x01 0x1D 0x00 crcL crcH
-        const expectedCrc = data[3] | (data[4] << 8);
+          if (onProgress && totalSize > 0) {
+            onProgress({
+              percent: Math.min(99, Math.round((receivedBytes / totalSize) * 100)),
+              bytesReceived: receivedBytes,
+              bytesTotal: totalSize
+            });
+          }
+        } else if (data[0] === TYPE_CMD && data[1] === CMD_FILE_DONE[0] && data[2] === CMD_FILE_DONE[1]) {
+          // Transfer complete: 0x01 0x1D 0x00 crcL crcH
+          const expectedCrc = data[3] | (data[4] << 8);
 
-        // Concatenate all chunks
-        const fileData = new Uint8Array(receivedBytes);
-        let offset = 0;
-        for (const chunk of chunks) {
-          fileData.set(chunk, offset);
-          offset += chunk.length;
-        }
+          // Concatenate all chunks
+          const fileData = new Uint8Array(receivedBytes);
+          let offset = 0;
+          for (const chunk of chunks) {
+            fileData.set(chunk, offset);
+            offset += chunk.length;
+          }
 
-        // Verify CRC
-        const actualCrc = crc16Compute(fileData);
-        if (actualCrc !== expectedCrc) {
+          // Verify CRC
+          const actualCrc = crc16Compute(fileData);
+          if (actualCrc !== expectedCrc) {
+            // Exit sync state
+            await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
+            await this._readNotification(3000);
+            throw new Error(`CRC mismatch: expected 0x${expectedCrc.toString(16)}, got 0x${actualCrc.toString(16)}`);
+          }
+
+          if (onProgress) onProgress({ percent: 100, bytesReceived: receivedBytes, bytesTotal: totalSize });
+
           // Exit sync state
           await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
           await this._readNotification(3000);
-          throw new Error(`CRC mismatch: expected 0x${expectedCrc.toString(16)}, got 0x${actualCrc.toString(16)}`);
+
+          return fileData;
         }
-
-        if (onProgress) onProgress({ percent: 100, bytesReceived: receivedBytes, bytesTotal: totalSize });
-
-        // Exit sync state
+      }
+    } catch (err) {
+      // Always exit sync state on failure/abort so device buttons work again
+      try {
         await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
         await this._readNotification(3000);
-
-        return fileData;
-      }
+      } catch { /* best effort */ }
+      throw err;
     }
   }
 
@@ -641,6 +665,11 @@ export class BleDeviceManager {
    * Wait for the next notification with timeout
    */
   _readNotification(timeout = 10000) {
+    // Check abort flag first
+    if (this._downloadAborted) {
+      return Promise.reject(new Error('BLE download cancelled'));
+    }
+
     // Check queue first
     if (this._notifyQueue.length > 0) {
       return Promise.resolve(this._notifyQueue.shift());
@@ -656,6 +685,10 @@ export class BleDeviceManager {
         resolve: (data) => {
           clearTimeout(timer);
           resolve(data);
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          reject(err);
         }
       };
     });
