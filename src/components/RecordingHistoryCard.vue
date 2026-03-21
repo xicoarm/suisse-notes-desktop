@@ -113,6 +113,19 @@
           <q-tooltip>{{ $t('upload') }}</q-tooltip>
         </q-btn>
 
+        <!-- Pending without file: resync from device or delete -->
+        <q-btn
+          v-else-if="recording.uploadStatus === 'pending' && !recording.filePath && recording.source === 'device'"
+          flat
+          round
+          icon="sync"
+          color="primary"
+          size="sm"
+          @click="$emit('resync', recording)"
+        >
+          <q-tooltip>{{ $t('resyncFromDevice') }}</q-tooltip>
+        </q-btn>
+
         <!-- Cancelled: re-upload (has local file) or re-sync (needs device) -->
         <q-btn
           v-else-if="recording.uploadStatus === 'cancelled' && recording.filePath"
@@ -147,6 +160,19 @@
           @click="$emit('retry', recording)"
         >
           <q-tooltip>{{ $t('retryUpload') }}</q-tooltip>
+        </q-btn>
+
+        <!-- Failed without file: resync from device -->
+        <q-btn
+          v-else-if="recording.uploadStatus === 'failed' && !recording.filePath && recording.source === 'device'"
+          flat
+          round
+          icon="sync"
+          color="warning"
+          size="sm"
+          @click="$emit('resync', recording)"
+        >
+          <q-tooltip>{{ $t('resyncFromDevice') }}</q-tooltip>
         </q-btn>
 
         <!-- Copy link button for uploaded recordings -->
