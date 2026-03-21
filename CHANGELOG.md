@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.56](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.55...v3.7.56) (2026-03-21)
+
+
+### Bug Fixes
+
+* show resync button for orphaned pending/failed recordings without file ([1d27dcb](https://github.com/xicoarm/suisse-notes-desktop/commit/1d27dcb650f0056c156fb76f56198b151a1e58c2))
+
 ### [3.7.55](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.54...v3.7.55) (2026-03-21)
 
 
