@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.7.52](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.51...v3.7.52) (2026-03-21)
+
+
+### Features
+
+* auto-retry failed uploads, BLE auto-reconnect/discovery, and cancel device transfers ([8b01ac2](https://github.com/xicoarm/suisse-notes-desktop/commit/8b01ac284d6e87471250e8401f348f31f081d8c6))
+
 ### [3.7.51](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.50...v3.7.51) (2026-03-21)
 
 
