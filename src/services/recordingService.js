@@ -697,18 +697,31 @@ async function performAutoSplit(recordingStore, isAutoSplitting) {
   isAutoSplitting.value = true;
 
   try {
+    // Pause to prevent new ondataavailable events during session creation
     if (mediaRecorder && mediaRecorder.state === 'recording') {
-      mediaRecorder.requestData();
+      mediaRecorder.pause();
     }
 
-    await new Promise(r => setTimeout(r, 1000));
+    // Flush any buffered data and wait for it to be saved to disk
+    await flushRecordingData();
+
+    // Safe to create session — no new chunks can arrive while paused
     const result = await recordingStore.createSessionFile();
     if (!result.success) {
       console.error('Auto-split: Failed to create session file:', result.error);
     }
     recordingStore.resetChunkIndex();
+
+    // Resume recording
+    if (mediaRecorder && mediaRecorder.state === 'paused') {
+      mediaRecorder.resume();
+    }
   } catch (error) {
     console.error('Error during auto-split:', error);
+    // Ensure recording resumes even on error
+    if (mediaRecorder && mediaRecorder.state === 'paused') {
+      mediaRecorder.resume();
+    }
   } finally {
     isAutoSplitting.value = false;
   }

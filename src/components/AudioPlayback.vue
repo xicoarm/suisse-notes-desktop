@@ -201,8 +201,9 @@ export default {
     };
 
     const onSeek = (value) => {
-      if (!audioElement.value || duration.value === 0) return;
+      if (!audioElement.value || !isFinite(duration.value) || duration.value === 0) return;
       const seekTime = (value / 100) * duration.value;
+      if (!isFinite(seekTime)) return;
       audioElement.value.currentTime = seekTime;
     };
 

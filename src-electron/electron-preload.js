@@ -222,6 +222,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onSuspend: (callback) => {
       ipcRenderer.on('recording:suspend', (event, data) => callback(data));
     },
+    // Acknowledge that suspend flush is complete
+    sendSuspendAck: () => {
+      ipcRenderer.send('recording:suspend-ack');
+    },
     // Listen for system resume (wake from sleep)
     onResume: (callback) => {
       ipcRenderer.on('recording:resume', (event, data) => callback(data));

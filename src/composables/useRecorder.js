@@ -279,6 +279,8 @@ export function useRecorder() {
         if (recordingStore.isRecording) {
           await recordingService.flushRecordingData();
         }
+        // Acknowledge to main process that flush is complete
+        window.electronAPI.system.sendSuspendAck();
       });
 
       window.electronAPI.system.onResume(async (data) => {

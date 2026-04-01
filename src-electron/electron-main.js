@@ -46,6 +46,11 @@ Sentry.init({
     if (event.request?.headers?.authorization) {
       event.request.headers.authorization = '[REDACTED]';
     }
+    // Filter out read-only volume errors — handled via UX (move-to-Applications dialog)
+    const message = event.exception?.values?.[0]?.value || '';
+    if (message.includes('read-only volume') || (message.includes('read-only') && message.includes('move the application'))) {
+      return null;
+    }
     return event;
   }
 });
@@ -89,7 +94,7 @@ app.on('render-process-gone', (event, webContents, details) => {
       metadata.chunkCount = activeSession.chunkCount;
       metadata.userId = activeSession.userId || metadata.userId;
 
-      fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+      writeFileWithSync(metadataPath, JSON.stringify(metadata, null, 2));
       log.info('Crash metadata written for recording:', activeSession.recordId);
     }
   } catch (e) {
@@ -122,6 +127,9 @@ log.info('Auto-updater initialized - v2 silent background updates enabled');
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 autoUpdater.allowDowngrade = false;
+
+// Flag to skip auto-update when app is on a read-only volume (macOS DMG / Downloads)
+let skipAutoUpdate = false;
 
 // Note: Code signing is not yet configured. Existing users who installed a build
 // with publisherName set will see a signature verification error and be prompted
@@ -244,12 +252,20 @@ function updateUploadQueueRetry(recordId) {
 
 // === Auto-Recovery for Orphaned Recordings ===
 // Recover recordings that were interrupted by app crash
+let isRecoveryRunning = false;
 
 async function recoverOrphanedRecordings() {
+  if (isRecoveryRunning) {
+    log.warn('Recovery already in progress, skipping');
+    return;
+  }
+  isRecoveryRunning = true;
+
   try {
     const recordingsPath = getRecordingsPath();
     if (!fs.existsSync(recordingsPath)) {
       log.info('No recordings directory found, skipping recovery');
+      clearActiveRecording();
       return;
     }
 
@@ -262,6 +278,7 @@ async function recoverOrphanedRecordings() {
     // Scan for directories with chunks that don't have a combined audio file
     const dirs = fs.readdirSync(recordingsPath);
     let recoveredCount = 0;
+    let totalAttempted = 0;
 
     for (const dir of dirs) {
       try {
@@ -285,6 +302,7 @@ async function recoverOrphanedRecordings() {
 
         if (!hasChunks && !hasSessions) continue;
 
+        totalAttempted++;
         log.info(`Attempting to recover orphaned recording: ${dir}`);
 
         // Try to combine the chunks
@@ -347,8 +365,22 @@ async function recoverOrphanedRecordings() {
       }
     }
 
-    // Clear the active recording state after recovery attempt
-    clearActiveRecording();
+    // Only clear active recording state if recovery succeeded or there was nothing to recover.
+    // If all attempts failed, preserve state so next startup retries.
+    if (totalAttempted === 0 || recoveredCount > 0) {
+      clearActiveRecording();
+    } else {
+      // Track failed recovery attempts to avoid infinite retries
+      const attempts = (activeSession?.recoveryAttempts || 0) + 1;
+      if (attempts >= 3) {
+        log.error(`Recovery failed ${attempts} times, giving up on active recording`);
+        Sentry.captureMessage(`Recording recovery failed after ${attempts} attempts`, 'error');
+        clearActiveRecording();
+      } else if (activeSession) {
+        activeRecordingStore.set('activeSession', { ...activeSession, recoveryAttempts: attempts });
+        log.warn(`Recovery failed (attempt ${attempts}/3), will retry on next startup`);
+      }
+    }
 
     if (recoveredCount > 0) {
       log.info(`Recovery complete: ${recoveredCount} recording(s) recovered`);
@@ -356,6 +388,8 @@ async function recoverOrphanedRecordings() {
   } catch (error) {
     log.error('Error during orphaned recording recovery:', error);
     Sentry.captureException(error);
+  } finally {
+    isRecoveryRunning = false;
   }
 }
 
@@ -543,8 +577,17 @@ async function cleanupOldOrphanedDirectories() {
   }
 }
 
-// Process pending uploads on app startup
+// Process pending uploads on app startup or after login
+let isProcessingUploads = false;
+
 async function processPendingUploads() {
+  if (isProcessingUploads) {
+    log.info('Upload processing already in progress, skipping');
+    return;
+  }
+  isProcessingUploads = true;
+
+  try {
   const queue = uploadQueueStore.get('pendingUploads', []);
   if (queue.length === 0) return;
 
@@ -623,6 +666,9 @@ async function processPendingUploads() {
 
     // Wait 5 seconds between uploads to avoid overwhelming the server
     await new Promise(r => setTimeout(r, 5000));
+  }
+  } finally {
+    isProcessingUploads = false;
   }
 }
 
@@ -986,14 +1032,29 @@ app.whenReady().then(() => {
     log.info('System suspend detected');
 
     if (isRecordingInProgress) {
-      log.info('Recording in progress during suspend - saving state');
+      log.info('Recording in progress during suspend - flushing data');
 
-      // Notify renderer to flush current data
+      // Request renderer to flush current data and wait for acknowledgment
       if (mainWindow && !mainWindow.isDestroyed()) {
+        const flushComplete = new Promise((resolve) => {
+          const timeout = setTimeout(() => {
+            log.warn('Suspend flush timed out after 3s');
+            resolve();
+          }, 3000);
+
+          ipcMain.once('recording:suspend-ack', () => {
+            clearTimeout(timeout);
+            log.info('Suspend flush acknowledged by renderer');
+            resolve();
+          });
+        });
+
         mainWindow.webContents.send('recording:suspend', {
           reason: 'system_suspend',
           timestamp: Date.now()
         });
+
+        await flushComplete;
       }
 
       // Save active recording state
@@ -1050,9 +1111,27 @@ app.whenReady().then(() => {
     }
   });
 
+  // === macOS: Prompt user to move app to Applications if needed ===
+  if (process.platform === 'darwin' && app.isPackaged && !app.isInApplicationsFolder()) {
+    log.warn('App is not in Applications folder — auto-update will not work');
+    skipAutoUpdate = true;
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Move to Applications',
+      message: 'Suisse Notes works best from the Applications folder.',
+      detail: 'Move it there now so updates install automatically and everything runs smoothly.',
+      buttons: ['Move to Applications', 'Not Now'],
+      defaultId: 0
+    }).then(result => {
+      if (result.response === 0) {
+        app.moveToApplicationsFolder();
+      }
+    });
+  }
+
   // === Auto-Update: Check for updates silently ===
-  // Only check in production (packaged app)
-  if (app.isPackaged) {
+  // Only check in production (packaged app), skip if on read-only volume
+  if (app.isPackaged && !skipAutoUpdate) {
     // Check for updates on startup (silent - no notification)
     autoUpdater.checkForUpdates().catch(err => {
       log.error('Auto-update check failed:', err);
@@ -1060,23 +1139,27 @@ app.whenReady().then(() => {
 
     // Re-check every 4 hours while app is running
     setInterval(() => {
-      autoUpdater.checkForUpdates().catch(err => {
-        log.error('Periodic auto-update check failed:', err);
-      });
+      if (!skipAutoUpdate) {
+        autoUpdater.checkForUpdates().catch(err => {
+          log.error('Periodic auto-update check failed:', err);
+        });
+      }
     }, 4 * 60 * 60 * 1000);
   }
 
   // === Recover Orphaned Recordings ===
   // Run 5 seconds after startup to recover any crashed recordings
+  let recoveryPromise = null;
   setTimeout(() => {
-    recoverOrphanedRecordings().catch(err => {
+    recoveryPromise = recoverOrphanedRecordings().catch(err => {
       log.error('Error recovering orphaned recordings:', err);
     });
   }, 5000);
 
   // === Cleanup Old Orphaned Directories ===
-  // Run 10 seconds after startup (after recovery) to clean up old orphans
-  setTimeout(() => {
+  // Run 10 seconds after startup, but always wait for recovery to finish first
+  setTimeout(async () => {
+    if (recoveryPromise) await recoveryPromise;
     cleanupOldOrphanedDirectories().catch(err => {
       log.error('Error cleaning up orphaned directories:', err);
     });
@@ -1148,7 +1231,6 @@ autoUpdater.on('error', (err) => {
 
     // Show dialog to user explaining they need to manually update
     if (mainWindow && !mainWindow.isDestroyed()) {
-      const { dialog, shell } = require('electron');
       dialog.showMessageBox(mainWindow, {
         type: 'info',
         title: 'Update Available',
@@ -1167,16 +1249,20 @@ autoUpdater.on('error', (err) => {
   // Detect read-only volume error (macOS: app in Downloads or mounted DMG)
   if (process.platform === 'darwin' &&
       (errMsg.includes('read-only') || errMsg.includes('EROFS') || errMsg.includes('EACCES'))) {
-    log.warn('Update failed: app is on a read-only volume');
+    log.warn('Update failed: app is on a read-only volume — skipping future update checks');
+    skipAutoUpdate = true;
     if (mainWindow && !mainWindow.isDestroyed()) {
-      const { dialog } = require('electron');
       dialog.showMessageBox(mainWindow, {
-        type: 'warning',
-        title: 'Cannot Update',
-        message: 'The app cannot update because it is running from a read-only location.',
-        detail: 'Please move Suisse Notes to your Applications folder and relaunch it. Updates will then work automatically.',
-        buttons: ['OK'],
+        type: 'info',
+        title: 'Move to Applications',
+        message: 'Suisse Notes works best from the Applications folder.',
+        detail: 'Move it there now so updates install automatically and everything runs smoothly.',
+        buttons: ['Move to Applications', 'Not Now'],
         defaultId: 0
+      }).then(result => {
+        if (result.response === 0) {
+          app.moveToApplicationsFolder();
+        }
       });
     }
   }
@@ -1363,6 +1449,13 @@ ipcMain.handle('auth:saveToken', async (event, token) => {
       // Fallback to plain storage (less secure)
       configStore.set('authToken', token);
     }
+    // Trigger pending uploads now that we have auth
+    setImmediate(() => {
+      processPendingUploads().catch(err => {
+        log.error('Error processing pending uploads after login:', err);
+      });
+    });
+
     return { success: true };
   } catch (error) {
     return { success: false, error: error.message };
@@ -1605,13 +1698,34 @@ function validateChunkSequence(chunks, ext) {
   };
 }
 
+// Helper: Write data to file with fsync to guarantee persistence to disk
+function writeFileWithSync(filePath, data) {
+  fs.writeFileSync(filePath, data);
+  const fd = fs.openSync(filePath, 'r');
+  fs.fsyncSync(fd);
+  fs.closeSync(fd);
+}
+
 // Helper: Combine chunks using streaming to avoid memory issues with large files
 async function combineChunksStreaming(chunksPath, sortedChunks, outputPath) {
+  const tmpPath = outputPath + '.tmp';
   return new Promise((resolve, reject) => {
-    const writeStream = fs.createWriteStream(outputPath);
+    const writeStream = fs.createWriteStream(tmpPath);
 
-    writeStream.on('finish', () => resolve());
-    writeStream.on('error', (err) => reject(err));
+    writeStream.on('finish', () => {
+      try {
+        // Atomic swap: rename temp file to final path (atomic on same filesystem)
+        fs.renameSync(tmpPath, outputPath);
+        resolve();
+      } catch (err) {
+        try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore */ }
+        reject(err);
+      }
+    });
+    writeStream.on('error', (err) => {
+      try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore */ }
+      reject(err);
+    });
 
     // Process chunks sequentially to maintain order and avoid memory spikes
     (async () => {
@@ -1631,6 +1745,7 @@ async function combineChunksStreaming(chunksPath, sortedChunks, outputPath) {
         writeStream.end();
       } catch (err) {
         writeStream.destroy(err);
+        try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore */ }
         reject(err);
       }
     })();
@@ -1662,6 +1777,11 @@ function validateAudioOutput(outputPath, minSize = MIN_RECORDING_SIZE) {
     try {
       const headBuf = Buffer.alloc(Math.min(1024, stats.size));
       fs.readSync(fd, headBuf, 0, headBuf.length, 0);
+      // Verify WebM/EBML magic bytes (0x1A 0x45 0xDF 0xA3)
+      const EBML_MAGIC = Buffer.from([0x1A, 0x45, 0xDF, 0xA3]);
+      if (headBuf.length >= 4 && !headBuf.subarray(0, 4).equals(EBML_MAGIC)) {
+        return { valid: false, error: 'File does not have valid WebM/EBML header', size: stats.size };
+      }
       if (stats.size > 1024) {
         const tailBuf = Buffer.alloc(1024);
         fs.readSync(fd, tailBuf, 0, tailBuf.length, stats.size - 1024);
@@ -1689,12 +1809,13 @@ function calculateUploadTimeout(fileSizeBytes) {
 const FFMPEG_TIMEOUT_MS = 5 * 60 * 1000;
 
 // Execute FFmpeg command with timeout + Sentry tracking
-function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operationName = 'FFmpeg') {
+function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operationName = 'FFmpeg', { reportToSentry = true } = {}) {
   const startTime = Date.now();
   return new Promise((resolve, reject) => {
     const timeoutId = setTimeout(() => {
       const elapsed = Date.now() - startTime;
       log.warn(`${operationName} operation timed out after ${timeoutMs}ms`);
+      // Always report timeouts — they are never expected
       Sentry.captureMessage(`FFmpeg timeout: ${operationName} after ${(elapsed / 1000).toFixed(1)}s`, {
         level: 'error',
         tags: { operation: operationName },
@@ -1715,10 +1836,12 @@ function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operati
       })
       .on('error', (err) => {
         clearTimeout(timeoutId);
-        Sentry.captureException(err, {
-          tags: { operation: operationName },
-          extra: { elapsedMs: Date.now() - startTime },
-        });
+        if (reportToSentry) {
+          Sentry.captureException(err, {
+            tags: { operation: operationName },
+            extra: { elapsedMs: Date.now() - startTime },
+          });
+        }
         reject(err);
       })
       .run();
@@ -1769,7 +1892,7 @@ ipcMain.handle('recording:saveMetadata', async (event, recordId, metadata) => {
     }
 
     const metadataPath = path.join(recordPath, 'metadata.json');
-    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+    writeFileWithSync(metadataPath, JSON.stringify(metadata, null, 2));
 
     return { success: true };
   } catch (error) {
@@ -1832,7 +1955,7 @@ ipcMain.handle('recording:createSession', async (event, recordId, ext, userId) =
       startedAt: new Date().toISOString(),
       version: 1
     };
-    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+    writeFileWithSync(metadataPath, JSON.stringify(metadata, null, 2));
     log.info('Recording metadata written:', validRecordId, 'userId:', validUserId);
 
     // Initialize active recording state with userId
@@ -1870,8 +1993,11 @@ ipcMain.handle('recording:saveChunk', async (event, recordId, chunkData, chunkIn
     const filename = `chunk_${validChunkIndex}${validExt}`;
     const chunkPath = path.join(chunksPath, filename);
 
-    // CRITICAL: Use SYNCHRONOUS write to ensure chunk is saved before returning
-    fs.writeFileSync(chunkPath, buffer);
+    // CRITICAL: Write + fsync to guarantee chunk is persisted to disk, not just OS cache
+    const fd = fs.openSync(chunkPath, 'w');
+    fs.writeSync(fd, buffer);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
 
     // Update active recording state for crash recovery (with userId)
     updateActiveRecording(validRecordId, validChunkIndex + 1, validUserId);
@@ -1909,10 +2035,16 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
 
     const sortedChunks = sortChunksNumerically(chunks, validExt);
 
-    // Validate chunk sequence
+    // Validate chunk sequence — fail if chunks are missing
     const sequenceCheck = validateChunkSequence(chunks, validExt);
     if (!sequenceCheck.valid) {
-      log.warn('Chunk sequence validation:', sequenceCheck.message);
+      log.error('Chunk sequence gap detected:', sequenceCheck.message);
+      Sentry.captureMessage(`Chunk sequence gap: ${sequenceCheck.message}`, {
+        level: 'warning',
+        tags: { operation: 'createSessionFile' },
+        extra: { recordId: validRecordId, chunkCount: chunks.length },
+      });
+      return { success: false, error: `Missing audio chunks: ${sequenceCheck.message}` };
     }
 
     // Create sessions directory
@@ -1936,6 +2068,19 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
 
     console.log(`Combined ${sortedChunks.length} chunks into raw session (${rawStats.size} bytes)`);
 
+    // Validate raw file is a readable audio container before FFmpeg processing
+    try {
+      await getAudioMetadata(rawPath);
+    } catch (probeErr) {
+      log.error('Raw session file is not a valid audio file:', probeErr.message);
+      Sentry.captureException(probeErr, {
+        tags: { operation: 'Session file (probe validation)' },
+        extra: { rawPath, rawSize: rawStats.size, chunksCount: sortedChunks.length },
+      });
+      try { fs.unlinkSync(rawPath); } catch (e) { /* ignore */ }
+      return { success: false, error: 'Raw recording file is corrupt or unreadable' };
+    }
+
     // Process with FFmpeg (codec copy, fallback to re-encode) - with timeout
     try {
       await ffmpegWithTimeout(
@@ -1943,7 +2088,8 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
           .audioCodec('copy')
           .output(finalPath),
         FFMPEG_TIMEOUT_MS,
-        'Session file (codec copy)'
+        'Session file (codec copy)',
+        { reportToSentry: false } // Codec copy failure is an expected fallback, not an error
       );
       console.log('Session file created with codec copy');
     } catch (err) {
@@ -2019,7 +2165,7 @@ function updateRecordingMetadataOnCompletion(recordId, duration, hasAudioFile) {
     metadata.hasAudioFile = hasAudioFile;
     metadata.version = metadata.version || 1;
 
-    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+    writeFileWithSync(metadataPath, JSON.stringify(metadata, null, 2));
     log.info('Recording metadata updated on completion:', recordId);
   } catch (error) {
     log.error('Failed to update recording metadata on completion:', error);
@@ -2129,7 +2275,8 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
               .audioCodec('copy')
               .output(outputPath),
             FFMPEG_TIMEOUT_MS,
-            'Concat sessions (codec copy)'
+            'Concat sessions (codec copy)',
+            { reportToSentry: false } // Codec copy failure is an expected fallback, not an error
           );
         } catch (err) {
           console.warn('FFmpeg concat failed, trying re-encode:', err.message);
@@ -2202,10 +2349,16 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
         console.log(`Fallback: Direct concatenation of ${chunks.length} chunks`);
         const sortedChunks = sortChunksNumerically(chunks, validExt);
 
-        // Validate chunk sequence
+        // Validate chunk sequence — fail if chunks are missing
         const sequenceCheck = validateChunkSequence(chunks, validExt);
         if (!sequenceCheck.valid) {
-          log.warn('Chunk sequence validation:', sequenceCheck.message);
+          log.error('Chunk sequence gap detected:', sequenceCheck.message);
+          Sentry.captureMessage(`Chunk sequence gap: ${sequenceCheck.message}`, {
+            level: 'warning',
+            tags: { operation: 'combineChunks' },
+            extra: { recordId: validRecordId, chunkCount: chunks.length },
+          });
+          return { success: false, error: `Missing audio chunks: ${sequenceCheck.message}` };
         }
 
         // Use streaming concatenation to avoid memory issues
@@ -2277,10 +2430,15 @@ async function createSessionFileInternal(recordId, ext) {
 
   const sortedChunks = sortChunksNumerically(chunks, ext);
 
-  // Validate chunk sequence
+  // Validate chunk sequence — in recovery path, warn but continue (partial audio > no audio)
   const sequenceCheck = validateChunkSequence(chunks, ext);
   if (!sequenceCheck.valid) {
-    log.warn('Chunk sequence validation (internal):', sequenceCheck.message);
+    log.warn('Chunk sequence gap in recovery (continuing with partial audio):', sequenceCheck.message);
+    Sentry.captureMessage(`Recovery chunk gap: ${sequenceCheck.message}`, {
+      level: 'warning',
+      tags: { operation: 'createSessionFileInternal' },
+      extra: { recordId, chunkCount: chunks.length, hasGaps: true },
+    });
   }
 
   if (!fs.existsSync(sessionsPath)) {
@@ -2301,6 +2459,19 @@ async function createSessionFileInternal(recordId, ext) {
     return { success: false, error: 'Recording too short or empty' };
   }
 
+  // Validate raw file is a readable audio container before FFmpeg processing
+  try {
+    await getAudioMetadata(rawPath);
+  } catch (probeErr) {
+    log.error('Raw session file is not a valid audio file:', probeErr.message);
+    Sentry.captureException(probeErr, {
+      tags: { operation: 'Create session file (probe validation)' },
+      extra: { rawPath, rawSize: rawStats.size, chunksCount: sortedChunks.length },
+    });
+    try { fs.unlinkSync(rawPath); } catch (e) { /* ignore */ }
+    return { success: false, error: 'Raw recording file is corrupt or unreadable' };
+  }
+
   // Use timeout-wrapped FFmpeg with fallback
   try {
     await ffmpegWithTimeout(
@@ -2308,7 +2479,8 @@ async function createSessionFileInternal(recordId, ext) {
         .audioCodec('copy')
         .output(finalPath),
       FFMPEG_TIMEOUT_MS,
-      'Create session file (codec copy)'
+      'Create session file (codec copy)',
+      { reportToSentry: false } // Codec copy failure is an expected fallback, not an error
     );
   } catch (err) {
     console.warn('Codec copy failed, trying re-encode:', err.message);
@@ -2808,8 +2980,17 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
   }
 }
 
+const inFlightUploads = new Set();
+
 ipcMain.handle('upload:start', async (event, params) => {
   const { recordId, filePath, metadata } = params;
+
+  // Prevent duplicate concurrent uploads of the same recording
+  if (inFlightUploads.has(recordId)) {
+    log.warn(`Upload already in progress for ${recordId}, rejecting duplicate`);
+    return { success: false, error: 'Upload already in progress', duplicate: true };
+  }
+  inFlightUploads.add(recordId);
 
   // Add to persistent upload queue (survives app restart)
   addToUploadQueue(recordId, filePath, metadata);
@@ -2851,6 +3032,7 @@ ipcMain.handle('upload:start', async (event, params) => {
 
     return result;
   } finally {
+    inFlightUploads.delete(recordId);
     pendingUploadsCount--;
     if (pendingUploadsCount <= 0) {
       pendingUploadsCount = 0;
