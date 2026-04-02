@@ -152,25 +152,33 @@ export class BleDeviceManager {
 
     // Step 2: If no devices found, retry service UUID scan with a longer duration.
     // All protocol-compatible devices MUST advertise our service UUID.
-    // No unfiltered fallback — avoids showing unrelated BLE devices.
+    // Step 2: If no devices found via service UUID, retry with name-based filter.
+    // Many BLE devices don't advertise service UUIDs in their advertisement packets.
     if (devicesFound === 0) {
       addBreadcrumb({
         category: 'ble',
-        message: 'No devices found, retrying service UUID scan (extended)',
+        message: 'No devices with service UUID, trying name-based scan',
         level: 'warning'
       });
 
-      try {
-        await this.ble.requestLEScan(
-          { services: [BLE_SERVICE_UUID], allowDuplicates: false },
-          (result) => handleDevice(result, 'service-filter-retry')
-        );
-        await new Promise(r => setTimeout(r, duration));
-        await this.stopScan();
-      } catch (e) {
-        addBreadcrumb({ category: 'ble', message: `Extended scan error: ${e.message}`, level: 'error' });
-        await this.stopScan();
-      }
+      await this.ble.requestLEScan(
+        { allowDuplicates: false },
+        (result) => {
+          if (!result.device) return;
+          const name = result.device.name || result.localName || null;
+          if (name) allSeen.push(name);
+
+          // Filter by known recording device name patterns
+          if (name && /M\d+\(BLE\)|T240|MeCho|Record.?Card/i.test(name)) {
+            handleDevice(result, 'name-filter');
+          }
+        }
+      );
+      await new Promise(r => setTimeout(r, duration));
+      await this.stopScan();
+
+      // Log all nearby names to Sentry so we can identify new device variants
+      captureMessage(`BLE name-scan: found=[${[...seen].length}] all_nearby=[${allSeen.join(', ')}]`, 'info');
     }
 
     addBreadcrumb({
@@ -180,7 +188,7 @@ export class BleDeviceManager {
     });
 
     if (devicesFound === 0) {
-      captureMessage('BLE scan: 0 protocol-compatible devices found', 'warning');
+      captureMessage(`BLE scan: 0 devices found. All nearby: [${allSeen.join(', ')}]`, 'warning');
     }
   }
 
