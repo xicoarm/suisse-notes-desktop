@@ -65,12 +65,30 @@ async function sendLocalNotification(id, title, body) {
  * Get or create a persistent app UUID for BLE pairing.
  * NOT user-scoped — the device firmware locks to this UUID per phone installation.
  * Changing it per-user would cause "already paired to another app" rejection.
+ *
+ * Migration: a previous version stored UUIDs per-user under 'ble_app_uuid:uXXX'.
+ * If a user-scoped UUID exists but no installation UUID, adopt it so devices
+ * paired during that period still recognize this phone.
  */
 async function getOrCreateAppUuid() {
   if (isCapacitor()) {
     const { Preferences } = await import('@capacitor/preferences');
     const { value } = await Preferences.get({ key: PREF_APP_UUID });
     if (value) return value;
+
+    // Migration: check if a user-scoped UUID exists from the previous version
+    const auth = useAuthStore();
+    const userId = auth.user?.id;
+    if (userId) {
+      const scopedKey = `${PREF_APP_UUID}:u${userId}`;
+      const { value: scopedUuid } = await Preferences.get({ key: scopedKey });
+      if (scopedUuid) {
+        // Adopt the scoped UUID as the installation UUID
+        await Preferences.set({ key: PREF_APP_UUID, value: scopedUuid });
+        return scopedUuid;
+      }
+    }
+
     const newUuid = uuidv4();
     await Preferences.set({ key: PREF_APP_UUID, value: newUuid });
     return newUuid;
