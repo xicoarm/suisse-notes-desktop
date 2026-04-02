@@ -384,36 +384,43 @@ export class BleDeviceManager {
     await this._write(buildCmd(CMD_SYNC_STATE, [0x01]));
     await this._readNotification(5000);
 
-    // Request file list
-    await this._write(buildCmd(CMD_FILE_LIST));
+    try {
+      // Request file list
+      await this._write(buildCmd(CMD_FILE_LIST));
 
-    // First response: file count
-    const countResp = await this._readNotification(10000);
-    const countJson = parseJsonFromBuffer(countResp, 3);
+      // First response: file count
+      const countResp = await this._readNotification(10000);
+      addBreadcrumb({ category: 'ble', message: `getFileList countResp raw: [${Array.from(countResp.slice(0, 20)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(', ')}...] len=${countResp.length}`, level: 'info' });
 
-    // Check for error (device busy)
-    if (countJson.FileList) {
-      // Exit sync state
-      await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
-      await this._readNotification(3000);
-      throw new Error(countJson.FileList);
+      const countJson = parseJsonFromBuffer(countResp, 3);
+      addBreadcrumb({ category: 'ble', message: `getFileList countJson: ${JSON.stringify(countJson)}`, level: 'info' });
+
+      // Check for error (device busy)
+      if (countJson.FileList) {
+        throw new Error(countJson.FileList);
+      }
+
+      const fileCount = countJson.FileNum || 0;
+      addBreadcrumb({ category: 'ble', message: `getFileList fileCount=${fileCount}`, level: 'info' });
+      const files = [];
+
+      // Read each file info
+      for (let i = 0; i < fileCount; i++) {
+        const fileResp = await this._readNotification(10000);
+        const fileJson = parseJsonFromBuffer(fileResp, 3);
+        addBreadcrumb({ category: 'ble', message: `getFileList file[${i}]: ${JSON.stringify(fileJson)}`, level: 'info' });
+        files.push(fileJson);
+      }
+
+      return files;
+    } finally {
+      // Always exit sync state — even on error/timeout.
+      // Without this, the device stays locked in "transferring" mode permanently.
+      try {
+        await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
+        await this._readNotification(3000);
+      } catch { /* best effort */ }
     }
-
-    const fileCount = countJson.FileNum || 0;
-    const files = [];
-
-    // Read each file info
-    for (let i = 0; i < fileCount; i++) {
-      const fileResp = await this._readNotification(10000);
-      const fileJson = parseJsonFromBuffer(fileResp, 3);
-      files.push(fileJson);
-    }
-
-    // Exit sync state
-    await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
-    await this._readNotification(3000);
-
-    return files;
   }
 
   /**
