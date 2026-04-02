@@ -62,22 +62,23 @@ async function sendLocalNotification(id, title, body) {
 }
 
 /**
- * Get or create a persistent app UUID for BLE pairing (scoped per-user)
+ * Get or create a persistent app UUID for BLE pairing.
+ * NOT user-scoped — the device firmware locks to this UUID per phone installation.
+ * Changing it per-user would cause "already paired to another app" rejection.
  */
 async function getOrCreateAppUuid() {
-  const key = _userPrefKey(PREF_APP_UUID);
   if (isCapacitor()) {
     const { Preferences } = await import('@capacitor/preferences');
-    const { value } = await Preferences.get({ key });
+    const { value } = await Preferences.get({ key: PREF_APP_UUID });
     if (value) return value;
     const newUuid = uuidv4();
-    await Preferences.set({ key, value: newUuid });
+    await Preferences.set({ key: PREF_APP_UUID, value: newUuid });
     return newUuid;
   }
-  let uuid = localStorage.getItem(key);
+  let uuid = localStorage.getItem(PREF_APP_UUID);
   if (!uuid) {
     uuid = uuidv4();
-    localStorage.setItem(key, uuid);
+    localStorage.setItem(PREF_APP_UUID, uuid);
   }
   return uuid;
 }
