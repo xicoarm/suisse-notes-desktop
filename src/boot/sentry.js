@@ -173,10 +173,10 @@ async function initCapacitor(app, router) {
         environment: import.meta.env.DEV ? 'development' : 'production',
         release: `ch.suissenotes.mobile@${appVersion}`,
         dist: platform,
-        // P1 Fix: Enable native crash handling to capture C/C++ level crashes
-        // in audio processing (AVFoundation, MediaMuxer, BackgroundRecording plugin)
-        enableNative: true,
-        enableNativeCrashHandling: true,
+        // Native crash handling requires native Sentry SDK installed in Xcode/Gradle.
+        // Keep disabled until dSYM/ProGuard upload is configured.
+        enableNative: false,
+        enableNativeCrashHandling: false,
         integrations: [
           SentryVue.vueIntegration({
             app,
