@@ -368,6 +368,49 @@ export const useDeviceStore = defineStore('device', {
     /**
      * Forget (unpair) the device
      */
+    /**
+     * Factory reset: delete all files on device, unpair, and clear local state.
+     * @returns {Promise<{success: boolean, deletedCount: number, errors: string[]}>}
+     */
+    async resetDevice() {
+      if (!this.isConnected) {
+        throw new Error('Device must be connected to reset');
+      }
+
+      const manager = getBleManager();
+      const errors = [];
+      let deletedCount = 0;
+
+      // Step 1: Fetch latest file list
+      await this.fetchFileList();
+      const files = [...this.deviceFiles];
+
+      // Step 2: Delete all files on device
+      for (const file of files) {
+        try {
+          const deleted = await manager.deleteFile(file.file);
+          if (deleted) {
+            deletedCount++;
+          } else {
+            errors.push(`Failed to delete ${file.file}`);
+          }
+        } catch (e) {
+          errors.push(`Error deleting ${file.file}: ${e.message}`);
+        }
+      }
+
+      // Step 3: Unpair and clear local state (same as forgetDevice)
+      await this.forgetDevice();
+
+      addBreadcrumb({
+        category: 'ble',
+        message: `Device reset: deleted ${deletedCount}/${files.length} files, ${errors.length} errors`,
+        level: 'info'
+      });
+
+      return { success: errors.length === 0, deletedCount, errors };
+    },
+
     async forgetDevice() {
       this._intentionalDisconnect = true;
       this._stopReconnect();

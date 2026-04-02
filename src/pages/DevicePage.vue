@@ -75,6 +75,23 @@
                   {{ $t('forgetDevice') }}
                 </q-item-section>
               </q-item>
+              <q-item
+                v-if="deviceStore.isConnected"
+                v-close-popup
+                clickable
+                @click="confirmReset"
+              >
+                <q-item-section avatar>
+                  <q-icon
+                    name="restart_alt"
+                    color="negative"
+                    size="20px"
+                  />
+                </q-item-section>
+                <q-item-section class="text-negative">
+                  {{ $t('resetDevice') }}
+                </q-item-section>
+              </q-item>
             </q-list>
           </q-menu>
         </q-btn>
@@ -465,6 +482,29 @@ export default {
       });
     };
 
+    const confirmReset = () => {
+      $q.dialog({
+        title: t('resetDeviceTitle'),
+        message: t('resetDeviceMessage'),
+        cancel: { flat: true, label: t('cancel') },
+        ok: { color: 'negative', label: t('resetDevice'), flat: true }
+      }).onOk(async () => {
+        try {
+          $q.loading.show({ message: t('resettingDevice') });
+          const result = await deviceStore.resetDevice();
+          $q.loading.hide();
+          if (result.success) {
+            $q.notify({ type: 'positive', message: t('resetDeviceSuccess') });
+          } else {
+            $q.notify({ type: 'warning', message: `${t('resetDevicePartial')}: ${result.errors.join(', ')}`, timeout: 5000 });
+          }
+        } catch (e) {
+          $q.loading.hide();
+          $q.notify({ type: 'negative', message: t('resetDeviceFailed'), caption: e.message, timeout: 5000 });
+        }
+      });
+    };
+
     const syncFile = async (file) => {
       try {
         await deviceStore.syncFile(file);
@@ -574,6 +614,7 @@ export default {
       reconnect,
       disconnect,
       confirmForget,
+      confirmReset,
       syncFile,
       syncAll,
       formatStorage,
