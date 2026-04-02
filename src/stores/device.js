@@ -449,6 +449,8 @@ export const useDeviceStore = defineStore('device', {
         this.fileListLoaded = true;
       } catch (e) {
         console.warn('Failed to fetch file list:', e.message);
+        // Send to Sentry so the diagnostic breadcrumbs from getFileList are captured
+        captureException(e, { tags: { action: 'ble_file_list' } });
         this.deviceFiles = [];
         this.fileListLoaded = true;
       }
