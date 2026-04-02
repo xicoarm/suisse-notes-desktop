@@ -413,7 +413,7 @@ export class BleDeviceManager {
   async getFileList() {
     const release = await this._acquireLock();
     // Drain any stale notifications from previous operations
-    this._drainNotifyQueue();
+    await this._drainNotifyQueue();
 
     // Enter sync state
     await this._write(buildCmd(CMD_SYNC_STATE, [0x01]));
@@ -483,7 +483,7 @@ export class BleDeviceManager {
     this._downloadAborted = false;
 
     // Drain any stale notifications from previous operations
-    this._drainNotifyQueue();
+    await this._drainNotifyQueue();
 
     // Enter sync state
     await this._write(buildCmd(CMD_SYNC_STATE, [0x01]));
@@ -588,7 +588,7 @@ export class BleDeviceManager {
     };
 
     // Drain stale notifications that may have flushed from native BLE stack on reconnection
-    this._drainNotifyQueue();
+    await this._drainNotifyQueue();
 
     // Step 1: Device automatically sends its UUID after notifications are started.
     // Per protocol: "app opens notification channel, device responds and sends device UUID"
@@ -707,13 +707,37 @@ export class BleDeviceManager {
   }
 
   /**
-   * Drain any stale notifications from the queue (e.g. after a failed operation)
+   * Drain stale notifications, waiting until the device goes quiet.
+   * After an interrupted getFileList, the device may still be streaming
+   * hundreds of file entries. A single queue clear misses notifications
+   * that arrive between the clear and the next command.
+   * This method drains repeatedly until no new notifications arrive
+   * for `quietMs` milliseconds.
    */
-  _drainNotifyQueue() {
-    const drained = this._notifyQueue.length;
-    if (drained > 0) {
-      this._notifyQueue = [];
-      addBreadcrumb({ category: 'ble', message: `Drained ${drained} stale BLE notification(s)`, level: 'warning' });
+  async _drainNotifyQueue(quietMs = 300, maxWaitMs = 5000) {
+    let totalDrained = 0;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < maxWaitMs) {
+      const count = this._notifyQueue.length;
+      if (count > 0) {
+        totalDrained += count;
+        this._notifyQueue = [];
+      }
+      // Wait and check if more arrive
+      await new Promise(r => setTimeout(r, quietMs));
+      if (this._notifyQueue.length === 0) {
+        // Device went quiet
+        break;
+      }
+    }
+
+    // Final drain
+    totalDrained += this._notifyQueue.length;
+    this._notifyQueue = [];
+
+    if (totalDrained > 0) {
+      addBreadcrumb({ category: 'ble', message: `Drained ${totalDrained} stale BLE notification(s)`, level: 'warning' });
     }
   }
 
