@@ -164,6 +164,16 @@
               />
             </div>
           </div>
+          <!-- Device files & sync page -->
+          <q-btn
+            v-if="deviceStore.isConnected"
+            unelevated
+            class="gradient-btn full-width q-mt-md"
+            icon="folder_open"
+            :label="$t('deviceRecordings')"
+            no-caps
+            @click="$router.push('/device')"
+          />
           <div class="device-setting-footer">
             <q-btn
               flat
