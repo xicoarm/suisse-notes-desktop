@@ -163,6 +163,38 @@ The auto-sync poll (`_autoSyncPoll`) ran every 20 seconds. Within each poll, it 
 
 ---
 
+## Bug 7: Drain in _handshake() eats the device's step 1 UUID (regression in 3.7.61)
+
+**Discovered:** 2026-04-02, testing v3.7.61
+**Sentry issues:** CAPACITOR-32 (Handshake failed: BLE response timeout), CAPACITOR-2Z (BLE response timeout)
+
+The quiet drain fix (commit f113d3d) added `_drainNotifyQueue()` inside `_handshake()` at line 597. This was intended to clear stale notifications from previous failed operations. But the handshake runs on a **fresh BLE connection** — the device sends its step 1 UUID immediately after `startNotifications()`, and the drain discards it as "stale".
+
+**Sequence in 3.7.61:**
+```
+1. startNotifications() → device sends UUID → queued in _notifyQueue
+2. _handshake() calls _drainNotifyQueue() → UUID discarded
+3. _readNotification() waits → device already sent UUID, won't resend
+4. Device times out waiting for step 2 → sends [0x01 0x01 0x00 0x02 0x04]
+   byte[3]=0x02 (step 3 marker), byte[4]=0x04 ("Handshake timeout")
+5. App treats this as stale step1, retries, times out → disconnects
+```
+
+**Sentry evidence (CAPACITOR-32):**
+```
+02:28:46.681  BLE notifications started        ← device sends UUID
+02:28:47.284  Drained 1 stale BLE notification  ← UUID discarded!
+02:28:50.804  byte[3]=0x2, retrying             ← device timeout error
+02:28:50.806  raw: [0x01 0x01 0x00 0x02 0x04]   ← 0x04 = "Handshake timeout"
+02:28:50.949  BLE disconnected
+```
+
+**Why it worked in 3.7.60:** No drain before handshake. UUID stayed in queue.
+
+**Fix:** Removed `_drainNotifyQueue()` from `_handshake()`. `connect()` already clears the queue at line 238. Replaced single-retry with a loop (up to 4 attempts, 8s deadline) that skips any stale native-stack flushes while preserving the real step 1 UUID.
+
+---
+
 ## Open questions
 
 1. **Why did the JSON parse fail on a file entry?** The first getFileList correctly parsed `FileNum: 618` and started reading entries. One of the 618 entries had data that wasn't valid JSON. This could be:
@@ -180,7 +212,7 @@ The auto-sync poll (`_autoSyncPoll`) ran every 20 seconds. Within each poll, it 
 
 ## Recommendations
 
-1. **Test on 3.7.61** — confirm Sentry shows the new version and whether the fixes work
+1. **Test on 3.7.62** — confirm handshake succeeds, then verify file list/sync works with 618 files
 2. **Factory reset the new device** — if possible via a physical button on the device, to clear the 618 files
 3. **Contact device manufacturer** — ask about:
    - Maximum recommended file count

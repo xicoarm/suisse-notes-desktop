@@ -593,25 +593,46 @@ export class BleDeviceManager {
       return `[${bytes.join(' ')}]${data.length > maxLen ? `... (${data.length} bytes total)` : ''}`;
     };
 
-    // Drain stale notifications that may have flushed from native BLE stack on reconnection
-    await this._drainNotifyQueue();
-
     // Step 1: Device automatically sends its UUID after notifications are started.
     // Per protocol: "app opens notification channel, device responds and sends device UUID"
     // We do NOT send a command — just wait for the device's notification.
-    // On reconnection, native BLE stack may flush stale notifications — retry once if unexpected.
-    let step1 = await this._readNotification(5000);
+    //
+    // DO NOT drain here — connect() already cleared _notifyQueue, and the device's
+    // step 1 UUID is the first legitimate notification. Draining would discard it,
+    // causing the device to timeout waiting for step 2 (error 0x04).
+    //
+    // On reconnection, native BLE stack may flush 1-2 stale cached notifications
+    // before the real UUID arrives. The loop below skips those.
+    const step1Deadline = Date.now() + 8000;
+    let step1;
+    let step1Attempts = 0;
+    const maxStep1Attempts = 4;
 
-    captureMessage(`BLE handshake step1 raw: ${hexDump(step1, 30)}`, 'info');
+    while (true) {
+      const remaining = step1Deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error('BLE response timeout waiting for handshake step1');
+      }
 
-    // Response: 0x01 0x01 0x00 0x00 {json with uuid}
-    if (step1[3] !== 0x00) {
-      addBreadcrumb({ category: 'ble', message: `Discarding stale handshake notification (byte[3]=0x${step1[3].toString(16)}), retrying`, level: 'warning' });
-      step1 = await this._readNotification(5000);
-      captureMessage(`BLE handshake step1 retry raw: ${hexDump(step1, 30)}`, 'info');
+      step1 = await this._readNotification(Math.min(remaining, 5000));
+      step1Attempts++;
 
-      if (step1[3] !== 0x00) {
-        const err = new Error(`Unexpected handshake step1: byte[3]=0x${step1[3].toString(16)}, raw=${hexDump(step1, 30)}`);
+      captureMessage(`BLE handshake step1 raw (attempt ${step1Attempts}): ${hexDump(step1, 30)}`, 'info');
+
+      // Valid step 1: byte[3]=0x00, followed by JSON with device UUID
+      if (step1.length >= 5 && step1[3] === 0x00) {
+        break;
+      }
+
+      // Not a valid step 1 — likely a stale native-stack flush or device error
+      addBreadcrumb({
+        category: 'ble',
+        message: `Skipping non-step1 notification (byte[3]=0x${step1[3]?.toString(16)}, len=${step1.length}), attempt ${step1Attempts}/${maxStep1Attempts}`,
+        level: 'warning'
+      });
+
+      if (step1Attempts >= maxStep1Attempts) {
+        const err = new Error(`Handshake step1 failed after ${step1Attempts} attempts: byte[3]=0x${step1[3]?.toString(16)}, raw=${hexDump(step1, 30)}`);
         captureException(err, { tags: { action: 'ble_handshake_step1' }, extra: { rawHex: hexDump(step1, 50) } });
         throw err;
       }

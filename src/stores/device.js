@@ -15,12 +15,22 @@ import { useRecordingsHistoryStore } from './recordings-history';
 import { isRawOpusPackets, rawOpusToOgg } from '../utils/rawOpusToOgg';
 import { i18n } from '../boot/i18n';
 
-// Preferences keys
+// Preferences base keys (scoped per-user at runtime via _userPrefKey)
 const PREF_PAIRED_DEVICE = 'ble_paired_device';
 const PREF_APP_UUID = 'ble_app_uuid';
 const PREF_SYNCED_FILES = 'ble_synced_files';
 const PREF_REJECTED_DEVICES = 'ble_rejected_devices';
 const PREF_SKIPPED_FILES = 'ble_skipped_files';
+
+/**
+ * Scope a preference key to the current user.
+ * Returns 'key:uUSERID' when authenticated, 'key' as fallback.
+ */
+function _userPrefKey(baseKey) {
+  const auth = useAuthStore();
+  const userId = auth.user?.id;
+  return userId ? `${baseKey}:u${userId}` : baseKey;
+}
 
 // Background timers
 const RECONNECT_INTERVAL_MS = 15_000;  // Try reconnect every 15s
@@ -52,22 +62,22 @@ async function sendLocalNotification(id, title, body) {
 }
 
 /**
- * Get or create a persistent app UUID for BLE pairing
+ * Get or create a persistent app UUID for BLE pairing (scoped per-user)
  */
 async function getOrCreateAppUuid() {
+  const key = _userPrefKey(PREF_APP_UUID);
   if (isCapacitor()) {
     const { Preferences } = await import('@capacitor/preferences');
-    const { value } = await Preferences.get({ key: PREF_APP_UUID });
+    const { value } = await Preferences.get({ key });
     if (value) return value;
     const newUuid = uuidv4();
-    await Preferences.set({ key: PREF_APP_UUID, value: newUuid });
+    await Preferences.set({ key, value: newUuid });
     return newUuid;
   }
-  // Fallback for non-capacitor (shouldn't happen)
-  let uuid = localStorage.getItem(PREF_APP_UUID);
+  let uuid = localStorage.getItem(key);
   if (!uuid) {
     uuid = uuidv4();
-    localStorage.setItem(PREF_APP_UUID, uuid);
+    localStorage.setItem(key, uuid);
   }
   return uuid;
 }
@@ -153,7 +163,8 @@ export const useDeviceStore = defineStore('device', {
 
   actions: {
     /**
-     * Initialize BLE and load persisted state
+     * Initialize BLE hardware and listeners (once per app lifecycle).
+     * User-specific data is loaded separately via _loadUserData().
      */
     async initialize() {
       if (!isCapacitor()) return;
@@ -171,11 +182,6 @@ export const useDeviceStore = defineStore('device', {
           await LocalNotifications.requestPermissions();
         }
       } catch { /* best-effort */ }
-
-      // Load persisted data
-      await this._loadPairedDevice();
-      await this._loadSyncedFiles();
-      await this._loadSkippedFiles();
 
       // Set disconnect handler — auto-reconnect unless user explicitly disconnected
       manager.onDisconnect(() => {
@@ -195,9 +201,6 @@ export const useDeviceStore = defineStore('device', {
         this.isRecordingOnDevice = recording;
       });
 
-      // Load rejected devices for discovery filtering
-      await this._loadRejectedDevices();
-
       // Listen for app foreground to reconnect (AirPods-style)
       if (isCapacitor()) {
         const { App } = await import('@capacitor/app');
@@ -209,9 +212,121 @@ export const useDeviceStore = defineStore('device', {
         });
       }
 
+      // Load user-scoped data (may be empty if no user is authenticated yet)
+      await this._loadUserData();
+
       // Start persistent background timers
       this._startPersistentReconnect();
       this._startBackgroundDiscovery();
+    },
+
+    /**
+     * Load user-scoped persisted data (paired device, synced files, etc.)
+     */
+    async _loadUserData() {
+      await this._loadPairedDevice();
+      await this._loadSyncedFiles();
+      await this._loadSkippedFiles();
+      await this._loadRejectedDevices();
+    },
+
+    /**
+     * Reload device state for the current user (called after login / session restore).
+     * Disconnects any active BLE connection, clears in-memory state, and loads
+     * the new user's persisted device preferences.
+     */
+    async reloadForUser() {
+      // Disconnect any active connection from previous user
+      if (this.connectionState !== 'disconnected') {
+        this._intentionalDisconnect = true;
+        this.stopAutoSync();
+        this._stopReconnect();
+        const manager = getBleManager();
+        try { await manager.disconnect(); } catch { /* best-effort */ }
+      }
+
+      // Clear in-memory device state
+      this.connectionState = 'disconnected';
+      this.error = null;
+      this.pairedDevice = null;
+      this.deviceName = '';
+      this.deviceSN = '';
+      this.deviceUuid = '';
+      this.batteryLevel = 0;
+      this.freeStorageKB = 0;
+      this.totalStorageKB = 0;
+      this.isRecordingOnDevice = false;
+      this.deviceFiles = [];
+      this.fileListLoaded = false;
+      this.syncState = 'idle';
+      this.syncCurrent = 0;
+      this.syncTotal = 0;
+      this.syncProgress = 0;
+      this.syncBytesReceived = 0;
+      this.syncBytesTotal = 0;
+      this.syncPhase = 'idle';
+      this.currentSyncFile = null;
+      this.syncError = null;
+      this.syncedFiles = [];
+      this.skippedFiles = [];
+      this.scanResults = [];
+      this.rejectedDeviceIds = [];
+      this.discoveredDevice = null;
+
+      // Load the new user's persisted data
+      await this._loadUserData();
+
+      // Auto-connect if this user has a paired device
+      if (this.hasPairedDevice) {
+        this._intentionalDisconnect = false;
+        this._startPersistentReconnect();
+        this.autoConnect().catch(() => {});
+      }
+    },
+
+    /**
+     * Clean up device state on logout. Disconnects BLE, stops timers,
+     * clears in-memory state. Does NOT clear persisted data (it stays
+     * scoped to the user who wrote it).
+     */
+    async onLogout() {
+      this._intentionalDisconnect = true;
+      this.stopAutoSync();
+      this._stopReconnect();
+      this._stopPersistentReconnect();
+      this._stopBackgroundDiscovery();
+
+      if (this.connectionState !== 'disconnected') {
+        const manager = getBleManager();
+        try { await manager.disconnect(); } catch { /* best-effort */ }
+      }
+
+      this.connectionState = 'disconnected';
+      this.error = null;
+      this.pairedDevice = null;
+      this.deviceName = '';
+      this.deviceSN = '';
+      this.deviceUuid = '';
+      this.batteryLevel = 0;
+      this.freeStorageKB = 0;
+      this.totalStorageKB = 0;
+      this.isRecordingOnDevice = false;
+      this.deviceFiles = [];
+      this.fileListLoaded = false;
+      this.syncState = 'idle';
+      this.syncCurrent = 0;
+      this.syncTotal = 0;
+      this.syncProgress = 0;
+      this.syncBytesReceived = 0;
+      this.syncBytesTotal = 0;
+      this.syncPhase = 'idle';
+      this.currentSyncFile = null;
+      this.syncError = null;
+      this.syncedFiles = [];
+      this.skippedFiles = [];
+      this.scanResults = [];
+      this.rejectedDeviceIds = [];
+      this.discoveredDevice = null;
     },
 
     /**
@@ -432,7 +547,7 @@ export const useDeviceStore = defineStore('device', {
 
       if (isCapacitor()) {
         const { Preferences } = await import('@capacitor/preferences');
-        await Preferences.remove({ key: PREF_PAIRED_DEVICE });
+        await Preferences.remove({ key: _userPrefKey(PREF_PAIRED_DEVICE) });
       }
     },
 
@@ -1020,7 +1135,7 @@ export const useDeviceStore = defineStore('device', {
       if (isCapacitor()) {
         const { Preferences } = await import('@capacitor/preferences');
         await Preferences.set({
-          key: PREF_PAIRED_DEVICE,
+          key: _userPrefKey(PREF_PAIRED_DEVICE),
           value: JSON.stringify(this.pairedDevice)
         });
       }
@@ -1029,7 +1144,7 @@ export const useDeviceStore = defineStore('device', {
     async _loadPairedDevice() {
       if (isCapacitor()) {
         const { Preferences } = await import('@capacitor/preferences');
-        const { value } = await Preferences.get({ key: PREF_PAIRED_DEVICE });
+        const { value } = await Preferences.get({ key: _userPrefKey(PREF_PAIRED_DEVICE) });
         if (value) {
           try {
             this.pairedDevice = JSON.parse(value);
@@ -1041,7 +1156,7 @@ export const useDeviceStore = defineStore('device', {
     async _loadSyncedFiles() {
       if (isCapacitor()) {
         const { Preferences } = await import('@capacitor/preferences');
-        const { value } = await Preferences.get({ key: PREF_SYNCED_FILES });
+        const { value } = await Preferences.get({ key: _userPrefKey(PREF_SYNCED_FILES) });
         if (value) {
           try {
             this.syncedFiles = JSON.parse(value);
@@ -1058,7 +1173,7 @@ export const useDeviceStore = defineStore('device', {
         if (isCapacitor()) {
           const { Preferences } = await import('@capacitor/preferences');
           await Preferences.set({
-            key: PREF_SYNCED_FILES,
+            key: _userPrefKey(PREF_SYNCED_FILES),
             value: JSON.stringify(this.syncedFiles)
           });
         }
@@ -1068,7 +1183,7 @@ export const useDeviceStore = defineStore('device', {
     async _loadSkippedFiles() {
       if (isCapacitor()) {
         const { Preferences } = await import('@capacitor/preferences');
-        const { value } = await Preferences.get({ key: PREF_SKIPPED_FILES });
+        const { value } = await Preferences.get({ key: _userPrefKey(PREF_SKIPPED_FILES) });
         if (value) {
           try {
             this.skippedFiles = JSON.parse(value);
@@ -1085,7 +1200,7 @@ export const useDeviceStore = defineStore('device', {
         if (isCapacitor()) {
           const { Preferences } = await import('@capacitor/preferences');
           await Preferences.set({
-            key: PREF_SKIPPED_FILES,
+            key: _userPrefKey(PREF_SKIPPED_FILES),
             value: JSON.stringify(this.skippedFiles)
           });
         }
@@ -1097,7 +1212,7 @@ export const useDeviceStore = defineStore('device', {
       if (isCapacitor()) {
         const { Preferences } = await import('@capacitor/preferences');
         await Preferences.set({
-          key: PREF_SKIPPED_FILES,
+          key: _userPrefKey(PREF_SKIPPED_FILES),
           value: JSON.stringify(this.skippedFiles)
         });
       }
@@ -1106,7 +1221,7 @@ export const useDeviceStore = defineStore('device', {
     async _loadRejectedDevices() {
       if (isCapacitor()) {
         const { Preferences } = await import('@capacitor/preferences');
-        const { value } = await Preferences.get({ key: PREF_REJECTED_DEVICES });
+        const { value } = await Preferences.get({ key: _userPrefKey(PREF_REJECTED_DEVICES) });
         if (value) {
           try {
             this.rejectedDeviceIds = JSON.parse(value);
@@ -1121,7 +1236,7 @@ export const useDeviceStore = defineStore('device', {
       if (isCapacitor()) {
         const { Preferences } = await import('@capacitor/preferences');
         await Preferences.set({
-          key: PREF_REJECTED_DEVICES,
+          key: _userPrefKey(PREF_REJECTED_DEVICES),
           value: JSON.stringify(this.rejectedDeviceIds)
         });
       }

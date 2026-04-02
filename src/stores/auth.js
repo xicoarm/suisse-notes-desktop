@@ -148,6 +148,15 @@ export const useAuthStore = defineStore('auth', {
           // Start periodic token refresh
           this.startTokenRefresh();
 
+          // Reload device store for this user (user-scoped BLE pairings)
+          try {
+            const { useDeviceStore } = await import('./device');
+            const deviceStore = useDeviceStore();
+            await deviceStore.reloadForUser();
+          } catch (e) {
+            console.warn('Device store reload after login failed:', e);
+          }
+
           // P1 Fix: Resume any pending uploads that failed while logged out
           resumeMobileUploadQueue(this);
 
@@ -184,6 +193,15 @@ export const useAuthStore = defineStore('auth', {
           // Start periodic token refresh
           this.startTokenRefresh();
 
+          // Reload device store for this new user
+          try {
+            const { useDeviceStore } = await import('./device');
+            const deviceStore = useDeviceStore();
+            await deviceStore.reloadForUser();
+          } catch (e) {
+            console.warn('Device store reload after register failed:', e);
+          }
+
           // P1 Fix: Resume any pending uploads after registration
           resumeMobileUploadQueue(this);
 
@@ -201,6 +219,16 @@ export const useAuthStore = defineStore('auth', {
     },
 
     async logout() {
+      // Disconnect BLE and clear device state BEFORE clearing user
+      // (must happen while user.id is still available for scoped keys)
+      try {
+        const { useDeviceStore } = await import('./device');
+        const deviceStore = useDeviceStore();
+        await deviceStore.onLogout();
+      } catch (error) {
+        console.warn('Error cleaning up device store on logout:', error);
+      }
+
       try {
         await platformClearToken();
       } catch (error) {
@@ -257,6 +285,15 @@ export const useAuthStore = defineStore('auth', {
 
           // Set Sentry user context on session restore
           setUser(userInfo);
+
+          // Reload device store for this user (user-scoped BLE pairings)
+          try {
+            const { useDeviceStore } = await import('./device');
+            const deviceStore = useDeviceStore();
+            await deviceStore.reloadForUser();
+          } catch (e) {
+            console.warn('Device store reload after session restore failed:', e);
+          }
 
           // Start periodic token refresh
           this.startTokenRefresh();
