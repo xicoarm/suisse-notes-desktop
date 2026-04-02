@@ -78,7 +78,11 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
 
   getters: {
     // Get all recordings
-    allRecordings: (state) => state.recordings,
+    allRecordings: (state) => [...state.recordings].sort((a, b) => {
+      const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return dateB - dateA; // newest first
+    }),
 
     // Get recordings by status
     pendingRecordings: (state) =>
