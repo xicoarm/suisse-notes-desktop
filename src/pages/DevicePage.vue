@@ -390,9 +390,21 @@
           </div>
         </div>
         <div class="file-action">
-          <!-- Synced -->
+          <!-- Currently syncing this file — show cancel -->
+          <q-btn
+            v-if="deviceStore.currentSyncFile === file.file"
+            flat
+            dense
+            color="negative"
+            icon="stop"
+            :label="$t('cancel')"
+            no-caps
+            @click="cancelSync"
+          />
+
+          <!-- Downloaded + uploaded to cloud — fully synced -->
           <div
-            v-if="deviceStore.syncedFiles.includes(file.file)"
+            v-else-if="deviceStore.syncedFiles.includes(file.file) && getUploadStatus(file.file) === 'uploaded'"
             class="synced-badge"
           >
             <q-icon
@@ -403,17 +415,74 @@
             <span>{{ $t('synced') }}</span>
           </div>
 
-          <!-- Currently syncing this file — show cancel -->
-          <q-btn
-            v-else-if="deviceStore.currentSyncFile === file.file"
-            flat
-            dense
-            color="negative"
-            icon="stop"
-            :label="$t('cancel')"
-            no-caps
-            @click="cancelSync"
-          />
+          <!-- Downloaded + uploading to cloud -->
+          <div
+            v-else-if="deviceStore.syncedFiles.includes(file.file) && getUploadStatus(file.file) === 'uploading'"
+            class="upload-status-actions"
+          >
+            <div class="upload-status-badge uploading">
+              <q-spinner-dots
+                size="14px"
+                color="primary"
+              />
+              <span>{{ $t('uploading') }}</span>
+            </div>
+            <q-btn
+              flat
+              dense
+              round
+              color="negative"
+              icon="stop"
+              size="sm"
+              @click="cancelUpload(file)"
+            />
+          </div>
+
+          <!-- Downloaded + upload failed or pending retry -->
+          <div
+            v-else-if="deviceStore.syncedFiles.includes(file.file) && (getUploadStatus(file.file) === 'failed' || getUploadStatus(file.file) === 'pending')"
+            class="upload-status-actions"
+          >
+            <div class="upload-status-badge failed">
+              <q-icon
+                name="error_outline"
+                size="14px"
+                color="negative"
+              />
+              <span>{{ $t('uploadFailed') }}</span>
+            </div>
+            <q-btn
+              flat
+              dense
+              color="primary"
+              icon="replay"
+              size="sm"
+              :disable="deviceStore.isSyncing"
+              @click="retryUpload(file)"
+            />
+            <q-btn
+              flat
+              dense
+              round
+              color="grey-5"
+              icon="skip_next"
+              size="sm"
+              @click="cancelUpload(file)"
+            />
+          </div>
+
+          <!-- Downloaded but no upload record (legacy) — show as synced -->
+          <div
+            v-else-if="deviceStore.syncedFiles.includes(file.file)"
+            class="synced-badge"
+          >
+            <q-icon
+              name="check_circle"
+              size="16px"
+              color="positive"
+            />
+            <span>{{ $t('synced') }}</span>
+          </div>
 
           <!-- Skipped — show unskip + sync option -->
           <div
@@ -432,7 +501,7 @@
             />
           </div>
 
-          <!-- Pending — show sync + skip -->
+          <!-- Pending — not downloaded yet -->
           <div
             v-else
             class="pending-actions"
@@ -469,6 +538,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useQuasar } from 'quasar';
 import { useI18n } from 'vue-i18n';
 import { useDeviceStore } from '../stores/device';
+import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { isCapacitor } from '../utils/platform';
 
 export default {
@@ -478,7 +548,14 @@ export default {
     const $q = useQuasar();
     const { t } = useI18n();
     const deviceStore = useDeviceStore();
+    const historyStore = useRecordingsHistoryStore();
     const bleAvailable = ref(true);
+
+    // Get the cloud upload status for a device file
+    const getUploadStatus = (filename) => {
+      const rec = historyStore.getRecordingByDeviceFilename(filename);
+      return rec?.uploadStatus || null;
+    };
 
     const batteryColor = computed(() => {
       if (deviceStore.batteryLevel > 50) return 'positive';
@@ -584,6 +661,19 @@ export default {
       }
     };
 
+    const retryUpload = async (file) => {
+      try {
+        await deviceStore.retryUpload(file.file);
+        $q.notify({ type: 'positive', message: t('syncComplete') });
+      } catch (e) {
+        $q.notify({ type: 'negative', message: t('syncFailed'), caption: e.message, timeout: 5000 });
+      }
+    };
+
+    const cancelUpload = async (file) => {
+      await deviceStore.cancelUpload(file.file);
+    };
+
     const formatStorage = (kb) => {
       if (!kb) return '—';
       if (kb >= 1048576) return `${(kb / 1048576).toFixed(1)} GB`;
@@ -681,6 +771,9 @@ export default {
       cancelSync,
       skipFile,
       unskipAndSync,
+      retryUpload,
+      cancelUpload,
+      getUploadStatus,
       formatStorage,
       formatDuration,
       formatFileSize,
@@ -1102,6 +1195,28 @@ export default {
   font-size: 13px;
   font-weight: 500;
   color: #22c55e;
+}
+
+.upload-status-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.upload-status-badge {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
+
+  &.uploading {
+    color: #6366f1;
+  }
+
+  &.failed {
+    color: #ef4444;
+  }
 }
 
 .skipped-actions,

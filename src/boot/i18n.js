@@ -288,6 +288,7 @@ const messages = {
     // Offline Banner & Auto-save
     offlineBanner: 'You are offline. Recordings are saved locally and will upload when connected.',
     autoSavingIn: 'Auto-saving in {seconds}s...',
+    uploadFailed: 'Upload failed',
     uploadFailedNoInternet: 'No internet connection. Your recording is safe and will upload automatically when you reconnect.',
     uploadFailedServer: 'Server error. Your recording is saved locally and will retry automatically.',
     recordingSavedLocally: 'Your recording is saved locally',
@@ -626,6 +627,7 @@ const messages = {
     // Offline Banner & Auto-save
     offlineBanner: 'Sie sind offline. Aufnahmen werden lokal gespeichert und hochgeladen, sobald Sie verbunden sind.',
     autoSavingIn: 'Automatisches Speichern in {seconds}s...',
+    uploadFailed: 'Upload fehlgeschlagen',
     uploadFailedNoInternet: 'Keine Internetverbindung. Ihre Aufnahme ist sicher und wird automatisch hochgeladen, wenn Sie wieder verbunden sind.',
     uploadFailedServer: 'Serverfehler. Ihre Aufnahme ist lokal gespeichert und wird automatisch erneut versucht.',
     recordingSavedLocally: 'Ihre Aufnahme ist lokal gespeichert',
@@ -964,6 +966,7 @@ const messages = {
     // Offline Banner & Auto-save
     offlineBanner: 'Vous êtes hors ligne. Les enregistrements sont sauvegardés localement et seront téléchargés une fois connecté.',
     autoSavingIn: 'Sauvegarde automatique dans {seconds}s...',
+    uploadFailed: 'Échec du téléchargement',
     uploadFailedNoInternet: 'Pas de connexion internet. Votre enregistrement est en sécurité et sera téléchargé automatiquement lorsque vous vous reconnecterez.',
     uploadFailedServer: 'Erreur serveur. Votre enregistrement est sauvegardé localement et sera réessayé automatiquement.',
     recordingSavedLocally: 'Votre enregistrement est sauvegardé localement',
@@ -1302,6 +1305,7 @@ const messages = {
     // Offline Banner & Auto-save
     offlineBanner: 'Sei offline. Le registrazioni vengono salvate localmente e caricate quando sei connesso.',
     autoSavingIn: 'Salvataggio automatico tra {seconds}s...',
+    uploadFailed: 'Caricamento fallito',
     uploadFailedNoInternet: 'Nessuna connessione internet. La tua registrazione è al sicuro e verrà caricata automaticamente quando ti riconnetti.',
     uploadFailedServer: 'Errore del server. La tua registrazione è salvata localmente e verrà ritentata automaticamente.',
     recordingSavedLocally: 'La tua registrazione è salvata localmente',

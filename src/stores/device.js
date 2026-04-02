@@ -808,6 +808,65 @@ export const useDeviceStore = defineStore('device', {
     },
 
     /**
+     * Retry cloud upload for a device file that was downloaded but failed to upload.
+     * Finds the recording by deviceFilename and re-uploads from the saved local file.
+     */
+    async retryUpload(filename) {
+      const historyStore = useRecordingsHistoryStore();
+      const authStore = useAuthStore();
+      const rec = historyStore.getRecordingByDeviceFilename(filename);
+      if (!rec || !rec.filePath) return;
+
+      await historyStore.updateRecording(rec.id, { uploadStatus: 'uploading' });
+
+      try {
+        const result = await uploadWithVerification({
+          filePath: rec.filePath,
+          recordId: rec.id,
+          apiUrl: getApiUrlSync(),
+          authToken: authStore.token,
+          metadata: {
+            duration: (rec.duration || 0).toString(),
+            title: rec.title || '',
+            filename
+          },
+          onProgress: () => {},
+          getAuthStore: () => authStore
+        });
+
+        if (result.success) {
+          await historyStore.updateRecording(rec.id, {
+            uploadStatus: 'uploaded',
+            transcriptionId: result.transcriptionId,
+            audioFileId: result.audioFileId
+          });
+        } else {
+          await historyStore.updateRecording(rec.id, {
+            uploadStatus: 'failed',
+            uploadError: result.error || 'Upload failed'
+          });
+        }
+      } catch (err) {
+        await historyStore.updateRecording(rec.id, {
+          uploadStatus: 'failed',
+          uploadError: err.message
+        });
+      }
+    },
+
+    /**
+     * Cancel a pending/failed upload and mark the file as skipped.
+     */
+    async cancelUpload(filename) {
+      const historyStore = useRecordingsHistoryStore();
+      const rec = historyStore.getRecordingByDeviceFilename(filename);
+      if (rec) {
+        await historyStore.updateRecording(rec.id, { uploadStatus: 'cancelled' });
+      }
+      await this._addSkippedFile(filename);
+    },
+
+    /**
      * Format a filename like R20250311-093012.opus into a readable title
      */
     _formatTitleFromFilename(filename) {

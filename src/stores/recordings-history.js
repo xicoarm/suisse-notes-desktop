@@ -100,6 +100,10 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
     getRecordingById: (state) => (id) =>
       state.recordings.find(r => r.id === id),
 
+    // Get the most recent recording for a device filename
+    getRecordingByDeviceFilename: (state) => (filename) =>
+      state.recordings.find(r => r.deviceFilename === filename),
+
     // Check if should show storage dialog
     shouldShowStorageDialog: (state) =>
       state.defaultStoragePreference === null
