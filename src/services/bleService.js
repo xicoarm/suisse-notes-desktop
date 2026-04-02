@@ -444,15 +444,37 @@ export class BleDeviceManager {
       const fileCount = countJson.FileNum || 0;
       addBreadcrumb({ category: 'ble', message: `getFileList fileCount=${fileCount}`, level: 'info' });
       const files = [];
+      let skipped = 0;
 
-      // Read each file info
+      // Read each file info — skip corrupt entries instead of aborting.
+      // All fileCount notifications MUST be consumed, otherwise the device
+      // keeps streaming and stale data floods subsequent commands.
       for (let i = 0; i < fileCount; i++) {
-        const fileResp = await this._readNotification(10000);
-        const fileJson = parseJsonFromBuffer(fileResp, 3);
-        addBreadcrumb({ category: 'ble', message: `getFileList file[${i}]: ${JSON.stringify(fileJson)}`, level: 'info' });
-        files.push(fileJson);
+        try {
+          const fileResp = await this._readNotification(10000);
+
+          // Validate: must be a CMD response for FILE_LIST
+          if (fileResp.length < 4 || fileResp[0] !== TYPE_CMD ||
+              fileResp[1] !== CMD_FILE_LIST[0] || fileResp[2] !== CMD_FILE_LIST[1]) {
+            skipped++;
+            addBreadcrumb({ category: 'ble', message: `getFileList file[${i}]: skipped non-file-list response (byte[1]=0x${fileResp[1]?.toString(16)})`, level: 'warning' });
+            continue;
+          }
+
+          const fileJson = parseJsonFromBuffer(fileResp, 3);
+          if (fileJson.file) {
+            files.push(fileJson);
+          } else {
+            skipped++;
+            addBreadcrumb({ category: 'ble', message: `getFileList file[${i}]: skipped entry without filename: ${JSON.stringify(fileJson)}`, level: 'warning' });
+          }
+        } catch (entryErr) {
+          skipped++;
+          addBreadcrumb({ category: 'ble', message: `getFileList file[${i}]: parse error (${entryErr.message}), skipping`, level: 'warning' });
+        }
       }
 
+      addBreadcrumb({ category: 'ble', message: `getFileList done: ${files.length} files, ${skipped} skipped out of ${fileCount}`, level: 'info' });
       return files;
     } finally {
       // Always exit sync state — even on error/timeout.
