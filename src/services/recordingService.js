@@ -1462,10 +1462,12 @@ export async function cancelRecording(recordingStore, stopSystemAudio) {
  * Flush recording data (for visibility changes / suspend)
  * Returns a Promise that resolves when the flushed chunk has been saved,
  * with a 2-second timeout fallback.
+ * @returns {Promise<{flushed: boolean, timedOut: boolean}>}
  */
 export async function flushRecordingData() {
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     try {
+      let didTimeout = false;
       const chunkSaved = new Promise((resolve) => {
         flushResolvers.push(resolve);
         // Timeout fallback: resolve after 2s even if ondataavailable hasn't fired
@@ -1473,16 +1475,24 @@ export async function flushRecordingData() {
           const idx = flushResolvers.indexOf(resolve);
           if (idx !== -1) {
             flushResolvers.splice(idx, 1);
+            didTimeout = true;
             resolve();
           }
         }, 2000);
       });
       mediaRecorder.requestData();
       await chunkSaved;
+      // P2 Fix: Report whether flush actually produced data or timed out
+      if (didTimeout) {
+        console.warn('Flush timed out after 2s without ondataavailable');
+      }
+      return { flushed: !didTimeout, timedOut: didTimeout };
     } catch (e) {
       console.warn('Could not flush recording data:', e);
+      return { flushed: false, timedOut: false };
     }
   }
+  return { flushed: false, timedOut: false };
 }
 
 /**

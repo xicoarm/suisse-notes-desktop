@@ -237,6 +237,27 @@ export function useNativeRecorder() {
     console.log('Auto-split triggered at 4h 55m, creating session file...');
 
     try {
+      // P1 Fix: Pause native recording to prevent chunk writes during transition.
+      // Without this, the native plugin continues writing chunks while we flush
+      // metadata and reset indices, causing inconsistent state.
+      if (BackgroundRecording) {
+        try {
+          await BackgroundRecording.pauseRecording();
+        } catch (e) {
+          console.warn('Auto-split: Could not pause native recording:', e);
+        }
+
+        // Sync latest chunk index from native before flushing
+        try {
+          const status = await BackgroundRecording.getStatus();
+          if (status.chunkIndex > recordingStore.chunkIndex) {
+            recordingStore.chunkIndex = status.chunkIndex;
+          }
+        } catch (e) {
+          console.warn('Auto-split: Could not sync chunk index:', e);
+        }
+      }
+
       const result = await recordingStore.createSessionFile();
       if (!result.success) {
         console.error('Auto-split: Failed to create session file:', result.error);
@@ -245,9 +266,22 @@ export function useNativeRecorder() {
       }
 
       recordingStore.resetChunkIndex();
-      console.log('Auto-split complete, continuing recording...');
+      console.log('Auto-split complete, resuming recording...');
+
+      // Resume native recording after transition is complete
+      if (BackgroundRecording) {
+        try {
+          await BackgroundRecording.resumeRecording();
+        } catch (e) {
+          console.error('Auto-split: Failed to resume native recording:', e);
+        }
+      }
     } catch (error) {
       console.error('Error during auto-split:', error);
+      // Best-effort resume on error
+      if (BackgroundRecording) {
+        try { await BackgroundRecording.resumeRecording(); } catch (e) { /* ignore */ }
+      }
     } finally {
       isAutoSplitting.value = false;
     }
@@ -339,6 +373,23 @@ export function useNativeRecorder() {
 
   // Stop recording
   const stopRecording = async () => {
+    // P2 Fix: Refresh native state before stop to avoid relying on stale 3s health check
+    if (isNativeRecording.value && BackgroundRecording) {
+      try {
+        const freshStatus = await BackgroundRecording.getStatus();
+        if (!freshStatus.isRecording && !freshStatus.isRecorderActive) {
+          console.warn('Stop: native recording already dead (detected on fresh check)');
+          isNativeRecording.value = false;
+        }
+        // Sync latest chunk index
+        if (freshStatus.chunkIndex > recordingStore.chunkIndex) {
+          recordingStore.chunkIndex = freshStatus.chunkIndex;
+        }
+      } catch (e) {
+        console.warn('Stop: could not query native status:', e);
+      }
+    }
+
     // P0 Data Loss Fix: Handle case where native recording state was lost but chunks exist on disk
     if (!isNativeRecording.value) {
       if (recordingStore.recordId) {

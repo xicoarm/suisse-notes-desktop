@@ -17,6 +17,9 @@ let batteryCheckInterval = null;
 let isRecordingActiveFlag = false;
 let currentBatteryIntervalMs = 60000; // Default: 60s
 
+// P0 Fix: Track background flush completion to retry on foreground if interrupted
+let backgroundFlushCompleted = true;
+
 // Callbacks set by recording store
 let onAppBackground = null;
 let onAppForeground = null;
@@ -57,6 +60,33 @@ export const initializeLifecycle = async () => {
       if (isActive) {
         console.log('Lifecycle: App came to foreground');
         sentryAppForeground();
+
+        // P0 Fix: If background flush was interrupted by iOS suspension, retry now
+        if (!backgroundFlushCompleted && onAppBackground) {
+          console.warn('Lifecycle: Background flush was interrupted — retrying on foreground');
+          try {
+            await onAppBackground();
+            backgroundFlushCompleted = true;
+          } catch (e) {
+            console.error('Lifecycle: Retry background flush failed:', e);
+          }
+        }
+
+        // P0 Fix: Check battery immediately on foreground (may have dropped to critical during background)
+        if (isRecordingActiveFlag && onCriticalBattery) {
+          try {
+            const { Device } = await import('@capacitor/device');
+            const info = await Device.getBatteryInfo();
+            const batteryPercent = Math.round((info.batteryLevel || 0) * 100);
+            if (!info.isCharging && batteryPercent <= PlatformConstants.CRITICAL_BATTERY_PERCENT) {
+              console.warn(`Lifecycle: Critical battery on foreground return (${batteryPercent}%)`);
+              await onCriticalBattery(batteryPercent);
+            }
+          } catch (e) {
+            console.warn('Lifecycle: Battery check on foreground failed:', e);
+          }
+        }
+
         if (onAppForeground) {
           try { await onAppForeground(); } catch (e) { console.error('Lifecycle: onAppForeground error:', e); }
         }
@@ -64,7 +94,18 @@ export const initializeLifecycle = async () => {
         console.log('Lifecycle: App went to background');
         sentryAppBackground();
         if (onAppBackground) {
-          try { await onAppBackground(); } catch (e) { console.error('Lifecycle: onAppBackground error:', e); }
+          // P0 Fix: Track flush completion — iOS may kill us mid-await
+          backgroundFlushCompleted = false;
+          try {
+            // Race the flush against a 4-second timeout (iOS gives ~5s minimum)
+            await Promise.race([
+              onAppBackground(),
+              new Promise(resolve => setTimeout(resolve, 4000))
+            ]);
+            backgroundFlushCompleted = true;
+          } catch (e) {
+            console.error('Lifecycle: onAppBackground error:', e);
+          }
         }
       }
     });

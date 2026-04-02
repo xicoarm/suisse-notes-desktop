@@ -35,58 +35,70 @@ export function rawOpusToOgg(rawData) {
   const numPackets = Math.floor(rawData.length / PACKET_SIZE);
   if (numPackets === 0) return rawData;
 
-  const serial = 0x4B4146; // "KAF"
-  const pages = [];
+  try {
+    const serial = 0x4B4146; // "KAF"
+    const pages = [];
 
-  // Page 0: OpusHead (BOS)
-  const opusHead = new Uint8Array(19);
-  writeString(opusHead, 0, 'OpusHead');
-  opusHead[8] = 1;   // version
-  opusHead[9] = 1;   // channels (mono)
-  writeUint16LE(opusHead, 10, 312);    // pre-skip
-  writeUint32LE(opusHead, 12, 16000);  // input sample rate
-  writeInt16LE(opusHead, 16, 0);       // output gain
-  opusHead[18] = 0;  // channel mapping family
-  pages.push(makeOggPage(0x02, 0, serial, 0, [opusHead]));
+    // Page 0: OpusHead (BOS)
+    const opusHead = new Uint8Array(19);
+    writeString(opusHead, 0, 'OpusHead');
+    opusHead[8] = 1;   // version
+    opusHead[9] = 1;   // channels (mono)
+    writeUint16LE(opusHead, 10, 312);    // pre-skip
+    writeUint32LE(opusHead, 12, 16000);  // input sample rate
+    writeInt16LE(opusHead, 16, 0);       // output gain
+    opusHead[18] = 0;  // channel mapping family
+    pages.push(makeOggPage(0x02, 0, serial, 0, [opusHead]));
 
-  // Page 1: OpusTags
-  const vendor = 'raw2ogg';
-  const opusTags = new Uint8Array(8 + 4 + vendor.length + 4);
-  writeString(opusTags, 0, 'OpusTags');
-  writeUint32LE(opusTags, 8, vendor.length);
-  writeString(opusTags, 12, vendor);
-  writeUint32LE(opusTags, 12 + vendor.length, 0); // no comments
-  pages.push(makeOggPage(0x00, 0, serial, 1, [opusTags]));
+    // Page 1: OpusTags
+    const vendor = 'raw2ogg';
+    const opusTags = new Uint8Array(8 + 4 + vendor.length + 4);
+    writeString(opusTags, 0, 'OpusTags');
+    writeUint32LE(opusTags, 8, vendor.length);
+    writeString(opusTags, 12, vendor);
+    writeUint32LE(opusTags, 12 + vendor.length, 0); // no comments
+    pages.push(makeOggPage(0x00, 0, serial, 1, [opusTags]));
 
-  // Audio pages: batch ~20 packets per page
-  let granule = 0;
-  let batch = [];
-  let pageSeq = 2;
-  const BATCH_SIZE = 20;
+    // Audio pages: batch ~20 packets per page
+    let granule = 0;
+    let batch = [];
+    let pageSeq = 2;
+    const BATCH_SIZE = 20;
 
-  for (let i = 0; i < numPackets; i++) {
-    const packet = rawData.slice(i * PACKET_SIZE, (i + 1) * PACKET_SIZE);
-    batch.push(packet);
-    granule += SAMPLES_PER_PACKET_48K;
+    for (let i = 0; i < numPackets; i++) {
+      const packet = rawData.slice(i * PACKET_SIZE, (i + 1) * PACKET_SIZE);
+      batch.push(packet);
+      granule += SAMPLES_PER_PACKET_48K;
 
-    if (batch.length >= BATCH_SIZE || i === numPackets - 1) {
-      const flags = (i === numPackets - 1) ? 0x04 : 0x00; // EOS on last page
-      pages.push(makeOggPage(flags, granule, serial, pageSeq, batch));
-      pageSeq++;
-      batch = [];
+      if (batch.length >= BATCH_SIZE || i === numPackets - 1) {
+        const flags = (i === numPackets - 1) ? 0x04 : 0x00; // EOS on last page
+        pages.push(makeOggPage(flags, granule, serial, pageSeq, batch));
+        pageSeq++;
+        batch = [];
+      }
     }
-  }
 
-  // Concatenate all pages
-  let totalSize = 0;
-  for (const page of pages) totalSize += page.length;
-  const result = new Uint8Array(totalSize);
-  let offset = 0;
-  for (const page of pages) {
-    result.set(page, offset);
-    offset += page.length;
+    // Concatenate all pages
+    let totalSize = 0;
+    for (const page of pages) totalSize += page.length;
+    const result = new Uint8Array(totalSize);
+    let offset = 0;
+    for (const page of pages) {
+      result.set(page, offset);
+      offset += page.length;
+    }
+
+    // P2 Fix: Validate output starts with OggS magic and has reasonable size
+    // Expected: 2 header pages + ceil(numPackets/BATCH_SIZE) audio pages
+    if (result.length < 47 || result[0] !== 0x4F || result[1] !== 0x67 || result[2] !== 0x67 || result[3] !== 0x53) {
+      throw new Error(`OGG output validation failed: invalid header magic (got ${result.slice(0, 4)})`);
+    }
+
+    return result;
+  } catch (error) {
+    console.error('rawOpusToOgg conversion failed:', error);
+    throw error;
   }
-  return result;
 }
 
 

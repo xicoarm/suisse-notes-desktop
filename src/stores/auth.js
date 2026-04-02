@@ -1,8 +1,29 @@
 import { defineStore } from 'pinia';
-import { isElectron, getPlatform } from '../utils/platform';
+import { isElectron, isCapacitor, getPlatform } from '../utils/platform';
 import { storeToken, getToken, clearToken, storeUserCredentials, getUserCredentials, clearAllCredentials } from '../services/secureStorage';
 import { apiRequest, authenticatedRequest, API_ENDPOINTS } from '../services/api';
 import { addBreadcrumb, captureException, setUser } from '../boot/sentry';
+
+/**
+ * P1 Fix: Resume pending mobile uploads after successful authentication.
+ * Uploads may have failed with 401 while the user was logged out or token was expired.
+ */
+async function resumeMobileUploadQueue(authStore) {
+  if (!isCapacitor()) return;
+  try {
+    const { processMobileUploadQueue, getMobileUploadQueue } = await import('../services/upload');
+    const { getApiUrlSync } = await import('../services/api');
+    const queue = getMobileUploadQueue();
+    if (queue.length > 0) {
+      console.log(`Auth: Resuming ${queue.length} pending mobile upload(s) after authentication`);
+      processMobileUploadQueue(authStore, getApiUrlSync).catch(e =>
+        console.warn('Auth: Failed to resume mobile upload queue:', e)
+      );
+    }
+  } catch (e) {
+    console.warn('Auth: Could not resume mobile uploads:', e);
+  }
+}
 
 /**
  * Platform-aware auth helpers.
@@ -127,6 +148,9 @@ export const useAuthStore = defineStore('auth', {
           // Start periodic token refresh
           this.startTokenRefresh();
 
+          // P1 Fix: Resume any pending uploads that failed while logged out
+          resumeMobileUploadQueue(this);
+
           return { success: true };
         } else {
           this.error = result.error || 'Login failed';
@@ -159,6 +183,9 @@ export const useAuthStore = defineStore('auth', {
 
           // Start periodic token refresh
           this.startTokenRefresh();
+
+          // P1 Fix: Resume any pending uploads after registration
+          resumeMobileUploadQueue(this);
 
           return { success: true };
         } else {
@@ -318,6 +345,10 @@ export const useAuthStore = defineStore('auth', {
           await platformSaveToken(result.token);
 
           addBreadcrumb({ category: 'auth', message: 'Token refreshed successfully', level: 'info' });
+
+          // P1 Fix: Resume uploads that may have failed with expired token
+          resumeMobileUploadQueue(this);
+
           return { success: true, token: result.token };
         }
 

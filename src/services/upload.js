@@ -14,7 +14,7 @@ import { calculateUploadChecksum, verifyUploadChecksum } from './integrity';
 import { readFile, deleteFile } from './storage';
 import { sentryUploadStart, sentryUploadSuccess, sentryUploadFail } from './sentryHelpers';
 
-// --- Persistent Mobile Upload Queue (localStorage-based) ---
+// --- Persistent Mobile Upload Queue (localStorage + Preferences backup) ---
 const MOBILE_UPLOAD_QUEUE_KEY = 'mobile_upload_queue';
 const MAX_QUEUE_RETRIES = 10;
 
@@ -29,12 +29,45 @@ const QUEUE_ITEM_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Safely write queue to localStorage using write-ahead pattern (V12)
- * Writes to _tmp first, then overwrites main key
+ * P2 Fix: Also writes to @capacitor/preferences as durable backup (survives iOS storage purge)
  */
 function _safeWriteQueue(queue) {
   const data = JSON.stringify(queue);
   localStorage.setItem(MOBILE_UPLOAD_QUEUE_TMP_KEY, data);
   localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, data);
+
+  // Fire-and-forget write to Preferences for durability
+  if (isCapacitor()) {
+    import('@capacitor/preferences').then(({ Preferences }) =>
+      Preferences.set({ key: MOBILE_UPLOAD_QUEUE_KEY, value: data })
+    ).catch(() => {}); // best-effort
+  }
+}
+
+/**
+ * P2 Fix: Recover upload queue from Preferences if localStorage was purged by iOS.
+ * Call once at app startup before processing the queue.
+ */
+export async function recoverQueueFromPreferences() {
+  if (!isCapacitor()) return;
+
+  // Only recover if localStorage is empty (purged) — don't overwrite existing data
+  const existing = localStorage.getItem(MOBILE_UPLOAD_QUEUE_KEY);
+  if (existing) return;
+
+  try {
+    const { Preferences } = await import('@capacitor/preferences');
+    const { value } = await Preferences.get({ key: MOBILE_UPLOAD_QUEUE_KEY });
+    if (value) {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, value);
+        console.warn(`Upload queue recovered from Preferences: ${parsed.length} item(s)`);
+      }
+    }
+  } catch (e) {
+    console.warn('Could not recover upload queue from Preferences:', e);
+  }
 }
 
 /**
@@ -930,6 +963,12 @@ export const safeDeleteAfterUpload = async (filePath, recordId, recordingStore) 
  * @param {Object} uploadOptions - Upload options
  */
 export const queueUpload = (uploadOptions) => {
+  // P1 Fix: Prevent duplicate uploads for the same recording
+  if (uploadQueue.some(item => item.id === uploadOptions.recordId)) {
+    console.warn('Upload already queued for', uploadOptions.recordId);
+    return;
+  }
+
   uploadQueue.push({
     ...uploadOptions,
     id: uploadOptions.recordId,

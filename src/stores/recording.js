@@ -60,6 +60,7 @@ export const useRecordingStore = defineStore('recording', {
     interruptionInfo: null, // { reason, chunkCount, lastChunkTimestamp, detectedAt }
     // Recovery state
     recoveryInProgress: false,
+    _recoveryPromise: null, // P1 Fix: Promise to await before starting new recording
     // Mobile-specific state
     appInBackground: false,
     networkConnected: true,
@@ -175,15 +176,13 @@ export const useRecordingStore = defineStore('recording', {
           }
         });
 
-        // Cold-start recovery: also check for orphaned recordings on app launch
-        // Delay to ensure stores are initialized and UI is ready
-        setTimeout(async () => {
-          try {
-            await this._processRecovery('cold-start');
-          } catch (e) {
-            console.error('Cold-start recovery failed:', e);
-          }
-        }, 3000);
+        // Cold-start recovery: check for orphaned recordings on app launch
+        // P1 Fix: Store the promise so startRecording can await it (prevents race condition)
+        // Delay 3s to ensure stores are initialized and UI is ready
+        this._recoveryPromise = new Promise(resolve => setTimeout(resolve, 3000))
+          .then(() => this._processRecovery('cold-start'))
+          .catch(e => console.error('Cold-start recovery failed:', e))
+          .finally(() => { this._recoveryPromise = null; });
       }
     },
 
@@ -196,6 +195,13 @@ export const useRecordingStore = defineStore('recording', {
 
     async startRecording(userId = null) {
       try {
+        // P1 Fix: Wait for cold-start recovery to complete before starting a new recording
+        // Prevents race where recovery and new recording both modify store state
+        if (this._recoveryPromise) {
+          console.log('Waiting for recovery to complete before starting recording...');
+          await this._recoveryPromise;
+        }
+
         // Check storage before starting (V1 fix)
         const storageCheck = await checkStorageBeforeRecording();
         this.storageStatus = {
@@ -439,7 +445,7 @@ export const useRecordingStore = defineStore('recording', {
                   const hasCombined = hasM4a || hasWebm;
                   if (!hasCombined) {
                     console.warn('Found', chunkCount, 'orphaned chunks without metadata for', recordId, '- attempting combine');
-                    const combineResult = await this.combineChunksNative(recordId);
+                    const combineResult = await this.combineChunksNative(recordId, { isRecovery: true });
                     if (combineResult.success) {
                       recoveredRecordings.push({
                         id: recordId, userId: null,
@@ -467,7 +473,7 @@ export const useRecordingStore = defineStore('recording', {
                 if (chunkCount > 0) {
                   console.log('Orphaned recording has', chunkCount, 'chunks - auto-combining');
 
-                  const combineResult = await this.combineChunksNative(recordId);
+                  const combineResult = await this.combineChunksNative(recordId, { isRecovery: true });
 
                   if (combineResult.success) {
                     // Update metadata to mark as recovered
@@ -587,14 +593,86 @@ export const useRecordingStore = defineStore('recording', {
       return savePromise;
     },
 
+    // Validate chunk sequence is contiguous (0, 1, 2, ..., N-1) with no gaps
+    async _validateChunkSequence(recordId) {
+      const chunksDir = `recordings/${recordId}/chunks`;
+      const listResult = await storage.listFiles(chunksDir);
+
+      if (!listResult.success || !listResult.files || listResult.files.length === 0) {
+        return { valid: false, error: 'No chunks found', chunkCount: 0, gaps: [] };
+      }
+
+      // Parse chunk indices from filenames (chunk_000000.m4a → 0)
+      const indices = listResult.files
+        .map(f => {
+          const match = f.match(/chunk_(\d+)\./);
+          return match ? parseInt(match[1], 10) : null;
+        })
+        .filter(i => i !== null)
+        .sort((a, b) => a - b);
+
+      if (indices.length === 0) {
+        return { valid: false, error: 'No valid chunk files found', chunkCount: 0, gaps: [] };
+      }
+
+      // Check for gaps
+      const gaps = [];
+      for (let i = 0; i < indices.length - 1; i++) {
+        if (indices[i + 1] !== indices[i] + 1) {
+          for (let g = indices[i] + 1; g < indices[i + 1]; g++) {
+            gaps.push(g);
+          }
+        }
+      }
+
+      // Check sequence starts at 0
+      if (indices[0] !== 0) {
+        for (let g = 0; g < indices[0]; g++) {
+          gaps.unshift(g);
+        }
+      }
+
+      return {
+        valid: gaps.length === 0,
+        chunkCount: indices.length,
+        expectedCount: (indices[indices.length - 1] || 0) + 1,
+        gaps,
+        firstIndex: indices[0],
+        lastIndex: indices[indices.length - 1]
+      };
+    },
+
     // Combine chunks on mobile using native plugin (proper M4A merging)
-    async combineChunksNative(recordIdOverride = null) {
+    async combineChunksNative(recordIdOverride = null, { isRecovery = false } = {}) {
       if (!isCapacitor()) {
         return { success: false, error: 'Not on mobile platform' };
       }
 
       try {
         const targetRecordId = recordIdOverride || this.recordId;
+
+        // P0 Fix: Validate chunk sequence before combining
+        const validation = await this._validateChunkSequence(targetRecordId);
+
+        if (!validation.valid) {
+          // No chunks at all vs. gaps in the sequence — different error messages
+          if (validation.chunkCount === 0) {
+            const msg = validation.error || 'No chunks found';
+            console.error('Chunk validation failed:', msg);
+            return { success: false, error: msg };
+          }
+
+          const gapMsg = `Chunk sequence has ${validation.gaps.length} gap(s) at indices [${validation.gaps.slice(0, 10).join(', ')}${validation.gaps.length > 10 ? '...' : ''}]. Found ${validation.chunkCount}/${validation.expectedCount} chunks.`;
+
+          if (!isRecovery) {
+            // Normal path: hard fail — do not produce audio with hidden gaps
+            console.error('Chunk gap detected (hard fail):', gapMsg);
+            return { success: false, error: `Chunk integrity failure: ${gapMsg}`, gapDetected: true, gaps: validation.gaps };
+          }
+
+          // Recovery path: warn but proceed — partial audio is better than none
+          console.warn('Chunk gap detected (recovery mode, proceeding):', gapMsg);
+        }
 
         // Use native plugin for proper M4A/AAC combining via platform APIs
         // (AVMutableComposition on iOS, MediaMuxer on Android)
@@ -603,12 +681,30 @@ export const useRecordingStore = defineStore('recording', {
         const result = await BackgroundRecording.combineChunks({ recordId: targetRecordId });
 
         if (result.success) {
+          // P0 Fix: Validate combined output file
+          const outputPath = result.outputPath;
+          if (!outputPath || !result.fileSize || result.fileSize === 0) {
+            console.error('Combined file validation failed: empty or missing output');
+            return { success: false, error: 'Combined file is empty or missing' };
+          }
+
+          // Verify output file exists and has expected size
+          try {
+            await storage.exists(outputPath).then(fileExists => {
+              if (!fileExists) throw new Error('Combined file does not exist at reported path');
+            });
+          } catch (verifyError) {
+            console.error('Combined file verification failed:', verifyError);
+            return { success: false, error: `Output verification failed: ${verifyError.message}` };
+          }
+
           return {
             success: true,
-            outputPath: result.outputPath,
+            outputPath,
             fileSize: result.fileSize,
             chunkCount: result.chunkCount,
-            duration: result.duration ? Math.round(result.duration) : null
+            duration: result.duration ? Math.round(result.duration) : null,
+            hadGaps: validation.gaps.length > 0 ? validation.gaps : undefined
           };
         }
         return { success: false, error: result.error || 'Native combine failed' };

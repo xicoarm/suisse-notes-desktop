@@ -10,6 +10,25 @@ let Filesystem = null;
 let Directory = null;
 
 /**
+ * Verify a write completed successfully by checking the file exists and has expected minimum size.
+ * Serves as a durability check since Capacitor doesn't expose fsync().
+ * @param {string} path - File path to verify
+ * @param {number} expectedMinSize - Minimum expected file size in bytes (default 1)
+ * @returns {Promise<void>} Throws if verification fails
+ */
+const verifyWrite = async (path, expectedMinSize = 1) => {
+  const stat = await Filesystem.stat({
+    path,
+    directory: Directory.Documents
+  });
+  if (!stat || stat.size < expectedMinSize) {
+    throw new Error(
+      `Write verification failed for ${path}: expected >=${expectedMinSize} bytes, got ${stat?.size || 0}`
+    );
+  }
+};
+
+/**
  * Initialize Capacitor filesystem module if on mobile
  */
 const initCapacitorFilesystem = async () => {
@@ -79,12 +98,16 @@ export const saveChunk = async (recordId, data, chunkIndex, extension = '.webm')
       const fileName = `chunk_${String(chunkIndex).padStart(6, '0')}${extension}`;
       const path = `recordings/${recordId}/chunks/${fileName}`;
 
+      const base64Data = dataToBase64(data);
       await Filesystem.writeFile({
         path,
-        data: dataToBase64(data),
+        data: base64Data,
         directory: Directory.Documents,
         recursive: true
       });
+
+      // Verify write reached disk — fsync substitute
+      await verifyWrite(path, data.length || 1);
 
       return { success: true, path };
     } catch (error) {
@@ -152,6 +175,10 @@ export const writeFile = async (path, data) => {
         directory: Directory.Documents,
         recursive: true
       });
+
+      // Verify write reached disk — fsync substitute
+      await verifyWrite(path, data.byteLength || 1);
+
       return { success: true };
     } catch (error) {
       console.error('Error writing file on Capacitor:', error);
@@ -431,15 +458,45 @@ export const saveMetadata = async (recordId, metadata) => {
   if (isCapacitor()) {
     await initCapacitorFilesystem();
 
+    const basePath = `recordings/${recordId}`;
+    const primaryPath = `${basePath}/metadata.json`;
+    const tmpPath = `${basePath}/metadata.json.tmp`;
+    const bakPath = `${basePath}/metadata.json.bak`;
+    const jsonData = JSON.stringify(metadata, null, 2);
+
     try {
-      const path = `recordings/${recordId}/metadata.json`;
+      // Step 1: Write to tmp file
       await Filesystem.writeFile({
-        path,
-        data: JSON.stringify(metadata, null, 2),
+        path: tmpPath,
+        data: jsonData,
         directory: Directory.Documents,
         recursive: true,
         encoding: 'utf8'
       });
+
+      // Step 2: Verify tmp file
+      await verifyWrite(tmpPath, jsonData.length);
+
+      // Step 3: Backup current metadata (best-effort — missing file is fine)
+      try {
+        await Filesystem.copy({
+          from: primaryPath,
+          to: bakPath,
+          directory: Directory.Documents,
+          toDirectory: Directory.Documents
+        });
+      } catch {
+        // No existing metadata to back up — expected on first save
+      }
+
+      // Step 4: Atomic rename tmp → primary
+      await Filesystem.rename({
+        from: tmpPath,
+        to: primaryPath,
+        directory: Directory.Documents,
+        toDirectory: Directory.Documents
+      });
+
       return { success: true };
     } catch (error) {
       console.error('Error saving metadata on Capacitor:', error);
@@ -463,19 +520,33 @@ export const loadMetadata = async (recordId) => {
   if (isCapacitor()) {
     await initCapacitorFilesystem();
 
-    try {
-      const path = `recordings/${recordId}/metadata.json`;
-      const contents = await Filesystem.readFile({
-        path,
-        directory: Directory.Documents,
-        encoding: 'utf8'
-      });
-      const metadata = JSON.parse(contents.data);
-      return { success: true, metadata };
-    } catch (error) {
-      console.error('Error loading metadata on Capacitor:', error);
-      return { success: false, error: error.message };
+    const basePath = `recordings/${recordId}`;
+    const primaryPath = `${basePath}/metadata.json`;
+    const bakPath = `${basePath}/metadata.json.bak`;
+
+    // Try primary file first, fall back to backup on corruption
+    for (const path of [primaryPath, bakPath]) {
+      try {
+        const contents = await Filesystem.readFile({
+          path,
+          directory: Directory.Documents,
+          encoding: 'utf8'
+        });
+        const metadata = JSON.parse(contents.data);
+        if (path === bakPath) {
+          console.warn(`Primary metadata corrupt for ${recordId}, recovered from backup`);
+        }
+        return { success: true, metadata };
+      } catch (error) {
+        if (path === primaryPath) {
+          console.warn(`Failed to load primary metadata for ${recordId}, trying backup:`, error.message);
+        } else {
+          console.error('Error loading metadata on Capacitor (both primary and backup failed):', error);
+        }
+      }
     }
+
+    return { success: false, error: 'Both primary and backup metadata are missing or corrupt' };
   }
 
   return { success: false, error: 'Unsupported platform' };

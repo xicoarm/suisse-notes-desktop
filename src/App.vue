@@ -62,7 +62,10 @@ onMounted(async () => {
     // Process persistent upload queue once auth is ready
     const processQueue = async (authStore) => {
       try {
-        const { processMobileUploadQueue, getMobileUploadQueue } = await import('./services/upload');
+        const { processMobileUploadQueue, getMobileUploadQueue, recoverQueueFromPreferences } = await import('./services/upload');
+
+        // P2 Fix: Recover queue from Preferences if localStorage was purged
+        await recoverQueueFromPreferences();
         const { getApiUrlSync } = await import('./services/api');
         processMobileUploadQueue(authStore, getApiUrlSync).catch(e => {
           console.warn('Startup upload queue processing failed:', e);

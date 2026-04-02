@@ -51,6 +51,14 @@ export const setUser = (user) => {
   }
 };
 
+/**
+ * P1 Fix: Set context for crash reports (e.g., active recording state)
+ */
+export const setContext = (name, context) => {
+  if (!sentryInitialized || !SentryModule) return;
+  SentryModule.setContext(name, context);
+};
+
 // Shared beforeSend to scrub auth tokens
 function scrubSensitiveData(event) {
   if (event.request?.headers?.authorization) {
@@ -165,8 +173,10 @@ async function initCapacitor(app, router) {
         environment: import.meta.env.DEV ? 'development' : 'production',
         release: `ch.suissenotes.mobile@${appVersion}`,
         dist: platform,
-        enableNative: false,
-        enableNativeCrashHandling: false,
+        // P1 Fix: Enable native crash handling to capture C/C++ level crashes
+        // in audio processing (AVFoundation, MediaMuxer, BackgroundRecording plugin)
+        enableNative: true,
+        enableNativeCrashHandling: true,
         integrations: [
           SentryVue.vueIntegration({
             app,

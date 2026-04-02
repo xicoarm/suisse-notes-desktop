@@ -103,9 +103,12 @@ export class BleDeviceManager {
    * Scan for recording devices
    * @param {number} duration - Scan duration in ms
    * @param {Function} onFound - Callback for each device found
+   * @param {Object} options
+   * @param {boolean} options.serviceUuidOnly - If true, only use Phase 1 (service UUID filter).
+   *   Use this for background discovery to avoid showing unrelated BLE devices.
    * @returns {Promise<void>}
    */
-  async scan(duration = 7000, onFound = null) {
+  async scan(duration = 7000, onFound = null, { serviceUuidOnly = false } = {}) {
     if (!this.ble) await this.initialize();
 
     let devicesFound = 0;
@@ -150,12 +153,14 @@ export class BleDeviceManager {
       await this.stopScan();
     }
 
-    // Step 2: If no devices found, retry WITHOUT filter but log ALL names
-    // Many BLE devices don't advertise service UUIDs in their advertisement packets
-    if (devicesFound === 0) {
+    // Step 2: If no devices found via service UUID, retry WITHOUT filter.
+    // Some devices don't advertise service UUIDs in their advertisement packets.
+    // Show all named BLE devices — the handshake will verify protocol compatibility.
+    // Skip Phase 2 for background discovery (serviceUuidOnly) to avoid false positives.
+    if (devicesFound === 0 && !serviceUuidOnly) {
       addBreadcrumb({
         category: 'ble',
-        message: 'No devices with service UUID, trying name-based scan',
+        message: 'No devices with service UUID, trying unfiltered scan',
         level: 'warning'
       });
 
@@ -166,9 +171,9 @@ export class BleDeviceManager {
           const name = result.device.name || result.localName || null;
           if (name) allSeen.push(name);
 
-          // Only show devices matching known recording device patterns
-          // M1(BLE), M2(BLE) etc. = BLE advertisement name; T240 = handshake name
-          if (name && /M\d+\(BLE\)|T240|MeCho|Record.?Card/i.test(name)) {
+          // Show any device with a name — handshake validates protocol compatibility.
+          // Previously filtered by hardcoded names; now protocol-based via handshake.
+          if (name) {
             handleDevice(result, 'name-filter');
           }
         }
@@ -176,8 +181,8 @@ export class BleDeviceManager {
       await new Promise(r => setTimeout(r, duration));
       await this.stopScan();
 
-      // Log ALL discovered names to Sentry so we can identify the device's advertisement name
-      captureMessage(`BLE name-scan: found=[${[...seen].length}] all_nearby=[${allSeen.join(', ')}]`, 'info');
+      // Log discovered names to Sentry for diagnostics
+      captureMessage(`BLE unfiltered scan: matched=[${[...seen].length}] all_nearby=[${allSeen.join(', ')}]`, 'info');
     }
 
     addBreadcrumb({
@@ -187,7 +192,7 @@ export class BleDeviceManager {
     });
 
     if (devicesFound === 0) {
-      captureMessage(`BLE scan: 0 T240 devices found. All nearby: [${allSeen.join(', ')}]`, 'warning');
+      captureMessage(`BLE scan: 0 devices found. All nearby: [${allSeen.join(', ')}]`, 'warning');
     }
   }
 

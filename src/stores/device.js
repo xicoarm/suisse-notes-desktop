@@ -896,7 +896,7 @@ export const useDeviceStore = defineStore('device', {
           if (!this.rejectedDeviceIds.includes(device.deviceId)) {
             found.push(device);
           }
-        });
+        }, { serviceUuidOnly: true });
 
         if (found.length > 0) {
           // Show the first discovered device (strongest signal or first found)

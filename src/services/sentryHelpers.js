@@ -2,15 +2,19 @@
  * Sentry breadcrumb helpers for key app events
  * All functions are no-ops when Sentry is not initialized (desktop, dev)
  */
-import { addBreadcrumb, captureException, setUser } from '../boot/sentry';
+import { addBreadcrumb, captureException, setUser, setContext } from '../boot/sentry';
 
 // --- Recording ---
 export const sentryRecordingStart = (recordId) => {
   addBreadcrumb({ category: 'recording', message: 'Recording started', data: { recordId }, level: 'info' });
+  // P1 Fix: Attach recording state to crash reports so crashes during recording are identifiable
+  setContext('recording', { recordId, status: 'recording', startedAt: new Date().toISOString() });
 };
 
 export const sentryRecordingStop = (recordId, durationSeconds) => {
   addBreadcrumb({ category: 'recording', message: 'Recording stopped', data: { recordId, durationSeconds }, level: 'info' });
+  // Clear recording context — no longer recording
+  setContext('recording', null);
 };
 
 export const sentryRecordingPause = (recordId) => {
