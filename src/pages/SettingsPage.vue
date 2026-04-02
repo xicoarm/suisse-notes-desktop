@@ -81,25 +81,6 @@
             @click="handleLogout"
           />
         </div>
-
-        <div class="setting-row danger-zone account-danger-zone">
-          <div class="setting-info">
-            <div class="setting-label danger-label">
-              {{ $t('deleteAccount') }}
-            </div>
-            <div class="setting-description">
-              {{ $t('deleteAccountWarning') }}
-            </div>
-          </div>
-          <q-btn
-            flat
-            color="negative"
-            :label="$t('deleteAccount')"
-            icon="person_remove"
-            :loading="isDeletingAccount"
-            @click="showDeleteAccountConfirmation = true"
-          />
-        </div>
       </div>
 
       <!-- Recording Device Section (Mobile only) -->
@@ -311,24 +292,6 @@
           </div>
         </div>
 
-        <div class="setting-row danger-zone">
-          <div class="setting-info">
-            <div class="setting-label danger-label">
-              {{ $t('deleteAllRecordings') }}
-            </div>
-            <div class="setting-description">
-              {{ $t('deleteAllRecordingsDesc') }}
-            </div>
-          </div>
-          <q-btn
-            flat
-            color="negative"
-            :label="$t('deleteAll')"
-            icon="delete_forever"
-            :loading="isDeleting"
-            @click="showDeleteConfirmation = true"
-          />
-        </div>
       </div>
 
       <!-- Transcription Section -->
@@ -472,6 +435,54 @@
           </q-card-actions>
         </q-card>
       </q-dialog>
+
+      <!-- Danger Zone — destructive actions at the bottom -->
+      <div
+        v-if="authStore.isAuthenticated"
+        class="settings-section danger-section"
+      >
+        <div class="section-title text-negative">
+          {{ $t('dangerZone') }}
+        </div>
+
+        <div class="setting-row danger-zone">
+          <div class="setting-info">
+            <div class="setting-label danger-label">
+              {{ $t('deleteAllRecordings') }}
+            </div>
+            <div class="setting-description">
+              {{ $t('deleteAllRecordingsDesc') }}
+            </div>
+          </div>
+          <q-btn
+            flat
+            color="negative"
+            :label="$t('deleteAll')"
+            icon="delete_forever"
+            :loading="isDeleting"
+            @click="showDeleteConfirmation = true"
+          />
+        </div>
+
+        <div class="setting-row danger-zone">
+          <div class="setting-info">
+            <div class="setting-label danger-label">
+              {{ $t('deleteAccount') }}
+            </div>
+            <div class="setting-description">
+              {{ $t('deleteAccountWarning') }}
+            </div>
+          </div>
+          <q-btn
+            flat
+            color="negative"
+            :label="$t('deleteAccount')"
+            icon="person_remove"
+            :loading="isDeletingAccount"
+            @click="showDeleteAccountConfirmation = true"
+          />
+        </div>
+      </div>
 
       <!-- About Section -->
       <div class="settings-section">
@@ -1033,6 +1044,27 @@ const handleLogout = async () => {
   .danger-label {
     color: #dc2626;
     font-weight: 500;
+  }
+}
+
+// Danger section: multiple danger rows stacked
+.danger-section .setting-row.danger-zone {
+  margin: 0 -24px;
+  border-radius: 0;
+
+  &:first-of-type {
+    margin-top: 8px;
+  }
+  &:last-of-type {
+    margin-bottom: -24px;
+    border-radius: 0 0 12px 12px;
+  }
+
+  @media (max-width: 600px) {
+    margin: 0 -16px;
+    &:last-of-type {
+      margin-bottom: -16px;
+    }
   }
 }
 
