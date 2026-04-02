@@ -151,7 +151,7 @@
             unelevated
             class="gradient-btn full-width q-mt-md"
             icon="folder_open"
-            :label="$t('deviceRecordings')"
+            :label="$t('manageDevice')"
             no-caps
             @click="$router.push('/device')"
           />

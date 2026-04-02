@@ -103,12 +103,9 @@ export class BleDeviceManager {
    * Scan for recording devices
    * @param {number} duration - Scan duration in ms
    * @param {Function} onFound - Callback for each device found
-   * @param {Object} options
-   * @param {boolean} options.serviceUuidOnly - If true, only use Phase 1 (service UUID filter).
-   *   Use this for background discovery to avoid showing unrelated BLE devices.
    * @returns {Promise<void>}
    */
-  async scan(duration = 7000, onFound = null, { serviceUuidOnly = false } = {}) {
+  async scan(duration = 7000, onFound = null) {
     if (!this.ble) await this.initialize();
 
     let devicesFound = 0;
@@ -153,36 +150,27 @@ export class BleDeviceManager {
       await this.stopScan();
     }
 
-    // Step 2: If no devices found via service UUID, retry WITHOUT filter.
-    // Some devices don't advertise service UUIDs in their advertisement packets.
-    // Show all named BLE devices — the handshake will verify protocol compatibility.
-    // Skip Phase 2 for background discovery (serviceUuidOnly) to avoid false positives.
-    if (devicesFound === 0 && !serviceUuidOnly) {
+    // Step 2: If no devices found, retry service UUID scan with a longer duration.
+    // All protocol-compatible devices MUST advertise our service UUID.
+    // No unfiltered fallback — avoids showing unrelated BLE devices.
+    if (devicesFound === 0) {
       addBreadcrumb({
         category: 'ble',
-        message: 'No devices with service UUID, trying unfiltered scan',
+        message: 'No devices found, retrying service UUID scan (extended)',
         level: 'warning'
       });
 
-      await this.ble.requestLEScan(
-        { allowDuplicates: false },
-        (result) => {
-          if (!result.device) return;
-          const name = result.device.name || result.localName || null;
-          if (name) allSeen.push(name);
-
-          // Show any device with a name — handshake validates protocol compatibility.
-          // Previously filtered by hardcoded names; now protocol-based via handshake.
-          if (name) {
-            handleDevice(result, 'name-filter');
-          }
-        }
-      );
-      await new Promise(r => setTimeout(r, duration));
-      await this.stopScan();
-
-      // Log discovered names to Sentry for diagnostics
-      captureMessage(`BLE unfiltered scan: matched=[${[...seen].length}] all_nearby=[${allSeen.join(', ')}]`, 'info');
+      try {
+        await this.ble.requestLEScan(
+          { services: [BLE_SERVICE_UUID], allowDuplicates: false },
+          (result) => handleDevice(result, 'service-filter-retry')
+        );
+        await new Promise(r => setTimeout(r, duration));
+        await this.stopScan();
+      } catch (e) {
+        addBreadcrumb({ category: 'ble', message: `Extended scan error: ${e.message}`, level: 'error' });
+        await this.stopScan();
+      }
     }
 
     addBreadcrumb({
@@ -192,7 +180,7 @@ export class BleDeviceManager {
     });
 
     if (devicesFound === 0) {
-      captureMessage(`BLE scan: 0 devices found. All nearby: [${allSeen.join(', ')}]`, 'warning');
+      captureMessage('BLE scan: 0 protocol-compatible devices found', 'warning');
     }
   }
 
