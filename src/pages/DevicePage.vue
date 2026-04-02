@@ -337,13 +337,22 @@
           >{{ deviceStore.newFilesCount }}</span>
         </div>
         <q-btn
-          v-if="deviceStore.newFilesCount > 0"
+          v-if="deviceStore.isSyncing"
+          flat
+          dense
+          color="negative"
+          no-caps
+          :label="$t('cancelSync')"
+          icon="stop"
+          @click="cancelSync"
+        />
+        <q-btn
+          v-else-if="deviceStore.newFilesCount > 0"
           flat
           dense
           color="primary"
           no-caps
           :label="$t('syncAll')"
-          :loading="deviceStore.isSyncing"
           icon="sync"
           @click="syncAll"
         />
@@ -381,6 +390,7 @@
           </div>
         </div>
         <div class="file-action">
+          <!-- Synced -->
           <div
             v-if="deviceStore.syncedFiles.includes(file.file)"
             class="synced-badge"
@@ -392,28 +402,62 @@
             />
             <span>{{ $t('synced') }}</span>
           </div>
+
+          <!-- Currently syncing this file — show cancel -->
           <q-btn
             v-else-if="deviceStore.currentSyncFile === file.file"
             flat
             dense
-            disable
-          >
-            <q-spinner-dots
-              size="16px"
-              color="primary"
-            />
-          </q-btn>
-          <q-btn
-            v-else
-            flat
-            dense
-            color="primary"
-            icon="download"
-            :label="$t('syncNow')"
+            color="negative"
+            icon="stop"
+            :label="$t('cancel')"
             no-caps
-            :disable="deviceStore.isSyncing"
-            @click="syncFile(file)"
+            @click="cancelSync"
           />
+
+          <!-- Skipped — show unskip + sync option -->
+          <div
+            v-else-if="deviceStore.isFileSkipped(file.file)"
+            class="skipped-actions"
+          >
+            <span class="text-grey-5" style="font-size: 12px;">{{ $t('skipped') }}</span>
+            <q-btn
+              flat
+              dense
+              color="primary"
+              icon="replay"
+              size="sm"
+              :disable="deviceStore.isSyncing"
+              @click="unskipAndSync(file)"
+            />
+          </div>
+
+          <!-- Pending — show sync + skip -->
+          <div
+            v-else
+            class="pending-actions"
+          >
+            <q-btn
+              flat
+              dense
+              color="primary"
+              icon="download"
+              :label="$t('syncNow')"
+              no-caps
+              :disable="deviceStore.isSyncing"
+              @click="syncFile(file)"
+            />
+            <q-btn
+              flat
+              dense
+              round
+              color="grey-5"
+              icon="skip_next"
+              size="sm"
+              :disable="deviceStore.isSyncing"
+              @click="skipFile(file)"
+            />
+          </div>
         </div>
       </div>
     </div>
@@ -519,7 +563,24 @@ export default {
         await deviceStore.syncAllNew();
         $q.notify({ type: 'positive', message: t('syncComplete') });
       } catch (e) {
-        $q.notify({ type: 'negative', message: t('syncFailed'), caption: e.message, timeout: 5000 });
+        if (e.message !== 'cancelled') {
+          $q.notify({ type: 'negative', message: t('syncFailed'), caption: e.message, timeout: 5000 });
+        }
+      }
+    };
+
+    const cancelSync = async () => {
+      await deviceStore.cancelSync();
+    };
+
+    const skipFile = async (file) => {
+      await deviceStore._addSkippedFile(file.file);
+    };
+
+    const unskipAndSync = async (file) => {
+      await deviceStore._removeSkippedFile(file.file);
+      if (!deviceStore.isSyncing) {
+        await syncFile(file);
       }
     };
 
@@ -617,6 +678,9 @@ export default {
       confirmReset,
       syncFile,
       syncAll,
+      cancelSync,
+      skipFile,
+      unskipAndSync,
       formatStorage,
       formatDuration,
       formatFileSize,
@@ -1038,6 +1102,13 @@ export default {
   font-size: 13px;
   font-weight: 500;
   color: #22c55e;
+}
+
+.skipped-actions,
+.pending-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 // ========== Mobile Adjustments ==========
