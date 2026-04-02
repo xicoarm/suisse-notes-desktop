@@ -160,6 +160,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getPendingQueue: () => ipcRenderer.invoke('upload:getPendingQueue'),
     retryPending: () => ipcRenderer.invoke('upload:retryPending'),
     removeFromQueue: (recordId) => ipcRenderer.invoke('upload:removeFromQueue', recordId),
+    pollMeetingStatus: (meetingId) =>
+      withTimeout(
+        ipcRenderer.invoke('meeting:pollStatus', meetingId),
+        960000, // 16 minutes (slightly more than 15min poll timeout)
+        'Poll meeting status'
+      ),
     onProgress: (callback) => {
       ipcRenderer.on('upload:progress', (event, data) => callback(data));
     },

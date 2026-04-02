@@ -347,9 +347,48 @@
             </div>
           </div>
 
+          <!-- Transcription pending: gateway failed, polling for completion -->
+          <div
+            v-if="isTranscriptionPending"
+            class="transcript-cta"
+          >
+            <div class="cta-icon">
+              <q-spinner-dots
+                color="primary"
+                size="64px"
+              />
+            </div>
+            <h3 class="cta-title">
+              {{ $t('transcriptionProcessing') }}
+            </h3>
+            <p class="cta-subtitle">
+              {{ $t('transcriptionProcessingDesc') }}
+            </p>
+          </div>
+
+          <!-- Transcription failed after polling -->
+          <div
+            v-else-if="transcriptionPollStatus === 'failed'"
+            class="transcript-cta"
+          >
+            <div class="cta-icon">
+              <q-icon
+                name="error_outline"
+                size="80px"
+                color="warning"
+              />
+            </div>
+            <h3 class="cta-title">
+              {{ $t('transcriptionFailedTitle') }}
+            </h3>
+            <p class="cta-subtitle">
+              {{ $t('transcriptionFailedDesc') }}
+            </p>
+          </div>
+
           <!-- Main CTA: View Transcript -->
           <div
-            v-if="currentAudioFileId"
+            v-else-if="currentAudioFileId"
             class="transcript-cta"
           >
             <div class="cta-icon">
@@ -546,6 +585,9 @@ const isUploaded = ref(false);
 const isRetrying = ref(false);
 const isCancelling = ref(false);
 const uploadError = ref(null);
+const isTranscriptionPending = ref(false);
+const transcriptionPollStatus = ref(null); // null | 'polling' | 'completed' | 'failed' | 'timeout'
+const pendingMeetingId = ref(null);
 const retryAttempt = ref(0);
 const currentFilePath = ref('');
 const currentFileSize = ref(0);
@@ -866,7 +908,7 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
         duration: duration || 0,
         fileSize: fileSize,
         filePath: null,
-        uploadStatus: 'uploaded',
+        uploadStatus: uploadResult.gatewayFailed ? 'processing' : 'uploaded',
         storagePreference: null,
         transcriptionId: uploadResult.transcriptionId,
         audioFileId: uploadResult.audioFileId
@@ -875,17 +917,34 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
       // Reset session after successful upload
       transcriptionStore.resetSession();
 
-      // Refresh minutes balance (server will deduct after transcription)
-      setTimeout(() => {
-        minutesStore.fetchMinutes(authStore.token, true).catch(err => {
-          console.warn('Failed to refresh minutes after upload:', err);
-        });
-      }, 5000);
+      if (uploadResult.gatewayFailed && uploadResult.meetingId) {
+        // Gateway failed — audio is saved but transcription is pending
+        isTranscriptionPending.value = true;
+        pendingMeetingId.value = uploadResult.meetingId;
+        transcriptionPollStatus.value = 'polling';
 
-      $q.notify({
-        type: 'positive',
-        message: 'File uploaded successfully'
-      });
+        $q.notify({
+          type: 'info',
+          message: t('transcriptionProcessing'),
+          icon: 'hourglass_top',
+          timeout: 8000
+        });
+
+        // Poll in background (non-blocking)
+        pollTranscriptionStatus(uploadResult.meetingId, recordId);
+      } else {
+        // Normal success — transcription started
+        setTimeout(() => {
+          minutesStore.fetchMinutes(authStore.token, true).catch(err => {
+            console.warn('Failed to refresh minutes after upload:', err);
+          });
+        }, 5000);
+
+        $q.notify({
+          type: 'positive',
+          message: t('uploadSuccessful')
+        });
+      }
     } else {
       const errMsg = uploadResult.error || 'Upload failed';
       const isMinutesError = /insufficient|minutes|credit|balance/i.test(errMsg);
@@ -1060,6 +1119,54 @@ const cancelCurrentUpload = async () => {
   }
 };
 
+const pollTranscriptionStatus = async (meetingId, recordId) => {
+  try {
+    const result = await window.electronAPI.upload.pollMeetingStatus(meetingId);
+
+    if (result.status === 'COMPLETED') {
+      transcriptionPollStatus.value = 'completed';
+      isTranscriptionPending.value = false;
+
+      await historyStore.updateRecording(recordId, { uploadStatus: 'uploaded' });
+
+      setTimeout(() => {
+        minutesStore.fetchMinutes(authStore.token, true).catch(() => {});
+      }, 2000);
+
+      $q.notify({
+        type: 'positive',
+        message: t('transcriptionCompleted'),
+        icon: 'check_circle',
+        timeout: 6000
+      });
+    } else if (result.status === 'FAILED') {
+      transcriptionPollStatus.value = 'failed';
+      isTranscriptionPending.value = false;
+
+      await historyStore.updateRecording(recordId, { uploadStatus: 'failed' });
+
+      setTimeout(() => {
+        minutesStore.fetchMinutes(authStore.token, true).catch(() => {});
+      }, 2000);
+
+      $q.notify({
+        type: 'negative',
+        message: t('transcriptionFailed'),
+        icon: 'error_outline',
+        timeout: 8000
+      });
+    } else {
+      // TIMEOUT, UNKNOWN, or AUTH_EXPIRED — stop silently
+      transcriptionPollStatus.value = 'timeout';
+      isTranscriptionPending.value = false;
+    }
+  } catch (error) {
+    console.warn('Meeting status poll error:', error);
+    transcriptionPollStatus.value = 'timeout';
+    isTranscriptionPending.value = false;
+  }
+};
+
 const handleReset = () => {
   recordingStore.reset();
   isProcessing.value = false;
@@ -1067,6 +1174,9 @@ const handleReset = () => {
   isUploaded.value = false;
   isCancelling.value = false;
   uploadError.value = null;
+  isTranscriptionPending.value = false;
+  transcriptionPollStatus.value = null;
+  pendingMeetingId.value = null;
   retryAttempt.value = 0;
   currentFilePath.value = '';
   currentFileSize.value = 0;

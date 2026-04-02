@@ -2678,6 +2678,70 @@ async function pollServerStatus(audioFileId, maxAttempts = 15) {
   return { persisted: false, verified: false, error: 'Server confirmation timeout' };
 }
 
+/**
+ * Poll meeting transcription status after gateway failure.
+ * The transcription webhook may complete the meeting while the desktop shows "pending".
+ * Polls GET /api/desktop/meeting/{meetingId}/status every 30s for up to 15 minutes.
+ */
+async function pollMeetingTranscriptionStatus(meetingId, maxAttempts = 30) {
+  const pollInterval = 30000; // 30 seconds between polls
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      // Re-fetch token each iteration to handle expiry during long polls
+      const authToken = await getAuthToken();
+      if (!authToken) {
+        log.warn(`[MeetingPoll] No auth token available for meeting ${meetingId}`);
+        return { status: 'AUTH_EXPIRED', resolved: false };
+      }
+
+      const response = await axios.get(
+        `${API_BASE_URL}/api/desktop/meeting/${meetingId}/status`,
+        {
+          headers: {
+            'Authorization': `Bearer ${authToken}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000
+        }
+      );
+
+      if (response.data) {
+        const status = response.data.status;
+
+        if (status === 'COMPLETED') {
+          log.info(`[MeetingPoll] Meeting ${meetingId} transcription completed`);
+          return { status: 'COMPLETED', resolved: true };
+        }
+
+        if (status === 'FAILED') {
+          log.warn(`[MeetingPoll] Meeting ${meetingId} transcription failed`);
+          return { status: 'FAILED', resolved: true };
+        }
+
+        // Still PROCESSING — continue polling
+        log.info(`[MeetingPoll] Meeting ${meetingId} still ${status} (attempt ${attempt + 1}/${maxAttempts})`);
+      }
+
+      if (attempt < maxAttempts - 1) {
+        await sleep(pollInterval);
+      }
+    } catch (error) {
+      if (error.response && error.response.status === 404) {
+        log.warn(`[MeetingPoll] Status endpoint not available for meeting ${meetingId}`);
+        return { status: 'UNKNOWN', resolved: false };
+      }
+      log.warn(`[MeetingPoll] Poll attempt ${attempt + 1} failed:`, error.message);
+      if (attempt < maxAttempts - 1) {
+        await sleep(pollInterval);
+      }
+    }
+  }
+
+  log.warn(`[MeetingPoll] Timeout for meeting ${meetingId} after ${maxAttempts} attempts`);
+  return { status: 'TIMEOUT', resolved: false };
+}
+
 // Helper: Upload with retry logic
 async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
   const retryDelays = [0, 2000, 5000, 10000]; // Exponential backoff
@@ -2873,7 +2937,9 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
           success: true,
           audioFileId: response.data.audioFileId,
           transcriptionId: response.data.transcriptionId,
+          meetingId: response.data.meetingId,
           message: response.data.message,
+          gatewayFailed: response.data.gatewayFailed || false,
           canDelete: true,
           verified: true
         };
@@ -3179,6 +3245,10 @@ ipcMain.handle('upload:retryPending', async () => {
 ipcMain.handle('upload:removeFromQueue', async (event, recordId) => {
   removeFromUploadQueue(recordId);
   return { success: true };
+});
+
+ipcMain.handle('meeting:pollStatus', async (event, meetingId) => {
+  return await pollMeetingTranscriptionStatus(meetingId);
 });
 
 // --- Utility ---
