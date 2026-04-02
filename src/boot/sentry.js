@@ -163,35 +163,57 @@ async function initCapacitor(app, router) {
 
   try {
     const SentryVue = await import('@sentry/vue');
-    const SentryCapacitor = await import('@sentry/capacitor');
     SentryModule = SentryVue;
 
-    SentryCapacitor.init(
-      {
+    // Try Capacitor wrapper first, fall back to Vue-only init if native bridge unavailable
+    let initialized = false;
+    try {
+      const SentryCapacitor = await import('@sentry/capacitor');
+      SentryCapacitor.init(
+        {
+          app,
+          dsn,
+          environment: import.meta.env.DEV ? 'development' : 'production',
+          release: `ch.suissenotes.mobile@${appVersion}`,
+          dist: platform,
+          enableNative: false,
+          enableNativeCrashHandling: false,
+          integrations: [
+            SentryVue.vueIntegration({
+              app,
+              attachProps: true,
+              logErrors: true,
+              trackComponents: true,
+            }),
+            SentryVue.browserTracingIntegration({ router }),
+          ],
+          tracesSampleRate: 0.1,
+          beforeSend: scrubSensitiveData,
+          beforeBreadcrumb: filterBreadcrumbs,
+        },
+        SentryVue.init
+      );
+      initialized = true;
+    } catch (capacitorErr) {
+      console.warn('Sentry: Capacitor wrapper failed, falling back to Vue-only init:', capacitorErr.message);
+    }
+
+    // Fallback: init without Capacitor wrapper
+    if (!initialized) {
+      SentryVue.init({
         app,
         dsn,
         environment: import.meta.env.DEV ? 'development' : 'production',
         release: `ch.suissenotes.mobile@${appVersion}`,
-        dist: platform,
-        // Native crash handling requires native Sentry SDK installed in Xcode/Gradle.
-        // Keep disabled until dSYM/ProGuard upload is configured.
-        enableNative: false,
-        enableNativeCrashHandling: false,
         integrations: [
-          SentryVue.vueIntegration({
-            app,
-            attachProps: true,
-            logErrors: true,
-            trackComponents: true,
-          }),
+          SentryVue.vueIntegration({ app, attachProps: true, logErrors: true, trackComponents: true }),
           SentryVue.browserTracingIntegration({ router }),
         ],
         tracesSampleRate: 0.1,
         beforeSend: scrubSensitiveData,
         beforeBreadcrumb: filterBreadcrumbs,
-      },
-      SentryVue.init
-    );
+      });
+    }
 
     sentryInitialized = true;
 
