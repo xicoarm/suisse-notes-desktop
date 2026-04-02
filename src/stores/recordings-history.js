@@ -97,6 +97,31 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
     inProgressRecordings: (state) =>
       state.recordings.filter(r => r.uploadStatus === 'recording'),
 
+    transferringRecordings: (state) =>
+      state.recordings.filter(r => r.uploadStatus === 'transferring'),
+
+    skippedRecordings: (state) =>
+      state.recordings.filter(r => r.uploadStatus === 'skipped'),
+
+    deviceRecordings: (state) => [...state.recordings]
+      .filter(r => r.source === 'device')
+      .sort((a, b) => {
+        const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return dateB - dateA;
+      }),
+
+    appRecordings: (state) => [...state.recordings]
+      .filter(r => r.source !== 'device')
+      .sort((a, b) => {
+        const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return dateB - dateA;
+      }),
+
+    hasDeviceRecordings: (state) =>
+      state.recordings.some(r => r.source === 'device'),
+
     // Get recording count
     recordingCount: (state) => state.recordings.length,
 
@@ -265,6 +290,14 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
         if (recording.id && this.recordings.find(r => r.id === recording.id)) {
           const { id, ...updates } = recording;
           return this.updateRecording(id, updates);
+        }
+
+        // Prevent deviceFilename duplicates (e.g., from repeated recovery of same device file)
+        if (recording.deviceFilename) {
+          const existingByFilename = this.recordings.find(r => r.deviceFilename === recording.deviceFilename);
+          if (existingByFilename) {
+            return this.updateRecording(existingByFilename.id, recording);
+          }
         }
 
         // Add userId to recording

@@ -47,6 +47,20 @@
         <span class="stat-label">{{ $t('statsPending') }}</span>
       </div>
       <div
+        v-if="historyStore.transferringRecordings.length > 0"
+        class="stat-item"
+      >
+        <span class="stat-value" style="color: #6366f1;">{{ historyStore.transferringRecordings.length }}</span>
+        <span class="stat-label">{{ $t('statsTransferring') }}</span>
+      </div>
+      <div
+        v-if="historyStore.skippedRecordings.length > 0"
+        class="stat-item"
+      >
+        <span class="stat-value" style="color: #94a3b8;">{{ historyStore.skippedRecordings.length }}</span>
+        <span class="stat-label">{{ $t('statsSkipped') }}</span>
+      </div>
+      <div
         v-if="historyStore.failedRecordings.length > 0"
         class="stat-item"
       >
@@ -128,17 +142,63 @@
         </div>
       </div>
 
-      <RecordingHistoryCard
-        v-for="recording in historyStore.allRecordings"
-        :key="recording.id"
-        :recording="recording"
-        :uploading="uploadingRecordingId === recording.id"
-        @upload="handleUpload"
-        @retry="handleUpload"
-        @deleted="onRecordingDeleted"
-        @cancel-transfer="handleCancelTransfer"
-        @resync="handleResync"
-      />
+      <!-- Mobile: group device vs app recordings -->
+      <template v-if="isMobile && historyStore.hasDeviceRecordings">
+        <div class="source-section">
+          <div class="source-section-header">
+            <q-icon name="bluetooth" size="16px" color="primary" />
+            <span>{{ $t('deviceRecordingsSection') }}</span>
+            <span class="section-count">{{ historyStore.deviceRecordings.length }}</span>
+          </div>
+          <RecordingHistoryCard
+            v-for="recording in historyStore.deviceRecordings"
+            :key="recording.id"
+            :recording="recording"
+            :uploading="uploadingRecordingId === recording.id"
+            @upload="handleUpload"
+            @retry="handleUpload"
+            @deleted="onRecordingDeleted"
+            @cancel-transfer="handleCancelTransfer"
+            @resync="handleResync"
+          />
+        </div>
+        <div
+          v-if="historyStore.appRecordings.length > 0"
+          class="source-section"
+        >
+          <div class="source-section-header">
+            <q-icon name="mic" size="16px" color="primary" />
+            <span>{{ $t('appRecordingsSection') }}</span>
+            <span class="section-count">{{ historyStore.appRecordings.length }}</span>
+          </div>
+          <RecordingHistoryCard
+            v-for="recording in historyStore.appRecordings"
+            :key="recording.id"
+            :recording="recording"
+            :uploading="uploadingRecordingId === recording.id"
+            @upload="handleUpload"
+            @retry="handleUpload"
+            @deleted="onRecordingDeleted"
+            @cancel-transfer="handleCancelTransfer"
+            @resync="handleResync"
+          />
+        </div>
+      </template>
+
+      <!-- Desktop or no device recordings: flat chronological list -->
+      <template v-else>
+        <RecordingHistoryCard
+          v-for="recording in historyStore.allRecordings"
+          :key="recording.id"
+          :recording="recording"
+          :uploading="uploadingRecordingId === recording.id"
+          @upload="handleUpload"
+          @retry="handleUpload"
+          @deleted="onRecordingDeleted"
+          @cancel-transfer="handleCancelTransfer"
+          @resync="handleResync"
+        />
+      </template>
     </div>
   </q-page>
 </template>
@@ -151,7 +211,7 @@ import { useI18n } from 'vue-i18n';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingStore } from '../stores/recording';
-import { isElectron, isCapacitor } from '../utils/platform';
+import { isElectron, isCapacitor, isMobile as isMobilePlatform } from '../utils/platform';
 import { uploadWithVerification } from '../services/upload';
 import { getApiUrlSync } from '../services/api';
 import RecordingHistoryCard from '../components/RecordingHistoryCard.vue';
@@ -171,6 +231,7 @@ export default {
     const authStore = useAuthStore();
     const recordingStore = useRecordingStore();
 
+    const isMobile = computed(() => isMobilePlatform());
     const uploadingRecordingId = ref(null);
     const uploadProgress = ref(0);
     const retryAttempt = ref(0);
@@ -435,6 +496,7 @@ export default {
     return {
       historyStore,
       recordingStore,
+      isMobile,
       uploadingRecordingId,
       uploadProgress,
       retryAttempt,
@@ -595,6 +657,28 @@ export default {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.source-section {
+  margin-bottom: 16px;
+}
+
+.source-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+
+  .section-count {
+    font-weight: 400;
+    color: #94a3b8;
+    font-size: 12px;
+  }
 }
 
 .uploading-card {

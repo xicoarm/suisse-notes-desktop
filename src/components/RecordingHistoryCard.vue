@@ -11,6 +11,13 @@
           <span :class="['status-badge', currentStatus]">
             {{ statusLabel }}
           </span>
+          <span
+            v-if="recording.source === 'device'"
+            class="source-badge device"
+          >
+            <q-icon name="bluetooth" size="10px" />
+            {{ $t('device') }}
+          </span>
         </div>
 
         <div class="recording-meta">
@@ -125,9 +132,9 @@
           <q-tooltip>{{ $t('resyncFromDevice') }}</q-tooltip>
         </q-btn>
 
-        <!-- Cancelled: re-upload (has local file) or re-sync (needs device) -->
+        <!-- Cancelled or Skipped: re-upload (has local file) or re-sync (needs device) -->
         <q-btn
-          v-else-if="recording.uploadStatus === 'cancelled' && recording.filePath"
+          v-else-if="(recording.uploadStatus === 'cancelled' || recording.uploadStatus === 'skipped') && recording.filePath"
           flat
           round
           icon="cloud_upload"
@@ -138,7 +145,7 @@
           <q-tooltip>{{ $t('reUpload') }}</q-tooltip>
         </q-btn>
         <q-btn
-          v-else-if="recording.uploadStatus === 'cancelled' && !recording.filePath"
+          v-else-if="(recording.uploadStatus === 'cancelled' || recording.uploadStatus === 'skipped') && !recording.filePath"
           flat
           round
           icon="sync"
@@ -331,6 +338,7 @@ export default {
         failed: 'statusFailed',
         recording: 'statusRecording',
         cancelled: 'statusCancelled',
+        skipped: 'statusSkipped',
         transferring: 'statusTransferring'
       };
       const key = statusKeys[props.recording.uploadStatus];
@@ -442,6 +450,10 @@ export default {
     border-left: 3px solid #94a3b8;
   }
 
+  &.status-skipped {
+    border-left: 3px dashed #a1a1aa;
+  }
+
   &.status-transferring {
     border-left: 3px solid #6366f1;
   }
@@ -540,9 +552,31 @@ export default {
     color: #64748b;
   }
 
+  &.skipped {
+    background: rgba(161, 161, 170, 0.1);
+    color: #78716c;
+  }
+
   &.transferring {
     background: rgba(99, 102, 241, 0.1);
     color: #6366f1;
+  }
+}
+
+.source-badge {
+  padding: 2px 6px;
+  border-radius: 9999px;
+  font-size: 9px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+
+  &.device {
+    background: rgba(59, 130, 246, 0.1);
+    color: #2563eb;
   }
 }
 

@@ -889,7 +889,7 @@ export const useDeviceStore = defineStore('device', {
       const historyStore = useRecordingsHistoryStore();
       const rec = historyStore.getRecordingByDeviceFilename(filename);
       if (rec) {
-        await historyStore.updateRecording(rec.id, { uploadStatus: 'cancelled' });
+        await historyStore.updateRecording(rec.id, { uploadStatus: 'skipped' });
       }
       await this._addSkippedFile(filename);
     },
