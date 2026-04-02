@@ -350,7 +350,13 @@ export class BleDeviceManager {
       await this._write(buildCmd(CMD_BATTERY));
       const resp = await this._readNotification(5000);
       // Response: 0x01 0x09 0x00 <level>
-      return resp[3];
+      // Validate this is actually a battery response before reading the value
+      if (resp.length < 4 || resp[0] !== TYPE_CMD || resp[1] !== CMD_BATTERY[0] || resp[2] !== CMD_BATTERY[1]) {
+        addBreadcrumb({ category: 'ble', message: `getBattery: unexpected response [${Array.from(resp.slice(0, 6)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(', ')}]`, level: 'warning' });
+        return -1; // Signal invalid reading — caller should ignore
+      }
+      const level = resp[3];
+      return (level >= 0 && level <= 100) ? level : -1;
     } finally {
       release();
     }

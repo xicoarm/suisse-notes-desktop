@@ -723,7 +723,8 @@ export const useDeviceStore = defineStore('device', {
     async _fetchDeviceStatus() {
       const manager = getBleManager();
       try {
-        this.batteryLevel = await manager.getBattery();
+        const level = await manager.getBattery();
+        if (level >= 0) this.batteryLevel = level;
       } catch (e) {
         console.warn('Failed to get battery:', e.message);
       }
@@ -773,7 +774,8 @@ export const useDeviceStore = defineStore('device', {
         // device from disconnecting due to inactivity (even during recording)
         const manager = getBleManager();
         try {
-          this.batteryLevel = await manager.getBattery();
+          const level = await manager.getBattery();
+          if (level >= 0) this.batteryLevel = level; // Ignore invalid readings (-1)
         } catch (e) {
           console.warn('BLE keepalive (battery) failed:', e.message);
         }
