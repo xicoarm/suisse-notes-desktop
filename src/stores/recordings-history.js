@@ -218,6 +218,21 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
             _setCachedRecordings(userId, this.recordings);
           }
 
+          // Fix stale 'uploading' status from crashed/killed sessions.
+          // If a recording is stuck in 'uploading' from a previous app session,
+          // reset it to 'pending' so the user can retry.
+          let staleFixed = 0;
+          for (const rec of this.recordings) {
+            if (rec.uploadStatus === 'uploading') {
+              rec.uploadStatus = 'pending';
+              staleFixed++;
+            }
+          }
+          if (staleFixed > 0) {
+            console.warn(`Reset ${staleFixed} stale 'uploading' recording(s) to 'pending'`);
+            _setCachedRecordings(userId, this.recordings);
+          }
+
           // Retry syncing any local-only recordings to server
           this.syncUnsyncedToServer();
         } catch (error) {

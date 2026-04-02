@@ -345,6 +345,9 @@ export default {
         if (filename) {
           await deviceStore._removeSkippedFile(filename);
 
+          // Refresh file list from device before checking
+          await deviceStore.fetchFileList();
+
           // Find the file on the device and sync it
           const deviceFile = deviceStore.deviceFiles.find(f => f.file === filename);
           if (deviceFile) {
@@ -364,13 +367,26 @@ export default {
       }
     };
 
-    const handleCancelTransfer = async () => {
+    const handleCancelTransfer = async (recording) => {
       try {
-        const { useDeviceStore } = await import('../stores/device');
-        const deviceStore = useDeviceStore();
-        await deviceStore.cancelSync();
+        // Cancel BLE device sync if it's a device recording
+        if (recording?.source === 'device') {
+          const { useDeviceStore } = await import('../stores/device');
+          const deviceStore = useDeviceStore();
+          await deviceStore.cancelSync();
+        }
+
+        // Reset stuck upload status to pending so user can retry
+        if (recording?.id && recording.uploadStatus === 'uploading') {
+          await historyStore.updateRecording(recording.id, { uploadStatus: 'pending' });
+        }
+
+        // Clear local uploading state
+        if (uploadingRecordingId.value === recording?.id) {
+          uploadingRecordingId.value = null;
+        }
       } catch (e) {
-        console.warn('Cancel sync error:', e);
+        console.warn('Cancel transfer error:', e);
       }
     };
 

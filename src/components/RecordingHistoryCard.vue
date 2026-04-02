@@ -89,7 +89,6 @@
             size="24px"
           />
           <q-btn
-            v-if="recording.source === 'device'"
             flat
             round
             icon="close"
@@ -97,7 +96,7 @@
             size="sm"
             @click="onCancelTransfer"
           >
-            <q-tooltip>{{ $t('cancelSync') }}</q-tooltip>
+            <q-tooltip>{{ $t('cancel') }}</q-tooltip>
           </q-btn>
         </template>
 
