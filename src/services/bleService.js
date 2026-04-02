@@ -85,6 +85,22 @@ export class BleDeviceManager {
     this._onDisconnectCallback = null;
     this._recordingStateCallback = null;
     this._downloadAborted = false;
+
+    // Command lock: prevents concurrent BLE commands from interleaving responses.
+    // Without this, auto-sync keepalive (getBattery) can fire during getFileList,
+    // causing response bytes to be read by the wrong command.
+    this._commandLock = Promise.resolve();
+  }
+
+  /**
+   * Acquire exclusive access to the BLE command channel.
+   * All public commands must go through this to prevent interleaving.
+   */
+  _acquireLock() {
+    let release;
+    const prev = this._commandLock;
+    this._commandLock = new Promise(resolve => { release = resolve; });
+    return prev.then(() => release);
   }
 
   /**
@@ -299,10 +315,12 @@ export class BleDeviceManager {
    */
   async unpair() {
     if (this.connected && this.deviceId) {
+      const release = await this._acquireLock();
       try {
         await this._write(buildCmd(CMD_UNPAIR));
         await this._readNotification(3000);
       } catch { /* ignore */ }
+      finally { release(); }
       await this.disconnect();
     }
   }
@@ -327,10 +345,15 @@ export class BleDeviceManager {
    * Get battery level (0-100)
    */
   async getBattery() {
-    await this._write(buildCmd(CMD_BATTERY));
-    const resp = await this._readNotification(5000);
-    // Response: 0x01 0x09 0x00 <level>
-    return resp[3];
+    const release = await this._acquireLock();
+    try {
+      await this._write(buildCmd(CMD_BATTERY));
+      const resp = await this._readNotification(5000);
+      // Response: 0x01 0x09 0x00 <level>
+      return resp[3];
+    } finally {
+      release();
+    }
   }
 
   /**
@@ -338,34 +361,49 @@ export class BleDeviceManager {
    * @returns {Object} { unit, totalCapacity, freeCapacity }
    */
   async getStorage() {
-    await this._write(buildCmd(CMD_STORAGE));
-    const resp = await this._readNotification(5000);
-    return parseJsonFromBuffer(resp, 3);
+    const release = await this._acquireLock();
+    try {
+      await this._write(buildCmd(CMD_STORAGE));
+      const resp = await this._readNotification(5000);
+      return parseJsonFromBuffer(resp, 3);
+    } finally {
+      release();
+    }
   }
 
   /**
    * Sync phone time to device
    */
   async syncTime() {
-    const now = new Date();
-    const timeStr = now.getFullYear().toString() +
-      (now.getMonth() + 1).toString().padStart(2, '0') +
-      now.getDate().toString().padStart(2, '0') +
-      now.getHours().toString().padStart(2, '0') +
-      now.getMinutes().toString().padStart(2, '0') +
-      now.getSeconds().toString().padStart(2, '0');
-    const timeBytes = new TextEncoder().encode(timeStr);
-    await this._write(buildCmd(CMD_TIME_SYNC, [...timeBytes]));
-    await this._readNotification(3000);
+    const release = await this._acquireLock();
+    try {
+      const now = new Date();
+      const timeStr = now.getFullYear().toString() +
+        (now.getMonth() + 1).toString().padStart(2, '0') +
+        now.getDate().toString().padStart(2, '0') +
+        now.getHours().toString().padStart(2, '0') +
+        now.getMinutes().toString().padStart(2, '0') +
+        now.getSeconds().toString().padStart(2, '0');
+      const timeBytes = new TextEncoder().encode(timeStr);
+      await this._write(buildCmd(CMD_TIME_SYNC, [...timeBytes]));
+      await this._readNotification(3000);
+    } finally {
+      release();
+    }
   }
 
   /**
    * Get device info (brand, model, versions, etc.)
    */
   async getDeviceInfo() {
-    await this._write(buildCmd(CMD_DEVICE_INFO));
-    const resp = await this._readNotification(5000);
-    return parseJsonFromBuffer(resp, 3);
+    const release = await this._acquireLock();
+    try {
+      await this._write(buildCmd(CMD_DEVICE_INFO));
+      const resp = await this._readNotification(5000);
+      return parseJsonFromBuffer(resp, 3);
+    } finally {
+      release();
+    }
   }
 
   /**
@@ -373,6 +411,7 @@ export class BleDeviceManager {
    * @returns {Promise<Array>} Array of file info objects
    */
   async getFileList() {
+    const release = await this._acquireLock();
     // Drain any stale notifications from previous operations
     this._drainNotifyQueue();
 
@@ -416,6 +455,7 @@ export class BleDeviceManager {
         await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
         await this._readNotification(3000);
       } catch { /* best effort */ }
+      release();
     }
   }
 
@@ -439,6 +479,7 @@ export class BleDeviceManager {
   }
 
   async downloadFile(filename, onProgress = null, totalSize = 0) {
+    const release = await this._acquireLock();
     this._downloadAborted = false;
 
     // Drain any stale notifications from previous operations
@@ -511,6 +552,8 @@ export class BleDeviceManager {
         await this._readNotification(3000);
       } catch { /* best effort */ }
       throw err;
+    } finally {
+      release();
     }
   }
 
@@ -520,11 +563,16 @@ export class BleDeviceManager {
    * @returns {Promise<boolean>} true if deleted
    */
   async deleteFile(filename) {
-    const filenameBytes = new TextEncoder().encode(filename);
-    await this._write(buildCmd(CMD_DELETE_FILE, [...filenameBytes]));
-    const resp = await this._readNotification(5000);
-    // 0x01 = success, 0x02 = failure
-    return resp[3] === 0x01;
+    const release = await this._acquireLock();
+    try {
+      const filenameBytes = new TextEncoder().encode(filename);
+      await this._write(buildCmd(CMD_DELETE_FILE, [...filenameBytes]));
+      const resp = await this._readNotification(5000);
+      // 0x01 = success, 0x02 = failure
+      return resp[3] === 0x01;
+    } finally {
+      release();
+    }
   }
 
   // ========== Internal Methods ==========
