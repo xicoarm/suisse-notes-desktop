@@ -403,8 +403,32 @@ export const useDeviceStore = defineStore('device', {
 
       try {
         const manager = getBleManager();
-        const appUuid = await getOrCreateAppUuid();
-        const deviceInfo = await manager.connect(bleDeviceId, appUuid);
+        let appUuid = await getOrCreateAppUuid();
+        let deviceInfo;
+
+        try {
+          deviceInfo = await manager.connect(bleDeviceId, appUuid);
+        } catch (e) {
+          // If device rejects because it's paired to a different UUID (0x01),
+          // try user-scoped UUIDs from the migration period
+          if (e.message?.includes('rejected pairing')) {
+            const altUuid = await this._findAlternativeAppUuid(appUuid);
+            if (altUuid) {
+              addBreadcrumb({ category: 'ble', message: 'Retrying handshake with alternative UUID (migration recovery)', level: 'info' });
+              deviceInfo = await manager.connect(bleDeviceId, altUuid);
+              // It worked — adopt this UUID as the installation UUID
+              if (isCapacitor()) {
+                const { Preferences } = await import('@capacitor/preferences');
+                await Preferences.set({ key: PREF_APP_UUID, value: altUuid });
+              }
+              appUuid = altUuid;
+            } else {
+              throw e; // No alternative found
+            }
+          } else {
+            throw e;
+          }
+        }
 
         // Store device info
         this.deviceName = deviceInfo.name || deviceInfo.model || 'Recording Device';
@@ -1194,6 +1218,23 @@ export const useDeviceStore = defineStore('device', {
     },
 
     // ========== Persistence ==========
+
+    /**
+     * Find an alternative appUuid that a device might be paired to.
+     * Checks user-scoped UUIDs from the migration period.
+     */
+    async _findAlternativeAppUuid(currentUuid) {
+      if (!isCapacitor()) return null;
+      const auth = useAuthStore();
+      const userId = auth.user?.id;
+      if (!userId) return null;
+
+      const { Preferences } = await import('@capacitor/preferences');
+      const scopedKey = `${PREF_APP_UUID}:u${userId}`;
+      const { value } = await Preferences.get({ key: scopedKey });
+      if (value && value !== currentUuid) return value;
+      return null;
+    },
 
     async _savePairedDevice() {
       if (isCapacitor()) {
