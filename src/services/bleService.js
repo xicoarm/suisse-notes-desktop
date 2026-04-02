@@ -31,6 +31,7 @@ const CMD_FILE_DOWNLOAD = [0x1C, 0x00];
 const CMD_FILE_DONE = [0x1D, 0x00];
 const CMD_DELETE_FILE = [0x1E, 0x00];
 const CMD_DEVICE_INFO = [0x3D, 0x00];
+const CMD_FORMAT = [0x68, 0x00];      // Format device storage (FAT) — wipes all files
 const CMD_SYNC_STATE = [0x74, 0x00];
 const CMD_UNPAIR = [0x05, 0x00];
 
@@ -308,6 +309,25 @@ export class BleDeviceManager {
     } catch { /* ignore */ }
     this.connected = false;
     this.deviceId = null;
+  }
+
+  /**
+   * Format device storage (wipes all files). Per protocol §9:
+   * Returns 0x00 on success, other value on failure.
+   * Device won't accept commands until format completes.
+   */
+  async formatDevice() {
+    const release = await this._acquireLock();
+    try {
+      await this._write(buildCmd(CMD_FORMAT));
+      // Format can take a while on large storage — use generous timeout
+      const resp = await this._readNotification(30000);
+      const status = resp[3];
+      addBreadcrumb({ category: 'ble', message: `Format device: status=0x${status.toString(16)}`, level: 'info' });
+      return status === 0x00;
+    } finally {
+      release();
+    }
   }
 
   /**

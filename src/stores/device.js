@@ -494,37 +494,23 @@ export const useDeviceStore = defineStore('device', {
       }
 
       const manager = getBleManager();
-      const errors = [];
-      let deletedCount = 0;
 
-      // Step 1: Fetch latest file list
-      await this.fetchFileList();
-      const files = [...this.deviceFiles];
-
-      // Step 2: Delete all files on device
-      for (const file of files) {
-        try {
-          const deleted = await manager.deleteFile(file.file);
-          if (deleted) {
-            deletedCount++;
-          } else {
-            errors.push(`Failed to delete ${file.file}`);
-          }
-        } catch (e) {
-          errors.push(`Error deleting ${file.file}: ${e.message}`);
-        }
+      // Format device storage — single command wipes all files (protocol §9, CMD 0x68)
+      const formatted = await manager.formatDevice();
+      if (!formatted) {
+        throw new Error('Device format failed');
       }
 
-      // Step 3: Unpair and clear local state (same as forgetDevice)
+      // Unpair and clear local state
       await this.forgetDevice();
 
       addBreadcrumb({
         category: 'ble',
-        message: `Device reset: deleted ${deletedCount}/${files.length} files, ${errors.length} errors`,
+        message: 'Device factory reset: format + unpair complete',
         level: 'info'
       });
 
-      return { success: errors.length === 0, deletedCount, errors };
+      return { success: true, deletedCount: 0, errors: [] };
     },
 
     async forgetDevice() {
