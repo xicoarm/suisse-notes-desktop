@@ -203,6 +203,19 @@ export const useRecordingStore = defineStore('recording', {
           await this._recoveryPromise;
         }
 
+        // Wait for Electron main process recovery to finish (prevents chunk corruption)
+        if (isElectron() && window.electronAPI?.recording?.isRecoveryRunning) {
+          let recoveryWaitMs = 0;
+          while (await window.electronAPI.recording.isRecoveryRunning()) {
+            if (recoveryWaitMs >= 15000) {
+              console.warn('Recovery still running after 15s — proceeding anyway');
+              break;
+            }
+            await new Promise(r => setTimeout(r, 500));
+            recoveryWaitMs += 500;
+          }
+        }
+
         // Check storage before starting (V1 fix)
         const storageCheck = await checkStorageBeforeRecording();
         this.storageStatus = {
@@ -570,6 +583,10 @@ export const useRecordingStore = defineStore('recording', {
               this.chunkIndex++;
               return { success: true };
             } else {
+              // Disk full: skip retries, return immediately
+              if (result.diskFull) {
+                return { success: false, error: 'Disk full', diskFull: true };
+              }
               // Propagate error code from main process for specific handling
               const err = new Error(result.error || 'Failed to save chunk');
               err.code = result.code || null;
@@ -577,6 +594,12 @@ export const useRecordingStore = defineStore('recording', {
             }
           } catch (error) {
             console.error(`Error saving chunk (attempt ${attempt + 1}/${maxRetries + 1}):`, error);
+
+            // Detect disk full — no point retrying, stop immediately
+            if (error.code === 'ENOSPC') {
+              console.error('Disk full (ENOSPC) — cannot save chunk, must stop recording');
+              return { success: false, error: 'Disk full', code: 'ENOSPC', diskFull: true };
+            }
 
             // Detect AV/EDR file locking (EBUSY, EACCES, EPERM) — use longer retries
             if (attempt === 0 && (error.code === 'EBUSY' || error.code === 'EACCES' || error.code === 'EPERM')) {
@@ -682,15 +705,25 @@ export const useRecordingStore = defineStore('recording', {
             return { success: false, error: `Chunk integrity failure: ${gapMsg}`, gapDetected: true, gaps: validation.gaps };
           }
 
-          // Recovery path: warn but proceed — partial audio is better than none
-          console.warn('Chunk gap detected (recovery mode, proceeding):', gapMsg);
+          // Recovery path: proceed with available chunks — partial audio is better than none
+          // But only if we have a reasonable portion (>50% of expected chunks)
+          if (validation.chunkCount < validation.expectedCount * 0.5) {
+            console.error('Recovery: too many missing chunks, cannot produce usable audio:', gapMsg);
+            return { success: false, error: `Too many missing chunks (${validation.chunkCount}/${validation.expectedCount})`, gapDetected: true };
+          }
+          console.warn('Chunk gap detected (recovery mode, proceeding with partial):', gapMsg);
         }
 
         // Use native plugin for proper M4A/AAC combining via platform APIs
         // (AVMutableComposition on iOS, MediaMuxer on Android)
         const { registerPlugin } = await import('@capacitor/core');
         const BackgroundRecording = registerPlugin('BackgroundRecording');
-        const result = await BackgroundRecording.combineChunks({ recordId: targetRecordId });
+        const result = await Promise.race([
+          BackgroundRecording.combineChunks({ recordId: targetRecordId }),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Native combineChunks timed out after 60s')), 60000)
+          )
+        ]);
 
         if (result.success) {
           // P0 Fix: Validate combined output file

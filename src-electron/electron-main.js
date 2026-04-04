@@ -408,6 +408,9 @@ async function recoverOrphanedRecordings() {
   }
 }
 
+// Expose recovery state to renderer so it can wait before starting a new recording
+ipcMain.handle('recording:isRecoveryRunning', () => isRecoveryRunning);
+
 // Internal function for recovery - similar to combineChunks but without IPC
 async function combineChunksForRecovery(recordId) {
   try {
@@ -574,9 +577,18 @@ async function cleanupOldOrphanedDirectories() {
           const hasSessions = fs.existsSync(sessionsPath);
 
           if (hasChunks || hasSessions) {
-            log.info(`Cleaning up old orphaned directory: ${dir} (age: ${Math.round((now - stats.mtimeMs) / (24 * 60 * 60 * 1000))} days)`);
-            await fs.promises.rm(dirPath, { recursive: true, force: true });
-            cleanedCount++;
+            // Check if there are actual chunk files (user's audio data)
+            const chunkFiles = hasChunks ? fs.readdirSync(chunksPath).filter(f => f.startsWith('chunk_')) : [];
+            const sessionFiles = hasSessions ? fs.readdirSync(sessionsPath).filter(f => f.endsWith('.webm')) : [];
+            if (chunkFiles.length > 0 || sessionFiles.length > 0) {
+              // NEVER delete directories with audio data — user might still want it
+              log.warn(`Keeping old orphaned directory with ${chunkFiles.length} chunks, ${sessionFiles.length} sessions: ${dir}`);
+            } else {
+              // Empty chunks/sessions dirs — safe to clean up
+              log.info(`Cleaning up old empty orphaned directory: ${dir}`);
+              await fs.promises.rm(dirPath, { recursive: true, force: true });
+              cleanedCount++;
+            }
           }
         }
       } catch (err) {
@@ -2160,19 +2172,33 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
     console.log(`Combined ${sortedChunks.length} chunks into raw session (${rawStats.size} bytes)`);
 
     // Validate raw file is a readable audio container before FFmpeg processing
+    let ffmpegAvailable = true;
     try {
       await getAudioMetadata(rawPath);
     } catch (probeErr) {
-      log.error('Raw session file is not a valid audio file:', probeErr.message);
-      Sentry.captureException(probeErr, {
-        tags: { operation: 'Session file (probe validation)' },
-        extra: { rawPath, rawSize: rawStats.size, chunksCount: sortedChunks.length },
-      });
-      try { fs.unlinkSync(rawPath); } catch (e) { /* ignore */ }
-      return { success: false, error: 'Raw recording file is corrupt or unreadable' };
+      // Distinguish between "ffprobe can't run" vs "file is actually corrupt"
+      const isSpawnError = probeErr.message?.includes('spawn') || probeErr.message?.includes('ENOENT') || probeErr.message?.includes('ENOEXEC') || probeErr.message?.includes('system error');
+      if (isSpawnError) {
+        log.warn('FFmpeg/ffprobe binary cannot execute — skipping FFmpeg processing, using raw concatenation:', probeErr.message);
+        ffmpegAvailable = false;
+        // Don't fail — raw concatenation is valid WebM, just skip FFmpeg step
+      } else {
+        log.error('Raw session file is not a valid audio file:', probeErr.message);
+        Sentry.captureException(probeErr, {
+          tags: { operation: 'Session file (probe validation)' },
+          extra: { rawPath, rawSize: rawStats.size, chunksCount: sortedChunks.length },
+        });
+        // Keep raw file and chunks for recovery — don't delete
+        return { success: false, error: 'Raw recording file is corrupt or unreadable' };
+      }
     }
 
     // Process with FFmpeg (codec copy, fallback to re-encode) - with timeout
+    // Skip FFmpeg entirely if binary is broken — use raw concatenation as-is
+    if (!ffmpegAvailable) {
+      log.info('Using raw concatenated file as session (FFmpeg unavailable)');
+      fs.renameSync(rawPath, finalPath);
+    } else {
     try {
       await ffmpegWithTimeout(
         ffmpeg(rawPath)
@@ -2194,6 +2220,7 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
       );
       console.log('Session file created with re-encode');
     }
+    } // end ffmpegAvailable else block
 
     // Get duration via ffprobe
     let durationMs = 0;
@@ -2207,15 +2234,19 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
     // P0 Data Loss Fix: Validate session file BEFORE deleting source data
     const ipcSessionValidation = validateAudioOutput(finalPath);
     if (!ipcSessionValidation.valid) {
-      log.error('IPC createSessionFile: Output validation failed:', ipcSessionValidation.error);
+      log.warn('IPC createSessionFile: Output validation warning:', ipcSessionValidation.error);
+      // Keep raw file and chunks intact for recovery — don't delete anything
       try { fs.unlinkSync(finalPath); } catch (e) { /* ignore */ }
       return { success: false, error: `Session file validation failed: ${ipcSessionValidation.error}` };
     }
 
-    // Clean up raw file and chunks
+    // Validation passed — safe to clean up raw file and chunks
     try {
-      fs.unlinkSync(rawPath);
-      sortedChunks.forEach(f => fs.unlinkSync(path.join(chunksPath, f)));
+      if (fs.existsSync(rawPath)) fs.unlinkSync(rawPath);
+      sortedChunks.forEach(f => {
+        const chunkPath = path.join(chunksPath, f);
+        if (fs.existsSync(chunkPath)) fs.unlinkSync(chunkPath);
+      });
     } catch (e) {
       console.warn('Could not clean up after session creation:', e);
     }

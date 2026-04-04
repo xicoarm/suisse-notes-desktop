@@ -87,6 +87,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         IPC_TIMEOUTS.combine,
         'Combine chunks'
       ),
+    isRecoveryRunning: () => ipcRenderer.invoke('recording:isRecoveryRunning'),
     checkForChunks: (id, ext) =>
       withTimeout(
         ipcRenderer.invoke('recording:checkForChunks', id, ext),

@@ -112,6 +112,13 @@ export const saveChunk = async (recordId, data, chunkIndex, extension = '.webm')
       return { success: true, path };
     } catch (error) {
       console.error('Error saving chunk on Capacitor:', error);
+      // Check if this is a disk-full situation (Capacitor doesn't return ENOSPC codes)
+      try {
+        const space = await getFreeDiskSpace();
+        if (space.freeMB < 50) {
+          return { success: false, error: 'Disk full', diskFull: true };
+        }
+      } catch (e) { /* ignore space check failure */ }
       return { success: false, error: error.message };
     }
   }

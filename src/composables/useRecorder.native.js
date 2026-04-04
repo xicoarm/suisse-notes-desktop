@@ -434,9 +434,14 @@ export function useNativeRecorder() {
     }
 
     try {
-      // Stop native recording
+      // Stop native recording (with timeout to prevent infinite hang)
       if (BackgroundRecording) {
-        const nativeResult = await BackgroundRecording.stopRecording();
+        const nativeResult = await Promise.race([
+          BackgroundRecording.stopRecording(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Native stopRecording timed out after 10s')), 10000)
+          )
+        ]);
         console.log('Native recording stopped:', nativeResult);
       }
 

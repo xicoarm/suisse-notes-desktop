@@ -159,6 +159,7 @@
           <q-tooltip>{{ $t('resyncFromDevice') }}</q-tooltip>
         </q-btn>
 
+        <!-- Failed with file: retry upload -->
         <q-btn
           v-else-if="recording.uploadStatus === 'failed' && recording.filePath"
           flat
@@ -171,7 +172,7 @@
           <q-tooltip>{{ $t('retryUpload') }}</q-tooltip>
         </q-btn>
 
-        <!-- Failed without file: resync from device -->
+        <!-- Failed without file: resync from device if possible -->
         <q-btn
           v-else-if="recording.uploadStatus === 'failed' && !recording.filePath && recording.source === 'device'"
           flat
@@ -182,19 +183,6 @@
           @click="$emit('resync', recording)"
         >
           <q-tooltip>{{ $t('resyncFromDevice') }}</q-tooltip>
-        </q-btn>
-
-        <!-- Failed without file and not from device: allow delete -->
-        <q-btn
-          v-else-if="recording.uploadStatus === 'failed' && !recording.filePath"
-          flat
-          round
-          icon="delete_outline"
-          color="negative"
-          size="sm"
-          @click="onDelete"
-        >
-          <q-tooltip>{{ $t('delete') }}</q-tooltip>
         </q-btn>
 
         <!-- Copy link button for uploaded recordings -->

@@ -1299,8 +1299,34 @@ const handleStop = async () => {
 
       // Update existing history entry (created at recording start) to 'failed' status
       // Do NOT call addRecording — the entry already exists with uploadStatus 'recording'
+      // Try to resolve the file path even on failure — the audio file may still exist
+      let failedFilePath = null;
+      if (isElectron()) {
+        try {
+          const fileInfo = await window.electronAPI.recording.getFilePath(recordingStore.recordId, '.webm');
+          if (fileInfo.success) {
+            failedFilePath = fileInfo.filePath;
+            currentFilePath.value = fileInfo.filePath;
+            currentFileSize.value = fileInfo.fileSize || 0;
+          }
+        } catch (e) { /* file doesn't exist yet */ }
+      } else if (isCapacitor()) {
+        // On mobile, check if a combined file exists despite the error
+        try {
+          const { exists: fileExists } = await import('../services/storage');
+          const m4aExists = await fileExists(`recordings/${recordingStore.recordId}/combined.m4a`);
+          const webmExists = !m4aExists && await fileExists(`recordings/${recordingStore.recordId}/combined.webm`);
+          if (m4aExists || webmExists) {
+            failedFilePath = `recordings/${recordingStore.recordId}/combined.${m4aExists ? 'm4a' : 'webm'}`;
+            currentFilePath.value = failedFilePath;
+          }
+        } catch (e) { /* file doesn't exist */ }
+      }
+
       await historyStore.updateRecording(recordingStore.recordId, {
         duration: finalDuration.value,
+        filePath: failedFilePath,
+        fileSize: currentFileSize.value || 0,
         uploadStatus: 'failed',
         uploadError: result.error || 'Failed to process recording',
         chunkCount: result.chunkCount || 0
@@ -1469,21 +1495,24 @@ const startAutoUpload = async () => {
       });
 
       // P0 Data Loss Fix: Only delete if upload was verified AND canDelete returns true
-      // Check result.canDelete which comes from two-phase verification
+      // Schedule deletion after a safety delay — gives server time to persist
       if (currentStoragePreference.value === 'delete_after_upload') {
         if (result.canDelete && recordingStore.canDelete(recordingStore.recordId)) {
-          if (isElectron()) {
-            await window.electronAPI.recording.deleteRecording(recordingStore.recordId);
-          }
-          // On mobile, file deletion is handled by the storage service
-          await historyStore.updateRecording(recordingStore.recordId, { filePath: null });
+          const deleteRecordId = recordingStore.recordId;
+          // Delay deletion by 30s to allow server to fully persist
+          setTimeout(async () => {
+            try {
+              if (isElectron()) {
+                await window.electronAPI.recording.deleteRecording(deleteRecordId);
+              }
+              await historyStore.updateRecording(deleteRecordId, { filePath: null });
+              recordingStore.unlockFile(deleteRecordId);
+            } catch (e) {
+              console.warn('Delayed file deletion failed:', e);
+            }
+          }, 30000);
         } else {
           console.warn('File not deleted: upload not verified or file is locked');
-          $q.notify({
-            type: 'warning',
-            message: 'Recording uploaded but file kept locally for safety',
-            timeout: 5000
-          });
         }
       }
 

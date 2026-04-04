@@ -983,6 +983,11 @@ function stopAuthKeepAlive() {
  * @param {number|null} options.maxRecordingSeconds - Maximum recording duration in seconds (minutes limit)
  */
 export async function startRecording(options = {}) {
+  // Guard: prevent starting a new recording while one is already active
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    return { success: false, error: 'Recording already in progress' };
+  }
+
   const {
     recordingStore,
     authStore,
@@ -1146,8 +1151,15 @@ export async function startRecording(options = {}) {
             recordingStore.chunkSaveErrors++;
             console.error('Chunk save failed:', result.error, `(${recordingStore.chunkSaveErrors} consecutive failures)`);
 
-            // After 3 consecutive failures, emit warning for UI
-            if (recordingStore.chunkSaveErrors >= 3 && !recordingStore.chunkSaveErrorWarning) {
+            // Disk full: emergency stop immediately
+            if (result.diskFull) {
+              emit('chunkSaveFailure', {
+                consecutiveErrors: recordingStore.chunkSaveErrors,
+                error: 'Disk full — recording stopped to preserve saved data',
+                diskFull: true
+              });
+            } else if (!recordingStore.chunkSaveErrorWarning) {
+              // Emit warning on first failure so user knows immediately
               recordingStore.chunkSaveErrorWarning = true;
               emit('chunkSaveFailure', {
                 consecutiveErrors: recordingStore.chunkSaveErrors,
@@ -1155,7 +1167,12 @@ export async function startRecording(options = {}) {
               });
             }
 
-            // Don't resolve flush as successful when save failed
+            // Still resolve pending flushes so pause/close don't hang
+            if (flushResolvers.length > 0) {
+              const resolvers = flushResolvers;
+              flushResolvers = [];
+              resolvers.forEach(resolve => resolve());
+            }
             return;
           } else {
             // Reset consecutive error counter on success
@@ -1170,14 +1187,20 @@ export async function startRecording(options = {}) {
         } catch (error) {
           console.error('Error saving chunk:', error);
           recordingStore.chunkSaveErrors++;
-          if (recordingStore.chunkSaveErrors >= 3 && !recordingStore.chunkSaveErrorWarning) {
+          if (!recordingStore.chunkSaveErrorWarning) {
             recordingStore.chunkSaveErrorWarning = true;
             emit('chunkSaveFailure', {
               consecutiveErrors: recordingStore.chunkSaveErrors,
               error: error.message
             });
           }
-          return; // Don't resolve flush on error
+          // Still resolve pending flushes so pause/close don't hang
+          if (flushResolvers.length > 0) {
+            const resolvers = flushResolvers;
+            flushResolvers = [];
+            resolvers.forEach(resolve => resolve());
+          }
+          return;
         }
       }
       // Signal flush completion to all pending flush callers (only on success)
@@ -1476,14 +1499,24 @@ export async function stopRecording(recordingStore, stopSystemAudio) {
     }
 
     let finalChunkSavedResolve;
-    const finalChunkSaved = new Promise(r => { finalChunkSavedResolve = r; });
+    const finalChunkSaved = new Promise(r => {
+      finalChunkSavedResolve = r;
+      // Timeout: if ondataavailable never fires after stop(), don't hang forever
+      setTimeout(() => {
+        console.warn('Final chunk save timed out after 5s — proceeding with available data');
+        r();
+      }, 5000);
+    });
 
     mediaRecorder.ondataavailable = async (event) => {
       if (event.data.size > 0) {
         try {
           const arrayBuffer = await event.data.arrayBuffer();
           const uint8Array = new Uint8Array(arrayBuffer);
-          await recordingStore.saveChunk(Array.from(uint8Array));
+          const result = await recordingStore.saveChunk(Array.from(uint8Array));
+          if (result && !result.success) {
+            console.error('Final chunk save failed:', result.error);
+          }
         } catch (error) {
           console.error('Error saving final chunk:', error);
         }
@@ -1543,8 +1576,19 @@ export async function stopRecording(recordingStore, stopSystemAudio) {
     };
 
     if (mediaRecorder.state !== 'inactive') {
-      mediaRecorder.requestData();
-      mediaRecorder.stop();
+      try {
+        mediaRecorder.requestData();
+        mediaRecorder.stop();
+      } catch (stopError) {
+        console.error('MediaRecorder stop/requestData failed:', stopError);
+        // Force cleanup and resolve — don't let the promise hang
+        finalChunkSavedResolve();
+        cleanup();
+        mediaRecorder = null;
+        const result = await recordingStore.stopRecording();
+        resolve(result);
+        return;
+      }
     } else {
       stopLevelMonitoring();
   
