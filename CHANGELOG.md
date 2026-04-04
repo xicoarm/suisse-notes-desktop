@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.8.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.8.1...v3.8.2) (2026-04-04)
+
+
+### Bug Fixes
+
+* bulletproof recording pipeline — handle FFmpeg unavailable, prevent data loss ([e142515](https://github.com/xicoarm/suisse-notes-desktop/commit/e142515e4828d92212ff73088aea1d51898b6740))
+
 ### [3.8.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.8.0...v3.8.1) (2026-04-04)
 
 
