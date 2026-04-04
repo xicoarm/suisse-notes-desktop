@@ -1,6 +1,6 @@
 {
   "name": "suisse-notes-desktop",
-  "version": "3.8.2",
+  "version": "3.8.3",
   "description": "Desktop app for recording and transcribing meetings",
   "productName": "Suisse Notes",
   "author": "Suisse IT GmbH",
@@ -9,7 +9,8 @@
     "dev": "quasar dev -m electron",
     "dev:ios": "quasar dev -m capacitor -T ios",
     "dev:android": "quasar dev -m capacitor -T android",
-    "build": "quasar build -m electron",
+    "prepare:ffmpeg": "node scripts/prepare-ffmpeg.js",
+    "build": "node scripts/prepare-ffmpeg.js && quasar build -m electron",
     "build:ios": "quasar build -m capacitor -T ios",
     "build:android": "quasar build -m capacitor -T android",
     "cap:sync": "cd src-capacitor && npx cap sync && node -e \"const fs=require('fs'),p='ios/App/App/capacitor.config.json',c=JSON.parse(fs.readFileSync(p,'utf8'));if(!c.packageClassList)c.packageClassList=[];if(!c.packageClassList.includes('BackgroundRecordingPlugin')){c.packageClassList.push('BackgroundRecordingPlugin');fs.writeFileSync(p,JSON.stringify(c,null,'\\t'))}\"",

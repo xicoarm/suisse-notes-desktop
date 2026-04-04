@@ -185,6 +185,19 @@
           <q-tooltip>{{ $t('resyncFromDevice') }}</q-tooltip>
         </q-btn>
 
+        <!-- Failed without file (non-device): pick a new file and reupload -->
+        <q-btn
+          v-else-if="recording.uploadStatus === 'failed' && !recording.filePath && recording.source !== 'device'"
+          flat
+          round
+          icon="upload_file"
+          color="warning"
+          size="sm"
+          @click="$emit('reupload', recording)"
+        >
+          <q-tooltip>{{ $t('reUpload') }}</q-tooltip>
+        </q-btn>
+
         <!-- Copy link button for uploaded recordings -->
         <q-btn
           v-if="isUploaded && !linkLoading"
@@ -313,7 +326,7 @@ export default {
     }
   },
 
-  emits: ['upload', 'retry', 'deleted', 'cancel-transfer', 'resync'],
+  emits: ['upload', 'retry', 'deleted', 'cancel-transfer', 'resync', 'reupload'],
 
   setup(props, { emit }) {
     const { t } = useI18n();

@@ -188,7 +188,7 @@ export default function (ctx) {
         },
         extraResources: [
           {
-            from: 'resources/ffmpeg',
+            from: 'resources/ffmpeg/${os}-${arch}',
             to: 'ffmpeg',
             filter: ['**/*']
           }

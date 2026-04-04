@@ -307,6 +307,14 @@
               @click="retryUpload"
             />
             <q-btn
+              v-if="!isMobile && currentFilePath"
+              flat
+              color="grey-7"
+              :label="$t('openFileLocation')"
+              icon="folder_open"
+              @click="openFileLocation"
+            />
+            <q-btn
               flat
               color="grey-7"
               :label="$t('newRecording')"
@@ -1060,6 +1068,12 @@ const startMobileUpload = async (file, fileSize, filename) => {
       type: 'negative',
       message: error.message || 'Error uploading file'
     });
+  }
+};
+
+const openFileLocation = () => {
+  if (isElectron() && currentFilePath.value) {
+    window.electronAPI.shell.showItemInFolder(currentFilePath.value);
   }
 };
 

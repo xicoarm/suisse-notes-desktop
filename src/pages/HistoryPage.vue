@@ -180,6 +180,7 @@
             :uploading="uploadingRecordingId === recording.id"
             @upload="handleUpload"
             @retry="handleUpload"
+            @reupload="handleReupload"
             @deleted="onRecordingDeleted"
             @cancel-transfer="handleCancelTransfer"
             @resync="handleResync"
@@ -205,6 +206,7 @@
             :uploading="uploadingRecordingId === recording.id"
             @upload="handleUpload"
             @retry="handleUpload"
+            @reupload="handleReupload"
             @deleted="onRecordingDeleted"
             @cancel-transfer="handleCancelTransfer"
             @resync="handleResync"
@@ -221,6 +223,7 @@
           :uploading="uploadingRecordingId === recording.id"
           @upload="handleUpload"
           @retry="handleUpload"
+          @reupload="handleReupload"
           @deleted="onRecordingDeleted"
           @cancel-transfer="handleCancelTransfer"
           @resync="handleResync"
@@ -241,6 +244,7 @@ import { useRecordingStore } from '../stores/recording';
 import { isElectron, isCapacitor, isMobile as isMobilePlatform } from '../utils/platform';
 import { uploadWithVerification } from '../services/upload';
 import { getApiUrlSync } from '../services/api';
+import { pickAudioFile } from '../services/filePicker';
 import RecordingHistoryCard from '../components/RecordingHistoryCard.vue';
 
 export default {
@@ -342,6 +346,7 @@ export default {
         } else if (isCapacitor()) {
           result = await uploadWithVerification({
             filePath: recording.filePath,
+            file: recording.file, // File object for reupload via file picker
             recordId: recording.id,
             apiUrl: getApiUrlSync(),
             authToken: authStore.token,
@@ -411,6 +416,23 @@ export default {
         uploadingRecordingId.value = null;
         uploadProgress.value = 0;
         retryAttempt.value = 0;
+      }
+    };
+
+    const handleReupload = async (recording) => {
+      const result = await pickAudioFile();
+      if (!result.success || result.cancelled) return;
+
+      // Update the recording with the new file path
+      await historyStore.updateRecording(recording.id, {
+        filePath: result.filePath,
+        fileSize: result.fileSize || recording.fileSize
+      });
+
+      // Fetch updated recording and start upload
+      const updated = historyStore.allRecordings.find(r => r.id === recording.id);
+      if (updated) {
+        handleUpload({ ...updated, file: result.file });
       }
     };
 
@@ -543,6 +565,7 @@ export default {
       goToRecord,
       formatDuration,
       handleUpload,
+      handleReupload,
       handleResync,
       handleCancelTransfer,
       cancelActiveUpload,
