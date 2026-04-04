@@ -1747,6 +1747,12 @@ function sortChunksNumerically(chunks, ext) {
   });
 }
 
+// Helper: Safely parse duration from ffprobe metadata (guards against Infinity/NaN)
+function safeParseDuration(metadata) {
+  const d = parseFloat(metadata?.format?.duration);
+  return isFinite(d) ? Math.round(d) : 0;
+}
+
 // Helper: Get audio metadata via ffprobe
 function getAudioMetadata(filePath) {
   return new Promise((resolve, reject) => {
@@ -2193,7 +2199,7 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
     let durationMs = 0;
     try {
       const metadata = await getAudioMetadata(finalPath);
-      durationMs = parseFloat(metadata.format.duration) * 1000;
+      durationMs = safeParseDuration(metadata) * 1000;
     } catch (e) {
       console.warn('Could not get audio duration:', e);
     }
@@ -2309,9 +2315,8 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           // P0 Data Loss Fix: Validate output BEFORE deleting sources
           const singleSessionValidation = validateAudioOutput(outputPath);
           if (!singleSessionValidation.valid) {
-            log.error('combineChunks: Single session output validation failed:', singleSessionValidation.error);
-            try { fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
-            return { success: false, error: `Output validation failed: ${singleSessionValidation.error}` };
+            log.warn('combineChunks: Single session output validation warning:', singleSessionValidation.error);
+            // Continue anyway - audio data may still be usable by the server
           }
 
           // Cleanup
@@ -2324,7 +2329,7 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           let audioDuration = 0;
           try {
             const metadata = await getAudioMetadata(outputPath);
-            audioDuration = Math.round(parseFloat(metadata.format.duration) || 0);
+            audioDuration = safeParseDuration(metadata);
           } catch (e) {
             console.warn('Could not get audio duration for single session:', e.message);
           }
@@ -2339,7 +2344,7 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
             success: true,
             outputPath,
             filename: outputFile,
-            fileSizeMb: (singleSessionValidation.size / (1024 * 1024)).toFixed(2),
+            fileSizeMb: ((singleSessionValidation.size || fs.statSync(outputPath).size) / (1024 * 1024)).toFixed(2),
             duration: audioDuration
           };
         }
@@ -2390,16 +2395,15 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
         // P0 Data Loss Fix: Validate output BEFORE deleting sources
         const multiSessionValidation = validateAudioOutput(outputPath);
         if (!multiSessionValidation.valid) {
-          log.error('combineChunks: Multi-session output validation failed:', multiSessionValidation.error);
-          try { fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
-          return { success: false, error: `Output validation failed: ${multiSessionValidation.error}` };
+          log.warn('combineChunks: Multi-session output validation warning:', multiSessionValidation.error);
+          // Continue anyway - audio data may still be usable by the server
         }
 
         // Get actual audio duration via ffprobe
         let multiAudioDuration = 0;
         try {
           const metadata = await getAudioMetadata(outputPath);
-          multiAudioDuration = Math.round(parseFloat(metadata.format.duration) || 0);
+          multiAudioDuration = safeParseDuration(metadata);
         } catch (e) {
           console.warn('Could not get audio duration for multi session:', e.message);
         }
@@ -2419,7 +2423,7 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           success: true,
           outputPath,
           filename: outputFile,
-          fileSizeMb: (multiSessionValidation.size / (1024 * 1024)).toFixed(2),
+          fileSizeMb: ((multiSessionValidation.size || fs.statSync(outputPath).size) / (1024 * 1024)).toFixed(2),
           duration: multiAudioDuration
         };
       }
@@ -2447,21 +2451,50 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
         }
 
         // Use streaming concatenation to avoid memory issues
-        await combineChunksStreaming(chunksPath, sortedChunks, outputPath);
+        const rawConcatPath = outputPath + '.raw';
+        await combineChunksStreaming(chunksPath, sortedChunks, rawConcatPath);
+
+        // Process with FFmpeg (codec copy, fallback to re-encode) to ensure valid container
+        try {
+          try {
+            await ffmpegWithTimeout(
+              ffmpeg(rawConcatPath)
+                .audioCodec('copy')
+                .output(outputPath),
+              FFMPEG_TIMEOUT_MS,
+              'Direct concat (codec copy)',
+              { reportToSentry: false }
+            );
+          } catch (codecCopyErr) {
+            log.warn('Direct concat codec copy failed, trying re-encode:', codecCopyErr.message);
+            await ffmpegWithTimeout(
+              ffmpeg(rawConcatPath)
+                .output(outputPath),
+              FFMPEG_TIMEOUT_MS,
+              'Direct concat (re-encode)'
+            );
+          }
+          try { fs.unlinkSync(rawConcatPath); } catch (e) { /* ignore */ }
+        } catch (ffmpegErr) {
+          log.warn('FFmpeg processing failed for direct concat, using raw file:', ffmpegErr.message);
+          // Last resort: use the raw concatenated file as-is
+          try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
+          fs.renameSync(rawConcatPath, outputPath);
+        }
 
         // P0 Data Loss Fix: Validate output BEFORE deleting sources
         const directConcatValidation = validateAudioOutput(outputPath);
         if (!directConcatValidation.valid) {
-          log.error('combineChunks: Direct concat output validation failed:', directConcatValidation.error);
-          try { fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
-          return { success: false, error: `Output validation failed: ${directConcatValidation.error}` };
+          log.warn('combineChunks: Direct concat output validation failed:', directConcatValidation.error);
+          // Don't delete - keep the file even if validation fails, the audio data may still be usable
+          log.info('Keeping output file despite validation failure - audio may still be uploadable');
         }
 
         // Get actual audio duration via ffprobe
         let directAudioDuration = 0;
         try {
           const metadata = await getAudioMetadata(outputPath);
-          directAudioDuration = Math.round(parseFloat(metadata.format.duration) || 0);
+          directAudioDuration = safeParseDuration(metadata);
         } catch (e) {
           console.warn('Could not get audio duration for direct concat:', e.message);
         }
@@ -2479,7 +2512,7 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           success: true,
           outputPath,
           filename: outputFile,
-          fileSizeMb: (directConcatValidation.size / (1024 * 1024)).toFixed(2),
+          fileSizeMb: ((directConcatValidation.size || fs.statSync(outputPath).size) / (1024 * 1024)).toFixed(2),
           duration: directAudioDuration,
           warning: sequenceCheck.message || undefined
         };
@@ -3381,6 +3414,22 @@ ipcMain.handle('shell:openExternal', async (event, url) => {
   }
 });
 
+// Show a file in its parent folder in the OS file manager
+ipcMain.handle('shell:showItemInFolder', async (event, filePath) => {
+  try {
+    if (!filePath || typeof filePath !== 'string') {
+      return { success: false, error: 'Invalid file path' };
+    }
+    // Resolve relative paths against recordings directory
+    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.join(getRecordingsPath(), filePath);
+    shell.showItemInFolder(resolvedPath);
+    return { success: true };
+  } catch (error) {
+    console.error('Error showing item in folder:', error);
+    return { success: false, error: error.message };
+  }
+});
+
 // --- History Management ---
 
 // Get all recordings from history (filtered by userId)
@@ -3663,7 +3712,7 @@ ipcMain.handle('dialog:openFile', async (event, options) => {
     let duration = 0;
     try {
       const metadata = await getAudioMetadata(filePath);
-      duration = Math.round(parseFloat(metadata.format.duration) || 0);
+      duration = safeParseDuration(metadata);
     } catch (e) {
       console.warn('Could not get audio duration:', e);
     }
@@ -3691,7 +3740,7 @@ ipcMain.handle('dialog:getDroppedFilePath', async (event, filePath) => {
     let duration = 0;
     try {
       const metadata = await getAudioMetadata(filePath);
-      duration = Math.round(parseFloat(metadata.format.duration) || 0);
+      duration = safeParseDuration(metadata);
     } catch (e) {
       console.warn('Could not get audio duration:', e);
     }

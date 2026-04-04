@@ -15,7 +15,10 @@
             v-if="recording.source === 'device'"
             class="source-badge device"
           >
-            <q-icon name="bluetooth" size="10px" />
+            <q-icon
+              name="bluetooth"
+              size="10px"
+            />
             {{ $t('device') }}
           </span>
         </div>
@@ -181,6 +184,19 @@
           <q-tooltip>{{ $t('resyncFromDevice') }}</q-tooltip>
         </q-btn>
 
+        <!-- Failed without file and not from device: allow delete -->
+        <q-btn
+          v-else-if="recording.uploadStatus === 'failed' && !recording.filePath"
+          flat
+          round
+          icon="delete_outline"
+          color="negative"
+          size="sm"
+          @click="onDelete"
+        >
+          <q-tooltip>{{ $t('delete') }}</q-tooltip>
+        </q-btn>
+
         <!-- Copy link button for uploaded recordings -->
         <q-btn
           v-if="isUploaded && !linkLoading"
@@ -192,6 +208,19 @@
           @click="onCopyLink"
         >
           <q-tooltip>{{ $t('copyLinkTooltip') }}</q-tooltip>
+        </q-btn>
+
+        <!-- Open file location (desktop only) -->
+        <q-btn
+          v-if="isDesktop && recording.filePath && !uploading"
+          flat
+          round
+          icon="folder_open"
+          color="grey-7"
+          size="sm"
+          @click="openFileLocation"
+        >
+          <q-tooltip>{{ $t('openFileLocation') }}</q-tooltip>
         </q-btn>
 
         <q-btn
@@ -275,6 +304,7 @@ import { useI18n } from 'vue-i18n';
 import { useQuasar } from 'quasar';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useShareLink } from '../composables/useShareLink';
+import { isElectron } from '../utils/platform';
 import AudioPlayback from './AudioPlayback.vue';
 
 export default {
@@ -307,6 +337,7 @@ export default {
     const showDeleteDialog = ref(false);
     const deleteFile = ref(true);
     const linkLoading = ref(false);
+    const isDesktop = isElectron();
 
     const formattedDate = computed(() => {
       const data = historyStore.formatDateData(props.recording.createdAt);
@@ -376,6 +407,12 @@ export default {
       });
     };
 
+    const openFileLocation = () => {
+      if (isDesktop && props.recording.filePath) {
+        window.electronAPI.shell.showItemInFolder(props.recording.filePath);
+      }
+    };
+
     const onDelete = () => {
       showDeleteDialog.value = true;
     };
@@ -400,6 +437,8 @@ export default {
       onCardClick,
       onCopyLink,
       onCancelTransfer,
+      openFileLocation,
+      isDesktop,
       onDelete,
       confirmDelete
     };

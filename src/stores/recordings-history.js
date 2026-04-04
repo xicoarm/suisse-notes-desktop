@@ -608,7 +608,7 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
 
     // Format duration for display
     formatDuration(seconds) {
-      if (!seconds) return '0:00';
+      if (!seconds || !isFinite(seconds)) return '0:00';
 
       const hours = Math.floor(seconds / 3600);
       const minutes = Math.floor((seconds % 3600) / 60);

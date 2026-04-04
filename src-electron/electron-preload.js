@@ -195,9 +195,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getUserDataPath: () => ipcRenderer.invoke('app:getUserDataPath')
   },
 
-  // Shell (for opening external URLs)
+  // Shell (for opening external URLs and file locations)
   shell: {
-    openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url)
+    openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+    showItemInFolder: (filePath) => ipcRenderer.invoke('shell:showItemInFolder', filePath)
   },
 
   // Dialog (for file selection)

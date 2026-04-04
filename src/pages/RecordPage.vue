@@ -437,26 +437,22 @@
             size="lg"
             color="negative"
           />
-          <h3>Recording Error</h3>
-          <p>{{ recordingStore.error || 'An unexpected error occurred' }}</p>
-          <div
-            v-if="recordingStore.chunkIndex > 0"
-            class="chunks-info"
-          >
-            {{ recordingStore.chunkIndex }} audio chunk(s) saved locally.
-          </div>
+          <h3>{{ $t('recordingErrorTitle') }}</h3>
+          <p>{{ $t('recordingErrorMessage') }}</p>
           <div class="error-card-actions">
             <q-btn
+              v-if="recordingStore.chunkIndex > 0"
               color="primary"
-              label="New Recording"
-              icon="mic"
-              @click="handleNewRecording"
+              :label="$t('retrySaving')"
+              icon="refresh"
+              @click="retryChunkCombine"
             />
             <q-btn
-              v-if="recordingStore.chunkIndex > 0"
-              flat
-              label="Retry Combining"
-              @click="retryChunkCombine"
+              color="primary"
+              :label="$t('newRecording')"
+              icon="mic"
+              :flat="recordingStore.chunkIndex > 0"
+              @click="handleNewRecording"
             />
           </div>
         </div>
@@ -1611,7 +1607,16 @@ const retryChunkCombine = async () => {
   isProcessing.value = true;
   recordingStore.error = null;
   recordingStore.status = 'stopped';
-  const result = await recordingStore.combineChunksNative();
+
+  let result;
+  if (isElectron()) {
+    result = await window.electronAPI.recording.combineChunks(recordingStore.recordId, '.webm');
+  } else if (isCapacitor()) {
+    result = await recordingStore.combineChunksNative();
+  } else {
+    result = { success: false, error: 'Unsupported platform' };
+  }
+
   if (result.success) {
     currentFilePath.value = result.outputPath;
     currentFileSize.value = result.fileSize || 0;

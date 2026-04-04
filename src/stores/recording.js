@@ -82,6 +82,7 @@ export const useRecordingStore = defineStore('recording', {
       return 0;
     },
     formattedDuration: (state) => {
+      if (!state.duration || !isFinite(state.duration)) return '00:00:00';
       const hours = Math.floor(state.duration / 3600);
       const minutes = Math.floor((state.duration % 3600) / 60);
       const seconds = state.duration % 60;

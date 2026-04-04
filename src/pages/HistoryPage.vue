@@ -50,14 +50,20 @@
         v-if="historyStore.transferringRecordings.length > 0"
         class="stat-item"
       >
-        <span class="stat-value" style="color: #6366f1;">{{ historyStore.transferringRecordings.length }}</span>
+        <span
+          class="stat-value"
+          style="color: #6366f1;"
+        >{{ historyStore.transferringRecordings.length }}</span>
         <span class="stat-label">{{ $t('statsTransferring') }}</span>
       </div>
       <div
         v-if="historyStore.skippedRecordings.length > 0"
         class="stat-item"
       >
-        <span class="stat-value" style="color: #94a3b8;">{{ historyStore.skippedRecordings.length }}</span>
+        <span
+          class="stat-value"
+          style="color: #94a3b8;"
+        >{{ historyStore.skippedRecordings.length }}</span>
         <span class="stat-label">{{ $t('statsSkipped') }}</span>
       </div>
       <div
@@ -123,7 +129,20 @@
             />
             <span class="uploading-title">{{ $t('uploadingNewRecording') }}</span>
           </div>
-          <span class="uploading-progress">{{ Math.min(recordingStore.activeUploadProgress, 99) }}%</span>
+          <div class="uploading-actions">
+            <span class="uploading-progress">{{ Math.min(recordingStore.activeUploadProgress, 99) }}%</span>
+            <q-btn
+              flat
+              round
+              dense
+              icon="close"
+              color="negative"
+              size="xs"
+              @click="cancelActiveUpload"
+            >
+              <q-tooltip>{{ $t('cancelUpload') }}</q-tooltip>
+            </q-btn>
+          </div>
         </div>
         <q-linear-progress
           :value="Math.min(recordingStore.activeUploadProgress, 99) / 100"
@@ -146,7 +165,11 @@
       <template v-if="isMobile && historyStore.hasDeviceRecordings">
         <div class="source-section">
           <div class="source-section-header">
-            <q-icon name="bluetooth" size="16px" color="primary" />
+            <q-icon
+              name="bluetooth"
+              size="16px"
+              color="primary"
+            />
             <span>{{ $t('deviceRecordingsSection') }}</span>
             <span class="section-count">{{ historyStore.deviceRecordings.length }}</span>
           </div>
@@ -167,7 +190,11 @@
           class="source-section"
         >
           <div class="source-section-header">
-            <q-icon name="mic" size="16px" color="primary" />
+            <q-icon
+              name="mic"
+              size="16px"
+              color="primary"
+            />
             <span>{{ $t('appRecordingsSection') }}</span>
             <span class="section-count">{{ historyStore.appRecordings.length }}</span>
           </div>
@@ -248,7 +275,7 @@ export default {
     };
 
     const formatDuration = (seconds) => {
-      if (!seconds) return '00:00';
+      if (!seconds || !isFinite(seconds)) return '00:00';
       const hours = Math.floor(seconds / 3600);
       const minutes = Math.floor((seconds % 3600) / 60);
       const secs = seconds % 60;
@@ -451,6 +478,18 @@ export default {
       }
     };
 
+    const cancelActiveUpload = async () => {
+      if (isElectron()) {
+        await window.electronAPI.upload.cancel(recordingStore.recordId);
+      } else if (isCapacitor()) {
+        const { cancelUpload } = await import('../services/upload');
+        await cancelUpload(recordingStore.recordId);
+      }
+      recordingStore.status = 'stopped';
+      recordingStore.uploadProgress = 0;
+      recordingStore.backgroundUpload.active = false;
+    };
+
     const onRecordingDeleted = () => {
       $q.notify({
         type: 'info',
@@ -506,6 +545,7 @@ export default {
       handleUpload,
       handleResync,
       handleCancelTransfer,
+      cancelActiveUpload,
       onRecordingDeleted
     };
   }
@@ -705,6 +745,12 @@ export default {
     font-size: 16px;
     font-weight: 500;
     color: #1e293b;
+  }
+
+  .uploading-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
   .uploading-progress {
