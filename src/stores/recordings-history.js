@@ -341,6 +341,11 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
     // Update a recording in history (with userId check)
     async updateRecording(id, updates) {
       try {
+        // Sanitize duration — prevent Infinity/NaN from being persisted
+        if (updates.duration !== undefined && !isFinite(updates.duration)) {
+          updates.duration = 0;
+        }
+
         // Try to get userId from the existing recording as fallback
         const existing = this.recordings.find(r => r.id === id);
         const userId = this._getUserId(existing?.userId || updates?.userId, { forWrite: true });

@@ -954,7 +954,7 @@ export const useRecordingStore = defineStore('recording', {
     },
 
     setFinalDuration(duration) {
-      this.finalDuration = duration;
+      this.finalDuration = isFinite(duration) ? Math.round(duration) : 0;
     },
 
     setError(error) {

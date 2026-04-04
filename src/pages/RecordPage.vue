@@ -580,109 +580,111 @@
               <span>{{ $t('recordingSavedLocally') }}</span>
             </div>
           </div>
-
-          <!-- Upload Complete state -->
-          <div
-            v-else-if="recordingStore.isUploaded"
-            class="upload-success"
-          >
-            <!-- Top Section: New Recording Button + Duration (prominent) -->
-            <div class="success-top-actions">
-              <q-btn
-                unelevated
-                color="primary"
-                :label="$t('newRecording')"
-                icon="mic"
-                class="new-recording-btn"
-                @click="handleNewRecording"
-              />
-              <div
-                v-if="finalDuration > 0"
-                class="duration-badge"
-              >
-                <q-icon
-                  name="schedule"
-                  size="18px"
-                />
-                <span>{{ formattedFinalDuration }}</span>
-              </div>
-            </div>
-
-            <!-- Main CTA: View Transcript -->
-            <div
-              v-if="currentAudioFileId"
-              class="transcript-cta"
-            >
-              <div class="cta-icon">
-                <q-icon
-                  name="check_circle"
-                  size="64px"
-                  color="positive"
-                />
-              </div>
-              <h3 class="cta-title">
-                {{ $t('transcriptReady') }}
-              </h3>
-              <p class="cta-subtitle">
-                {{ $t('transcriptCta') }}
-              </p>
-
-              <!-- Prominent clickable button with animation -->
-              <div class="cta-button-wrapper">
-                <q-btn
-                  unelevated
-                  class="main-cta-button pulse-attention"
-                  @click="openInSuisseNotes"
-                >
-                  <div class="button-content">
-                    <q-icon
-                      name="open_in_new"
-                      size="28px"
-                      class="q-mr-md"
-                    />
-                    <div class="button-text">
-                      <span class="button-label">{{ $t('openInSuisseNotes') }}</span>
-                      <span class="button-hint">{{ $t('clickHereToView') }}</span>
-                    </div>
-                    <q-icon
-                      name="arrow_forward"
-                      size="24px"
-                      class="q-ml-md arrow-icon"
-                    />
-                  </div>
-                </q-btn>
-              </div>
-
-              <!-- URL Display with Copy -->
-              <div class="url-compact">
-                <code>https://app.suisse-notes.ch/meeting/audio/{{ currentAudioFileId }}</code>
-                <q-btn
-                  flat
-                  dense
-                  icon="content_copy"
-                  size="sm"
-                  color="primary"
-                  @click="copyTranscriptUrl"
-                >
-                  <q-tooltip>{{ $t('copyLink') }}</q-tooltip>
-                </q-btn>
-              </div>
-            </div>
-
-            <!-- Bottom: View History link -->
-            <div class="success-bottom">
-              <q-btn
-                flat
-                color="grey-7"
-                :label="$t('viewHistory')"
-                icon="history"
-                size="sm"
-                @click="goToHistory"
-              />
-            </div>
-          </div>
         </div>
       </teleport>
+
+      <!-- Upload Complete — shown inline (not blocking) so user can navigate freely -->
+      <div
+        v-if="recordingStore.isUploaded && isUploadedFromRecording"
+        class="upload-success-card modern-card no-hover"
+      >
+        <div class="upload-success">
+          <!-- Top Section: New Recording Button + Duration (prominent) -->
+          <div class="success-top-actions">
+            <q-btn
+              unelevated
+              color="primary"
+              :label="$t('newRecording')"
+              icon="mic"
+              class="new-recording-btn"
+              @click="handleNewRecording"
+            />
+            <div
+              v-if="finalDuration > 0"
+              class="duration-badge"
+            >
+              <q-icon
+                name="schedule"
+                size="18px"
+              />
+              <span>{{ formattedFinalDuration }}</span>
+            </div>
+          </div>
+
+          <!-- Main CTA: View Transcript -->
+          <div
+            v-if="currentAudioFileId"
+            class="transcript-cta"
+          >
+            <div class="cta-icon">
+              <q-icon
+                name="check_circle"
+                size="64px"
+                color="positive"
+              />
+            </div>
+            <h3 class="cta-title">
+              {{ $t('transcriptReady') }}
+            </h3>
+            <p class="cta-subtitle">
+              {{ $t('transcriptCta') }}
+            </p>
+
+            <!-- Prominent clickable button with animation -->
+            <div class="cta-button-wrapper">
+              <q-btn
+                unelevated
+                class="main-cta-button pulse-attention"
+                @click="openInSuisseNotes"
+              >
+                <div class="button-content">
+                  <q-icon
+                    name="open_in_new"
+                    size="28px"
+                    class="q-mr-md"
+                  />
+                  <div class="button-text">
+                    <span class="button-label">{{ $t('openInSuisseNotes') }}</span>
+                    <span class="button-hint">{{ $t('clickHereToView') }}</span>
+                  </div>
+                  <q-icon
+                    name="arrow_forward"
+                    size="24px"
+                    class="q-ml-md arrow-icon"
+                  />
+                </div>
+              </q-btn>
+            </div>
+
+            <!-- URL Display with Copy -->
+            <div class="url-compact">
+              <code>https://app.suisse-notes.ch/meeting/audio/{{ currentAudioFileId }}</code>
+              <q-btn
+                flat
+                dense
+                icon="content_copy"
+                size="sm"
+                color="primary"
+                @click="copyTranscriptUrl"
+              >
+                <q-tooltip>{{ $t('copyLink') }}</q-tooltip>
+              </q-btn>
+            </div>
+          </div>
+
+          <!-- Bottom: View History link -->
+          <div class="success-bottom">
+            <q-btn
+              flat
+              color="grey-7"
+              :label="$t('viewHistory')"
+              icon="history"
+              size="sm"
+              @click="goToHistory"
+            />
+          </div>
+        </div>
+      </div>
 
       <!-- Tips Section (only when idle) -->
       <div
@@ -991,12 +993,9 @@ const isUploadedFromRecording = computed(() => {
 });
 
 const showUploadSection = computed(() => {
-  // Don't show upload section if the uploaded state is from a file upload (UploadPage)
-  return isProcessing.value ||
-         isAutoUploading.value ||
-         recordingStore.isUploading ||
-         uploadError.value ||
-         isUploadedFromRecording.value;
+  // Show blocking overlay during processing, uploading, and error only.
+  // Once uploaded, overlay dismisses — success shown inline on the record page.
+  return ['processing', 'uploading', 'error'].includes(recordingStore.phase);
 });
 
 // Hide tab switcher when recording is in progress
@@ -1036,10 +1035,14 @@ const displayProgress = computed(() => {
 
 const formattedFinalDuration = computed(() => {
   const seconds = finalDuration.value;
+  if (!seconds || !isFinite(seconds)) return '00:00';
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   const secs = seconds % 60;
-  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  return `${minutes}:${secs.toString().padStart(2, '0')}`;
 });
 
 const formatBytes = (bytes) => {
