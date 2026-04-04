@@ -217,15 +217,14 @@ export function useRecorder() {
   // Toggle system audio during an active recording
   const toggleSystemAudioDuringRecording = async (enabled) => {
     if (enabled) {
-      // Capture and add system audio to the mix
-      const sysStream = await captureSystemAudio();
-      if (sysStream) {
-        recordingService.addSystemAudioStream(sysStream);
+      // Start AudioTee capture in main process (writes to file)
+      const result = await captureSystemAudio(recordingStore.recordId);
+      if (result) {
         await setSystemAudioEnabled(true);
       }
     } else {
-      // Remove system audio from the mix
-      recordingService.removeSystemAudioStream();
+      // Stop AudioTee capture
+      await stopSystemAudio();
       await setSystemAudioEnabled(false);
     }
   };
@@ -306,30 +305,10 @@ export function useRecorder() {
         }
       });
 
-      // Recover system audio after Audio Service crash (macOS ScreenCaptureKit bug)
+      // AudioTee runs as a standalone process — Audio Service crashes don't affect it.
+      // Keep the listener for logging but no recovery needed.
       window.electronAPI.system.onAudioServiceCrashed(async () => {
-        const state = recordingService.getState();
-        if (recordingStore.isRecording && state.systemAudioActive) {
-          console.warn('Audio Service crashed during recording — attempting system audio recovery');
-          silenceWarning.value = 'System audio interrupted — reconnecting...';
-          // Brief delay to let Electron respawn the Audio Service process
-          await new Promise(r => setTimeout(r, 1500));
-          try {
-            const sysStream = await captureSystemAudio();
-            if (sysStream) {
-              recordingService.addSystemAudioStream(sysStream);
-              console.log('System audio recovered after Audio Service crash');
-              silenceWarning.value = null;
-            } else {
-              silenceWarning.value = 'System audio could not be recovered — microphone recording continues';
-              setTimeout(() => { silenceWarning.value = null; }, 8000);
-            }
-          } catch (e) {
-            console.error('Failed to recover system audio:', e);
-            silenceWarning.value = 'System audio lost — microphone recording continues';
-            setTimeout(() => { silenceWarning.value = null; }, 8000);
-          }
-        }
+        console.warn('Audio Service crashed — AudioTee capture is independent and should continue');
       });
     }
   });
@@ -376,6 +355,7 @@ export function useRecorder() {
     loadingMicrophones,
     systemAudioEnabled,
     systemAudioPermissionStatus: permissionStatus,
+    isSystemAudioSupported: _systemAudioRef ? _systemAudioRef.isSupported : ref(false),
     silenceWarning,
     systemAudioCaptureError,
     micCaptureError,

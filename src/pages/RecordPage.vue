@@ -75,9 +75,9 @@
             </q-select>
           </div>
 
-          <!-- System Audio Toggle - Desktop Only -->
+          <!-- System Audio Toggle - macOS 14.2+ via AudioTee -->
           <div
-            v-if="isElectron()"
+            v-if="isElectron() && isSystemAudioSupported"
             class="system-audio-section"
           >
             <div class="system-audio-row">
@@ -207,9 +207,9 @@
             </p>
           </div>
 
-          <!-- System Audio Toggle (desktop only, interactive during recording) -->
+          <!-- System Audio Toggle (macOS 14.2+ via AudioTee, interactive during recording) -->
           <div
-            v-if="isElectron()"
+            v-if="isElectron() && isSystemAudioSupported"
             class="system-audio-indicator"
           >
             <q-icon
@@ -773,6 +773,7 @@ const {
   loadingMicrophones,
   systemAudioEnabled,
   systemAudioPermissionStatus,
+  isSystemAudioSupported,
   // P0 Data Loss Fix: Silence detection warning
   silenceWarning,
   // System audio capture error
@@ -829,7 +830,8 @@ const isMac = computed(() => {
 });
 
 const showMacPermissionNotice = computed(() => {
-  return isMac.value && systemAudioPermissionStatus.value !== 'granted' && systemAudioEnabled.value;
+  // AudioTee handles permission prompts automatically — only show notice if explicitly denied
+  return isMac.value && systemAudioPermissionStatus.value === 'denied' && systemAudioEnabled.value;
 });
 
 const micHealthStatus = computed(() => recordingHealth.value?.status || 'ok');

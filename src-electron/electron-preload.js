@@ -208,8 +208,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getDroppedFilePath: (filePath) => ipcRenderer.invoke('dialog:getDroppedFilePath', filePath)
   },
 
-  // System Audio (for capturing system sounds)
+  // System Audio (AudioTee — macOS 14.2+ Core Audio Taps)
   systemAudio: {
+    isSupported: () => ipcRenderer.invoke('systemAudio:isSupported'),
+    start: (recordId) => ipcRenderer.invoke('systemAudio:start', recordId),
+    stop: () => ipcRenderer.invoke('systemAudio:stop'),
+    // Legacy (kept for backward compat)
     getSources: () => ipcRenderer.invoke('systemAudio:getSources'),
     checkPermission: () => ipcRenderer.invoke('systemAudio:checkPermission'),
     getEnabled: () => ipcRenderer.invoke('config:getSystemAudioEnabled'),

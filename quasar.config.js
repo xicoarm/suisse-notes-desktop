@@ -172,7 +172,9 @@ export default function (ctx) {
           // Prevent macOS from silently terminating the app during long recordings
           extendInfo: {
             NSSupportsAutomaticTermination: false,
-            NSSupportsSuddenTermination: false
+            NSSupportsSuddenTermination: false,
+            // Required for AudioTee system audio capture (macOS 14.2+)
+            NSAudioCaptureUsageDescription: 'Suisse Notes captures system audio to include meeting participants in the transcription.'
           }
         },
         dmg: {
@@ -190,6 +192,11 @@ export default function (ctx) {
           {
             from: 'resources/ffmpeg/${os}-${arch}',
             to: 'ffmpeg',
+            filter: ['**/*']
+          },
+          {
+            from: 'resources/audiotee',
+            to: 'audiotee',
             filter: ['**/*']
           }
         ],

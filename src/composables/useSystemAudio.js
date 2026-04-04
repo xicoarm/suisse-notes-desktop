@@ -1,17 +1,33 @@
 import { ref } from 'vue';
+import { isElectron } from '../utils/platform';
 
 export function useSystemAudio() {
   const systemAudioEnabled = ref(false);
-  const permissionStatus = ref('unknown');
-  const systemAudioStream = ref(null);
+  const permissionStatus = ref('unknown'); // 'unknown' | 'granted' | 'denied' | 'unsupported'
+  const systemAudioStream = ref(null); // kept for API compat — not used with AudioTee
   const error = ref(null);
   const isLoading = ref(false);
+  const isSupported = ref(false);
 
-  // Load initial state from config
+  // Load initial state and check platform support
   const loadState = async () => {
     try {
+      if (!isElectron()) {
+        permissionStatus.value = 'unsupported';
+        return;
+      }
+
+      const support = await window.electronAPI.systemAudio.isSupported();
+      isSupported.value = support.supported;
+
+      if (!support.supported) {
+        permissionStatus.value = 'unsupported';
+        return;
+      }
+
       systemAudioEnabled.value = await window.electronAPI.systemAudio.getEnabled();
-      permissionStatus.value = await window.electronAPI.systemAudio.checkPermission();
+      // AudioTee uses "System Audio Recording" permission — can't pre-check, assume granted
+      permissionStatus.value = 'granted';
     } catch (e) {
       console.error('Error loading system audio state:', e);
     }
@@ -29,90 +45,47 @@ export function useSystemAudio() {
     }
   };
 
-  // Capture system audio stream using desktopCapturer
-  const captureSystemAudio = async () => {
-    if (!systemAudioEnabled.value) return null;
+  // Start system audio capture (called when recording starts)
+  const startCapture = async (recordId) => {
+    if (!systemAudioEnabled.value || !isSupported.value || !isElectron()) return null;
 
     isLoading.value = true;
     error.value = null;
 
     try {
-      // Get available sources from main process
-      const sources = await window.electronAPI.systemAudio.getSources();
-
-      if (!sources || sources.length === 0) {
-        throw new Error('No audio sources available');
-      }
-
-      // Find a screen source (captures all system audio)
-      const screenSource = sources.find(s =>
-        s.id.startsWith('screen:') ||
-        s.name === 'Entire Screen' ||
-        s.name.includes('Screen')
-      ) || sources[0];
-
-      console.log('Using audio source:', screenSource.name, screenSource.id);
-
-      // Request system audio via getUserMedia with chromeMediaSource
-      // Note: desktopCapturer requires video constraints even for audio-only
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: screenSource.id
-          }
-        },
-        video: {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: screenSource.id,
-            maxWidth: 1,
-            maxHeight: 1,
-            maxFrameRate: 1
-          }
+      const result = await window.electronAPI.systemAudio.start(recordId);
+      if (!result.success) {
+        error.value = result.error;
+        if (result.error?.includes('permission') || result.error?.includes('denied')) {
+          permissionStatus.value = 'denied';
         }
-      });
-
-      // Stop video tracks immediately - we only need audio
-      stream.getVideoTracks().forEach(track => track.stop());
-
-      // Check if we actually got audio tracks
-      if (stream.getAudioTracks().length === 0) {
-        throw new Error('No audio tracks in system audio stream');
+        return null;
       }
-
-      // Create a new stream with only audio tracks
-      systemAudioStream.value = new MediaStream(stream.getAudioTracks());
-      console.log('System audio captured successfully');
-
-      return systemAudioStream.value;
-
+      console.log('System audio capture started via AudioTee');
+      return true;
     } catch (e) {
-      console.error('Error capturing system audio:', e);
+      console.error('Error starting system audio capture:', e);
       error.value = e.message;
-
-      // Handle specific errors
-      if (e.name === 'NotAllowedError') {
-        permissionStatus.value = 'denied';
-        error.value = 'Screen recording permission denied. Please enable in System Preferences.';
-      }
-
       return null;
     } finally {
       isLoading.value = false;
     }
   };
 
-  // Stop system audio capture and clean up
-  const stopCapture = () => {
-    if (systemAudioStream.value) {
-      systemAudioStream.value.getTracks().forEach(track => track.stop());
-      systemAudioStream.value = null;
+  // Stop system audio capture (called when recording stops)
+  const stopCapture = async () => {
+    if (!isElectron()) return;
+    try {
+      await window.electronAPI.systemAudio.stop();
+    } catch (e) {
+      console.warn('Error stopping system audio capture:', e);
     }
   };
 
-  // NOTE: No onUnmounted cleanup - the recording service manages stream lifecycle.
-  // Cleaning up here would kill the system audio stream when navigating away during recording.
+  // Legacy API compat — captureSystemAudio now delegates to startCapture
+  const captureSystemAudio = async (recordId) => {
+    return startCapture(recordId);
+  };
 
   return {
     systemAudioEnabled,
@@ -120,9 +93,11 @@ export function useSystemAudio() {
     systemAudioStream,
     error,
     isLoading,
+    isSupported,
     loadState,
     setEnabled,
-    captureSystemAudio,
-    stopCapture
+    startCapture,
+    stopCapture,
+    captureSystemAudio
   };
 }

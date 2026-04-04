@@ -1010,16 +1010,18 @@ export async function startRecording(options = {}) {
       throw new Error('Microphone access is not available.');
     }
 
-    // Capture system audio first (independent of mic)
+    // Start system audio capture in the main process (AudioTee — macOS 14.2+)
+    // Audio is written to a file and merged with FFmpeg in combineChunks.
+    // No MediaStream needed — sysStream stays null.
     if (systemAudioEnabled && captureSystemAudio) {
       try {
-        sysStream = await captureSystemAudio();
+        const result = await captureSystemAudio(recordingStore.recordId);
+        if (!result) {
+          emit('systemAudioError', 'System audio capture could not start');
+        }
       } catch (e) {
-        console.warn('Could not capture system audio:', e);
+        console.warn('Could not start system audio capture:', e);
         emit('systemAudioError', e.message || 'System audio capture failed');
-      }
-      if (!sysStream) {
-        emit('systemAudioError', 'System audio capture returned no stream');
       }
     }
 

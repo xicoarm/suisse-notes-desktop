@@ -1979,6 +1979,60 @@ function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operati
   });
 }
 
+// Merge system audio (PCM) with mic recording using FFmpeg amix
+async function mergeSystemAudio(micPath, recordId) {
+  const recordPath = getRecordingPath(recordId);
+  const systemAudioPath = path.join(recordPath, 'system_audio.raw');
+
+  if (!fs.existsSync(systemAudioPath)) return micPath;
+  if (fs.statSync(systemAudioPath).size === 0) {
+    try { fs.unlinkSync(systemAudioPath); } catch (e) { /* ignore */ }
+    return micPath;
+  }
+  if (ffmpegSpawnBroken) {
+    log.warn('FFmpeg unavailable — skipping system audio merge');
+    return micPath;
+  }
+
+  const mergedPath = micPath.replace(/(\.\w+)$/, '_merged$1');
+  log.info(`Merging system audio (${fs.statSync(systemAudioPath).size} bytes) with mic recording`);
+
+  try {
+    await ffmpegWithTimeout(
+      ffmpeg()
+        // System audio: raw PCM, 48kHz, mono, 16-bit signed little-endian
+        .input(systemAudioPath)
+        .inputOptions(['-f', 's16le', '-ar', '48000', '-ac', '1'])
+        // Mic recording
+        .input(micPath)
+        // Mix both streams
+        .complexFilter('[0:a][1:a]amix=inputs=2:duration=longest:dropout_transition=0')
+        .output(mergedPath),
+      FFMPEG_TIMEOUT_MS,
+      'System audio merge'
+    );
+
+    // Validate merged file
+    const mergedValidation = validateAudioOutput(mergedPath);
+    if (mergedValidation.valid) {
+      // Replace original with merged
+      fs.unlinkSync(micPath);
+      fs.renameSync(mergedPath, micPath);
+      log.info('System audio merged successfully');
+    } else {
+      log.warn('Merged file validation failed, keeping mic-only recording');
+      try { fs.unlinkSync(mergedPath); } catch (e) { /* ignore */ }
+    }
+  } catch (err) {
+    log.warn('System audio merge failed, keeping mic-only recording:', err.message);
+    try { if (fs.existsSync(mergedPath)) fs.unlinkSync(mergedPath); } catch (e) { /* ignore */ }
+  }
+
+  // Clean up system audio file
+  try { fs.unlinkSync(systemAudioPath); } catch (e) { /* ignore */ }
+  return micPath;
+}
+
 // IPC handler for checking disk space before recording
 ipcMain.handle('recording:checkDiskSpace', async () => {
   try {
@@ -2397,6 +2451,9 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
             console.warn('Could not get audio duration for single session:', e.message);
           }
 
+          // Merge system audio if it was captured
+          await mergeSystemAudio(outputPath, validRecordId);
+
           // Clear active recording state - successfully combined
           clearActiveRecording();
 
@@ -2407,7 +2464,7 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
             success: true,
             outputPath,
             filename: outputFile,
-            fileSizeMb: ((singleSessionValidation.size || fs.statSync(outputPath).size) / (1024 * 1024)).toFixed(2),
+            fileSizeMb: ((fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0) / (1024 * 1024)).toFixed(2),
             duration: audioDuration
           };
         }
@@ -2476,6 +2533,9 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           await fs.promises.rm(chunksPath, { recursive: true, force: true });
         }
 
+        // Merge system audio if it was captured
+        await mergeSystemAudio(outputPath, validRecordId);
+
         // Clear active recording state - successfully combined
         clearActiveRecording();
 
@@ -2486,7 +2546,7 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           success: true,
           outputPath,
           filename: outputFile,
-          fileSizeMb: ((multiSessionValidation.size || fs.statSync(outputPath).size) / (1024 * 1024)).toFixed(2),
+          fileSizeMb: ((fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0) / (1024 * 1024)).toFixed(2),
           duration: multiAudioDuration
         };
       }
@@ -2565,6 +2625,9 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
         // Cleanup
         await fs.promises.rm(chunksPath, { recursive: true, force: true });
 
+        // Merge system audio if it was captured
+        await mergeSystemAudio(outputPath, validRecordId);
+
         // Clear active recording state - successfully combined
         clearActiveRecording();
 
@@ -2575,7 +2638,7 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           success: true,
           outputPath,
           filename: outputFile,
-          fileSizeMb: ((directConcatValidation.size || fs.statSync(outputPath).size) / (1024 * 1024)).toFixed(2),
+          fileSizeMb: ((fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0) / (1024 * 1024)).toFixed(2),
           duration: directAudioDuration,
           warning: sequenceCheck.message || undefined
         };
@@ -3837,36 +3900,168 @@ ipcMain.handle('dialog:getDroppedFilePath', async (event, filePath) => {
   }
 });
 
-// --- System Audio ---
+// --- System Audio (AudioTee — macOS 14.2+ Core Audio Taps) ---
 
-// Get available desktop capturer sources
-ipcMain.handle('systemAudio:getSources', async () => {
+let activeAudioTee = null; // { process, writeStream, filePath, recordId }
+
+function getAudioTeeBinaryPath() {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'audiotee', 'audiotee');
+  }
+  // Development: use from resources directly
+  return path.join(__dirname, '..', 'resources', 'audiotee', 'audiotee');
+}
+
+function isSystemAudioSupported() {
+  if (process.platform !== 'darwin') return false;
+  // Core Audio Taps requires macOS 14.2+
+  const ver = process.getSystemVersion?.() || '';
+  const [major, minor] = ver.split('.').map(Number);
+  return major > 14 || (major === 14 && minor >= 2);
+}
+
+// Check if system audio capture is supported on this machine
+ipcMain.handle('systemAudio:isSupported', () => {
+  return {
+    supported: isSystemAudioSupported(),
+    platform: process.platform,
+    macVersion: process.getSystemVersion?.() || 'unknown'
+  };
+});
+
+// Start system audio capture — writes PCM to file alongside recording chunks
+ipcMain.handle('systemAudio:start', async (event, recordId) => {
   try {
-    const sources = await desktopCapturer.getSources({
-      types: ['window', 'screen'],
-      fetchWindowIcons: false
+    if (activeAudioTee) {
+      log.warn('System audio already active, stopping previous session');
+      await stopSystemAudio();
+    }
+
+    if (!isSystemAudioSupported()) {
+      return { success: false, error: 'System audio requires macOS 14.2+' };
+    }
+
+    const binaryPath = getAudioTeeBinaryPath();
+    if (!fs.existsSync(binaryPath)) {
+      return { success: false, error: 'AudioTee binary not found' };
+    }
+
+    const recordPath = getRecordingPath(recordId);
+    if (!fs.existsSync(recordPath)) {
+      fs.mkdirSync(recordPath, { recursive: true });
+    }
+
+    const pcmPath = path.join(recordPath, 'system_audio.raw');
+    const writeStream = fs.createWriteStream(pcmPath);
+
+    // Spawn audiotee: 48kHz mono Int16 PCM, 200ms chunks
+    const proc = require('child_process').spawn(binaryPath, [
+      '--sample-rate', '48000',
+      '--chunk-duration', '0.2'
+    ]);
+
+    let started = false;
+    let startError = null;
+
+    proc.stdout.on('data', (data) => {
+      writeStream.write(data);
     });
-    return sources.map(s => ({ id: s.id, name: s.name }));
+
+    proc.stderr.on('data', (data) => {
+      const text = data.toString('utf8');
+      const lines = text.split('\n').filter(l => l.trim());
+      for (const line of lines) {
+        try {
+          const msg = JSON.parse(line);
+          if (msg.message_type === 'stream_start') {
+            started = true;
+            log.info('System audio capture started (AudioTee)');
+          } else if (msg.message_type === 'error') {
+            startError = msg.data?.message || 'Unknown error';
+            log.error('AudioTee error:', startError);
+          }
+        } catch (e) { /* non-JSON stderr output */ }
+      }
+    });
+
+    proc.on('error', (err) => {
+      log.error('AudioTee process error:', err);
+      startError = err.message;
+    });
+
+    proc.on('exit', (code) => {
+      if (code !== 0 && code !== null) {
+        log.warn(`AudioTee exited with code ${code}`);
+      }
+      if (activeAudioTee?.process === proc) {
+        activeAudioTee.writeStream.end();
+        activeAudioTee = null;
+      }
+    });
+
+    activeAudioTee = { process: proc, writeStream, filePath: pcmPath, recordId };
+
+    // Wait briefly for startup or error
+    await new Promise(r => setTimeout(r, 500));
+
+    if (startError) {
+      proc.kill('SIGTERM');
+      writeStream.end();
+      activeAudioTee = null;
+      return { success: false, error: startError };
+    }
+
+    return { success: true, filePath: pcmPath };
   } catch (error) {
-    console.error('Error getting desktop sources:', error);
-    return [];
+    log.error('Failed to start system audio:', error);
+    return { success: false, error: error.message };
   }
 });
 
-// Check macOS screen recording permission
-ipcMain.handle('systemAudio:checkPermission', () => {
-  if (process.platform === 'darwin') {
-    return systemPreferences.getMediaAccessStatus('screen');
+// Stop system audio capture
+ipcMain.handle('systemAudio:stop', async () => {
+  return await stopSystemAudio();
+});
+
+async function stopSystemAudio() {
+  if (!activeAudioTee) return { success: true };
+  try {
+    const { process: proc, writeStream, filePath } = activeAudioTee;
+    activeAudioTee = null;
+
+    if (proc && !proc.killed) {
+      proc.kill('SIGTERM');
+      // Wait for graceful exit
+      await new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          if (!proc.killed) proc.kill('SIGKILL');
+          resolve();
+        }, 3000);
+        proc.once('exit', () => { clearTimeout(timeout); resolve(); });
+      });
+    }
+    writeStream.end();
+
+    // Verify file was written
+    if (fs.existsSync(filePath) && fs.statSync(filePath).size > 0) {
+      log.info(`System audio saved: ${filePath} (${fs.statSync(filePath).size} bytes)`);
+      return { success: true, filePath };
+    }
+    return { success: true, filePath: null };
+  } catch (error) {
+    log.error('Error stopping system audio:', error);
+    return { success: false, error: error.message };
   }
+}
+
+// Legacy handlers kept for backward compatibility
+ipcMain.handle('systemAudio:getSources', async () => []);
+ipcMain.handle('systemAudio:checkPermission', () => {
+  if (isSystemAudioSupported()) return 'granted';
+  if (process.platform === 'darwin') return systemPreferences.getMediaAccessStatus('screen');
   return 'granted';
 });
-
-// Get system audio enabled setting - always default to off each session
-ipcMain.handle('config:getSystemAudioEnabled', () => {
-  return false;
-});
-
-// Set system audio enabled setting
+ipcMain.handle('config:getSystemAudioEnabled', () => false);
 ipcMain.handle('config:setSystemAudioEnabled', (event, enabled) => {
   configStore.set('systemAudioEnabled', enabled);
   return { success: true };
