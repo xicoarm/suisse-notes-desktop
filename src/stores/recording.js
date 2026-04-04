@@ -530,8 +530,9 @@ export const useRecordingStore = defineStore('recording', {
     async saveChunk(chunkData) {
       // FIX 8: Serialize concurrent saveChunk calls to prevent chunkIndex races
       const savePromise = this._chunkSaveQueue.then(async () => {
-        const maxRetries = 3;
-        const retryDelays = [1000, 2000, 4000];
+        // Default retry config
+        let maxRetries = 3;
+        let retryDelays = [1000, 2000, 4000];
 
         // Create chunk integrity before saving (V7 fix)
         const chunkIntegrity = createChunkIntegrity(this.chunkIndex, chunkData);
@@ -568,13 +569,23 @@ export const useRecordingStore = defineStore('recording', {
               this.chunkIndex++;
               return { success: true };
             } else {
-              throw new Error(result.error || 'Failed to save chunk');
+              // Propagate error code from main process for specific handling
+              const err = new Error(result.error || 'Failed to save chunk');
+              err.code = result.code || null;
+              throw err;
             }
           } catch (error) {
             console.error(`Error saving chunk (attempt ${attempt + 1}/${maxRetries + 1}):`, error);
 
+            // Detect AV/EDR file locking (EBUSY, EACCES, EPERM) — use longer retries
+            if (attempt === 0 && (error.code === 'EBUSY' || error.code === 'EACCES' || error.code === 'EPERM')) {
+              console.warn('File lock detected (possible antivirus scan) — switching to extended retries');
+              maxRetries = 5;
+              retryDelays = [2000, 5000, 10000, 15000, 20000];
+            }
+
             if (attempt < maxRetries) {
-              const delay = retryDelays[attempt];
+              const delay = retryDelays[Math.min(attempt, retryDelays.length - 1)];
               console.log(`Retrying chunk save in ${delay}ms...`);
               await new Promise(resolve => setTimeout(resolve, delay));
             } else {

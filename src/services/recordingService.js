@@ -59,6 +59,9 @@ let systemAudioActive = false;
 // Mic mute state
 let micMuted = false;
 
+// Recording store reference (set during startRecording, used by switchMicrophoneStream)
+let recordingStoreRef = null;
+
 // Flush synchronization: resolved when ondataavailable saves the chunk after a flush request
 let flushResolvers = [];
 
@@ -71,8 +74,8 @@ const VOICE_ENERGY_THRESHOLD = 5;
 // Configuration
 const SILENCE_THRESHOLD = 1;
 const HEALTH_SAMPLE_INTERVAL_MS = 100;
-const MIC_HEALTH_DEGRADED_SECONDS = 3;
-const MIC_HEALTH_CRITICAL_SECONDS = 10;
+const MIC_HEALTH_DEGRADED_SECONDS = 30;  // Show subtle hint after 30s of silence
+const MIC_HEALTH_CRITICAL_SECONDS = 60;  // Escalate to critical after 60s
 const MIC_HEALTH_RECOVERY_SECONDS = 3;
 const MAX_DURATION_SECONDS = 4 * 60 * 60 + 55 * 60; // 4h 55m
 const AUTH_KEEP_ALIVE_INTERVAL = 30 * 60 * 1000; // Refresh auth every 30 min during recording
@@ -152,19 +155,28 @@ function emit(event, data) {
 }
 
 function getMicHealthMessage(reasonCode) {
+  // When system audio is active, use gentler messages — the recording is still useful
+  const hasSysAudio = systemAudioActive;
+
   switch (reasonCode) {
     case MIC_HEALTH_REASON.NO_AUDIO_DETECTED:
-      return 'No microphone input detected. Check your selected microphone or OS input settings.';
+      return hasSysAudio
+        ? 'Microphone is silent — system audio is still being recorded.'
+        : 'No microphone input detected. Check your microphone or try switching devices above.';
     case MIC_HEALTH_REASON.NO_VOICE_DETECTED:
-      return 'Audio signal detected but no voice frequencies. Your microphone may be capturing noise only.';
+      return hasSysAudio
+        ? 'No voice from microphone — system audio is still being recorded.'
+        : 'No voice detected from microphone. You may want to check your input device.';
     case MIC_HEALTH_REASON.MIC_CAPTURE_FAILED:
-      return 'Microphone capture failed. Recording will continue with system audio only.';
+      return 'Microphone capture failed. Recording continues with system audio.';
     case MIC_HEALTH_REASON.TRACK_ENDED:
-      return 'Microphone stream ended unexpectedly. Please verify your microphone connection.';
+      return hasSysAudio
+        ? 'Microphone disconnected — system audio is still being recorded. You can switch devices above.'
+        : 'Microphone disconnected. You can switch to a different device above.';
     case MIC_HEALTH_REASON.SYSTEM_AUDIO_ONLY:
-      return 'Recording is currently system audio only. Microphone input is not being captured.';
+      return 'Recording system audio only — microphone is not active.';
     case MIC_HEALTH_REASON.MONITORING_ERROR:
-      return 'Microphone health monitoring failed. Please restart recording.';
+      return 'Microphone monitoring issue. Recording continues normally.';
     default:
       return null;
   }
@@ -320,6 +332,15 @@ function createMixingPipeline(micStream, sysStream) {
     systemAudioActive = true;
   }
 
+  // Auto-resume AudioContext if it gets suspended (macOS audio session interruption,
+  // system resume from sleep, another app claiming audio focus)
+  ctx.addEventListener('statechange', () => {
+    if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+      console.warn(`AudioContext state changed to "${ctx.state}" — attempting resume`);
+      ctx.resume().catch(e => console.warn('AudioContext auto-resume failed:', e));
+    }
+  });
+
   mixingContext = ctx;
   mixingDest = dest;
   return dest.stream;
@@ -383,6 +404,131 @@ export function removeSystemAudioStream() {
       { systemAudioActive: false }
     );
     console.log('System audio removed from recording mix');
+  }
+}
+
+/**
+ * Resume AudioContexts after system sleep/interruption.
+ * Called from the resume handler to ensure audio pipeline is active.
+ */
+export async function resumeAudioContexts() {
+  const contexts = [mixingContext, micHealthAudioContext].filter(Boolean);
+  for (const ctx of contexts) {
+    if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+      try {
+        await ctx.resume();
+        console.log(`Resumed AudioContext (was "${ctx.state}")`);
+      } catch (e) {
+        console.warn('Failed to resume AudioContext:', e);
+      }
+    }
+  }
+}
+
+/**
+ * Switch microphone source mid-recording without stopping the MediaRecorder.
+ * Follows the same pattern as addSystemAudioStream/removeSystemAudioStream.
+ * @param {string} newDeviceId - The device ID to switch to
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+export async function switchMicrophoneStream(newDeviceId) {
+  if (!mixingContext || !mixingDest) {
+    return { success: false, error: 'No active recording to switch microphone in' };
+  }
+
+  try {
+    // Step 1: Acquire new mic stream with fallback constraints
+    let newStream = null;
+    const constraintLadder = [
+      { deviceId: { exact: newDeviceId }, echoCancellation: true, noiseSuppression: true, sampleRate: 48000 },
+      { deviceId: { ideal: newDeviceId }, noiseSuppression: true },
+      { noiseSuppression: true },
+      true
+    ];
+
+    for (const constraints of constraintLadder) {
+      try {
+        newStream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+        break;
+      } catch (e) {
+        console.warn('Mic switch constraint attempt failed:', e.name);
+      }
+    }
+
+    if (!newStream) {
+      return { success: false, error: 'Could not access the selected microphone' };
+    }
+
+    // Step 2: Stop old health monitoring (uses the old mic stream)
+    if (micHealthInterval) {
+      clearInterval(micHealthInterval);
+      micHealthInterval = null;
+    }
+    if (micHealthSourceNode) {
+      try { micHealthSourceNode.disconnect(); } catch (e) { /* already disconnected */ }
+      micHealthSourceNode = null;
+    }
+    if (micHealthAudioContext) {
+      micHealthAudioContext.close().catch(() => {});
+      micHealthAudioContext = null;
+    }
+    micHealthAnalyser = null;
+
+    // Step 3: Disconnect old mic from mixing pipeline
+    if (micSourceNode) {
+      try { micSourceNode.disconnect(); } catch (e) { /* already disconnected */ }
+      micSourceNode = null;
+    }
+    if (stream) {
+      stream.getTracks().forEach(track => {
+        track.onended = null; // Remove old listener
+        track.stop();
+      });
+    }
+
+    // Step 4: Connect new mic to mixing pipeline
+    micSourceNode = mixingContext.createMediaStreamSource(newStream);
+    micSourceNode.connect(mixingDest);
+    stream = newStream;
+    micMuted = false;
+
+    // Step 5: Set up track.onended listener for new stream
+    for (const track of newStream.getTracks()) {
+      track.onended = () => {
+        console.warn('Switched mic track ended unexpectedly — waiting 3s before declaring critical');
+        updateMicHealthState(MIC_HEALTH_STATUS.DEGRADED, MIC_HEALTH_REASON.TRACK_ENDED, null, {
+          micActive: false, systemAudioActive
+        });
+        setTimeout(() => {
+          if (!recordingStoreRef?.isRecording) return;
+          if (micHealthState.status === MIC_HEALTH_STATUS.OK) return;
+          updateMicHealthState(MIC_HEALTH_STATUS.CRITICAL, MIC_HEALTH_REASON.TRACK_ENDED, null, {
+            micActive: false, systemAudioActive
+          });
+          setSilenceWarning(micHealthState.message);
+          if (recordingStoreRef) verifyRecordingState(recordingStoreRef);
+        }, 3000);
+      };
+    }
+
+    // Step 6: Restart health monitoring with new stream
+    if (recordingStoreRef) {
+      startMicHealthMonitoring(newStream, recordingStoreRef);
+    }
+
+    // Step 7: Update health state to OK
+    updateMicHealthTrackDetails(newStream, newDeviceId);
+    clearSilenceWarning();
+    micAnomalyCounter = 0;
+    micRecoveryCounter = 0;
+
+    const trackLabel = newStream.getAudioTracks()[0]?.label || newDeviceId;
+    console.log('Microphone switched successfully to:', trackLabel);
+    emit('microphoneChange', { deviceId: newDeviceId, label: trackLabel });
+    return { success: true };
+  } catch (e) {
+    console.error('Error switching microphone:', e);
+    return { success: false, error: e.message };
   }
 }
 
@@ -518,14 +664,29 @@ function startMicHealthMonitoring(micStream, recordingStore) {
         reasonCode = MIC_HEALTH_REASON.NO_VOICE_DETECTED;
       }
 
+      // When system audio is active and carrying the recording, mic silence
+      // is normal (user may just be listening to a call). Suppress NO_VOICE
+      // entirely and use much longer thresholds for NO_AUDIO.
+      if (reasonCode && systemAudioActive) {
+        if (reasonCode === MIC_HEALTH_REASON.NO_VOICE_DETECTED) {
+          // Completely normal — user is listening, system audio captures the call
+          reasonCode = null;
+        }
+        // For NO_AUDIO_DETECTED with system audio: only flag after 2 minutes
+        // (mic might genuinely be disconnected, but recording is still useful)
+      }
+
       if (reasonCode) {
         micAnomalyCounter++;
         micRecoveryCounter = 0;
 
         const anomalySeconds = (micAnomalyCounter * HEALTH_SAMPLE_INTERVAL_MS) / 1000;
-        const nextStatus = anomalySeconds >= MIC_HEALTH_CRITICAL_SECONDS
+        // When system audio is active, use much longer thresholds — the recording is still useful
+        const degradedThreshold = systemAudioActive ? 120 : MIC_HEALTH_DEGRADED_SECONDS;
+        const criticalThreshold = systemAudioActive ? 300 : MIC_HEALTH_CRITICAL_SECONDS;
+        const nextStatus = anomalySeconds >= criticalThreshold
           ? MIC_HEALTH_STATUS.CRITICAL
-          : (anomalySeconds >= MIC_HEALTH_DEGRADED_SECONDS ? MIC_HEALTH_STATUS.DEGRADED : MIC_HEALTH_STATUS.OK);
+          : (anomalySeconds >= degradedThreshold ? MIC_HEALTH_STATUS.DEGRADED : MIC_HEALTH_STATUS.OK);
 
         if (nextStatus !== MIC_HEALTH_STATUS.OK) {
           updateMicHealthState(nextStatus, reasonCode, null, {
@@ -832,6 +993,9 @@ export async function startRecording(options = {}) {
     maxRecordingSeconds = null
   } = options;
 
+  // Store reference for mid-recording operations (mic switching, etc.)
+  recordingStoreRef = recordingStore;
+
   let sysStream = null;
   try {
     resetMicHealthState();
@@ -1054,12 +1218,14 @@ export async function startRecording(options = {}) {
       };
     }
     // Also monitor mic stream tracks
+    // Grace period before declaring death — Bluetooth codec switches (A2DP→SCO)
+    // can briefly end the track before a new one becomes available
     if (stream) {
       for (const track of stream.getTracks()) {
         track.onended = () => {
-          console.warn('Mic track ended unexpectedly:', track.kind);
+          console.warn('Mic track ended unexpectedly:', track.kind, '— waiting 3s before declaring critical');
           updateMicHealthState(
-            MIC_HEALTH_STATUS.CRITICAL,
+            MIC_HEALTH_STATUS.DEGRADED,
             MIC_HEALTH_REASON.TRACK_ENDED,
             null,
             {
@@ -1067,8 +1233,26 @@ export async function startRecording(options = {}) {
               systemAudioActive
             }
           );
-          setSilenceWarning(micHealthState.message);
-          verifyRecordingState(recordingStore);
+          // Grace period: check after 3s if a replacement device appeared
+          setTimeout(() => {
+            // If recording was stopped during the grace period, skip
+            if (!recordingStore.isRecording) return;
+            // If health recovered (e.g., statechange listener resumed context), skip
+            if (micHealthState.status === MIC_HEALTH_STATUS.OK) return;
+
+            console.warn('Mic track still dead after grace period — declaring critical');
+            updateMicHealthState(
+              MIC_HEALTH_STATUS.CRITICAL,
+              MIC_HEALTH_REASON.TRACK_ENDED,
+              null,
+              {
+                micActive: false,
+                systemAudioActive
+              }
+            );
+            setSilenceWarning(micHealthState.message);
+            verifyRecordingState(recordingStore);
+          }, 3000);
         };
       }
     }
@@ -1121,7 +1305,10 @@ export async function startRecording(options = {}) {
 
     let errorMessage = error.message;
     if (error.name === 'NotAllowedError') {
-      errorMessage = 'Microphone access denied.';
+      const isWindows = navigator.userAgent.includes('Windows');
+      errorMessage = isWindows
+        ? 'Microphone access denied. Check Windows Settings > Privacy & Security > Microphone and ensure "Let desktop apps access your microphone" is enabled.'
+        : 'Microphone access denied.';
     } else if (error.name === 'NotFoundError') {
       errorMessage = 'No microphone found.';
     } else if (error.name === 'NotReadableError') {

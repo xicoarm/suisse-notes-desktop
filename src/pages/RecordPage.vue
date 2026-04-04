@@ -229,6 +229,48 @@
             />
           </div>
 
+          <!-- Microphone Switcher (during recording) -->
+          <div class="mic-switch-section">
+            <div class="mic-switch-row">
+              <q-icon
+                name="mic"
+                size="14px"
+                :color="micHealthStatus === 'ok' ? 'grey-6' : micHealthBadgeColor"
+              />
+              <q-select
+                :model-value="selectedMicrophoneId"
+                :options="availableMicrophones"
+                option-value="id"
+                option-label="label"
+                emit-value
+                map-options
+                outlined
+                dense
+                borderless
+                :loading="switchingMic || loadingMicrophones"
+                class="mic-switch-select"
+                popup-content-class="mic-dropdown"
+                @update:model-value="handleMicSwitch"
+              >
+                <template #selected-item="scope">
+                  <span class="mic-switch-text">{{ scope.opt?.label || 'No microphone' }}</span>
+                </template>
+              </q-select>
+              <q-btn
+                flat
+                round
+                dense
+                icon="refresh"
+                size="xs"
+                color="grey-6"
+                :loading="loadingMicrophones"
+                @click.stop="loadMicrophones"
+              >
+                <q-tooltip>Refresh microphones</q-tooltip>
+              </q-btn>
+            </div>
+          </div>
+
           <!-- Timer Display -->
           <div class="timer-section">
             <div :class="['timer-display', { 'recording': recordingStore.isRecording, 'paused': recordingStore.isPaused }]">
@@ -274,41 +316,28 @@
             />
           </div>
 
+          <!-- Mic health notice (subtle inline text, not a big banner) -->
           <div
             v-if="showMicCriticalBanner"
-            class="critical-section"
+            class="health-notice health-notice--critical"
           >
-            <q-banner
-              class="critical-banner"
-              rounded
-            >
-              <template #avatar>
-                <q-icon
-                  name="warning"
-                  color="negative"
-                />
-              </template>
-              {{ micHealthMessage }}
-            </q-banner>
+            <q-icon
+              name="error_outline"
+              size="14px"
+              color="negative"
+            />
+            <span>{{ micHealthMessage }}</span>
           </div>
-
-          <!-- P0 Data Loss Fix: Silence Warning Display (hidden when critical banner already shows the message) -->
           <div
-            v-if="silenceWarning && !showMicCriticalBanner"
-            class="warning-section"
+            v-else-if="silenceWarning"
+            class="health-notice health-notice--warning"
           >
-            <q-banner
-              class="warning-banner"
-              rounded
-            >
-              <template #avatar>
-                <q-icon
-                  name="mic_off"
-                  color="warning"
-                />
-              </template>
-              {{ silenceWarning }}
-            </q-banner>
+            <q-icon
+              name="info_outline"
+              size="14px"
+              color="warning"
+            />
+            <span>{{ silenceWarning }}</span>
           </div>
 
           <!-- System Audio Capture Error Warning -->
@@ -791,8 +820,24 @@ const {
   stopRecording,
   cancelRecording,
   toggleSystemAudioDuringRecording,
-  toggleMicMute
+  toggleMicMute,
+  switchMicrophoneDuringRecording
 } = useRecorder();
+
+// Mid-recording microphone switching
+const switchingMic = ref(false);
+const handleMicSwitch = async (newDeviceId) => {
+  if (switchingMic.value) return;
+  switchingMic.value = true;
+  try {
+    const result = await switchMicrophoneDuringRecording(newDeviceId);
+    if (!result.success) {
+      console.error('Mic switch failed:', result.error);
+    }
+  } finally {
+    switchingMic.value = false;
+  }
+};
 
 // System audio toggle functionality
 const toggleSystemAudio = async (enabled) => {
@@ -1976,6 +2021,38 @@ const removeSessionWord = (word) => {
   }
 }
 
+.mic-switch-section {
+  padding: 0 24px;
+  margin-bottom: 8px;
+
+  .mic-switch-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .mic-switch-select {
+    flex: 1;
+    min-width: 0;
+
+    :deep(.q-field__control) {
+      min-height: 28px;
+      padding: 0 4px;
+    }
+    :deep(.q-field__native) {
+      padding: 0;
+    }
+  }
+
+  .mic-switch-text {
+    font-size: 11px;
+    color: #94a3b8;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
 .timer-section {
   text-align: center;
   margin-bottom: 24px;
@@ -2013,22 +2090,33 @@ const removeSessionWord = (word) => {
   text-align: center;
 }
 
-.critical-section {
-  margin-top: 20px;
-
-  .critical-banner {
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.25);
-    color: #991b1b;
-  }
-}
-
 .warning-section {
-  margin-top: 24px;
+  margin-top: 12px;
 
   .warning-banner {
     background: rgba(245, 158, 11, 0.1);
     border: 1px solid rgba(245, 158, 11, 0.2);
+    color: #92400e;
+  }
+}
+
+.health-notice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 24px;
+  font-size: 11px;
+  line-height: 1.3;
+
+  span {
+    opacity: 0.85;
+  }
+
+  &--critical {
+    color: #b91c1c;
+  }
+
+  &--warning {
     color: #92400e;
   }
 }

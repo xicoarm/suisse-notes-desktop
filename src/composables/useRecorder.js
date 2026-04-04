@@ -230,6 +230,15 @@ export function useRecorder() {
     }
   };
 
+  // Switch microphone during active recording
+  const switchMicrophoneDuringRecording = async (newDeviceId) => {
+    const result = await recordingService.switchMicrophoneStream(newDeviceId);
+    if (result.success) {
+      selectedMicrophoneId.value = newDeviceId;
+    }
+    return result;
+  };
+
   // Toggle microphone mute
   const toggleMicMute = () => {
     recordingService.toggleMicMute();
@@ -285,6 +294,9 @@ export function useRecorder() {
 
       window.electronAPI.system.onResume(async (data) => {
         if (data.needsRecovery && recordingStore.isRecording) {
+          // Explicitly resume AudioContext — it may be suspended after system sleep
+          await recordingService.resumeAudioContexts();
+
           silenceWarning.value = 'Recording resumed after system sleep - please check audio is working';
           setTimeout(() => {
             if (audioLevel.value > 1) {
@@ -383,6 +395,7 @@ export function useRecorder() {
     stopRecording,
     cancelRecording,
     toggleSystemAudioDuringRecording,
-    toggleMicMute
+    toggleMicMute,
+    switchMicrophoneDuringRecording
   };
 }

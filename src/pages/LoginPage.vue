@@ -160,16 +160,16 @@
     <div class="company-footer">
       <div class="footer-content">
         <div class="company-info">
-          <span class="company-name">Suisse AI Group GmbH</span>
+          <span class="company-name">Suisse IT GmbH</span>
           <span class="company-divider">•</span>
-          <span class="company-location">Wallisellen, Switzerland</span>
+          <span class="company-location">Berikon, Switzerland</span>
         </div>
         <div class="footer-links">
           <a
-            href="https://suisse-ai.ch"
+            href="https://suisse-it.ch"
             target="_blank"
             rel="noopener"
-          >suisse-ai.ch</a>
+          >suisse-it.ch</a>
           <span class="link-divider">•</span>
           <a
             href="https://app.suisse-notes.ch/privacy"
@@ -184,7 +184,7 @@
           >{{ $t('terms') }}</a>
         </div>
         <div class="copyright">
-          © {{ currentYear }} Suisse AI Group GmbH. All rights reserved.
+          © {{ currentYear }} Suisse IT GmbH. All rights reserved.
         </div>
       </div>
     </div>

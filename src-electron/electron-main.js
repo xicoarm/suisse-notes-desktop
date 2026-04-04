@@ -118,6 +118,21 @@ app.on('child-process-gone', (event, details) => {
   }
 });
 
+// === Single Instance Lock ===
+// Prevent multiple app instances from corrupting shared electron-store files
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  log.warn('Another instance is already running — quitting');
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
 // Configure auto-updater logging
 autoUpdater.logger = log;
 autoUpdater.logger.transports.file.level = 'info';
@@ -951,6 +966,9 @@ function createWindow() {
 
   // Prevent close during recording, processing, or upload
   mainWindow.on('close', (e) => {
+    // Allow close if we already flushed recording data during shutdown
+    if (app._quitFlushed) return;
+
     const shouldPreventClose = isRecordingInProgress ||
                                 isProcessingRecording ||
                                 isUploadInProgress ||
@@ -1109,6 +1127,69 @@ app.whenReady().then(() => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('system:screen-unlocked');
     }
+  });
+
+  // === P0 Data Loss Fix: Graceful Shutdown Handlers ===
+  // Flush recording data before app quit (OS shutdown, Force Quit, SIGTERM)
+
+  // Helper: flush recording data with a tight timeout before allowing quit
+  const flushBeforeQuit = async (reason) => {
+    if (!isRecordingInProgress) return;
+    log.info(`Flushing recording data before quit (reason: ${reason})`);
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const flushComplete = new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          log.warn(`Quit flush timed out after 2s (reason: ${reason})`);
+          resolve();
+        }, 2000);
+
+        ipcMain.once('recording:suspend-ack', () => {
+          clearTimeout(timeout);
+          log.info(`Quit flush acknowledged by renderer (reason: ${reason})`);
+          resolve();
+        });
+      });
+
+      mainWindow.webContents.send('recording:suspend', {
+        reason,
+        timestamp: Date.now()
+      });
+
+      await flushComplete;
+    }
+
+    // Persist active recording state for recovery on next launch
+    const activeSession = getActiveRecording();
+    if (activeSession) {
+      activeRecordingStore.set('activeSession', {
+        ...activeSession,
+        shutdownAt: new Date().toISOString(),
+        needsRecovery: true
+      });
+      log.info('Active recording state saved before quit:', activeSession.recordId);
+    }
+  };
+
+  app.on('before-quit', async (e) => {
+    if (isRecordingInProgress && !app._quitFlushed) {
+      e.preventDefault();
+      await flushBeforeQuit('before_quit');
+      app._quitFlushed = true;
+      app.quit();
+    }
+  });
+
+  // Windows-specific: fires when OS is shutting down / restarting
+  powerMonitor.on('shutdown', async () => {
+    await flushBeforeQuit('system_shutdown');
+  });
+
+  // Handle SIGTERM (kill, systemctl stop, etc.)
+  process.on('SIGTERM', async () => {
+    log.info('SIGTERM received');
+    await flushBeforeQuit('sigterm');
+    app.quit();
   });
 
   // === macOS: Prompt user to move app to Applications if needed ===
@@ -1994,10 +2075,14 @@ ipcMain.handle('recording:saveChunk', async (event, recordId, chunkData, chunkIn
     const chunkPath = path.join(chunksPath, filename);
 
     // CRITICAL: Write + fsync to guarantee chunk is persisted to disk, not just OS cache
-    const fd = fs.openSync(chunkPath, 'w');
-    fs.writeSync(fd, buffer);
-    fs.fsyncSync(fd);
-    fs.closeSync(fd);
+    // Uses async I/O to avoid blocking the main process event loop
+    const fh = await fs.promises.open(chunkPath, 'w');
+    try {
+      await fh.write(buffer);
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
 
     // Update active recording state for crash recovery (with userId)
     updateActiveRecording(validRecordId, validChunkIndex + 1, validUserId);
@@ -2006,7 +2091,7 @@ ipcMain.handle('recording:saveChunk', async (event, recordId, chunkData, chunkIn
     return { success: true, chunkIndex, chunkPath };
   } catch (error) {
     console.error('Error saving chunk:', error);
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, code: error.code || null };
   }
 });
 
@@ -3262,7 +3347,7 @@ ipcMain.handle('app:getUserDataPath', () => {
 
 // Open external URL in default browser
 // Security: Only allow specific trusted domains to prevent malicious URL opening
-const ALLOWED_EXTERNAL_DOMAINS = ['app.suisse-notes.ch', 'suisse-notes.ch', 'suisse-ai.ch'];
+const ALLOWED_EXTERNAL_DOMAINS = ['app.suisse-notes.ch', 'suisse-notes.ch', 'suisse-ai.ch', 'suisse-it.ch'];
 
 ipcMain.handle('shell:openExternal', async (event, url) => {
   try {

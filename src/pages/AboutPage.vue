@@ -200,7 +200,7 @@
           <span>{{ $t('aboutMadeInSwitzerland') }}</span>
         </div>
         <h2 class="company-name">
-          Suisse AI Group GmbH
+          Suisse IT GmbH
         </h2>
         <p class="company-desc">
           {{ $t('aboutCompanyDesc') }}
@@ -213,7 +213,7 @@
               size="16px"
               color="grey-6"
             />
-            <span>Kirchstrasse 3, 8304 Wallisellen, Schweiz</span>
+            <span>Kesslernmattstrasse 20, 8965 Berikon, Schweiz</span>
           </div>
           <div class="detail-item">
             <q-icon
@@ -222,10 +222,10 @@
               color="grey-6"
             />
             <a
-              href="https://suisse-ai.ch"
+              href="https://suisse-it.ch"
               target="_blank"
               rel="noopener"
-            >suisse-ai.ch</a>
+            >suisse-it.ch</a>
           </div>
         </div>
       </section>
@@ -267,7 +267,7 @@
           </a>
         </div>
         <p class="copyright">
-          © {{ currentYear }} Suisse AI Group GmbH. All rights reserved.
+          © {{ currentYear }} Suisse IT GmbH. All rights reserved.
         </p>
       </section>
     </div>

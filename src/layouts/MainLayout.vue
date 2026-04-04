@@ -367,13 +367,13 @@
       <div class="footer-content">
         <span>© 2026</span>
         <a
-          href="https://suisse-ai.ch"
+          href="https://suisse-it.ch"
           target="_blank"
           rel="noopener"
           class="footer-link"
-        >Suisse AI Group GmbH</a>
+        >Suisse IT GmbH</a>
         <span class="footer-separator">·</span>
-        <span class="footer-address">Kirchstrasse 3, 8304 Wallisellen, Schweiz</span>
+        <span class="footer-address">Kesslernmattstrasse 20, 8965 Berikon, Schweiz</span>
       </div>
     </q-footer>
 

@@ -168,7 +168,12 @@ export default function (ctx) {
           entitlementsInherit: 'build/entitlements.mac.plist',
           forceCodeSigning: !!process.env.CSC_KEYCHAIN,
           // Notarization is handled manually via xcrun notarytool in CI
-          notarize: false
+          notarize: false,
+          // Prevent macOS from silently terminating the app during long recordings
+          extendInfo: {
+            NSSupportsAutomaticTermination: false,
+            NSSupportsSuddenTermination: false
+          }
         },
         dmg: {
           contents: [
