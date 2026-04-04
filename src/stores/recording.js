@@ -11,7 +11,8 @@ export const useRecordingStore = defineStore('recording', {
   state: () => ({
     recordId: null,
     userId: null, // Track userId for multi-account handling
-    status: 'idle', // idle | recording | paused | stopped | uploading | uploaded | error
+    // Single authoritative state: idle | recording | paused | stopping | processing | uploading | uploaded | error
+    phase: 'idle',
     startTime: null,
     duration: 0, // in seconds
     chunkIndex: 0,
@@ -22,23 +23,16 @@ export const useRecordingStore = defineStore('recording', {
     uploadRetryAttempt: 0,
     uploadRetryMaxRetries: 0,
     error: null,
+    uploadError: null, // Upload error message (persists across navigation)
     // Uploaded file info (persists for navigation)
     audioFileId: null,
     finalDuration: 0,
+    currentFileSize: 0, // Size of recording file
     // Upload metadata for display in other pages
     uploadMetadata: {
       createdAt: null,
       fileSize: 0,
       finalDuration: 0
-    },
-    // Background upload tracking (persists when starting new recording)
-    backgroundUpload: {
-      active: false,
-      recordId: null,
-      progress: 0,
-      bytesUploaded: 0,
-      bytesTotal: 0,
-      metadata: null
     },
     // File locking for upload safety (V6 fix, FIX 7: Map<recordId, timestamp> with 24h expiry)
     lockedFiles: new Map(),
@@ -68,19 +62,19 @@ export const useRecordingStore = defineStore('recording', {
   }),
 
   getters: {
-    isRecording: (state) => state.status === 'recording',
-    isPaused: (state) => state.status === 'paused',
-    isStopped: (state) => state.status === 'stopped',
-    isUploading: (state) => state.status === 'uploading',
-    isUploaded: (state) => state.status === 'uploaded',
-    // Check if ANY upload is in progress (current session or background)
-    hasActiveUpload: (state) => state.status === 'uploading' || state.backgroundUpload.active,
-    // Get current upload progress (prioritize current session, fallback to background)
+    isRecording: (state) => state.phase === 'recording',
+    isPaused: (state) => state.phase === 'paused',
+    isStopped: (state) => state.phase === 'stopping',
+    isProcessing: (state) => state.phase === 'processing',
+    isUploading: (state) => state.phase === 'uploading',
+    isUploaded: (state) => state.phase === 'uploaded',
+    hasActiveUpload: (state) => state.phase === 'uploading',
     activeUploadProgress: (state) => {
-      if (state.status === 'uploading') return state.uploadProgress;
-      if (state.backgroundUpload.active) return state.backgroundUpload.progress;
+      if (state.phase === 'uploading') return state.uploadProgress;
       return 0;
     },
+    // True during any phase where the user must stay on the record page
+    isBlocking: (state) => ['recording', 'paused', 'stopping', 'processing', 'uploading'].includes(state.phase),
     formattedDuration: (state) => {
       if (!state.duration || !isFinite(state.duration)) return '00:00:00';
       const hours = Math.floor(state.duration / 3600);
@@ -92,17 +86,13 @@ export const useRecordingStore = defineStore('recording', {
     isFileLocked: (state) => (recordId) => {
       const lockTime = state.lockedFiles.get(recordId);
       if (!lockTime) return false;
-      // Auto-expire locks older than 24 hours
       if (Date.now() - lockTime > 24 * 60 * 60 * 1000) return false;
       return true;
     },
-    // Check if storage is low
     hasLowStorage: (state) => state.storageStatus.status === 'low' || state.storageStatus.status === 'critical',
-    // Check if app can safely record
     canRecord: (state) => state.storageStatus.status !== 'critical' && !state.appInBackground && !state.recoveryInProgress,
-    // Check if recording died unexpectedly (native stopped but store still says recording/paused)
     isRecordingDead: (state) => state.recordingInterrupted &&
-      (state.status === 'recording' || state.status === 'paused')
+      (state.phase === 'recording' || state.phase === 'paused')
   },
 
   actions: {
@@ -116,7 +106,7 @@ export const useRecordingStore = defineStore('recording', {
           onBackground: async () => {
             this.appInBackground = true;
             // Flush MediaRecorder buffer to a chunk on disk, then save metadata
-            if (this.status === 'recording') {
+            if (this.phase === 'recording') {
               try {
                 const { flushRecordingData } = await import('../services/recordingService.js');
                 await flushRecordingData();
@@ -170,7 +160,7 @@ export const useRecordingStore = defineStore('recording', {
           onCriticalBattery: async (batteryPercent) => {
             this.batteryLevel = batteryPercent;
             // Emergency stop at critical battery
-            if (this.status === 'recording') {
+            if (this.phase === 'recording') {
               console.warn('Critical battery - emergency stop');
               await this.emergencyStop('Critical battery level');
             }
@@ -230,7 +220,7 @@ export const useRecordingStore = defineStore('recording', {
 
         this.recordId = uuidv4();
         this.userId = userId; // Store userId for use in saveChunk
-        this.status = 'recording';
+        this.phase ='recording';
         this.startTime = Date.now();
         this.duration = 0;
         this.chunkIndex = 0;
@@ -286,7 +276,7 @@ export const useRecordingStore = defineStore('recording', {
         return { success: true, recordId: this.recordId, storageWarning: storageCheck.message };
       } catch (error) {
         this.error = error.message;
-        this.status = 'error';
+        this.phase ='error';
         sentryRecordingError(this.recordId, error);
         if (isElectron()) {
           await window.electronAPI.recording.setInProgress(false);
@@ -296,22 +286,22 @@ export const useRecordingStore = defineStore('recording', {
     },
 
     pauseRecording() {
-      if (this.status === 'recording') {
-        this.status = 'paused';
+      if (this.phase === 'recording') {
+        this.phase ='paused';
         sentryRecordingPause(this.recordId);
       }
     },
 
     resumeRecording() {
-      if (this.status === 'paused') {
-        this.status = 'recording';
+      if (this.phase === 'paused') {
+        this.phase ='recording';
         sentryRecordingResume(this.recordId);
       }
     },
 
     async stopRecording() {
       try {
-        this.status = 'stopped';
+        this.phase ='stopped';
         stopStorageMonitor();
         // P0 Data Loss Fix: Notify lifecycle for adaptive battery monitoring (V9)
         setRecordingActive(false);
@@ -352,7 +342,7 @@ export const useRecordingStore = defineStore('recording', {
         return { success: false, error: 'Unsupported platform' };
       } catch (error) {
         this.error = error.message;
-        this.status = 'error';
+        this.phase ='error';
         sentryRecordingError(this.recordId, error);
         if (isElectron()) {
           await window.electronAPI.recording.setInProgress(false);
@@ -390,7 +380,7 @@ export const useRecordingStore = defineStore('recording', {
         // Save current chunk immediately
         await this.flushCurrentState();
         // Stop recording
-        this.status = 'stopped';
+        this.phase ='stopped';
         this.error = `Recording stopped: ${reason}`;
         stopStorageMonitor();
 
@@ -412,7 +402,7 @@ export const useRecordingStore = defineStore('recording', {
           startTime: this.startTime,
           duration: this.duration,
           chunkIndex: this.chunkIndex,
-          status: this.status,
+          status: this.phase,
           integrity: this.integrity,
           platform: 'mobile',
           lastUpdated: Date.now()
@@ -946,7 +936,7 @@ export const useRecordingStore = defineStore('recording', {
     },
 
     setUploading(metadata = {}) {
-      this.status = 'uploading';
+      this.phase ='uploading';
       this.uploadProgress = 0;
       this.uploadRetryAttempt = 0;
       this.uploadRetryMaxRetries = 0;
@@ -956,7 +946,7 @@ export const useRecordingStore = defineStore('recording', {
     },
 
     setUploaded(audioFileId = null) {
-      this.status = 'uploaded';
+      this.phase ='uploaded';
       this.uploadProgress = 100;
       if (audioFileId) {
         this.audioFileId = audioFileId;
@@ -969,46 +959,13 @@ export const useRecordingStore = defineStore('recording', {
 
     setError(error) {
       this.error = error;
-      this.status = 'error';
-    },
-
-    // Move current upload to background (when starting new recording)
-    moveToBackgroundUpload() {
-      if (this.status === 'uploading') {
-        this.backgroundUpload = {
-          active: true,
-          recordId: this.recordId,
-          progress: this.uploadProgress,
-          bytesUploaded: this.bytesUploaded,
-          bytesTotal: this.bytesTotal,
-          metadata: { ...this.uploadMetadata }
-        };
-      }
-    },
-
-    updateBackgroundUploadProgress(recordId, progress, bytesUploaded, bytesTotal) {
-      if (this.backgroundUpload.active && this.backgroundUpload.recordId === recordId) {
-        this.backgroundUpload.progress = progress;
-        this.backgroundUpload.bytesUploaded = bytesUploaded;
-        this.backgroundUpload.bytesTotal = bytesTotal;
-      }
-    },
-
-    clearBackgroundUpload() {
-      this.backgroundUpload = {
-        active: false,
-        recordId: null,
-        progress: 0,
-        bytesUploaded: 0,
-        bytesTotal: 0,
-        metadata: null
-      };
+      this.phase ='error';
     },
 
     reset() {
       this.recordId = null;
       this.userId = null;
-      this.status = 'idle';
+      this.phase ='idle';
       this.startTime = null;
       this.duration = 0;
       this.chunkIndex = 0;
@@ -1019,8 +976,10 @@ export const useRecordingStore = defineStore('recording', {
       this.uploadRetryAttempt = 0;
       this.uploadRetryMaxRetries = 0;
       this.error = null;
+      this.uploadError = null;
       this.audioFileId = null;
       this.finalDuration = 0;
+      this.currentFileSize = 0;
       this.uploadMetadata = {
         createdAt: null,
         fileSize: 0,

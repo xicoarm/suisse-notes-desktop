@@ -518,10 +518,7 @@ onMounted(() => {
       if (data.recordId === recordingStore.recordId) {
         recordingStore.updateUploadProgress(data.progress, data.bytesUploaded, data.bytesTotal);
       }
-      // Update background upload
-      if (recordingStore.backgroundUpload.active && data.recordId === recordingStore.backgroundUpload.recordId) {
-        recordingStore.updateBackgroundUploadProgress(data.recordId, data.progress, data.bytesUploaded, data.bytesTotal);
-      }
+      // Background uploads removed — pipeline is now linear (stop → process → upload → done)
     });
 
     // Listen for upload retry events — reset progress + show retry state

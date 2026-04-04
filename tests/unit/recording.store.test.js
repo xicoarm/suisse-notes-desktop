@@ -33,7 +33,7 @@ describe('Recording Store', () => {
     it('should have correct initial state', () => {
       const store = useRecordingStore();
       expect(store.recordId).toBeNull();
-      expect(store.status).toBe('idle');
+      expect(store.phase).toBe('idle');
       expect(store.duration).toBe(0);
       expect(store.chunkIndex).toBe(0);
       expect(store.uploadProgress).toBe(0);
@@ -44,29 +44,29 @@ describe('Recording Store', () => {
   describe('getters', () => {
     it('isRecording should return true when recording', () => {
       const store = useRecordingStore();
-      store.status = 'recording';
+      store.phase = 'recording';
       expect(store.isRecording).toBe(true);
       expect(store.isPaused).toBe(false);
     });
 
     it('isPaused should return true when paused', () => {
       const store = useRecordingStore();
-      store.status = 'paused';
+      store.phase = 'paused';
       expect(store.isPaused).toBe(true);
       expect(store.isRecording).toBe(false);
     });
 
     it('isUploading should return true when uploading', () => {
       const store = useRecordingStore();
-      store.status = 'uploading';
+      store.phase = 'uploading';
       expect(store.isUploading).toBe(true);
     });
 
-    it('hasActiveUpload should detect background uploads', () => {
+    it('hasActiveUpload should detect uploading phase', () => {
       const store = useRecordingStore();
       expect(store.hasActiveUpload).toBe(false);
 
-      store.backgroundUpload.active = true;
+      store.phase = 'uploading';
       expect(store.hasActiveUpload).toBe(true);
     });
 
@@ -94,7 +94,7 @@ describe('Recording Store', () => {
 
         expect(result.success).toBe(true);
         expect(store.recordId).toBe('test-uuid-1234');
-        expect(store.status).toBe('recording');
+        expect(store.phase).toBe('recording');
         expect(store.chunkIndex).toBe(0);
         expect(store.error).toBeNull();
       });
@@ -109,38 +109,38 @@ describe('Recording Store', () => {
         const result = await store.startRecording();
 
         expect(result.success).toBe(false);
-        expect(store.status).toBe('error');
+        expect(store.phase).toBe('error');
       });
     });
 
     describe('pauseRecording', () => {
       it('should pause when recording', () => {
         const store = useRecordingStore();
-        store.status = 'recording';
+        store.phase = 'recording';
 
         store.pauseRecording();
 
-        expect(store.status).toBe('paused');
+        expect(store.phase).toBe('paused');
       });
 
       it('should not change state when not recording', () => {
         const store = useRecordingStore();
-        store.status = 'idle';
+        store.phase = 'idle';
 
         store.pauseRecording();
 
-        expect(store.status).toBe('idle');
+        expect(store.phase).toBe('idle');
       });
     });
 
     describe('resumeRecording', () => {
       it('should resume when paused', () => {
         const store = useRecordingStore();
-        store.status = 'paused';
+        store.phase = 'paused';
 
         store.resumeRecording();
 
-        expect(store.status).toBe('recording');
+        expect(store.phase).toBe('recording');
       });
     });
 
@@ -148,7 +148,7 @@ describe('Recording Store', () => {
       it('should combine chunks and return file path', async () => {
         const store = useRecordingStore();
         store.recordId = 'test-id';
-        store.status = 'recording';
+        store.phase = 'recording';
 
         mockElectronAPI.recording.combineChunks.mockResolvedValue({
           success: true,
@@ -160,7 +160,7 @@ describe('Recording Store', () => {
         expect(result.success).toBe(true);
         expect(result.filePath).toBe('/path/to/audio.webm');
         expect(store.audioFilePath).toBe('/path/to/audio.webm');
-        expect(store.status).toBe('stopped');
+        expect(store.phase).toBe('stopping');
       });
     });
 
@@ -198,39 +198,13 @@ describe('Recording Store', () => {
       });
     });
 
-    describe('moveToBackgroundUpload', () => {
-      it('should move upload to background when uploading', () => {
-        const store = useRecordingStore();
-        store.status = 'uploading';
-        store.recordId = 'upload-id';
-        store.uploadProgress = 50;
-        store.bytesUploaded = 5000;
-        store.bytesTotal = 10000;
-
-        store.moveToBackgroundUpload();
-
-        expect(store.backgroundUpload.active).toBe(true);
-        expect(store.backgroundUpload.recordId).toBe('upload-id');
-        expect(store.backgroundUpload.progress).toBe(50);
-      });
-
-      it('should not move to background when not uploading', () => {
-        const store = useRecordingStore();
-        store.status = 'idle';
-
-        store.moveToBackgroundUpload();
-
-        expect(store.backgroundUpload.active).toBe(false);
-      });
-    });
-
     describe('reset', () => {
       it('should reset all state to initial values', () => {
         const store = useRecordingStore();
 
         // Set some values
         store.recordId = 'test-id';
-        store.status = 'recording';
+        store.phase = 'recording';
         store.duration = 100;
         store.chunkIndex = 5;
         store.error = 'Some error';
@@ -238,7 +212,7 @@ describe('Recording Store', () => {
         store.reset();
 
         expect(store.recordId).toBeNull();
-        expect(store.status).toBe('idle');
+        expect(store.phase).toBe('idle');
         expect(store.duration).toBe(0);
         expect(store.chunkIndex).toBe(0);
         expect(store.error).toBeNull();

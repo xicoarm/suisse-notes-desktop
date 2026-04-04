@@ -113,7 +113,7 @@ export function useNativeRecorder() {
         }
 
         // Fix 3: Periodic metadata flush every ~30s (every 10th health check tick)
-        if (healthCheckTick % 10 === 0 && recordingStore.status === 'recording') {
+        if (healthCheckTick % 10 === 0 && recordingStore.phase === 'recording') {
           recordingStore.flushCurrentState().catch(e =>
             console.warn('Periodic metadata flush failed:', e)
           );

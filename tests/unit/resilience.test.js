@@ -149,7 +149,7 @@ describe('Resilience Features', () => {
     it('should transition states correctly when stopping', async () => {
       const store = useRecordingStore();
       store.recordId = 'test-id';
-      store.status = 'recording';
+      store.phase = 'recording';
 
       mockElectronAPI.recording.combineChunks.mockResolvedValue({
         success: true,
@@ -167,7 +167,7 @@ describe('Resilience Features', () => {
     it('should clear all states on stop error', async () => {
       const store = useRecordingStore();
       store.recordId = 'test-id';
-      store.status = 'recording';
+      store.phase = 'recording';
 
       mockElectronAPI.recording.combineChunks.mockRejectedValue(new Error('Processing error'));
 
@@ -175,7 +175,7 @@ describe('Resilience Features', () => {
 
       expect(mockElectronAPI.recording.setInProgress).toHaveBeenCalledWith(false);
       expect(mockElectronAPI.recording.setProcessing).toHaveBeenCalledWith(false);
-      expect(store.status).toBe('error');
+      expect(store.phase).toBe('error');
     });
   });
 
@@ -183,7 +183,7 @@ describe('Resilience Features', () => {
     it('should include warning from chunk sequence validation', async () => {
       const store = useRecordingStore();
       store.recordId = 'test-id';
-      store.status = 'recording';
+      store.phase = 'recording';
 
       mockElectronAPI.recording.combineChunks.mockResolvedValue({
         success: true,
@@ -198,58 +198,27 @@ describe('Resilience Features', () => {
     });
   });
 
-  describe('Background Upload Management', () => {
-    it('should update background upload progress correctly', () => {
+  describe('Phase-Based State Machine', () => {
+    it('should block navigation during processing phase', () => {
       const store = useRecordingStore();
-      store.backgroundUpload = {
-        active: true,
-        recordId: 'bg-upload-id',
-        progress: 0,
-        bytesUploaded: 0,
-        bytesTotal: 10000,
-        metadata: null
-      };
-
-      store.updateBackgroundUploadProgress('bg-upload-id', 50, 5000, 10000);
-
-      expect(store.backgroundUpload.progress).toBe(50);
-      expect(store.backgroundUpload.bytesUploaded).toBe(5000);
+      store.phase = 'processing';
+      expect(store.isBlocking).toBe(true);
+      expect(store.isProcessing).toBe(true);
     });
 
-    it('should not update progress for different recordId', () => {
+    it('should block navigation during uploading phase', () => {
       const store = useRecordingStore();
-      store.backgroundUpload = {
-        active: true,
-        recordId: 'bg-upload-id',
-        progress: 25,
-        bytesUploaded: 2500,
-        bytesTotal: 10000,
-        metadata: null
-      };
-
-      store.updateBackgroundUploadProgress('different-id', 75, 7500, 10000);
-
-      // Should remain unchanged
-      expect(store.backgroundUpload.progress).toBe(25);
-      expect(store.backgroundUpload.bytesUploaded).toBe(2500);
+      store.phase = 'uploading';
+      expect(store.isBlocking).toBe(true);
+      expect(store.isUploading).toBe(true);
+      expect(store.hasActiveUpload).toBe(true);
     });
 
-    it('should clear background upload correctly', () => {
+    it('should allow navigation after upload completes', () => {
       const store = useRecordingStore();
-      store.backgroundUpload = {
-        active: true,
-        recordId: 'bg-upload-id',
-        progress: 100,
-        bytesUploaded: 10000,
-        bytesTotal: 10000,
-        metadata: { duration: 120 }
-      };
-
-      store.clearBackgroundUpload();
-
-      expect(store.backgroundUpload.active).toBe(false);
-      expect(store.backgroundUpload.recordId).toBeNull();
-      expect(store.backgroundUpload.progress).toBe(0);
+      store.phase = 'uploaded';
+      expect(store.isBlocking).toBe(false);
+      expect(store.isUploaded).toBe(true);
     });
   });
 });

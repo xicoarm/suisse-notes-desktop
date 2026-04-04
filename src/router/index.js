@@ -107,16 +107,22 @@ export default function (/* { store, ssrContext } */) {
     } else if (to.name === 'about' && authStore.isAuthenticated) {
       // Allow authenticated users to visit about page
       next();
-    } else if (to.name === 'upload') {
-      // Prevent navigating to upload page while recording is active
+    } else {
+      // Block navigation away from record page during any blocking phase
       const { useRecordingStore } = await import('../stores/recording');
       const recordingStore = useRecordingStore();
-      if (recordingStore.isRecording || recordingStore.isPaused) {
+
+      if (from.name === 'record' && to.name !== 'record' && recordingStore.isBlocking) {
         next({ name: 'record' });
-      } else {
-        next();
+        return;
       }
-    } else {
+
+      // Prevent navigating to upload page while recording is active
+      if (to.name === 'upload' && recordingStore.isBlocking) {
+        next({ name: 'record' });
+        return;
+      }
+
       next();
     }
   });

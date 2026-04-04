@@ -2,7 +2,7 @@
   <div class="recording-controls">
     <!-- Idle State - Start Button -->
     <q-btn
-      v-if="recordingStore.status === 'idle'"
+      v-if="recordingStore.phase === 'idle'"
       round
       size="lg"
       color="negative"

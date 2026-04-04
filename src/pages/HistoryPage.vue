@@ -152,10 +152,7 @@
           class="uploading-bar"
         />
         <div class="uploading-meta">
-          <span v-if="recordingStore.backgroundUpload.active && recordingStore.backgroundUpload.metadata">
-            {{ formatDuration(recordingStore.backgroundUpload.metadata.finalDuration) }}
-          </span>
-          <span v-else-if="recordingStore.uploadMetadata.finalDuration">
+          <span v-if="recordingStore.uploadMetadata.finalDuration">
             {{ formatDuration(recordingStore.uploadMetadata.finalDuration) }}
           </span>
         </div>
@@ -507,9 +504,8 @@ export default {
         const { cancelUpload } = await import('../services/upload');
         await cancelUpload(recordingStore.recordId);
       }
-      recordingStore.status = 'stopped';
+      recordingStore.phase = 'idle';
       recordingStore.uploadProgress = 0;
-      recordingStore.backgroundUpload.active = false;
     };
 
     const onRecordingDeleted = () => {
@@ -535,9 +531,7 @@ export default {
           if (data.recordId === recordingStore.recordId) {
             recordingStore.updateUploadProgress(data.progress, data.bytesUploaded, data.bytesTotal);
           }
-          if (recordingStore.backgroundUpload.active && data.recordId === recordingStore.backgroundUpload.recordId) {
-            recordingStore.updateBackgroundUploadProgress(data.recordId, data.progress, data.bytesUploaded, data.bytesTotal);
-          }
+          // Background uploads removed — pipeline is now linear
         });
 
         window.electronAPI.upload.onRetry((data) => {

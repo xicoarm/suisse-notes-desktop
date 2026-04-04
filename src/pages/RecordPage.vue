@@ -6,7 +6,7 @@
 
       <!-- IDLE STATE: Recording form -->
       <div
-        v-if="recordingStore.status === 'idle' && !isUploadedFromRecording"
+        v-if="recordingStore.phase === 'idle' && !isUploadedFromRecording"
         class="idle-layout"
       >
         <!-- Record Card -->
@@ -428,7 +428,7 @@
 
       <!-- ERROR STATE: Recording failed -->
       <div
-        v-if="recordingStore.status === 'error' && !showUploadSection"
+        v-if="recordingStore.phase === 'error' && !showUploadSection"
         class="error-card modern-card no-hover"
       >
         <div class="error-card-content">
@@ -458,258 +458,235 @@
         </div>
       </div>
 
-      <!-- Auto-Upload Progress Section -->
-      <div
-        v-if="showUploadSection"
-        class="upload-card modern-card no-hover"
-      >
-        <!-- Only show header during processing/uploading/error, not when complete -->
+      <!-- Full-screen blocking overlay during processing/uploading/complete/error -->
+      <teleport to="body">
         <div
-          v-if="!recordingStore.isUploaded"
-          class="upload-header"
+          v-if="showUploadSection"
+          class="recording-pipeline-overlay"
         >
-          <q-icon
-            :name="uploadIcon"
-            size="sm"
-            :color="uploadIconColor"
-          />
-          <span>{{ uploadHeaderText }}</span>
-        </div>
-
-        <!-- Processing state -->
-        <div
-          v-if="isProcessing"
-          class="upload-content"
-        >
-          <div class="processing-state">
-            <q-spinner-dots
-              color="primary"
-              size="40px"
-            />
-            <span>Processing recording...</span>
-          </div>
-        </div>
-
-        <!-- Uploading state -->
-        <div
-          v-else-if="isAutoUploading || recordingStore.isUploading"
-          class="upload-content"
-        >
-          <div class="upload-progress-section">
-            <div class="progress-info">
-              <span class="progress-text">
-                {{ displayProgress >= 100 ? $t('processingOnServer') : (recordingStore.uploadRetryAttempt > 0 ? $t('uploadRetrying', { attempt: recordingStore.uploadRetryAttempt, max: recordingStore.uploadRetryMaxRetries }) : $t('uploading')) }}
-              </span>
-              <span
-                v-if="displayProgress > 0 && displayProgress < 100"
-                class="progress-percent"
-              >{{ displayProgress }}%</span>
-            </div>
-            <q-linear-progress
-              v-if="displayProgress > 0 && displayProgress < 100"
-              :value="displayProgress / 100"
-              color="primary"
-              size="8px"
-              rounded
-            />
-            <q-linear-progress
-              v-else
-              indeterminate
-              color="primary"
-              size="8px"
-              rounded
-            />
-            <div
-              v-if="displayProgress < 100"
-              class="progress-meta"
-            >
-              <span>{{ formatBytes(recordingStore.bytesUploaded) }} / {{ formatBytes(recordingStore.bytesTotal) }}</span>
-            </div>
-            <div
-              v-else
-              class="progress-meta"
-            >
-              <span>Upload complete, waiting for server response...</span>
-            </div>
-          </div>
-          <div class="upload-note">
-            <q-icon
-              name="info"
-              size="xs"
-              color="grey-6"
-            />
-            <span>Upload continues in background - you can start a new recording</span>
-          </div>
-          <div class="upload-actions">
-            <q-btn
-              outline
-              color="primary"
-              label="New Recording"
-              icon="mic"
-              size="sm"
-              @click="startNewWhileUploading"
-            />
-            <q-btn
-              flat
-              color="negative"
-              label="Cancel Upload"
-              icon="close"
-              size="sm"
-              @click="cancelUpload"
-            />
-          </div>
-        </div>
-
-        <!-- Upload Error state -->
-        <div
-          v-else-if="uploadError"
-          class="upload-content"
-        >
-          <div class="error-state">
-            <q-icon
-              name="cloud_off"
-              size="lg"
-              color="negative"
-            />
-            <div class="error-info">
-              <span class="error-title">Upload Failed</span>
-              <span class="error-message">{{ uploadError }}</span>
-            </div>
-          </div>
-
-          <div class="error-actions">
-            <q-btn
-              unelevated
-              class="gradient-btn"
-              label="Retry Upload"
-              icon="refresh"
-              :loading="isRetrying"
-              @click="retryUpload"
-            />
-            <q-btn
-              flat
-              color="grey-7"
-              label="View History"
-              icon="history"
-              @click="goToHistory"
-            />
-          </div>
-
-          <div class="error-note">
-            <q-icon
-              name="check_circle"
-              size="xs"
-              color="positive"
-            />
-            <span>{{ $t('recordingSavedLocally') }}</span>
-          </div>
-        </div>
-
-        <!-- Upload Complete state -->
-        <div
-          v-else-if="recordingStore.isUploaded"
-          class="upload-success"
-        >
-          <!-- Top Section: New Recording Button + Duration (prominent) -->
-          <div class="success-top-actions">
-            <q-btn
-              unelevated
-              color="primary"
-              :label="$t('newRecording')"
-              icon="mic"
-              class="new-recording-btn"
-              @click="handleNewRecording"
-            />
-            <div
-              v-if="finalDuration > 0"
-              class="duration-badge"
-            >
-              <q-icon
-                name="schedule"
-                size="18px"
-              />
-              <span>{{ formattedFinalDuration }}</span>
-            </div>
-          </div>
-
-          <!-- Main CTA: View Transcript -->
+          <!-- Only show header during processing/uploading/error, not when complete -->
           <div
-            v-if="currentAudioFileId"
-            class="transcript-cta"
+            v-if="!recordingStore.isUploaded"
+            class="upload-header"
           >
-            <div class="cta-icon">
-              <q-icon
-                name="check_circle"
-                size="64px"
-                color="positive"
-              />
-            </div>
-            <h3 class="cta-title">
-              {{ $t('transcriptReady') }}
-            </h3>
-            <p class="cta-subtitle">
-              {{ $t('transcriptCta') }}
-            </p>
+            <q-icon
+              :name="uploadIcon"
+              size="sm"
+              :color="uploadIconColor"
+            />
+            <span>{{ uploadHeaderText }}</span>
+          </div>
 
-            <!-- Prominent clickable button with animation -->
-            <div class="cta-button-wrapper">
+          <!-- Processing state -->
+          <div
+            v-if="isProcessing"
+            class="upload-content"
+          >
+            <div class="processing-state">
+              <q-spinner-dots
+                color="primary"
+                size="40px"
+              />
+              <span>Processing recording...</span>
+            </div>
+          </div>
+
+          <!-- Uploading state -->
+          <div
+            v-else-if="isAutoUploading || recordingStore.isUploading"
+            class="upload-content"
+          >
+            <div class="upload-progress-section">
+              <div class="progress-info">
+                <span class="progress-text">
+                  {{ displayProgress >= 100 ? $t('processingOnServer') : (recordingStore.uploadRetryAttempt > 0 ? $t('uploadRetrying', { attempt: recordingStore.uploadRetryAttempt, max: recordingStore.uploadRetryMaxRetries }) : $t('uploading')) }}
+                </span>
+                <span
+                  v-if="displayProgress > 0 && displayProgress < 100"
+                  class="progress-percent"
+                >{{ displayProgress }}%</span>
+              </div>
+              <q-linear-progress
+                v-if="displayProgress > 0 && displayProgress < 100"
+                :value="displayProgress / 100"
+                color="primary"
+                size="8px"
+                rounded
+              />
+              <q-linear-progress
+                v-else
+                indeterminate
+                color="primary"
+                size="8px"
+                rounded
+              />
+              <div
+                v-if="displayProgress < 100"
+                class="progress-meta"
+              >
+                <span>{{ formatBytes(recordingStore.bytesUploaded) }} / {{ formatBytes(recordingStore.bytesTotal) }}</span>
+              </div>
+              <div
+                v-else
+                class="progress-meta"
+              >
+                <span>Upload complete, waiting for server response...</span>
+              </div>
+            </div>
+          <!-- Upload is blocking — user waits for completion -->
+          </div>
+
+          <!-- Upload Error state -->
+          <div
+            v-else-if="uploadError"
+            class="upload-content"
+          >
+            <div class="error-state">
+              <q-icon
+                name="cloud_off"
+                size="lg"
+                color="negative"
+              />
+              <div class="error-info">
+                <span class="error-title">Upload Failed</span>
+                <span class="error-message">{{ uploadError }}</span>
+              </div>
+            </div>
+
+            <div class="error-actions">
               <q-btn
                 unelevated
-                class="main-cta-button pulse-attention"
-                @click="openInSuisseNotes"
-              >
-                <div class="button-content">
-                  <q-icon
-                    name="open_in_new"
-                    size="28px"
-                    class="q-mr-md"
-                  />
-                  <div class="button-text">
-                    <span class="button-label">{{ $t('openInSuisseNotes') }}</span>
-                    <span class="button-hint">{{ $t('clickHereToView') }}</span>
-                  </div>
-                  <q-icon
-                    name="arrow_forward"
-                    size="24px"
-                    class="q-ml-md arrow-icon"
-                  />
-                </div>
-              </q-btn>
-            </div>
-
-            <!-- URL Display with Copy -->
-            <div class="url-compact">
-              <code>https://app.suisse-notes.ch/meeting/audio/{{ currentAudioFileId }}</code>
+                class="gradient-btn"
+                label="Retry Upload"
+                icon="refresh"
+                :loading="isRetrying"
+                @click="retryUpload"
+              />
               <q-btn
                 flat
-                dense
-                icon="content_copy"
-                size="sm"
-                color="primary"
-                @click="copyTranscriptUrl"
-              >
-                <q-tooltip>{{ $t('copyLink') }}</q-tooltip>
-              </q-btn>
+                color="grey-7"
+                label="View History"
+                icon="history"
+                @click="goToHistory"
+              />
+            </div>
+
+            <div class="error-note">
+              <q-icon
+                name="check_circle"
+                size="xs"
+                color="positive"
+              />
+              <span>{{ $t('recordingSavedLocally') }}</span>
             </div>
           </div>
 
-          <!-- Bottom: View History link -->
-          <div class="success-bottom">
-            <q-btn
-              flat
-              color="grey-7"
-              :label="$t('viewHistory')"
-              icon="history"
-              size="sm"
-              @click="goToHistory"
-            />
+          <!-- Upload Complete state -->
+          <div
+            v-else-if="recordingStore.isUploaded"
+            class="upload-success"
+          >
+            <!-- Top Section: New Recording Button + Duration (prominent) -->
+            <div class="success-top-actions">
+              <q-btn
+                unelevated
+                color="primary"
+                :label="$t('newRecording')"
+                icon="mic"
+                class="new-recording-btn"
+                @click="handleNewRecording"
+              />
+              <div
+                v-if="finalDuration > 0"
+                class="duration-badge"
+              >
+                <q-icon
+                  name="schedule"
+                  size="18px"
+                />
+                <span>{{ formattedFinalDuration }}</span>
+              </div>
+            </div>
+
+            <!-- Main CTA: View Transcript -->
+            <div
+              v-if="currentAudioFileId"
+              class="transcript-cta"
+            >
+              <div class="cta-icon">
+                <q-icon
+                  name="check_circle"
+                  size="64px"
+                  color="positive"
+                />
+              </div>
+              <h3 class="cta-title">
+                {{ $t('transcriptReady') }}
+              </h3>
+              <p class="cta-subtitle">
+                {{ $t('transcriptCta') }}
+              </p>
+
+              <!-- Prominent clickable button with animation -->
+              <div class="cta-button-wrapper">
+                <q-btn
+                  unelevated
+                  class="main-cta-button pulse-attention"
+                  @click="openInSuisseNotes"
+                >
+                  <div class="button-content">
+                    <q-icon
+                      name="open_in_new"
+                      size="28px"
+                      class="q-mr-md"
+                    />
+                    <div class="button-text">
+                      <span class="button-label">{{ $t('openInSuisseNotes') }}</span>
+                      <span class="button-hint">{{ $t('clickHereToView') }}</span>
+                    </div>
+                    <q-icon
+                      name="arrow_forward"
+                      size="24px"
+                      class="q-ml-md arrow-icon"
+                    />
+                  </div>
+                </q-btn>
+              </div>
+
+              <!-- URL Display with Copy -->
+              <div class="url-compact">
+                <code>https://app.suisse-notes.ch/meeting/audio/{{ currentAudioFileId }}</code>
+                <q-btn
+                  flat
+                  dense
+                  icon="content_copy"
+                  size="sm"
+                  color="primary"
+                  @click="copyTranscriptUrl"
+                >
+                  <q-tooltip>{{ $t('copyLink') }}</q-tooltip>
+                </q-btn>
+              </div>
+            </div>
+
+            <!-- Bottom: View History link -->
+            <div class="success-bottom">
+              <q-btn
+                flat
+                color="grey-7"
+                :label="$t('viewHistory')"
+                icon="history"
+                size="sm"
+                @click="goToHistory"
+              />
+            </div>
           </div>
         </div>
-      </div>
+      </teleport>
 
       <!-- Tips Section (only when idle) -->
       <div
-        v-if="recordingStore.status === 'idle'"
+        v-if="recordingStore.phase === 'idle'"
         class="tips-card modern-card no-hover"
       >
         <div class="tips-header">
@@ -897,13 +874,15 @@ const showStorageDialog = ref(false);
 const showContactSalesDialog = ref(false);
 const contactSalesReason = ref('limit_reached');
 const currentStoragePreference = ref('keep');
-const isProcessing = ref(false);
-const isAutoUploading = ref(false);
-const isRetrying = ref(false);
-const uploadError = ref(null);
-const retryAttempt = ref(0);
-const currentFilePath = ref('');
-const currentFileSize = ref(0);
+// All recording/upload state lives in the store — no local refs for these.
+// Computed aliases for template convenience:
+const isProcessing = computed(() => recordingStore.isProcessing);
+const isAutoUploading = computed(() => recordingStore.isUploading);
+const uploadError = computed(() => recordingStore.uploadError);
+const retryAttempt = computed(() => recordingStore.uploadRetryAttempt);
+const currentFilePath = computed(() => recordingStore.audioFilePath);
+const currentFileSize = computed(() => recordingStore.currentFileSize);
+const isRetrying = ref(false); // Local UI state for retry button spinner
 
 // Watch for minutes limit warning
 watch(minutesLimitWarning, (minutesRemaining) => {
@@ -979,11 +958,12 @@ const statusText = computed(() => {
   if (uploadError.value) return 'Upload failed';
   if (recordingStore.isRecording && !isMicHealthy.value) return t('micHealthStatusIssue');
 
-  switch (recordingStore.status) {
+  switch (recordingStore.phase) {
     case 'idle': return 'Ready to record';
     case 'recording': return 'Recording in progress';
     case 'paused': return 'Recording paused';
-    case 'stopped': return 'Recording stopped';
+    case 'stopping': return 'Stopping...';
+    case 'processing': return 'Processing recording...';
     case 'uploading': return 'Uploading...';
     case 'uploaded': return 'Upload complete';
     case 'error': return 'Error occurred';
@@ -1109,10 +1089,10 @@ onMounted(async () => {
   // If state is from a file upload (UploadPage), always reset so RecordPage starts clean
   if (recordingStore.recordId && recordingStore.recordId.startsWith('file_')) {
     recordingStore.reset();
-  } else if (recordingStore.status === 'uploading') {
-    isAutoUploading.value = true;
-    isProcessing.value = false;
-  } else if (recordingStore.status === 'uploaded') {
+  } else if (recordingStore.phase === 'uploading') {
+    // phase set to 'uploading' via setUploading()
+    // phase transition handled by subsequent action (setUploading/setError/reset)
+  } else if (recordingStore.phase === 'uploaded') {
     // Recording already finished — reset to idle so the user sees a fresh Record tab
     recordingStore.reset();
   }
@@ -1129,8 +1109,8 @@ onUnmounted(() => {
 
 const handleStartClick = async () => {
   // Reset error state
-  uploadError.value = null;
-  retryAttempt.value = 0;
+  recordingStore.uploadError =null;
+  recordingStore.uploadRetryAttempt = 0;
 
   // Sync minutes with server before checking (3s timeout, fallback to cached)
   await Promise.race([
@@ -1246,9 +1226,9 @@ const handleStop = async () => {
   recordingStore.setFinalDuration(recordingStore.duration);
 
   // Start processing
-  isProcessing.value = true;
-  uploadError.value = null;
-  retryAttempt.value = 0;
+  recordingStore.phase = 'processing';
+  recordingStore.uploadError =null;
+  recordingStore.uploadRetryAttempt = 0;
 
   try {
     const result = await stopRecording();
@@ -1272,14 +1252,14 @@ const handleStop = async () => {
       if (isElectron()) {
         const fileInfo = await window.electronAPI.recording.getFilePath(recordingStore.recordId, '.webm');
         if (fileInfo.success) {
-          currentFilePath.value = fileInfo.filePath;
-          currentFileSize.value = fileInfo.fileSize;
+          recordingStore.audioFilePath =fileInfo.filePath;
+          recordingStore.currentFileSize =fileInfo.fileSize;
         }
       } else if (isCapacitor()) {
         // On mobile, the file path and size come from the stop result
         if (result.filePath) {
-          currentFilePath.value = result.filePath;
-          currentFileSize.value = result.fileSize || 0;
+          recordingStore.audioFilePath =result.filePath;
+          recordingStore.currentFileSize =result.fileSize || 0;
         }
       }
 
@@ -1292,10 +1272,10 @@ const handleStop = async () => {
       });
 
       // Processing done, start auto-upload
-      isProcessing.value = false;
+      // phase transition handled by subsequent action (setUploading/setError/reset)
       await startAutoUpload();
     } else {
-      isProcessing.value = false;
+      // phase transition handled by subsequent action (setUploading/setError/reset)
 
       // Update existing history entry (created at recording start) to 'failed' status
       // Do NOT call addRecording — the entry already exists with uploadStatus 'recording'
@@ -1306,8 +1286,8 @@ const handleStop = async () => {
           const fileInfo = await window.electronAPI.recording.getFilePath(recordingStore.recordId, '.webm');
           if (fileInfo.success) {
             failedFilePath = fileInfo.filePath;
-            currentFilePath.value = fileInfo.filePath;
-            currentFileSize.value = fileInfo.fileSize || 0;
+            recordingStore.audioFilePath =fileInfo.filePath;
+            recordingStore.currentFileSize =fileInfo.fileSize || 0;
           }
         } catch (e) { /* file doesn't exist yet */ }
       } else if (isCapacitor()) {
@@ -1318,7 +1298,7 @@ const handleStop = async () => {
           const webmExists = !m4aExists && await fileExists(`recordings/${recordingStore.recordId}/combined.webm`);
           if (m4aExists || webmExists) {
             failedFilePath = `recordings/${recordingStore.recordId}/combined.${m4aExists ? 'm4a' : 'webm'}`;
-            currentFilePath.value = failedFilePath;
+            recordingStore.audioFilePath =failedFilePath;
           }
         } catch (e) { /* file doesn't exist */ }
       }
@@ -1347,7 +1327,7 @@ const handleStop = async () => {
       }
     }
   } catch (error) {
-    isProcessing.value = false;
+    // phase transition handled by subsequent action (setUploading/setError/reset)
     $q.notify({
       type: 'negative',
       message: error.message || 'Error processing recording'
@@ -1393,12 +1373,12 @@ const handleCancel = async () => {
 
     // Reset all state
     recordingStore.reset();
-    isProcessing.value = false;
-    isAutoUploading.value = false;
-    uploadError.value = null;
-    retryAttempt.value = 0;
-    currentFilePath.value = '';
-    currentFileSize.value = 0;
+    // phase transition handled by subsequent action (setUploading/setError/reset)
+    // phase reset handled by store actions
+    recordingStore.uploadError =null;
+    recordingStore.uploadRetryAttempt = 0;
+    recordingStore.audioFilePath ='';
+    recordingStore.currentFileSize =0;
 
     $q.notify({
       type: 'info',
@@ -1409,13 +1389,13 @@ const handleCancel = async () => {
     console.error('Error cancelling recording:', error);
     // Force reset even on error
     recordingStore.reset();
-    isProcessing.value = false;
-    isAutoUploading.value = false;
+    // phase transition handled by subsequent action (setUploading/setError/reset)
+    // phase reset handled by store actions
   }
 };
 
 const startAutoUpload = async () => {
-  isAutoUploading.value = true;
+  // phase set to 'uploading' via setUploading()
   recordingStore.setUploading({
     createdAt: new Date().toISOString(),
     fileSize: currentFileSize.value,
@@ -1481,8 +1461,8 @@ const startAutoUpload = async () => {
       throw new Error('Unsupported platform');
     }
 
-    isAutoUploading.value = false;
-    retryAttempt.value = 0;
+    // phase reset handled by store actions
+    recordingStore.uploadRetryAttempt = 0;
 
     if (result.success) {
       recordingStore.setUploaded(result.audioFileId);
@@ -1539,7 +1519,7 @@ const startAutoUpload = async () => {
       handleUploadError(result.error);
     }
   } catch (error) {
-    isAutoUploading.value = false;
+    // phase reset handled by store actions
     handleUploadError(error.message);
   }
 };
@@ -1547,14 +1527,14 @@ const startAutoUpload = async () => {
 const handleUploadError = async (errorMessage) => {
   // Make "Insufficient minutes" error more user-friendly
   if (errorMessage && errorMessage.includes('Insufficient minutes')) {
-    uploadError.value = 'No recording minutes remaining. Please upgrade your plan or purchase more minutes at app.suisse-notes.ch';
+    recordingStore.uploadError ='No recording minutes remaining. Please upgrade your plan or purchase more minutes at app.suisse-notes.ch';
     // Refresh minutes display
     const authStore = (await import('../stores/auth')).useAuthStore();
     const { useMinutesStore } = await import('../stores/minutes');
     const minutesStore = useMinutesStore();
     minutesStore.fetchMinutes(authStore.token, true);
   } else {
-    uploadError.value = errorMessage;
+    recordingStore.uploadError =errorMessage;
   }
 
   // Update history entry as failed (already added before upload started)
@@ -1570,7 +1550,7 @@ const handleUploadError = async (errorMessage) => {
   if (isMinutesError) {
     // Refresh minutes to update the header badge
     minutesStore.syncWithServer(authStore.token).catch(() => {});
-    uploadError.value = t('insufficientMinutesUpload');
+    recordingStore.uploadError =t('insufficientMinutesUpload');
     $q.notify({
       type: 'warning',
       message: t('insufficientMinutesUpload'),
@@ -1617,8 +1597,8 @@ const handleUploadError = async (errorMessage) => {
 
 const retryUpload = async () => {
   isRetrying.value = true;
-  uploadError.value = null;
-  retryAttempt.value = 0;
+  recordingStore.uploadError =null;
+  recordingStore.uploadRetryAttempt = 0;
 
   try {
     // Remove from history (will re-add based on result)
@@ -1628,14 +1608,14 @@ const retryUpload = async () => {
     await startAutoUpload();
   } catch (error) {
     isRetrying.value = false;
-    uploadError.value = error.message;
+    recordingStore.uploadError =error.message;
   }
 };
 
 const retryChunkCombine = async () => {
-  isProcessing.value = true;
+  recordingStore.phase = 'processing';
   recordingStore.error = null;
-  recordingStore.status = 'stopped';
+  recordingStore.phase = 'stopped';
 
   let result;
   if (isElectron()) {
@@ -1647,14 +1627,14 @@ const retryChunkCombine = async () => {
   }
 
   if (result.success) {
-    currentFilePath.value = result.outputPath;
-    currentFileSize.value = result.fileSize || 0;
-    isProcessing.value = false;
+    recordingStore.audioFilePath =result.outputPath;
+    recordingStore.currentFileSize =result.fileSize || 0;
+    // phase transition handled by subsequent action (setUploading/setError/reset)
     await startAutoUpload();
   } else {
-    isProcessing.value = false;
+    // phase transition handled by subsequent action (setUploading/setError/reset)
     recordingStore.error = result.error;
-    recordingStore.status = 'error';
+    recordingStore.phase = 'error';
   }
 };
 
@@ -1678,8 +1658,8 @@ const handleSaveDeadRecording = async () => {
   // Save duration before stopping
   recordingStore.setFinalDuration(recordingStore.duration);
 
-  isProcessing.value = true;
-  uploadError.value = null;
+  recordingStore.phase = 'processing';
+  recordingStore.uploadError =null;
 
   try {
     const result = await stopRecording();
@@ -1701,13 +1681,13 @@ const handleSaveDeadRecording = async () => {
       if (isElectron()) {
         const fileInfo = await window.electronAPI.recording.getFilePath(recordingStore.recordId, '.webm');
         if (fileInfo.success) {
-          currentFilePath.value = fileInfo.filePath;
-          currentFileSize.value = fileInfo.fileSize;
+          recordingStore.audioFilePath =fileInfo.filePath;
+          recordingStore.currentFileSize =fileInfo.fileSize;
         }
       } else if (isCapacitor()) {
         if (result.filePath) {
-          currentFilePath.value = result.filePath;
-          currentFileSize.value = result.fileSize || 0;
+          recordingStore.audioFilePath =result.filePath;
+          recordingStore.currentFileSize =result.fileSize || 0;
         }
       }
 
@@ -1719,17 +1699,17 @@ const handleSaveDeadRecording = async () => {
         uploadStatus: 'pending'
       });
 
-      isProcessing.value = false;
+      // phase transition handled by subsequent action (setUploading/setError/reset)
       await startAutoUpload();
     } else {
-      isProcessing.value = false;
+      // phase transition handled by subsequent action (setUploading/setError/reset)
       $q.notify({
         type: 'negative',
         message: result.error || 'Failed to save recording'
       });
     }
   } catch (error) {
-    isProcessing.value = false;
+    // phase transition handled by subsequent action (setUploading/setError/reset)
     $q.notify({
       type: 'negative',
       message: error.message || 'Error processing recording'
@@ -1748,100 +1728,24 @@ const handleDiscardDeadRecording = () => {
     persistent: true
   }).onOk(() => {
     recordingStore.reset();
-    isProcessing.value = false;
-    isAutoUploading.value = false;
-    uploadError.value = null;
+    // phase transition handled by subsequent action (setUploading/setError/reset)
+    // phase reset handled by store actions
+    recordingStore.uploadError =null;
   });
 };
 
 const handleNewRecording = () => {
   recordingStore.reset();
-  isProcessing.value = false;
-  isAutoUploading.value = false;
-  uploadError.value = null;
-  retryAttempt.value = 0;
-  currentFilePath.value = '';
-  currentFileSize.value = 0;
+  // phase transition handled by subsequent action (setUploading/setError/reset)
+  // phase reset handled by store actions
+  recordingStore.uploadError =null;
+  recordingStore.uploadRetryAttempt = 0;
+  recordingStore.audioFilePath ='';
+  recordingStore.currentFileSize =0;
 };
 
-// Start new recording while upload continues in background
-const startNewWhileUploading = () => {
-  // Move current upload to background tracking
-  recordingStore.moveToBackgroundUpload();
-
-  // Reset local UI state
-  isProcessing.value = false;
-  isAutoUploading.value = false;
-  uploadError.value = null;
-  retryAttempt.value = 0;
-  currentFilePath.value = '';
-  currentFileSize.value = 0;
-
-  // Reset store for new recording (background upload continues)
-  recordingStore.recordId = null;
-  recordingStore.status = 'idle';
-  recordingStore.duration = 0;
-  recordingStore.chunkIndex = 0;
-  recordingStore.audioFilePath = null;
-  recordingStore.uploadProgress = 0;
-  recordingStore.bytesUploaded = 0;
-  recordingStore.bytesTotal = 0;
-  recordingStore.error = null;
-  recordingStore.audioFileId = null;
-  recordingStore.finalDuration = 0;
-};
-
-// Cancel the current upload (with confirmation dialog)
-const cancelUpload = () => {
-  $q.dialog({
-    title: t('cancelUploadTitle'),
-    message: t('cancelUploadConfirm'),
-    cancel: { flat: true, label: t('cancel') },
-    ok: { color: 'negative', label: t('confirmCancelUpload') },
-    persistent: true
-  }).onOk(async () => {
-    try {
-      if (recordingStore.recordId && isElectron()) {
-        await window.electronAPI.upload.cancel(recordingStore.recordId);
-      }
-
-      // On mobile, cancel the active XHR upload
-      if (recordingStore.recordId && isCapacitor()) {
-        try {
-          const { cancelUpload: cancelMobileUpload } = await import('../services/upload');
-          await cancelMobileUpload(recordingStore.recordId);
-        } catch (e) {
-          console.warn('Could not cancel mobile upload:', e);
-        }
-      }
-
-      // Update history entry to pending so it's not stuck on 'uploading'
-      if (recordingStore.recordId) {
-        await historyStore.updateRecording(recordingStore.recordId, { uploadStatus: 'pending' });
-      }
-
-      // Reset UI state
-      isProcessing.value = false;
-      isAutoUploading.value = false;
-      uploadError.value = null;
-      retryAttempt.value = 0;
-
-      // Reset store
-      recordingStore.status = 'idle';
-      recordingStore.uploadProgress = 0;
-      recordingStore.bytesUploaded = 0;
-      recordingStore.bytesTotal = 0;
-      recordingStore.error = null;
-
-      $q.notify({
-        type: 'info',
-        message: t('cancelUpload')
-      });
-    } catch (error) {
-      console.error('Error cancelling upload:', error);
-    }
-  });
-};
+// "Start new while uploading" removed — pipeline is now linear.
+// User must wait for upload to complete before starting a new recording.
 
 const openInSuisseNotes = () => {
   if (currentAudioFileId.value) {
@@ -2279,6 +2183,27 @@ const removeSessionWord = (word) => {
       gap: 12px;
       margin-top: 8px;
     }
+  }
+}
+
+// Full-screen blocking overlay — prevents any interaction during processing/upload
+.recording-pipeline-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(255, 255, 255, 0.97);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+
+  // Reuse the card styling inside the overlay
+  .upload-header,
+  .upload-content,
+  .upload-success {
+    max-width: 520px;
+    width: 100%;
   }
 }
 

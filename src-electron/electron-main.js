@@ -1767,10 +1767,22 @@ function safeParseDuration(metadata) {
 
 // Helper: Get audio metadata via ffprobe
 function getAudioMetadata(filePath) {
+  // Fast-fail if FFmpeg/ffprobe binary is known to be broken
+  if (ffmpegSpawnBroken) {
+    return Promise.reject(new Error('ffprobe binary unavailable (spawn failed previously)'));
+  }
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(filePath, (err, metadata) => {
-      if (err) reject(err);
-      else resolve(metadata);
+      if (err) {
+        // Detect spawn failures so future calls fast-fail
+        if (isSpawnError(err)) {
+          ffmpegSpawnBroken = true;
+          log.error(`ffprobe binary cannot execute (${err.message}) — all FFmpeg operations will be skipped`);
+        }
+        reject(err);
+      } else {
+        resolve(metadata);
+      }
     });
   });
 }
@@ -1907,8 +1919,23 @@ function calculateUploadTimeout(fileSizeBytes) {
 // FFmpeg operation timeout (5 minutes default)
 const FFMPEG_TIMEOUT_MS = 5 * 60 * 1000;
 
+// Fast-fail flag: once FFmpeg binary fails to spawn (ENOEXEC/ENOENT),
+// all subsequent ffmpegWithTimeout calls reject instantly instead of
+// waiting through 5-minute timeout cascades.
+let ffmpegSpawnBroken = false;
+
+function isSpawnError(err) {
+  const msg = (err?.message || '').toLowerCase();
+  return msg.includes('spawn') || msg.includes('enoent') || msg.includes('enoexec') || msg.includes('system error -8');
+}
+
 // Execute FFmpeg command with timeout + Sentry tracking
 function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operationName = 'FFmpeg', { reportToSentry = true } = {}) {
+  // Fast-fail if FFmpeg binary is known to be broken
+  if (ffmpegSpawnBroken) {
+    return Promise.reject(new Error(`FFmpeg binary unavailable (spawn failed previously) ��� skipping ${operationName}`));
+  }
+
   const startTime = Date.now();
   return new Promise((resolve, reject) => {
     const timeoutId = setTimeout(() => {
@@ -1935,10 +1962,15 @@ function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operati
       })
       .on('error', (err) => {
         clearTimeout(timeoutId);
+        // Detect spawn failures and set the fast-fail flag for all future calls
+        if (isSpawnError(err)) {
+          ffmpegSpawnBroken = true;
+          log.error(`FFmpeg binary cannot execute (${err.message}) — all FFmpeg operations will be skipped`);
+        }
         if (reportToSentry) {
           Sentry.captureException(err, {
             tags: { operation: operationName },
-            extra: { elapsedMs: Date.now() - startTime },
+            extra: { elapsedMs: Date.now() - startTime, spawnBroken: ffmpegSpawnBroken },
           });
         }
         reject(err);
@@ -2609,19 +2641,31 @@ async function createSessionFileInternal(recordId, ext) {
   }
 
   // Validate raw file is a readable audio container before FFmpeg processing
-  try {
-    await getAudioMetadata(rawPath);
-  } catch (probeErr) {
-    log.error('Raw session file is not a valid audio file:', probeErr.message);
-    Sentry.captureException(probeErr, {
-      tags: { operation: 'Create session file (probe validation)' },
-      extra: { rawPath, rawSize: rawStats.size, chunksCount: sortedChunks.length },
-    });
-    try { fs.unlinkSync(rawPath); } catch (e) { /* ignore */ }
-    return { success: false, error: 'Raw recording file is corrupt or unreadable' };
+  let ffmpegAvailable = !ffmpegSpawnBroken;
+  if (ffmpegAvailable) {
+    try {
+      await getAudioMetadata(rawPath);
+    } catch (probeErr) {
+      if (isSpawnError(probeErr)) {
+        log.warn('ffprobe binary cannot execute — skipping FFmpeg processing, using raw concatenation:', probeErr.message);
+        ffmpegAvailable = false;
+      } else {
+        log.error('Raw session file is not a valid audio file:', probeErr.message);
+        Sentry.captureException(probeErr, {
+          tags: { operation: 'Create session file (probe validation)' },
+          extra: { rawPath, rawSize: rawStats.size, chunksCount: sortedChunks.length },
+        });
+        try { fs.unlinkSync(rawPath); } catch (e) { /* ignore */ }
+        return { success: false, error: 'Raw recording file is corrupt or unreadable' };
+      }
+    }
   }
 
-  // Use timeout-wrapped FFmpeg with fallback
+  // Process with FFmpeg or fall back to raw concatenation
+  if (!ffmpegAvailable) {
+    log.info('Using raw concatenated file as session (FFmpeg unavailable)');
+    fs.renameSync(rawPath, finalPath);
+  } else {
   try {
     await ffmpegWithTimeout(
       ffmpeg(rawPath)
@@ -2642,11 +2686,15 @@ async function createSessionFileInternal(recordId, ext) {
         'Create session file (re-encode)'
       );
     } catch (reencodeErr) {
-      console.error('Re-encode also failed:', reencodeErr.message);
-      // Clean up raw file before returning error
-      try { fs.unlinkSync(rawPath); } catch (e) { /* ignore */ }
-      return { success: false, error: `FFmpeg processing failed: ${reencodeErr.message}` };
+      console.error('FFmpeg processing failed, using raw file:', reencodeErr.message);
+      // Last resort: use raw concatenated file as-is (still valid WebM)
+      if (fs.existsSync(rawPath)) {
+        fs.renameSync(rawPath, finalPath);
+      } else {
+        return { success: false, error: `FFmpeg processing failed: ${reencodeErr.message}` };
+      }
     }
+  }
   }
 
   // P0 Data Loss Fix: Validate session file BEFORE deleting source chunks
