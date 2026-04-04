@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.8.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.8.0...v3.8.1) (2026-04-04)
+
+
+### Bug Fixes
+
+* prevent recording data loss, fix Infinity duration, improve error UX ([0c87349](https://github.com/xicoarm/suisse-notes-desktop/commit/0c87349e116862d033ed01fde465ea9b122ef7c3))
+
 ## [3.8.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.58...v3.8.0) (2026-04-04)
 
 
