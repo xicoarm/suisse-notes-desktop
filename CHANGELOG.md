@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.8.5](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.8.4...v3.8.5) (2026-04-04)
+
+
+### Bug Fixes
+
+* dismiss overlay after upload, fix Infinity:NaN duration display ([4b310e9](https://github.com/xicoarm/suisse-notes-desktop/commit/4b310e9ed994c3793116603fa53dfced42720ec1))
+
 ### [3.8.4](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.8.3...v3.8.4) (2026-04-04)
 
 
