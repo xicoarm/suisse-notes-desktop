@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [3.8.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.58...v3.8.0) (2026-04-04)
+
+
+### Features
+
+* add cancel, skip, and unskip controls for device file sync ([3642e85](https://github.com/xicoarm/suisse-notes-desktop/commit/3642e85933e4ce0ba585d50a4b981f7421c4a4af))
+* add device factory reset option ([28f3a62](https://github.com/xicoarm/suisse-notes-desktop/commit/28f3a62a95e450216aeb309671d41ef0b7a5e1c8))
+* factory reset via CMD_FORMAT (0x68) instead of per-file delete ([ea022e7](https://github.com/xicoarm/suisse-notes-desktop/commit/ea022e73f064a97cb414edad29c5be3739e239be))
+* HistoryPage UX overhaul for mobile device recordings ([1bd6998](https://github.com/xicoarm/suisse-notes-desktop/commit/1bd6998916e0f21876eb61da472bc2275c02a11d))
+* mid-recording mic switch, graceful shutdown data protection, rebrand to Suisse IT GmbH ([41e8d62](https://github.com/xicoarm/suisse-notes-desktop/commit/41e8d625d0d287aed9c8549ccf8e6271c7b7eeb4))
+* per-file upload status with cancel/retry on DevicePage ([90d9aae](https://github.com/xicoarm/suisse-notes-desktop/commit/90d9aae87d9c7cb47babf450e47d7eb6de2834bd))
+
+
+### Bug Fixes
+
+* add button to access device recordings page from settings ([915ca5b](https://github.com/xicoarm/suisse-notes-desktop/commit/915ca5bb4836d5509a5428511b7201d582d8d98c))
+* add command lock to prevent BLE response interleaving ([2118947](https://github.com/xicoarm/suisse-notes-desktop/commit/2118947f9d610d13a4ade8c741ab0e744a856c5a))
+* always exit sync state in getFileList + add diagnostic logging ([6e606e5](https://github.com/xicoarm/suisse-notes-desktop/commit/6e606e5e143d9aee54e0e4220726f84a62f5b258))
+* auto-recover from UUID mismatch by trying alternative UUIDs ([fb7d2b6](https://github.com/xicoarm/suisse-notes-desktop/commit/fb7d2b6519cd429d15bb7a694ce714cedfcd0357))
+* BLE handshake drain regression + multi-tenant device isolation ([1bc60b9](https://github.com/xicoarm/suisse-notes-desktop/commit/1bc60b9495cac37904a9ff42cddd062a1b6b5751))
+* BLE scan shows only protocol devices + friendlier button label ([b6e1b2f](https://github.com/xicoarm/suisse-notes-desktop/commit/b6e1b2f52e462fc0b82a519eedd633dfe55b2225))
+* drain BLE notifications until device goes quiet before commands ([f113d3d](https://github.com/xicoarm/suisse-notes-desktop/commit/f113d3d08195fa98aa97502af2914b297fee6cd7))
+* getFileList skips corrupt entries instead of aborting ([11d7d83](https://github.com/xicoarm/suisse-notes-desktop/commit/11d7d83783a8ef27ef035485ad500e831a22b464))
+* harden audio recording reliability and fix Sentry errors ([865801a](https://github.com/xicoarm/suisse-notes-desktop/commit/865801a334a0ea2ab65d222697d84905c9757599))
+* keep appUuid per-installation, not per-user ([3ef6034](https://github.com/xicoarm/suisse-notes-desktop/commit/3ef60346a2c003fe685953c8eb9f84de8fbc1c1e))
+* migrate user-scoped appUuid to installation key ([325c69b](https://github.com/xicoarm/suisse-notes-desktop/commit/325c69bc22bab0a32120e0d3e23c1e22b8f88fe7))
+* mobile recording reliability audit — P0/P1/P2 fixes + protocol-based device discovery ([b7a8959](https://github.com/xicoarm/suisse-notes-desktop/commit/b7a895923acef4f5a24836266608eee9473b30df))
+* poll transcription status after gateway timeout instead of showing stale error ([8ba26fe](https://github.com/xicoarm/suisse-notes-desktop/commit/8ba26fe1e0f6d4c684c7a2d46633c46341ef669e))
+* reorganize settings page — move destructive actions to bottom ([d56dc01](https://github.com/xicoarm/suisse-notes-desktop/commit/d56dc01c2a0666990d9cc72c6a442642ffcf0e88))
+* restore name-based BLE scan fallback ([a79280c](https://github.com/xicoarm/suisse-notes-desktop/commit/a79280c6c961c9e86e7f01f045555db12a9afca2))
+* revert native Sentry crash handling — native SDK not installed ([346ebe4](https://github.com/xicoarm/suisse-notes-desktop/commit/346ebe4bd23c26bddd2b476b5d4812c63fc93251))
+* send getFileList failures to Sentry with diagnostic breadcrumbs ([afa8bb1](https://github.com/xicoarm/suisse-notes-desktop/commit/afa8bb14757f6ffe00b89d2245b3dca49c065bed))
+* Sentry init falls back to Vue-only if Capacitor bridge unavailable ([7032fc9](https://github.com/xicoarm/suisse-notes-desktop/commit/7032fc9abce1c92abb6b5ae91a63cbe1d68744e9))
+* sort recording history chronologically (newest first) ([2538f99](https://github.com/xicoarm/suisse-notes-desktop/commit/2538f998586c6816db6bcd0377475a3a876624ec))
+* stuck uploads + resync file-not-found + cancel for all uploads ([4612e4e](https://github.com/xicoarm/suisse-notes-desktop/commit/4612e4e04565c0b0f865bd3f0596380a74a19f69))
+* validate battery response bytes + version bump to 3.7.61 ([de90b27](https://github.com/xicoarm/suisse-notes-desktop/commit/de90b27d14a387f116cadaa39ff759150a5abddb))
+
 ### [3.7.58](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.7.57...v3.7.58) (2026-03-21)
 
 
