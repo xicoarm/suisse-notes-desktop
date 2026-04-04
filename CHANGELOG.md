@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [3.9.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.8.5...v3.9.0) (2026-04-04)
+
+
+### Features
+
+* system audio capture via AudioTee (macOS 14.2+ Core Audio Taps) ([173b524](https://github.com/xicoarm/suisse-notes-desktop/commit/173b524f746889c39b6e47639b7dcfca39da11ef))
+
 ### [3.8.5](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.8.4...v3.8.5) (2026-04-04)
 
 
