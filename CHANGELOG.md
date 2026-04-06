@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.9.8](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.7...v3.9.8) (2026-04-06)
+
+
+### Bug Fixes
+
+* add cancel upload button to RecordPage, allow system-audio-only recording ([c09deea](https://github.com/xicoarm/suisse-notes-desktop/commit/c09deea077518a267006660a36ef267127bd3f6c))
+* allow system-audio-only recording without a microphone ([49129ae](https://github.com/xicoarm/suisse-notes-desktop/commit/49129aece54ab564c27a86350459588808fdb1db))
+* bump Android versionCode to 9 and versionName to 3.9.7 ([2b2919f](https://github.com/xicoarm/suisse-notes-desktop/commit/2b2919fe6d9fbbcfe4cc5b3b7ad7f47c325d6021))
+* correct filename in latest.yml for Windows auto-update ([e89f457](https://github.com/xicoarm/suisse-notes-desktop/commit/e89f4575201c9740022d60744a63f70d7f21f664))
+
 ### [3.9.7](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.6...v3.9.7) (2026-04-06)
 
 
