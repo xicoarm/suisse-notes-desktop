@@ -1013,6 +1013,7 @@ export async function startRecording(options = {}) {
     // Start system audio capture:
     // - macOS: AudioTee writes PCM to file, merged via FFmpeg in combineChunks (returns true)
     // - Windows: desktopCapturer returns a MediaStream for real-time mixing
+    let audioTeeActive = false;
     if (systemAudioEnabled && captureSystemAudio) {
       try {
         const result = await captureSystemAudio(recordingStore.recordId);
@@ -1021,8 +1022,10 @@ export async function startRecording(options = {}) {
         } else if (result instanceof MediaStream) {
           // Windows: desktopCapturer returns a stream to mix in renderer
           sysStream = result;
+        } else {
+          // macOS: result is true, AudioTee handles file-based capture
+          audioTeeActive = true;
         }
-        // macOS: result is true, AudioTee handles file-based capture
       } catch (e) {
         console.warn('Could not start system audio capture:', e);
         emit('systemAudioError', e.message || 'System audio capture failed');
@@ -1066,12 +1069,14 @@ export async function startRecording(options = {}) {
     }
 
     if (!stream) {
-      if (sysStream) {
-        let micErrorMsg = micCaptureError?.message || 'Microphone capture failed';
+      if (sysStream || audioTeeActive) {
+        let micErrorMsg = micCaptureError?.message || 'No microphone available';
         if (micCaptureError?.name === 'NotReadableError') {
           micErrorMsg = 'Microphone is in use by another application. Recording with system audio only.';
         } else if (micCaptureError?.name === 'OverconstrainedError') {
           micErrorMsg = 'Microphone does not support required settings. Recording with system audio only.';
+        } else {
+          micErrorMsg = 'No microphone detected. Recording with system audio only.';
         }
 
         emit('micError', micErrorMsg);
@@ -1081,7 +1086,7 @@ export async function startRecording(options = {}) {
           micErrorMsg,
           {
             micActive: false,
-            systemAudioActive: Boolean(sysStream),
+            systemAudioActive: true,
             inputDeviceId: deviceId || null
           }
         );
@@ -1114,6 +1119,8 @@ export async function startRecording(options = {}) {
     micMuted = false;
 
     // Always use mixing pipeline so system audio can be added/removed dynamically
+    // If no mic and no sysStream (macOS AudioTee-only), the pipeline creates a silent
+    // placeholder — AudioTee output is merged via FFmpeg in combineChunks
     const recordingStream = createMixingPipeline(stream, sysStream);
     mixedStream = recordingStream;
 
