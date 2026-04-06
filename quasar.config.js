@@ -135,11 +135,8 @@ export default function (ctx) {
           target: 'nsis',
           icon: 'src-electron/icons/icon.ico',
           publisherName: 'Suisse IT GmbH',
-          // SSL.com eSigner cloud signing — custom sign script
-          ...(process.env.SSL_COM_CREDENTIAL_ID
-            ? { sign: './build/ssl-sign.js', signAndEditExecutable: true }
-            : { signAndEditExecutable: false }
-          )
+          // Signing handled post-build by SSL.com eSigner in CI
+          signAndEditExecutable: false
         },
         nsis: {
           oneClick: true,  // Silent auto-updates (no wizard prompts)

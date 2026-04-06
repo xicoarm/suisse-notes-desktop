@@ -42,30 +42,56 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install SSL.com CodeSignTool
-        shell: pwsh
-        run: |
-          echo "=== Downloading SSL.com CodeSignTool ==="
-          Invoke-WebRequest -Uri "https://www.ssl.com/download/codesigntool-for-windows/" -OutFile CodeSignTool.zip
-          Expand-Archive -Path CodeSignTool.zip -DestinationPath CodeSignTool -Force
-          $toolDir = (Get-ChildItem -Path CodeSignTool -Directory | Select-Object -First 1).FullName
-          if (-not $toolDir) { $toolDir = "CodeSignTool" }
-          $toolBat = Get-ChildItem -Path $toolDir -Filter "CodeSignTool.bat" -Recurse | Select-Object -First 1
-          if ($toolBat) {
-            echo "CODE_SIGN_TOOL_PATH=$($toolBat.FullName)" >> $env:GITHUB_ENV
-            echo "CodeSignTool found at: $($toolBat.FullName)"
-          } else {
-            echo "WARNING: CodeSignTool.bat not found, signing will be skipped"
-          }
-
-      - name: Build and publish Electron app
+      - name: Build Electron app (unsigned)
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          SSL_COM_USERNAME: ${{ secrets.SSL_COM_USERNAME }}
-          SSL_COM_PASSWORD: ${{ secrets.SSL_COM_PASSWORD }}
-          SSL_COM_CREDENTIAL_ID: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
-          SSL_COM_TOTP_SECRET: ${{ secrets.SSL_COM_TOTP_SECRET }}
-        run: npm run build
+        run: npx quasar build -m electron -P never
+
+      - name: Find installer exe
+        id: find-exe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path dist/electron/Packaged -Filter "*.exe" | Select-Object -First 1
+          echo "EXE_PATH=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+          echo "Found installer: $($exe.Name)"
+
+      - name: Sign Windows installer with SSL.com eSigner
+        uses: sslcom/esigner-codesign@main
+        with:
+          command: sign
+          username: ${{ secrets.SSL_COM_USERNAME }}
+          password: ${{ secrets.SSL_COM_PASSWORD }}
+          credential_id: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.SSL_COM_TOTP_SECRET }}
+          file_path: ${{ steps.find-exe.outputs.EXE_PATH }}
+          override: true
+          environment_name: PROD
+
+      - name: Update latest.yml hashes after signing
+        shell: pwsh
+        run: |
+          $exePath = "${{ steps.find-exe.outputs.EXE_PATH }}"
+          $ymlPath = "dist/electron/Packaged/latest.yml"
+
+          # Recalculate sha512 and size after signing changed the file
+          $hash = (Get-FileHash -Path $exePath -Algorithm SHA512).Hash
+          $base64Hash = [Convert]::ToBase64String([byte[]] -split ($hash -replace '..', '0x$& '))
+          $size = (Get-Item $exePath).Length
+
+          echo "New SHA512: $base64Hash"
+          echo "New size: $size"
+
+          # Update latest.yml with new hash and size
+          $content = Get-Content $ymlPath -Raw
+          $content = $content -replace '(?<=sha512: )\S+', $base64Hash
+          $content = $content -replace '(?<=size: )\d+', $size
+          Set-Content -Path $ymlPath -Value $content -NoNewline
+
+          echo "=== Updated latest.yml ==="
+          Get-Content $ymlPath
+
+          # Remove stale blockmap (will be regenerated or full download used)
+          Remove-Item -Path "dist/electron/Packaged/*.exe.blockmap" -Force -ErrorAction SilentlyContinue
 
       - name: Verify auto-update files exist
         shell: pwsh
@@ -82,6 +108,16 @@ jobs:
           }
           Write-Host "latest.yml OK:"
           Write-Host $content
+
+      - name: Upload Windows artifacts to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist/electron/Packaged/*.exe
+            dist/electron/Packaged/latest.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
   # =============================================================================
   # macOS Build - sign, notarize, then upload to release
