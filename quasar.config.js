@@ -134,14 +134,12 @@ export default function (ctx) {
         win: {
           target: 'nsis',
           icon: 'src-electron/icons/icon.ico',
-          // Only set publisherName when code signing is available
-          // Without this, electron-updater won't require signature verification
-          ...(process.env.CSC_LINK ? { publisherName: 'Suisse Notes' } : {}),
-          // Code signing - enable when certificate is available
-          // Set environment variables in CI/CD:
-          //   CSC_LINK: path to .pfx certificate file
-          //   CSC_KEY_PASSWORD: certificate password
-          signAndEditExecutable: !!process.env.CSC_LINK
+          publisherName: 'Suisse IT GmbH',
+          // SSL.com eSigner cloud signing — custom sign script
+          ...(process.env.SSL_COM_CREDENTIAL_ID
+            ? { sign: './build/ssl-sign.js', signAndEditExecutable: true }
+            : { signAndEditExecutable: false }
+          )
         },
         nsis: {
           oneClick: true,  // Silent auto-updates (no wizard prompts)

@@ -42,9 +42,30 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install SSL.com CodeSignTool
+        if: ${{ secrets.SSL_COM_CREDENTIAL_ID != '' }}
+        shell: pwsh
+        run: |
+          echo "=== Downloading SSL.com CodeSignTool ==="
+          Invoke-WebRequest -Uri "https://www.ssl.com/download/codesigntool-for-windows/" -OutFile CodeSignTool.zip
+          Expand-Archive -Path CodeSignTool.zip -DestinationPath CodeSignTool -Force
+          $toolDir = (Get-ChildItem -Path CodeSignTool -Directory | Select-Object -First 1).FullName
+          if (-not $toolDir) { $toolDir = "CodeSignTool" }
+          $toolBat = Get-ChildItem -Path $toolDir -Filter "CodeSignTool.bat" -Recurse | Select-Object -First 1
+          if ($toolBat) {
+            echo "CODE_SIGN_TOOL_PATH=$($toolBat.FullName)" >> $env:GITHUB_ENV
+            echo "CodeSignTool found at: $($toolBat.FullName)"
+          } else {
+            echo "WARNING: CodeSignTool.bat not found, signing will be skipped"
+          }
+
       - name: Build and publish Electron app
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          SSL_COM_USERNAME: ${{ secrets.SSL_COM_USERNAME }}
+          SSL_COM_PASSWORD: ${{ secrets.SSL_COM_PASSWORD }}
+          SSL_COM_CREDENTIAL_ID: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
+          SSL_COM_TOTP_SECRET: ${{ secrets.SSL_COM_TOTP_SECRET }}
         run: npm run build
 
       - name: Verify auto-update files exist
