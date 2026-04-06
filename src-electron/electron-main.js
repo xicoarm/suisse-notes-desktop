@@ -3913,11 +3913,15 @@ function getAudioTeeBinaryPath() {
 }
 
 function isSystemAudioSupported() {
-  if (process.platform !== 'darwin') return false;
-  // Core Audio Taps requires macOS 14.2+
-  const ver = process.getSystemVersion?.() || '';
-  const [major, minor] = ver.split('.').map(Number);
-  return major > 14 || (major === 14 && minor >= 2);
+  // Windows: desktopCapturer supports system audio capture
+  if (process.platform === 'win32') return true;
+  // macOS: Core Audio Taps requires macOS 14.2+
+  if (process.platform === 'darwin') {
+    const ver = process.getSystemVersion?.() || '';
+    const [major, minor] = ver.split('.').map(Number);
+    return major > 14 || (major === 14 && minor >= 2);
+  }
+  return false;
 }
 
 // Check if system audio capture is supported on this machine
@@ -4054,8 +4058,19 @@ async function stopSystemAudio() {
   }
 }
 
-// Legacy handlers kept for backward compatibility
-ipcMain.handle('systemAudio:getSources', async () => []);
+// Get available desktop capturer sources (used on Windows for system audio)
+ipcMain.handle('systemAudio:getSources', async () => {
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['window', 'screen'],
+      fetchWindowIcons: false
+    });
+    return sources.map(s => ({ id: s.id, name: s.name }));
+  } catch (error) {
+    log.error('Error getting desktop sources:', error);
+    return [];
+  }
+});
 ipcMain.handle('systemAudio:checkPermission', () => {
   if (isSystemAudioSupported()) return 'granted';
   if (process.platform === 'darwin') return systemPreferences.getMediaAccessStatus('screen');
