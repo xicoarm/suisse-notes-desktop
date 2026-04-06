@@ -2,7 +2,7 @@
   <q-page class="upload-page">
     <div class="upload-container">
       <!-- Mode Tab Switcher -->
-      <ModeTabSwitcher />
+      <ModeTabSwitcher :hidden="isUploading" />
 
       <!-- IDLE STATE: Upload form (no file selected yet) -->
       <div
@@ -274,7 +274,6 @@
               :label="$t('cancelUpload') || 'Cancel Upload'"
               icon="close"
               :loading="isCancelling"
-              :disable="displayProgress >= 100"
               @click="cancelCurrentUpload"
             />
           </div>
@@ -954,6 +953,7 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
         });
       }
     } else {
+      recordingStore.reset();
       const errMsg = uploadResult.error || 'Upload failed';
       const isMinutesError = /insufficient|minutes|credit|balance/i.test(errMsg);
       if (isMinutesError) {
@@ -966,6 +966,7 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
       }
     }
   } catch (error) {
+    recordingStore.reset();
     isUploading.value = false;
     isFileLoading.value = false;
     uploadError.value = error.message;
@@ -1115,7 +1116,6 @@ const cancelCurrentUpload = async () => {
         type: 'info',
         message: 'Upload cancelled'
       });
-      handleReset();
     } else {
       $q.notify({
         type: 'warning',
@@ -1130,6 +1130,7 @@ const cancelCurrentUpload = async () => {
     });
   } finally {
     isCancelling.value = false;
+    handleReset();
   }
 };
 
@@ -1241,6 +1242,15 @@ const removeSessionWord = (word) => {
   transcriptionStore.removeSessionWord(word);
 };
 
+// Prevent page refresh/close during active upload (desktop only)
+const handleBeforeUnload = (event) => {
+  if (isUploading.value) {
+    event.preventDefault();
+    event.returnValue = 'A file upload is in progress. Are you sure you want to leave?';
+    return event.returnValue;
+  }
+};
+
 // Load settings on mount
 onMounted(async () => {
   await transcriptionStore.loadGlobalSettings();
@@ -1248,6 +1258,9 @@ onMounted(async () => {
   if (!historyStore.loaded) {
     await historyStore.loadRecordings();
   }
+
+  // Prevent accidental page refresh during upload
+  window.addEventListener('beforeunload', handleBeforeUnload);
 
   // Electron-only listeners
   if (isElectron() && window.electronAPI?.upload) {
@@ -1266,6 +1279,8 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener('beforeunload', handleBeforeUnload);
+
   // Note: We do NOT call removeAllListeners() here because MainLayout has a global
   // upload progress listener that must persist across page navigation.
   // The global listener in MainLayout handles the header progress indicator.

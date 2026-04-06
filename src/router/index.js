@@ -117,6 +117,12 @@ export default function (/* { store, ssrContext } */) {
         return;
       }
 
+      // Block navigation away from upload page during active file upload
+      if (from.name === 'upload' && to.name !== 'upload' && recordingStore.isBlocking) {
+        next({ name: 'upload' });
+        return;
+      }
+
       // Prevent navigating to upload page while recording is active
       if (to.name === 'upload' && recordingStore.isBlocking) {
         next({ name: 'record' });
