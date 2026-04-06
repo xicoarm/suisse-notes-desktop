@@ -533,7 +533,16 @@
                 <span>Upload complete, waiting for server response...</span>
               </div>
             </div>
-          <!-- Upload is blocking — user waits for completion -->
+            <div class="upload-actions">
+              <q-btn
+                flat
+                color="grey-7"
+                :label="$t('cancelUpload') || 'Cancel Upload'"
+                icon="close"
+                :loading="isCancellingUpload"
+                @click="cancelRecordingUpload"
+              />
+            </div>
           </div>
 
           <!-- Upload Error state -->
@@ -887,6 +896,24 @@ const retryAttempt = computed(() => recordingStore.uploadRetryAttempt);
 const currentFilePath = computed(() => recordingStore.audioFilePath);
 const currentFileSize = computed(() => recordingStore.currentFileSize);
 const isRetrying = ref(false); // Local UI state for retry button spinner
+const isCancellingUpload = ref(false);
+
+const cancelRecordingUpload = async () => {
+  if (!recordingStore.isUploading) return;
+  isCancellingUpload.value = true;
+  try {
+    if (isElectron() && window.electronAPI?.upload?.cancel) {
+      await window.electronAPI.upload.cancel(recordingStore.recordId);
+    }
+    $q.notify({ type: 'info', message: t('uploadCancelled') || 'Upload cancelled' });
+  } catch (error) {
+    console.error('Error cancelling upload:', error);
+    $q.notify({ type: 'negative', message: 'Error cancelling upload' });
+  } finally {
+    isCancellingUpload.value = false;
+    recordingStore.reset();
+  }
+};
 
 // Watch for minutes limit warning
 watch(minutesLimitWarning, (minutesRemaining) => {
