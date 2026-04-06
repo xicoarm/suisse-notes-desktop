@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.9.5](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.4...v3.9.5) (2026-04-06)
+
+
+### Bug Fixes
+
+* remove secrets condition from workflow step to fix YAML validation ([b565cf8](https://github.com/xicoarm/suisse-notes-desktop/commit/b565cf8a6d446f2eeee4d61c53ce29f8215ab06d))
+
 ### [3.9.4](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.3...v3.9.4) (2026-04-06)
 
 
