@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.9.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.1...v3.9.2) (2026-04-06)
+
+
+### Bug Fixes
+
+* block all desktop navigation during upload — header nav, logo, router ([d73c7c0](https://github.com/xicoarm/suisse-notes-desktop/commit/d73c7c0fc93589d3a84d54843c290c16d4cf100e))
+
 ### [3.9.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.0...v3.9.1) (2026-04-06)
 
 
