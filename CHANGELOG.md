@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.9.6](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.5...v3.9.6) (2026-04-06)
+
+
+### Bug Fixes
+
+* use SSL.com official GitHub Action for Windows code signing ([1eb496f](https://github.com/xicoarm/suisse-notes-desktop/commit/1eb496fdc1e622520276ba5a40886240e2d7ef04))
+
 ### [3.9.5](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.4...v3.9.5) (2026-04-06)
 
 
