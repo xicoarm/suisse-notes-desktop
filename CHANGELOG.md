@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.9.7](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.6...v3.9.7) (2026-04-06)
+
+
+### Bug Fixes
+
+* restore system audio capture on Windows via desktopCapturer ([441b02f](https://github.com/xicoarm/suisse-notes-desktop/commit/441b02f045c7f60f40dd8754b7ee231420b4f5a8))
+
 ### [3.9.6](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.5...v3.9.6) (2026-04-06)
 
 
