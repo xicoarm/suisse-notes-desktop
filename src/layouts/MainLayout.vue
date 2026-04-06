@@ -376,8 +376,6 @@
           rel="noopener"
           class="footer-link"
         >Suisse IT GmbH</a>
-        <span class="footer-separator">·</span>
-        <span class="footer-address">Kesslernmattstrasse 20, 8965 Berikon, Schweiz</span>
       </div>
     </q-footer>
 

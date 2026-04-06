@@ -161,8 +161,6 @@
       <div class="footer-content">
         <div class="company-info">
           <span class="company-name">Suisse IT GmbH</span>
-          <span class="company-divider">•</span>
-          <span class="company-location">Berikon, Switzerland</span>
         </div>
         <div class="footer-links">
           <a

@@ -209,14 +209,6 @@
         <div class="company-details">
           <div class="detail-item">
             <q-icon
-              name="location_on"
-              size="16px"
-              color="grey-6"
-            />
-            <span>Kesslernmattstrasse 20, 8965 Berikon, Schweiz</span>
-          </div>
-          <div class="detail-item">
-            <q-icon
               name="language"
               size="16px"
               color="grey-6"
