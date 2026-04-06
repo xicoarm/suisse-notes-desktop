@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.9.3](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.2...v3.9.3) (2026-04-06)
+
+
+### Bug Fixes
+
+* sign AudioTee binary with Developer ID for notarized builds ([394b95b](https://github.com/xicoarm/suisse-notes-desktop/commit/394b95bb10fb3ecf69493a3c07f5ad76586d8264))
+
 ### [3.9.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.1...v3.9.2) (2026-04-06)
 
 
