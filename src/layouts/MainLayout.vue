@@ -152,9 +152,11 @@
           <nav
             v-if="authStore.isAuthenticated && !isMobile()"
             class="pill-nav"
+            :class="{ 'nav-disabled': recordingStore.isBlocking }"
           >
             <button
               :class="['nav-pill', { active: currentTab === 'about' }]"
+              :disabled="recordingStore.isBlocking"
               @click="goTo('/about')"
             >
               <q-icon
@@ -165,6 +167,7 @@
             </button>
             <button
               :class="['nav-pill', { active: currentTab === 'record' || currentTab === 'upload' }]"
+              :disabled="recordingStore.isBlocking"
               @click="goTo('/record')"
             >
               <q-icon
@@ -175,6 +178,7 @@
             </button>
             <button
               :class="['nav-pill', { active: currentTab === 'history' }]"
+              :disabled="recordingStore.isBlocking"
               @click="goTo('/history')"
             >
               <q-icon
@@ -665,6 +669,11 @@ onUnmounted(() => {
   background: #f1f5f9;
   padding: 4px;
   border-radius: 12px;
+
+  &.nav-disabled {
+    opacity: 0.5;
+    pointer-events: none;
+  }
 }
 
 .nav-pill {

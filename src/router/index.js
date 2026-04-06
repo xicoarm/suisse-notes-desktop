@@ -104,11 +104,8 @@ export default function (/* { store, ssrContext } */) {
       next({ name: 'login' });
     } else if ((to.name === 'login' || to.name === 'register') && authStore.isAuthenticated) {
       next({ name: 'record' });
-    } else if (to.name === 'about' && authStore.isAuthenticated) {
-      // Allow authenticated users to visit about page
-      next();
     } else {
-      // Block navigation away from record page during any blocking phase
+      // Block navigation during any active recording or upload phase
       const { useRecordingStore } = await import('../stores/recording');
       const recordingStore = useRecordingStore();
 
