@@ -153,6 +153,24 @@ jobs:
           codesign --verify --deep --strict --verbose=2 resources/ffmpeg/darwin/ffmpeg
           echo "=== FFmpeg signed successfully ==="
 
+      - name: Sign AudioTee binary
+        run: |
+          echo "=== Signing AudioTee binary with Developer ID ==="
+          IDENTITY=$(security find-identity -v -p codesigning "$CSC_KEYCHAIN" | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "Using identity: $IDENTITY"
+
+          codesign --sign "$IDENTITY" \
+            --keychain "$CSC_KEYCHAIN" \
+            --options runtime \
+            --entitlements build/entitlements.mac.plist \
+            --timestamp \
+            --force \
+            resources/audiotee/audiotee
+
+          echo "Verifying AudioTee signature..."
+          codesign --verify --deep --strict --verbose=2 resources/audiotee/audiotee
+          echo "=== AudioTee signed successfully ==="
+
       - name: Build Electron app for macOS
         env:
           # GH_TOKEN is needed by electron-builder to resolve GitHub publish provider
