@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.9.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.0...v3.9.1) (2026-04-06)
+
+
+### Bug Fixes
+
+* block tab navigation during file upload to prevent losing upload progress ([82afe02](https://github.com/xicoarm/suisse-notes-desktop/commit/82afe02d7ac9b521c90c974f480c1a7beafc8d46))
+
 ## [3.9.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.8.5...v3.9.0) (2026-04-04)
 
 
