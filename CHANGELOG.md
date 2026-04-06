@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [3.9.4](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.3...v3.9.4) (2026-04-06)
+
+
+### Features
+
+* Windows code signing via SSL.com eSigner ([7082e25](https://github.com/xicoarm/suisse-notes-desktop/commit/7082e257212310f273d93f824525debfd4745ce2))
+
+
+### Bug Fixes
+
+* remove company address from all pages, keep only Suisse IT GmbH ([862aa66](https://github.com/xicoarm/suisse-notes-desktop/commit/862aa666588dd2bf80096bd80adce0e026d0ac4c))
+
 ### [3.9.3](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.2...v3.9.3) (2026-04-06)
 
 
