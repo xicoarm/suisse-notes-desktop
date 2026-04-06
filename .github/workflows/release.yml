@@ -67,31 +67,32 @@ jobs:
           override: true
           environment_name: PROD
 
-      - name: Update latest.yml hashes after signing
+      - name: Update latest.yml after signing
         shell: pwsh
         run: |
           $exePath = "${{ steps.find-exe.outputs.EXE_PATH }}"
           $ymlPath = "dist/electron/Packaged/latest.yml"
+          $exeName = (Get-Item $exePath).Name
 
           # Recalculate sha512 and size after signing changed the file
           $hash = (Get-FileHash -Path $exePath -Algorithm SHA512).Hash
           $base64Hash = [Convert]::ToBase64String([byte[]] -split ($hash -replace '..', '0x$& '))
           $size = (Get-Item $exePath).Length
 
+          echo "Signed exe: $exeName"
           echo "New SHA512: $base64Hash"
           echo "New size: $size"
 
-          # Update latest.yml with new hash and size
+          # Update latest.yml with new hash, size, and fix filename (dots vs dashes)
           $content = Get-Content $ymlPath -Raw
           $content = $content -replace '(?<=sha512: )\S+', $base64Hash
           $content = $content -replace '(?<=size: )\d+', $size
+          # Fix electron-builder bug: filenames use dots but yml references dashes
+          $content = $content -replace 'Suisse-Notes-Setup-', 'Suisse.Notes.Setup.'
           Set-Content -Path $ymlPath -Value $content -NoNewline
 
           echo "=== Updated latest.yml ==="
           Get-Content $ymlPath
-
-          # Remove stale blockmap (will be regenerated or full download used)
-          Remove-Item -Path "dist/electron/Packaged/*.exe.blockmap" -Force -ErrorAction SilentlyContinue
 
       - name: Verify auto-update files exist
         shell: pwsh
