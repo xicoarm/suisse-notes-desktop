@@ -423,7 +423,17 @@ export const useDeviceStore = defineStore('device', {
               }
               appUuid = altUuid;
             } else {
-              throw e; // No alternative found
+              // No alternative UUID found — device is paired to another phone/app.
+              // Send unpair command to release the binding, then re-pair with our UUID.
+              addBreadcrumb({ category: 'ble', message: 'No alternative UUID — sending unpair to release device binding', level: 'warning' });
+              try {
+                await manager.unpair();
+              } catch { /* unpair best-effort */ }
+              await manager.disconnect();
+              // Short delay for device to process unpair
+              await new Promise(r => setTimeout(r, 1000));
+              // Reconnect and pair with our UUID
+              deviceInfo = await manager.connect(bleDeviceId, appUuid);
             }
           } else {
             throw e;
