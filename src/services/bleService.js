@@ -113,11 +113,15 @@ export class BleDeviceManager {
     }
     const { BleClient } = await import('@capacitor-community/bluetooth-le');
     this.ble = BleClient;
+    const neverForLocation = false;
+    captureMessage(`BLE initialize: androidNeverForLocation=${neverForLocation}, platform=${isAndroid() ? 'android' : 'ios'}`, 'info');
     try {
-      await this.ble.initialize({ androidNeverForLocation: false });
+      await this.ble.initialize({ androidNeverForLocation: neverForLocation });
       this._initialized = true;
+      captureMessage('BLE initialize: SUCCESS — permissions granted', 'info');
     } catch (e) {
       this._initialized = false;
+      captureMessage(`BLE initialize: FAILED — ${e.message}`, 'error');
       throw new Error('Bluetooth permissions are required. Please enable Bluetooth and Location permissions in your device settings.');
     }
   }
@@ -131,24 +135,40 @@ export class BleDeviceManager {
   async scan(duration = 7000, onFound = null) {
     if (!this.ble || !this._initialized) await this.initialize();
 
+    // Check Bluetooth is enabled — prompt user to turn it on if not
+    try {
+      const bleEnabled = await this.ble.isEnabled();
+      if (!bleEnabled?.value) {
+        captureMessage('BLE scan: Bluetooth disabled — requesting enable', 'warning');
+        await this.ble.requestEnable();
+        // Recheck after user interaction
+        const rechecked = await this.ble.isEnabled();
+        if (!rechecked?.value) {
+          throw new Error('Bluetooth is required for device scanning. Please enable Bluetooth.');
+        }
+      }
+    } catch (e) {
+      if (e.message?.includes('Bluetooth is required')) throw e;
+      captureMessage(`BLE scan: bluetooth check error — ${e.message}`, 'warning');
+    }
+
     // Android requires Location Services to be enabled for BLE scanning.
-    // Check and prompt user before attempting scan.
     if (isAndroid()) {
       try {
-        const enabled = await this.ble.isLocationEnabled();
-        if (!enabled) {
+        const locEnabled = await this.ble.isLocationEnabled();
+        captureMessage(`BLE scan pre-check: location=${locEnabled?.value}`, 'info');
+        if (!locEnabled?.value) {
+          captureMessage('BLE scan: Location disabled — opening settings', 'warning');
           await this.ble.openLocationSettings();
-          // Wait briefly for user to enable location, then recheck
           await new Promise(r => setTimeout(r, 2000));
           const rechecked = await this.ble.isLocationEnabled();
-          if (!rechecked) {
+          if (!rechecked?.value) {
             throw new Error('Location services are required for Bluetooth scanning on Android. Please enable location in your device settings.');
           }
         }
       } catch (e) {
         if (e.message?.includes('Location services')) throw e;
-        // isLocationEnabled may not be available in all plugin versions — continue
-        addBreadcrumb({ category: 'ble', message: `Location check skipped: ${e.message}`, level: 'warning' });
+        captureMessage(`BLE scan: location check error — ${e.message}`, 'warning');
       }
     }
 
