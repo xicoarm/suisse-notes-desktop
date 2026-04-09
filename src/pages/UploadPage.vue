@@ -1011,7 +1011,7 @@ const startMobileUpload = async (file, fileSize, filename) => {
         title: options.title,
         customVocabulary: options.customVocabulary
       },
-      onProgress: (p) => recordingStore.updateUploadProgress(p, 0, 0),
+      onProgress: (p, bytesUploaded, bytesTotal) => recordingStore.updateUploadProgress(p, bytesUploaded || 0, bytesTotal || 0),
       getAuthStore: () => authStore // Enable token refresh
     });
 

@@ -751,7 +751,7 @@ import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
 import { useMinutesStore } from '../stores/minutes';
 import { useRecorder } from '../composables/useRecorder';
-import { isElectron, isCapacitor } from '../utils/platform';
+import { isElectron, isCapacitor, isAndroid } from '../utils/platform';
 import { uploadWithVerification } from '../services/upload';
 import { getApiUrlSync } from '../services/api';
 import { stopStorageMonitor } from '../services/storageMonitor';
@@ -1074,6 +1074,17 @@ const formattedFinalDuration = computed(() => {
   return `${minutes}:${secs.toString().padStart(2, '0')}`;
 });
 
+// Open Android app settings (for permission management)
+const openAndroidAppSettings = async () => {
+  try {
+    const { registerPlugin } = await import('@capacitor/core');
+    const BackgroundRecording = registerPlugin('BackgroundRecording');
+    await BackgroundRecording.openAppSettings();
+  } catch (e) {
+    console.warn('Failed to open app settings:', e);
+  }
+};
+
 const formatBytes = (bytes) => {
   if (!bytes) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -1088,18 +1099,63 @@ const formatBytes = (bytes) => {
 
 // Load history store and set up listeners on mount
 onMounted(async () => {
+  // On Android, proactively trigger the microphone permission dialog
+  // before enumerating devices so the user sees it immediately
+  if (isAndroid() && navigator.mediaDevices) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach(track => track.stop());
+    } catch (e) {
+      // Permission denied or no mic — will be handled after loadMicrophones below
+      console.warn('Microphone permission request failed:', e);
+    }
+  }
+
   // Load available microphones on all platforms (desktop and mobile)
   // This enables selection of Bluetooth headsets, wired mics, etc. on mobile
   await loadMicrophones();
 
-  // Warn if no microphone detected
+  // Warn if no microphone detected (and not already shown permission denied message)
   if (availableMicrophones.value.length === 0) {
-    $q.notify({
-      type: 'warning',
-      message: t('noMicrophoneDetected'),
-      icon: 'mic_off',
-      timeout: 8000
-    });
+    // On Android, show a more specific message about permissions
+    if (isAndroid()) {
+      $q.notify({
+        type: 'warning',
+        message: t('micPermissionRequired'),
+        icon: 'mic_off',
+        timeout: 0,
+        actions: [
+          { label: t('allowMicrophone'), color: 'yellow', handler: async () => {
+            try {
+              const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+              stream.getTracks().forEach(track => track.stop());
+              await loadMicrophones();
+              if (availableMicrophones.value.length > 0) {
+                $q.notify({ type: 'positive', message: t('microphoneReady'), icon: 'mic', timeout: 3000 });
+              }
+            } catch (err) {
+              $q.notify({
+                type: 'negative',
+                message: t('micPermissionDenied'),
+                icon: 'mic_off',
+                timeout: 8000,
+                actions: [
+                  { label: t('openSettings'), color: 'white', handler: () => openAndroidAppSettings() }
+                ]
+              });
+            }
+          }},
+          { label: t('dismiss'), color: 'white' }
+        ]
+      });
+    } else {
+      $q.notify({
+        type: 'warning',
+        message: t('noMicrophoneDetected'),
+        icon: 'mic_off',
+        timeout: 8000
+      });
+    }
   }
 
   // Load system audio state (desktop only - mobile doesn't support system audio capture)
@@ -1175,6 +1231,27 @@ const handleStartClick = async () => {
       icon: 'schedule',
       timeout: 4000
     });
+  }
+
+  // On Android, check microphone permission and try to get it before proceeding
+  if (isAndroid() && availableMicrophones.value.length === 0) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach(track => track.stop());
+      await loadMicrophones();
+    } catch (err) {
+      $q.notify({
+        type: 'negative',
+        message: t('micPermissionDenied'),
+        icon: 'mic_off',
+        timeout: 0,
+        actions: [
+          { label: t('openSettings'), color: 'white', handler: () => openAndroidAppSettings() },
+          { label: t('dismiss'), color: 'white' }
+        ]
+      });
+      return;
+    }
   }
 
   // Check if no microphone and no system audio — cannot record
@@ -1486,7 +1563,7 @@ const startAutoUpload = async () => {
           title: options.title,
           customVocabulary: options.customVocabulary
         },
-        onProgress: (p) => recordingStore.updateUploadProgress(p, 0, 0),
+        onProgress: (p, bytesUploaded, bytesTotal) => recordingStore.updateUploadProgress(p, bytesUploaded || 0, bytesTotal || 0),
         getAuthStore: () => authStore // Enable token refresh
       });
     } else {

@@ -126,11 +126,13 @@ class ForegroundRecordingService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
+        // Keep recording alive when user swipes the app away.
+        // The foreground service notification lets them return to the app.
         if (isRecording) {
-            broadcastRecordingDeath("task_removed")
+            Log.i(TAG, "Task removed while recording — service continues in background")
+        } else {
+            stopSelf()
         }
-        stopRecording()
-        stopSelf()
     }
 
     override fun onDestroy() {

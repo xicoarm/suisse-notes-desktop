@@ -9,6 +9,9 @@
     <!-- Wake lock for recording during device sleep (FIX 6) -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Request exemption from battery optimization for background recording -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <!-- Bluetooth permissions (for recording device sync and wireless audio) -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
@@ -62,6 +65,7 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="microphone"
+            android:stopWithTask="false"
         />
     </application>
 </manifest>

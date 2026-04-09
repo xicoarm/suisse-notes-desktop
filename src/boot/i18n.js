@@ -310,6 +310,12 @@ const messages = {
     backgroundUploadSuccess: 'A pending recording was uploaded successfully!',
     noMicrophoneDetected: 'No microphone detected. You can still record system audio.',
     noMicrophoneNoSystemAudio: 'No microphone detected. Enable system audio to record, or connect a microphone.',
+    micPermissionRequired: 'Microphone access is required for recording. Please allow microphone access.',
+    micPermissionDenied: 'Microphone access denied. Please enable it in your device settings.',
+    allowMicrophone: 'Allow Microphone',
+    openSettings: 'Open Settings',
+    dismiss: 'Dismiss',
+    microphoneReady: 'Microphone ready!',
 
     // Device Page
     device: 'Device',
@@ -665,6 +671,12 @@ const messages = {
     backgroundUploadSuccess: 'Eine ausstehende Aufnahme wurde erfolgreich hochgeladen!',
     noMicrophoneDetected: 'Kein Mikrofon erkannt. Sie können trotzdem Systemaudio aufnehmen.',
     noMicrophoneNoSystemAudio: 'Kein Mikrofon erkannt. Aktivieren Sie Systemaudio oder schließen Sie ein Mikrofon an.',
+    micPermissionRequired: 'Mikrofonzugriff wird für die Aufnahme benötigt. Bitte erlauben Sie den Zugriff.',
+    micPermissionDenied: 'Mikrofonzugriff verweigert. Bitte aktivieren Sie ihn in den Geräteeinstellungen.',
+    allowMicrophone: 'Mikrofon erlauben',
+    openSettings: 'Einstellungen öffnen',
+    dismiss: 'Schliessen',
+    microphoneReady: 'Mikrofon bereit!',
 
     // Device Page
     device: 'Gerät',
@@ -1020,6 +1032,12 @@ const messages = {
     backgroundUploadSuccess: 'Un enregistrement en attente a été téléchargé avec succès !',
     noMicrophoneDetected: 'Aucun microphone détecté. Vous pouvez enregistrer l\'audio système.',
     noMicrophoneNoSystemAudio: 'Aucun microphone détecté. Activez l\'audio système ou connectez un microphone.',
+    micPermissionRequired: 'L\'accès au microphone est requis pour l\'enregistrement. Veuillez autoriser l\'accès.',
+    micPermissionDenied: 'Accès au microphone refusé. Veuillez l\'activer dans les paramètres de votre appareil.',
+    allowMicrophone: 'Autoriser le micro',
+    openSettings: 'Ouvrir les paramètres',
+    dismiss: 'Fermer',
+    microphoneReady: 'Microphone prêt !',
 
     // Device Page
     device: 'Appareil',
@@ -1375,6 +1393,12 @@ const messages = {
     backgroundUploadSuccess: 'Una registrazione in sospeso è stata caricata con successo!',
     noMicrophoneDetected: 'Nessun microfono rilevato. Puoi comunque registrare l\'audio di sistema.',
     noMicrophoneNoSystemAudio: 'Nessun microfono rilevato. Attiva l\'audio di sistema o collega un microfono.',
+    micPermissionRequired: 'L\'accesso al microfono è necessario per la registrazione. Consenti l\'accesso.',
+    micPermissionDenied: 'Accesso al microfono negato. Abilitalo nelle impostazioni del dispositivo.',
+    allowMicrophone: 'Consenti microfono',
+    openSettings: 'Apri impostazioni',
+    dismiss: 'Chiudi',
+    microphoneReady: 'Microfono pronto!',
 
     // Device Page
     device: 'Dispositivo',

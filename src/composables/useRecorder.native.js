@@ -296,6 +296,19 @@ export function useNativeRecorder() {
         throw new Error('Native recording plugin not available');
       }
 
+      // On Android, request battery optimization exemption so the recording
+      // keeps running in the background without being killed by the OS.
+      if (isAndroid()) {
+        try {
+          const batteryStatus = await BackgroundRecording.isBatteryOptimized();
+          if (batteryStatus.isOptimized) {
+            await BackgroundRecording.requestBatteryOptimizationExemption();
+          }
+        } catch (e) {
+          console.warn('Battery optimization check failed (non-critical):', e);
+        }
+      }
+
       // Set up event listeners before starting
       setupPluginListeners();
 

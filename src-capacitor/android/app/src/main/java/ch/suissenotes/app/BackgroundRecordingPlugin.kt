@@ -10,8 +10,11 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -527,6 +530,55 @@ class BackgroundRecordingPlugin : Plugin() {
             call.resolve()
         } catch (e: Exception) {
             call.reject("Failed to stop foreground service: ${e.message}")
+        }
+    }
+
+    @PluginMethod
+    fun isBatteryOptimized(call: PluginCall) {
+        val ctx = context ?: run {
+            call.reject("Context not available")
+            return
+        }
+        val powerManager = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val isIgnoring = powerManager.isIgnoringBatteryOptimizations(ctx.packageName)
+        val result = JSObject().apply {
+            put("isOptimized", !isIgnoring)
+        }
+        call.resolve(result)
+    }
+
+    @PluginMethod
+    fun requestBatteryOptimizationExemption(call: PluginCall) {
+        val ctx = context ?: run {
+            call.reject("Context not available")
+            return
+        }
+        val powerManager = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (powerManager.isIgnoringBatteryOptimizations(ctx.packageName)) {
+            call.resolve(JSObject().apply { put("alreadyExempt", true) })
+            return
+        }
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:${ctx.packageName}")
+            }
+            activity.startActivity(intent)
+            call.resolve(JSObject().apply { put("alreadyExempt", false) })
+        } catch (e: Exception) {
+            call.reject("Failed to request battery optimization exemption: ${e.message}")
+        }
+    }
+
+    @PluginMethod
+    fun openAppSettings(call: PluginCall) {
+        try {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.parse("package:${context.packageName}")
+            }
+            activity.startActivity(intent)
+            call.resolve()
+        } catch (e: Exception) {
+            call.reject("Failed to open app settings: ${e.message}")
         }
     }
 

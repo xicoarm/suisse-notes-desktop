@@ -724,7 +724,7 @@ const uploadFileMobile = async (filePath, apiUrl, authToken, metadata, onProgres
         onProgress: (bytesUploaded, bytesTotal) => {
           resetProgressTimeout();
           const percentage = Math.round((bytesUploaded / bytesTotal) * 100);
-          onProgress(percentage);
+          onProgress(percentage, bytesUploaded, bytesTotal);
         },
         onSuccess: () => {
           clearTimeout(progressTimeout);
@@ -819,7 +819,7 @@ const uploadFileMobileSimple = async (filePath, apiUrl, authToken, metadata, onP
       xhr.upload.addEventListener('progress', (event) => {
         if (event.lengthComputable) {
           const progress = Math.round((event.loaded / event.total) * 100);
-          onProgress(progress);
+          onProgress(progress, event.loaded, event.total);
         }
       });
 
