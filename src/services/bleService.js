@@ -9,7 +9,7 @@
  * - Notify:  00001911-0000-1000-8000-00805f9b34fb (NOTIFY)
  */
 
-import { isCapacitor } from '../utils/platform';
+import { isCapacitor, isAndroid } from '../utils/platform';
 import { addBreadcrumb, captureException, captureMessage } from '../boot/sentry';
 
 // BLE GATT UUIDs
@@ -113,7 +113,7 @@ export class BleDeviceManager {
     }
     const { BleClient } = await import('@capacitor-community/bluetooth-le');
     this.ble = BleClient;
-    await this.ble.initialize({ androidNeverForLocation: true });
+    await this.ble.initialize({ androidNeverForLocation: false });
   }
 
   /**
@@ -124,6 +124,27 @@ export class BleDeviceManager {
    */
   async scan(duration = 7000, onFound = null) {
     if (!this.ble) await this.initialize();
+
+    // Android requires Location Services to be enabled for BLE scanning.
+    // Check and prompt user before attempting scan.
+    if (isAndroid()) {
+      try {
+        const enabled = await this.ble.isLocationEnabled();
+        if (!enabled) {
+          await this.ble.openLocationSettings();
+          // Wait briefly for user to enable location, then recheck
+          await new Promise(r => setTimeout(r, 2000));
+          const rechecked = await this.ble.isLocationEnabled();
+          if (!rechecked) {
+            throw new Error('Location services are required for Bluetooth scanning on Android. Please enable location in your device settings.');
+          }
+        }
+      } catch (e) {
+        if (e.message?.includes('Location services')) throw e;
+        // isLocationEnabled may not be available in all plugin versions — continue
+        addBreadcrumb({ category: 'ble', message: `Location check skipped: ${e.message}`, level: 'warning' });
+      }
+    }
 
     let devicesFound = 0;
     const seen = new Set();
@@ -650,7 +671,7 @@ export class BleDeviceManager {
     let step1Attempts = 0;
     const maxStep1Attempts = 4;
 
-    while (true) {
+    while (true) { // eslint-disable-line no-constant-condition
       const remaining = step1Deadline - Date.now();
       if (remaining <= 0) {
         throw new Error('BLE response timeout waiting for handshake step1');
