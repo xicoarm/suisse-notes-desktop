@@ -10,9 +10,6 @@ import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebView;
 import android.webkit.WebSettings;
-import androidx.core.view.ViewCompat;
-import androidx.core.view.WindowCompat;
-import androidx.core.view.WindowInsetsCompat;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
@@ -49,20 +46,24 @@ public class MainActivity extends BridgeActivity {
             webSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         }
 
-        // Enable edge-to-edge mode so insets are dispatched to our listener.
-        // Without this, the system may consume navigation bar insets before we see them.
-        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
-
-        // Apply bottom padding for Android system navigation bar so it doesn't
-        // overlap the app's bottom tab bar. This reads the actual nav bar height
-        // from the system and works for 3-button nav, gesture nav, and tablets.
-        ViewCompat.setOnApplyWindowInsetsListener(webView, (v, insets) -> {
-            int bottomInset = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom;
-            v.setPadding(0, 0, 0, bottomInset);
-            return insets;
+        // Fix: Android system navigation bar overlaps the app's bottom tab bar.
+        // CSS env(safe-area-inset-bottom) returns 0 on Android WebView, and
+        // WindowInsets are not reliably dispatched inside Capacitor's WebView.
+        // Solution: read the actual nav bar height from system resources and
+        // inject it as a CSS variable so the web layer can use it.
+        webView.post(() -> {
+            int navBarHeight = 0;
+            int resourceId = getResources().getIdentifier("navigation_bar_height", "dimen", "android");
+            if (resourceId > 0) {
+                navBarHeight = getResources().getDimensionPixelSize(resourceId);
+            }
+            float density = getResources().getDisplayMetrics().density;
+            int navBarDp = Math.round(navBarHeight / density);
+            webView.evaluateJavascript(
+                "document.documentElement.style.setProperty('--android-nav-bar-height', '" + navBarDp + "px')",
+                null
+            );
         });
-        // Trigger initial inset dispatch
-        ViewCompat.requestApplyInsets(webView);
 
         // Set up WebChromeClient for microphone permissions AND file chooser
         webView.setWebChromeClient(new WebChromeClient() {

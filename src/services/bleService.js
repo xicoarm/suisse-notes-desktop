@@ -113,7 +113,13 @@ export class BleDeviceManager {
     }
     const { BleClient } = await import('@capacitor-community/bluetooth-le');
     this.ble = BleClient;
-    await this.ble.initialize({ androidNeverForLocation: false });
+    try {
+      await this.ble.initialize({ androidNeverForLocation: false });
+      this._initialized = true;
+    } catch (e) {
+      this._initialized = false;
+      throw new Error('Bluetooth permissions are required. Please enable Bluetooth and Location permissions in your device settings.');
+    }
   }
 
   /**
@@ -123,7 +129,7 @@ export class BleDeviceManager {
    * @returns {Promise<void>}
    */
   async scan(duration = 7000, onFound = null) {
-    if (!this.ble) await this.initialize();
+    if (!this.ble || !this._initialized) await this.initialize();
 
     // Android requires Location Services to be enabled for BLE scanning.
     // Check and prompt user before attempting scan.
