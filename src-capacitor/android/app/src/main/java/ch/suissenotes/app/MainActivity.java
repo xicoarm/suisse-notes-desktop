@@ -10,6 +10,8 @@ import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebView;
 import android.webkit.WebSettings;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
@@ -45,6 +47,15 @@ public class MainActivity extends BridgeActivity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             webSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         }
+
+        // Apply bottom padding for Android system navigation bar so it doesn't
+        // overlap the app's bottom tab bar. This reads the actual nav bar height
+        // from the system and works for 3-button nav, gesture nav, and tablets.
+        ViewCompat.setOnApplyWindowInsetsListener(webView, (v, insets) -> {
+            int bottomInset = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom;
+            v.setPadding(0, 0, 0, bottomInset);
+            return insets;
+        });
 
         // Set up WebChromeClient for microphone permissions AND file chooser
         webView.setWebChromeClient(new WebChromeClient() {
