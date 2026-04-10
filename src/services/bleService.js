@@ -113,7 +113,7 @@ export class BleDeviceManager {
     }
     const { BleClient } = await import('@capacitor-community/bluetooth-le');
     this.ble = BleClient;
-    const neverForLocation = false;
+    const neverForLocation = true;
     captureMessage(`BLE initialize: androidNeverForLocation=${neverForLocation}, platform=${isAndroid() ? 'android' : 'ios'}`, 'info');
     try {
       await this.ble.initialize({ androidNeverForLocation: neverForLocation });
@@ -152,25 +152,9 @@ export class BleDeviceManager {
       captureMessage(`BLE scan: bluetooth check error — ${e.message}`, 'warning');
     }
 
-    // Android requires Location Services to be enabled for BLE scanning.
-    if (isAndroid()) {
-      try {
-        const locEnabled = await this.ble.isLocationEnabled();
-        captureMessage(`BLE scan pre-check: location=${locEnabled}`, 'info');
-        if (!locEnabled) {
-          captureMessage('BLE scan: Location disabled — opening settings', 'warning');
-          await this.ble.openLocationSettings();
-          await new Promise(r => setTimeout(r, 2000));
-          const rechecked = await this.ble.isLocationEnabled();
-          if (!rechecked) {
-            throw new Error('Location services are required for Bluetooth scanning on Android. Please enable location in your device settings.');
-          }
-        }
-      } catch (e) {
-        if (e.message?.includes('Location services')) throw e;
-        captureMessage(`BLE scan: location check error — ${e.message}`, 'warning');
-      }
-    }
+    // Note: with androidNeverForLocation=true + BLUETOOTH_SCAN neverForLocation,
+    // Android 12+ does not require Location Services for BLE scanning.
+    // Android ≤11 uses ACCESS_FINE_LOCATION (maxSdkVersion=30) which covers it.
 
     let devicesFound = 0;
     const seen = new Set();
