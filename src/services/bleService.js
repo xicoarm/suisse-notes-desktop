@@ -138,12 +138,12 @@ export class BleDeviceManager {
     // Check Bluetooth is enabled — prompt user to turn it on if not
     try {
       const bleEnabled = await this.ble.isEnabled();
-      if (!bleEnabled?.value) {
+      captureMessage(`BLE scan pre-check: bluetooth=${bleEnabled}`, 'info');
+      if (!bleEnabled) {
         captureMessage('BLE scan: Bluetooth disabled — requesting enable', 'warning');
         await this.ble.requestEnable();
-        // Recheck after user interaction
         const rechecked = await this.ble.isEnabled();
-        if (!rechecked?.value) {
+        if (!rechecked) {
           throw new Error('Bluetooth is required for device scanning. Please enable Bluetooth.');
         }
       }
@@ -156,13 +156,13 @@ export class BleDeviceManager {
     if (isAndroid()) {
       try {
         const locEnabled = await this.ble.isLocationEnabled();
-        captureMessage(`BLE scan pre-check: location=${locEnabled?.value}`, 'info');
-        if (!locEnabled?.value) {
+        captureMessage(`BLE scan pre-check: location=${locEnabled}`, 'info');
+        if (!locEnabled) {
           captureMessage('BLE scan: Location disabled — opening settings', 'warning');
           await this.ble.openLocationSettings();
           await new Promise(r => setTimeout(r, 2000));
           const rechecked = await this.ble.isLocationEnabled();
-          if (!rechecked?.value) {
+          if (!rechecked) {
             throw new Error('Location services are required for Bluetooth scanning on Android. Please enable location in your device settings.');
           }
         }
