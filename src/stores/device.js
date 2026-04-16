@@ -36,6 +36,7 @@ function _userPrefKey(baseKey) {
 const RECONNECT_INTERVAL_MS = 15_000;  // Try reconnect every 15s
 const DISCOVERY_INTERVAL_MS = 15_000;  // Scan for new devices every 15s
 const DISCOVERY_SCAN_DURATION = 5000;  // Quick 5s scan for discovery
+const MAX_RECONNECT_ATTEMPTS = 10;     // After this, connectionState='lost' — manual retry required
 
 // Notification IDs
 const NOTIF_SYNC_PROGRESS = 9001;
@@ -104,8 +105,9 @@ async function getOrCreateAppUuid() {
 export const useDeviceStore = defineStore('device', {
   state: () => ({
     // Connection
-    connectionState: 'disconnected', // disconnected | scanning | connecting | connected
+    connectionState: 'disconnected', // disconnected | scanning | connecting | connected | lost
     error: null,
+    // 'lost' = reconnect gave up after MAX_RECONNECT_ATTEMPTS; user must tap "Retry"
 
     // Paired device (persisted)
     pairedDevice: null, // { deviceId, uuid, name, sn }
@@ -130,9 +132,10 @@ export const useDeviceStore = defineStore('device', {
     syncProgress: 0,
     syncBytesReceived: 0,
     syncBytesTotal: 0,
-    syncPhase: 'idle', // idle | detecting | downloading | uploading
+    syncPhase: 'idle', // idle | detecting | downloading | saving | uploading
     currentSyncFile: null,
     syncError: null,
+    syncErrorPhase: null, // phase in which error occurred: 'downloading' | 'saving' | 'uploading' | 'detecting'
 
     // Already synced files (persisted)
     syncedFiles: [],
@@ -151,6 +154,7 @@ export const useDeviceStore = defineStore('device', {
 
     // Auto-reconnect
     _reconnectTimer: null,
+    _reconnectAttempts: 0, // counter for current reconnect session; reset on success or manual retry
     _intentionalDisconnect: false,
     _appStateListener: null,
     _initialized: false,
@@ -205,11 +209,17 @@ export const useDeviceStore = defineStore('device', {
       // Set disconnect handler — auto-reconnect unless user explicitly disconnected
       manager.onDisconnect(() => {
         this.stopAutoSync();
-        this.connectionState = 'disconnected';
+        // Only move to 'disconnected' if we weren't already in 'lost' state
+        // (user still needs to see 'lost' if they backgrounded the app)
+        if (this.connectionState !== 'lost') {
+          this.connectionState = 'disconnected';
+        }
         this.deviceFiles = [];
         this.fileListLoaded = false;
 
         if (!this._intentionalDisconnect && this.pairedDevice) {
+          // Fresh disconnect → new reconnect session with counter reset
+          this._reconnectAttempts = 0;
           addBreadcrumb({ category: 'ble', message: 'Unexpected disconnect — starting reconnect loop', level: 'info' });
           this._scheduleReconnect();
         }
@@ -225,9 +235,12 @@ export const useDeviceStore = defineStore('device', {
         const { App } = await import('@capacitor/app');
         this._appStateListener = await App.addListener('appStateChange', async ({ isActive }) => {
           if (isActive && this.pairedDevice && this.connectionState === 'disconnected' && !this._intentionalDisconnect) {
+            // Fresh session on foreground — reset counter so user gets full 10 attempts
+            this._reconnectAttempts = 0;
             addBreadcrumb({ category: 'ble', message: 'App foregrounded — attempting reconnect', level: 'info' });
             this._scheduleReconnect(1500);
           }
+          // Intentionally skip auto-retry when connectionState==='lost' — user must tap "Retry"
         });
       }
 
@@ -632,6 +645,7 @@ export const useDeviceStore = defineStore('device', {
       this.syncBytesTotal = 0;
       this.syncPhase = 'idle';
       this.syncError = null;
+      this.syncErrorPhase = null;
 
       sendLocalNotification(NOTIF_SYNC_PROGRESS, t('bleTransferBanner'), t('syncProgress', { current: 1, total: 1 }));
 
@@ -642,10 +656,14 @@ export const useDeviceStore = defineStore('device', {
       } catch (e) {
         if (e.message === 'cancelled') {
           this.syncState = 'idle';
+          this.syncErrorPhase = null;
           return; // Cancellation is intentional, don't throw
         }
         this.syncState = 'error';
         this.syncError = e.message;
+        // Capture phase BEFORE finally resets it — UI uses this to render
+        // actionable messages like "Download failed" vs "Upload failed".
+        this.syncErrorPhase = this.syncPhase;
         throw e;
       } finally {
         this.currentSyncFile = null;
@@ -669,6 +687,7 @@ export const useDeviceStore = defineStore('device', {
       this.syncBytesTotal = 0;
       this.syncPhase = 'detecting';
       this.syncError = null;
+      this.syncErrorPhase = null;
 
       sendLocalNotification(NOTIF_SYNC_PROGRESS, t('bleTransferBanner'), t('bleTransferDetecting', { count: newFiles.length }));
 
@@ -678,7 +697,19 @@ export const useDeviceStore = defineStore('device', {
           this.syncCurrent++;
           this.currentSyncFile = file.file;
           this.syncProgress = 0;
-          await this._downloadAndUpload(file);
+          try {
+            await this._downloadAndUpload(file);
+          } catch (perFileErr) {
+            // Per-file cancel advances to the next file instead of aborting the
+            // whole batch. Only a user-initiated FULL cancel (set via
+            // cancelSync()) breaks the outer loop above. A non-cancel error
+            // propagates out so the batch enters 'error' state.
+            if (perFileErr.message === 'cancelled' && !this._cancelRequested) {
+              addBreadcrumb({ category: 'ble', message: `Skipped ${file.file} (per-file cancel) — continuing batch`, level: 'info' });
+              continue;
+            }
+            throw perFileErr;
+          }
         }
         if (this._cancelRequested) {
           this.syncState = 'idle';
@@ -689,10 +720,12 @@ export const useDeviceStore = defineStore('device', {
       } catch (e) {
         if (e.message === 'cancelled') {
           this.syncState = 'idle';
+          this.syncErrorPhase = null;
           return;
         }
         this.syncState = 'error';
         this.syncError = e.message;
+        this.syncErrorPhase = this.syncPhase;
         throw e;
       } finally {
         this.currentSyncFile = null;
@@ -750,6 +783,7 @@ export const useDeviceStore = defineStore('device', {
         // Phase 2: Save to filesystem
         if (this._cancelRequested) throw new Error('cancelled');
 
+        this.syncPhase = 'saving';
         let saveData = fileData;
         if (isRawOpusPackets(fileData)) {
           saveData = rawOpusToOgg(fileData);
@@ -825,13 +859,36 @@ export const useDeviceStore = defineStore('device', {
           err.message === 'cancelled';
 
         if (isCancelled) {
-          await historyStore.updateRecording(recordId, { uploadStatus: 'cancelled' });
-          await this._addSkippedFile(file.file);
-          // If file was saved to phone, mark as synced so BLE doesn't re-download
+          // User-chosen semantics: "Delete partial on phone, keep file on device,
+          // mark skipped locally." Re-sync is always a full re-download (the
+          // protocol has no byte-offset resume — CMD_FILE_DOWNLOAD takes filename only).
           const rec = historyStore.getRecordingById(recordId);
+
+          // 1) Delete any partial file that was saved to phone filesystem
           if (rec?.filePath) {
-            await this._addSyncedFile(file.file);
+            try {
+              const { Filesystem, Directory } = await import('@capacitor/filesystem');
+              await Filesystem.deleteFile({ path: rec.filePath, directory: Directory.Documents });
+              addBreadcrumb({ category: 'ble', message: `Deleted partial file: ${rec.filePath}`, level: 'info' });
+            } catch (delErr) {
+              // Best-effort — file may not exist or may fail to delete.
+              // Not fatal: the file will be overwritten on next sync.
+              addBreadcrumb({ category: 'ble', message: `Partial file delete failed (best-effort): ${delErr.message}`, level: 'warning' });
+            }
           }
+
+          // 2) Remove the history record entirely — nothing to show the user
+          //    since we never completed upload and deleted the local file
+          try {
+            await historyStore.deleteRecording(recordId, true);
+          } catch (histErr) {
+            addBreadcrumb({ category: 'ble', message: `History delete failed (best-effort): ${histErr.message}`, level: 'warning' });
+          }
+
+          // 3) Mark skipped so auto-sync ignores it (user can re-sync via "Sync again")
+          //    Deliberately NOT added to syncedFiles — user should be able to re-download
+          await this._addSkippedFile(file.file);
+
           throw new Error('cancelled');
         }
 
@@ -951,11 +1008,26 @@ export const useDeviceStore = defineStore('device', {
     },
 
     /**
-     * Cancel the current sync operation
+     * Cancel the ENTIRE in-progress sync batch. Sets the global cancel flag
+     * so `syncAllNew` breaks out of its loop; any remaining queued files are
+     * skipped. Called by the "Cancel All" button.
      */
     async cancelSync() {
       if (!this.isSyncing) return;
       this._cancelRequested = true;
+      const manager = getBleManager();
+      manager.abortDownload();
+    },
+
+    /**
+     * Cancel ONLY the currently-downloading file, letting `syncAllNew`
+     * advance to the next queued file. Does NOT set `_cancelRequested`
+     * (which would abort the whole batch). The current file enters the
+     * cancel cleanup path (partial file deleted, history record removed,
+     * file marked skipped) via `_downloadAndUpload`'s catch handler.
+     */
+    async cancelCurrentFile() {
+      if (!this.isSyncing) return;
       const manager = getBleManager();
       manager.abortDownload();
     },
@@ -1035,40 +1107,86 @@ export const useDeviceStore = defineStore('device', {
      * Schedule reconnect attempts with exponential backoff.
      * Tries to reconnect to paired device after unexpected disconnect
      * or when app returns to foreground.
+     *
+     * Gives up after MAX_RECONNECT_ATTEMPTS attempts (~5 min with backoff),
+     * setting connectionState='lost' so the UI can surface a manual retry
+     * prompt. The persistent-reconnect timer still runs as a long-term
+     * safety net for the 'disconnected' state but deliberately does NOT
+     * fire when state==='lost' — that requires explicit user action.
      */
     _scheduleReconnect(initialDelay = 2000) {
       this._stopReconnect();
 
-      let attempts = 0;
-
       const attempt = async () => {
         // Guard: stop if conditions changed
         if (this._intentionalDisconnect || !this.pairedDevice ||
-            this.connectionState === 'connected' || this.connectionState === 'connecting') {
+            this.connectionState === 'connected' || this.connectionState === 'connecting' ||
+            this.connectionState === 'lost') {
           return;
         }
 
-        attempts++;
+        this._reconnectAttempts++;
         addBreadcrumb({
           category: 'ble',
-          message: `Reconnect attempt ${attempts}`,
+          message: `Reconnect attempt ${this._reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`,
           level: 'info'
         });
 
         try {
           await this.autoConnect();
-          // Success — autoConnect already starts autoSync
+          // Success — reset counter for any future disconnect session
+          this._reconnectAttempts = 0;
           addBreadcrumb({ category: 'ble', message: 'Auto-reconnect succeeded', level: 'info' });
         } catch {
-          if (!this._intentionalDisconnect) {
-            // Backoff: 5s, 7.5s, 11s, 17s, 25s, 30s (capped)
-            const delay = Math.min(5000 * Math.pow(1.5, attempts - 1), 30000);
-            this._reconnectTimer = setTimeout(attempt, delay);
+          if (this._intentionalDisconnect) return;
+
+          if (this._reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            // Give up auto-retry; surface "lost" state so the UI can show a
+            // user-actionable retry prompt. Persistent-reconnect timer also
+            // skips this state (see _startPersistentReconnect guards).
+            this.connectionState = 'lost';
+            addBreadcrumb({
+              category: 'ble',
+              message: `Reconnect gave up after ${this._reconnectAttempts} attempts — connectionState=lost`,
+              level: 'warning'
+            });
+            return;
           }
+
+          // Backoff: 5s, 7.5s, 11s, 17s, 25s, 30s (capped)
+          const delay = Math.min(5000 * Math.pow(1.5, this._reconnectAttempts - 1), 30000);
+          this._reconnectTimer = setTimeout(attempt, delay);
         }
       };
 
       this._reconnectTimer = setTimeout(attempt, initialDelay);
+    },
+
+    /**
+     * User-triggered manual retry after auto-reconnect exhausted its budget.
+     * Resets the attempt counter and tries once synchronously. If it fails,
+     * a fresh background auto-reconnect session is scheduled (giving the user
+     * another MAX_RECONNECT_ATTEMPTS worth of retries) and the error is
+     * re-thrown so the UI can show an actionable toast.
+     * Called from UI when connectionState === 'lost'.
+     */
+    async retryConnect() {
+      if (!this.pairedDevice) return;
+      this._reconnectAttempts = 0;
+      this.error = null;
+      // Transition out of 'lost' so _scheduleReconnect's guard lets attempts through
+      if (this.connectionState === 'lost') {
+        this.connectionState = 'disconnected';
+      }
+      this._intentionalDisconnect = false;
+      try {
+        return await this.autoConnect();
+      } catch (e) {
+        // Kick off a background session so the user doesn't have to tap again
+        // immediately, but propagate the error so UI can notify the user.
+        this._scheduleReconnect(1500);
+        throw e;
+      }
     },
 
     /**

@@ -319,6 +319,24 @@ export class BleDeviceManager {
       // Sync phone time to device
       await this.syncTime();
 
+      // Best-effort: clear any stale sync-state left by a crashed prior session.
+      // If the device was in sync state (0x01) when last disconnected, its queue
+      // may still be waiting for an exit command — the next getFileList/downloadFile
+      // would hit stale-response cascades. We send [0x00] as a fresh-start signal.
+      // Devices already out of sync-state may simply not ack — that's fine.
+      try {
+        const release = await this._acquireLock();
+        try {
+          await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
+          await this._readNotification(2000);
+          addBreadcrumb({ category: 'ble', message: 'Cleared potential stale sync-state after connect', level: 'info' });
+        } finally {
+          release();
+        }
+      } catch {
+        // No ack or timeout is non-fatal — device was likely already clean
+      }
+
       return deviceInfo;
     } catch (e) {
       captureException(e, { tags: { action: 'ble_handshake' }, extra: { bleDeviceId } });
@@ -469,14 +487,20 @@ export class BleDeviceManager {
    */
   async getFileList() {
     const release = await this._acquireLock();
-    // Drain any stale notifications from previous operations
-    await this._drainNotifyQueue();
 
-    // Enter sync state
-    await this._write(buildCmd(CMD_SYNC_STATE, [0x01]));
-    await this._readNotification(5000);
+    // Hoisted so the finally block can scale drain by expected stream size.
+    let fileCount = 0;
+    let inSyncState = false;
 
     try {
+      // Drain any stale notifications from previous operations
+      await this._drainNotifyQueue();
+
+      // Enter sync state
+      await this._write(buildCmd(CMD_SYNC_STATE, [0x01]));
+      await this._readNotification(5000);
+      inSyncState = true;
+
       // Request file list
       await this._write(buildCmd(CMD_FILE_LIST));
 
@@ -492,7 +516,7 @@ export class BleDeviceManager {
         throw new Error(countJson.FileList);
       }
 
-      const fileCount = countJson.FileNum || 0;
+      fileCount = countJson.FileNum || 0;
       addBreadcrumb({ category: 'ble', message: `getFileList fileCount=${fileCount}`, level: 'info' });
       const files = [];
       let skipped = 0;
@@ -528,12 +552,23 @@ export class BleDeviceManager {
       addBreadcrumb({ category: 'ble', message: `getFileList done: ${files.length} files, ${skipped} skipped out of ${fileCount}`, level: 'info' });
       return files;
     } finally {
-      // Always exit sync state — even on error/timeout.
-      // Without this, the device stays locked in "transferring" mode permanently.
-      try {
-        await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
-        await this._readNotification(3000);
-      } catch { /* best effort */ }
+      // Always exit sync state — even on error/timeout. Without this, the
+      // device stays locked in "transferring" mode permanently.
+      if (inSyncState) {
+        try {
+          await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
+          await this._readNotification(3000);
+        } catch { /* best effort */ }
+      }
+      // If the read loop bailed early (stream timeout / corrupt entry), the
+      // device may still be streaming the remaining file entries. Drain them
+      // so they don't poison the next command's response. Scale by fileCount
+      // so large lists get enough time.
+      if (fileCount > 0) {
+        try {
+          await this._drainNotifyQueue(300, 5000, fileCount);
+        } catch { /* best effort */ }
+      }
       release();
     }
   }
@@ -561,22 +596,26 @@ export class BleDeviceManager {
     const release = await this._acquireLock();
     this._downloadAborted = false;
 
-    // Drain any stale notifications from previous operations
-    await this._drainNotifyQueue();
-
-    // Enter sync state
-    await this._write(buildCmd(CMD_SYNC_STATE, [0x01]));
-    await this._readNotification(5000);
-
-    // Send download command with filename
-    const filenameBytes = new TextEncoder().encode(filename);
-    await this._write(buildCmd(CMD_FILE_DOWNLOAD, [...filenameBytes]));
-
-    // Receive audio frames until transfer complete
+    // Track whether the device is in sync state so we only exit it when needed.
+    // Declared here so the catch block can reference it.
+    let inSyncState = false;
     const chunks = [];
     let receivedBytes = 0;
 
     try {
+      // Drain any stale notifications from previous operations
+      await this._drainNotifyQueue();
+
+      // Enter sync state
+      await this._write(buildCmd(CMD_SYNC_STATE, [0x01]));
+      await this._readNotification(5000);
+      inSyncState = true;
+
+      // Send download command with filename
+      const filenameBytes = new TextEncoder().encode(filename);
+      await this._write(buildCmd(CMD_FILE_DOWNLOAD, [...filenameBytes]));
+
+      // Receive audio frames until transfer complete
       let transferring = true;
       while (transferring) {
         const data = await this._readNotification(30000);
@@ -606,29 +645,40 @@ export class BleDeviceManager {
             offset += chunk.length;
           }
 
-          // Verify CRC
+          // Verify CRC — on mismatch, let the catch block clean up
           const actualCrc = crc16Compute(fileData);
           if (actualCrc !== expectedCrc) {
-            // Exit sync state
-            await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
-            await this._readNotification(3000);
             throw new Error(`CRC mismatch: expected 0x${expectedCrc.toString(16)}, got 0x${actualCrc.toString(16)}`);
           }
 
           if (onProgress) onProgress({ percent: 100, bytesReceived: receivedBytes, bytesTotal: totalSize });
 
-          // Exit sync state
+          // Success path: exit sync state cleanly
           await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
           await this._readNotification(3000);
+          inSyncState = false;
 
           return fileData;
         }
       }
     } catch (err) {
-      // Always exit sync state on failure/abort so device buttons work again
+      // Always exit sync state on failure/abort AND drain any in-flight frames.
+      // Without the drain, stale audio notifications sent by the device after
+      // we stopped reading get consumed by the next command's _readNotification,
+      // causing the cascade documented in docs/BLE_DEVICE_SYNC_BUG_REPORT.md
+      // (Bug 3). Scales drain wait by estimated stale frames so large-file
+      // aborts don't truncate prematurely.
+      if (inSyncState) {
+        try {
+          await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
+          await this._readNotification(3000);
+        } catch { /* best effort */ }
+      }
       try {
-        await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
-        await this._readNotification(3000);
+        // At ~500 bytes per audio frame, partially-received bytes approximate
+        // the number of stale frames the device may still be emitting.
+        const estimatedStale = Math.max(200, Math.round(receivedBytes / 500));
+        await this._drainNotifyQueue(300, 5000, estimatedStale);
       } catch { /* best effort */ }
       throw err;
     } finally {
@@ -813,12 +863,21 @@ export class BleDeviceManager {
    * that arrive between the clear and the next command.
    * This method drains repeatedly until no new notifications arrive
    * for `quietMs` milliseconds.
+   *
+   * @param {number} quietMs - how long the queue must stay empty to stop draining
+   * @param {number} maxWaitMs - absolute upper bound; ignored if too small for expectedCount
+   * @param {number} expectedCount - optional hint: if caller knows the device may stream
+   *   N stale notifications, scale the upper bound to give time for them all to arrive
+   *   (approximated at 50ms per entry based on observed file-list streaming rate).
    */
-  async _drainNotifyQueue(quietMs = 300, maxWaitMs = 5000) {
+  async _drainNotifyQueue(quietMs = 300, maxWaitMs = 5000, expectedCount = 0) {
+    const effectiveMaxWait = expectedCount > 0
+      ? Math.max(maxWaitMs, Math.min(expectedCount * 50, 60000))
+      : maxWaitMs;
     let totalDrained = 0;
     const startTime = Date.now();
 
-    while (Date.now() - startTime < maxWaitMs) {
+    while (Date.now() - startTime < effectiveMaxWait) {
       const count = this._notifyQueue.length;
       if (count > 0) {
         totalDrained += count;
@@ -837,7 +896,7 @@ export class BleDeviceManager {
     this._notifyQueue = [];
 
     if (totalDrained > 0) {
-      addBreadcrumb({ category: 'ble', message: `Drained ${totalDrained} stale BLE notification(s)`, level: 'warning' });
+      addBreadcrumb({ category: 'ble', message: `Drained ${totalDrained} stale BLE notification(s) in ${Date.now() - startTime}ms (expectedCount=${expectedCount})`, level: 'warning' });
     }
   }
 

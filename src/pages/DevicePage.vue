@@ -166,9 +166,33 @@
         <span>{{ $t('connecting') }}</span>
       </div>
 
+      <!-- Connection lost (auto-reconnect gave up) -->
+      <div
+        v-else-if="deviceStore.connectionState === 'lost'"
+        class="lost-banner"
+      >
+        <div class="lost-banner-header">
+          <q-icon
+            name="signal_cellular_off"
+            size="20px"
+          />
+          <span>{{ $t('deviceConnectionLost') }}</span>
+        </div>
+        <div class="lost-banner-hint">
+          {{ $t('deviceConnectionLostHint') }}
+        </div>
+        <q-btn
+          unelevated
+          class="gradient-btn full-width q-mt-md"
+          icon="refresh"
+          :label="$t('retryConnection')"
+          @click="retryConnection"
+        />
+      </div>
+
       <!-- Reconnect button (disconnected) -->
       <q-btn
-        v-if="!deviceStore.isConnected && !deviceStore.isConnecting"
+        v-else-if="!deviceStore.isConnected && !deviceStore.isConnecting"
         unelevated
         class="gradient-btn full-width q-mt-lg"
         icon="bluetooth"
@@ -312,14 +336,14 @@
         name="error_outline"
         size="18px"
       />
-      <span>{{ $t('syncFailed') }}</span>
+      <span>{{ phaseErrorLabel }}</span>
       <q-btn
         flat
         dense
         size="sm"
         icon="close"
         color="white"
-        @click="deviceStore.syncState = 'idle'"
+        @click="dismissSyncError"
       />
     </div>
 
@@ -342,7 +366,7 @@
           dense
           color="negative"
           no-caps
-          :label="$t('cancelSync')"
+          :label="$t('cancelAll')"
           icon="stop"
           @click="cancelSync"
         />
@@ -390,17 +414,33 @@
           </div>
         </div>
         <div class="file-action">
-          <!-- Currently syncing this file — show cancel -->
+          <!-- Currently downloading this file — cancel JUST this file
+               (batch continues with next queued file).
+               Only surfaced during 'downloading' phase: protocol can abort
+               the device-side stream mid-transfer, but once we're writing
+               to filesystem or uploading to cloud, "skip" has no handler yet.
+               That path will come with the upload-queue work in Batch 2. -->
           <q-btn
-            v-if="deviceStore.currentSyncFile === file.file"
+            v-if="deviceStore.currentSyncFile === file.file && deviceStore.syncPhase === 'downloading'"
             flat
             dense
             color="negative"
             icon="stop"
-            :label="$t('cancel')"
+            :label="$t('cancelThisFile')"
             no-caps
-            @click="cancelSync"
+            @click="cancelCurrentFile"
           />
+          <!-- Currently saving or uploading — show spinner only, no cancel -->
+          <div
+            v-else-if="deviceStore.currentSyncFile === file.file"
+            class="file-phase-indicator"
+          >
+            <q-spinner-dots
+              size="14px"
+              color="primary"
+            />
+            <span>{{ deviceStore.syncPhase === 'uploading' ? $t('uploading') : $t('synced') }}</span>
+          </div>
 
           <!-- Downloaded + uploaded to cloud — fully synced -->
           <div
@@ -489,7 +529,10 @@
             v-else-if="deviceStore.isFileSkipped(file.file)"
             class="skipped-actions"
           >
-            <span class="text-grey-5" style="font-size: 12px;">{{ $t('skipped') }}</span>
+            <span
+              class="text-grey-5"
+              style="font-size: 12px;"
+            >{{ $t('skipped') }}</span>
             <q-btn
               flat
               dense
@@ -561,6 +604,20 @@ export default {
       if (deviceStore.batteryLevel > 50) return 'positive';
       if (deviceStore.batteryLevel > 20) return 'warning';
       return 'negative';
+    });
+
+    // Phase-specific error labels — user sees "Upload failed" instead of generic
+    // "Sync failed", so they know what step broke and what to retry.
+    const phaseErrorLabel = computed(() => {
+      const msg = deviceStore.syncError || '';
+      const params = { message: msg };
+      switch (deviceStore.syncErrorPhase) {
+        case 'downloading': return t('syncErrorDownload', params);
+        case 'saving': return t('syncErrorSave', params);
+        case 'uploading': return t('syncErrorUpload', params);
+        case 'detecting': return t('syncErrorDetecting', params);
+        default: return t('syncFailed');
+      }
     });
 
     const startScan = async () => {
@@ -648,6 +705,25 @@ export default {
 
     const cancelSync = async () => {
       await deviceStore.cancelSync();
+    };
+
+    const cancelCurrentFile = async () => {
+      await deviceStore.cancelCurrentFile();
+    };
+
+    const retryConnection = async () => {
+      try {
+        await deviceStore.retryConnect();
+        $q.notify({ type: 'positive', message: t('deviceConnected') });
+      } catch (e) {
+        $q.notify({ type: 'negative', message: t('connectionFailed'), caption: e.message, timeout: 5000 });
+      }
+    };
+
+    const dismissSyncError = () => {
+      deviceStore.syncState = 'idle';
+      deviceStore.syncError = null;
+      deviceStore.syncErrorPhase = null;
     };
 
     const skipFile = async (file) => {
@@ -760,15 +836,19 @@ export default {
       deviceStore,
       bleAvailable,
       batteryColor,
+      phaseErrorLabel,
       startScan,
       connectDevice,
       reconnect,
+      retryConnection,
       disconnect,
       confirmForget,
       confirmReset,
       syncFile,
       syncAll,
       cancelSync,
+      cancelCurrentFile,
+      dismissSyncError,
       skipFile,
       unskipAndSync,
       retryUpload,
@@ -924,6 +1004,39 @@ export default {
   color: #6366F1;
   font-weight: 500;
   font-size: 14px;
+}
+
+.lost-banner {
+  margin-top: 16px;
+  padding: 16px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 12px;
+  color: #991b1b;
+}
+
+.lost-banner-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+.lost-banner-hint {
+  font-size: 13px;
+  color: #7f1d1d;
+  line-height: 1.4;
+}
+
+.file-phase-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 500;
 }
 
 // ========== Scan / Empty State ==========
