@@ -476,16 +476,32 @@ export default {
 
     const handleCancelTransfer = async (recording) => {
       try {
-        // Cancel BLE device sync if it's a device recording
+        // Cancel BLE device sync if it's a device recording (aborts download phase)
         if (recording?.source === 'device') {
           const { useDeviceStore } = await import('../stores/device');
           const deviceStore = useDeviceStore();
           await deviceStore.cancelSync();
         }
 
-        // Reset stuck upload status to pending so user can retry
-        if (recording?.id && recording.uploadStatus === 'uploading') {
-          await historyStore.updateRecording(recording.id, { uploadStatus: 'pending' });
+        // Abort the active cloud upload XHR (mobile) or main-process upload (desktop).
+        // Also removes the item from the persistent mobile queue so it won't
+        // auto-retry after the user said cancel.
+        if (recording?.id) {
+          if (isElectron() && window.electronAPI?.upload?.cancel) {
+            try { await window.electronAPI.upload.cancel(recording.id); } catch { /* best-effort */ }
+          } else if (isCapacitor()) {
+            try {
+              const { cancelUpload } = await import('../services/upload');
+              await cancelUpload(recording.id, { removeFromQueue: true });
+            } catch (e) { console.warn('Cancel upload failed:', e); }
+          }
+        }
+
+        // Mark as 'cancelled' so auto-queue-processing doesn't immediately
+        // re-pick it up, and the UI distinguishes user-cancel from auto-failure.
+        // Previous behavior set 'pending' which re-triggered the upload.
+        if (recording?.id && (recording.uploadStatus === 'uploading' || recording.uploadStatus === 'pending')) {
+          await historyStore.updateRecording(recording.id, { uploadStatus: 'cancelled' });
         }
 
         // Clear local uploading state

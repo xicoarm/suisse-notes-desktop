@@ -164,22 +164,65 @@ function _updateQueueItemRetries(recordId, retries) {
 }
 
 /**
+ * Mark a queue item as "unrecoverable": its error class is non-retryable
+ * (auth revoked, checksum mismatch, unsupported file) so the background
+ * processor should skip it and the UI should surface it as failed-permanent
+ * rather than burn the retry budget silently.
+ * @param {string} recordId
+ * @param {string} reason - short machine/human readable tag
+ */
+function _markQueueItemUnrecoverable(recordId, reason) {
+  try {
+    const queue = getMobileUploadQueue();
+    const item = queue.find(i => i.recordId === recordId);
+    if (item) {
+      item.unrecoverable = true;
+      item.unrecoverableReason = reason;
+      _safeWriteQueue(queue);
+    }
+  } catch (e) {
+    console.warn('Failed to mark queue item unrecoverable:', e);
+  }
+}
+
+/**
+ * Classify an upload error as retryable vs terminal. Mirrors the logic
+ * used by `uploadWithRetry` so the background queue processor makes the
+ * same call — avoids burning MAX_QUEUE_RETRIES on a 403/checksum-mismatch
+ * that will never succeed.
+ * @param {string} error - Error message
+ * @returns {boolean}
+ */
+function _isRetryableError(error) {
+  if (!error) return false;
+  const nonRetryable = [
+    'Checksum mismatch',
+    'Invalid file format',
+    'Unauthorized',
+    'Forbidden'
+  ];
+  return !nonRetryable.some(msg => error.includes(msg));
+}
+
+/**
  * Process the persistent mobile upload queue — retries all pending uploads
  * @param {Object} authStore - Auth store for token
  * @param {Function} getApiUrl - Function returning the API URL
  * @returns {Promise<{processed: number, succeeded: number, failed: number}>}
  */
 export async function processMobileUploadQueue(authStore, getApiUrl) {
-  if (isProcessingMobileQueue) return { processed: 0, succeeded: 0, failed: 0, skipped: true };
+  if (isProcessingMobileQueue) return { processed: 0, succeeded: 0, failed: 0, skipped: true, purged: [], unrecoverable: [] };
   isProcessingMobileQueue = true;
 
   try {
   const queue = getMobileUploadQueue();
-  if (queue.length === 0) return { processed: 0, succeeded: 0, failed: 0 };
+  if (queue.length === 0) return { processed: 0, succeeded: 0, failed: 0, purged: [], unrecoverable: [] };
 
   const apiUrl = typeof getApiUrl === 'function' ? getApiUrl() : getApiUrl;
   let succeeded = 0;
   let failed = 0;
+  const purgedRecordIds = [];        // Stale / over-budget items removed silently
+  const unrecoverableRecordIds = []; // Items hit non-retryable errors this run
   let tokenRefreshAttempts = 0;
   const MAX_TOKEN_REFRESHES_PER_RUN = 2;
 
@@ -196,22 +239,40 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
     }
   }
 
-  // Purge stale items (older than 7 days) and items that exceeded max retries
+  // Purge stale items (older than 7 days) and items that exceeded max retries.
+  // We track the IDs so the caller can update history records / notify the user
+  // instead of silently losing recordings.
   for (let j = queue.length - 1; j >= 0; j--) {
     const item = queue[j];
     const isStale = item.addedAt && (Date.now() - item.addedAt > QUEUE_ITEM_MAX_AGE_MS);
     if (isStale || item.retries >= MAX_QUEUE_RETRIES) {
       console.warn(`Removing expired queue item ${item.recordId} (retries: ${item.retries}, age: ${item.addedAt ? Math.round((Date.now() - item.addedAt) / 86400000) + 'd' : 'unknown'})`);
       removeFromMobileUploadQueue(item.recordId);
+      purgedRecordIds.push(item.recordId);
       failed++;
     }
   }
 
-  // Re-read queue after purge
-  const activeQueue = getMobileUploadQueue();
+  // Re-read queue after purge, sort strict-FIFO by addedAt so the user's
+  // recording order is preserved even if items were added out-of-order
+  // (e.g. from different threads, or queue rehydration from Preferences
+  // backup that doesn't guarantee insertion order).
+  const activeQueue = getMobileUploadQueue()
+    .slice()
+    .sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
+
   let i = 0;
   while (i < activeQueue.length) {
     const item = activeQueue[i];
+
+    // Skip items previously classified as unrecoverable — they won't succeed
+    // on retry and would otherwise waste the retry budget / user's time.
+    // UI surfaces them as 'failed' so the user can manually retry via the
+    // history card if they want to.
+    if (item.unrecoverable) {
+      i++;
+      continue;
+    }
 
     try {
       const result = await uploadWithVerification({
@@ -241,7 +302,7 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
         }
         i++;
       } else {
-        // Check if this is a token expiration error — refresh and retry same item
+        // Token expired? Refresh in-place, retry same item without burning retry budget.
         if (isTokenExpiredError(result.error, result.status) && tokenRefreshAttempts < MAX_TOKEN_REFRESHES_PER_RUN) {
           try {
             const refreshResult = await authStore.handleAuthError();
@@ -254,7 +315,20 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
             console.warn('Token refresh failed during queue processing:', e);
           }
         }
-        // Non-token error or refresh failed — increment retry count
+
+        // Non-retryable (403, checksum mismatch, invalid format)? Mark as
+        // unrecoverable and stop retrying automatically. Old behavior
+        // incremented retries until hit MAX_QUEUE_RETRIES then silently
+        // dropped — user lost the recording with no signal.
+        if (!_isRetryableError(result.error)) {
+          _markQueueItemUnrecoverable(item.recordId, result.error || 'unknown');
+          unrecoverableRecordIds.push(item.recordId);
+          failed++;
+          i++;
+          continue;
+        }
+
+        // Retryable error — increment retry count
         item.retries++;
         _updateQueueItemRetries(item.recordId, item.retries);
         failed++;
@@ -262,7 +336,7 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
       }
     } catch (e) {
       console.warn('Queued upload failed for', item.recordId, e);
-      // Check if exception message indicates token error
+      // Exception-level token error handling
       if (isTokenExpiredError(e.message) && tokenRefreshAttempts < MAX_TOKEN_REFRESHES_PER_RUN) {
         try {
           const refreshResult = await authStore.handleAuthError();
@@ -275,6 +349,14 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
           console.warn('Token refresh failed:', refreshErr);
         }
       }
+      // Exception-level non-retryable check
+      if (!_isRetryableError(e.message)) {
+        _markQueueItemUnrecoverable(item.recordId, e.message || 'unknown');
+        unrecoverableRecordIds.push(item.recordId);
+        failed++;
+        i++;
+        continue;
+      }
       item.retries++;
       _updateQueueItemRetries(item.recordId, item.retries);
       failed++;
@@ -282,7 +364,32 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
     }
   }
 
-  return { processed: activeQueue.length, succeeded, failed };
+  // Surface unrecoverable / purged items to history so the UI can show them
+  // as failed instead of silently losing them. Wrapped in best-effort since
+  // the history store may not be available in all call contexts.
+  if (purgedRecordIds.length > 0 || unrecoverableRecordIds.length > 0) {
+    try {
+      const { useRecordingsHistoryStore } = await import('../stores/recordings-history');
+      const historyStore = useRecordingsHistoryStore();
+      for (const id of purgedRecordIds) {
+        await historyStore.updateRecording(id, {
+          uploadStatus: 'failed',
+          uploadError: 'Upload abandoned after too many retries or 7 days offline'
+        });
+      }
+      for (const id of unrecoverableRecordIds) {
+        const queueItem = queue.find(q => q.recordId === id);
+        await historyStore.updateRecording(id, {
+          uploadStatus: 'failed',
+          uploadError: queueItem?.unrecoverableReason || 'Upload cannot be retried automatically'
+        });
+      }
+    } catch (e) {
+      console.warn('Could not flag purged/unrecoverable items in history:', e);
+    }
+  }
+
+  return { processed: activeQueue.length, succeeded, failed, purged: purgedRecordIds, unrecoverable: unrecoverableRecordIds };
   } finally {
     isProcessingMobileQueue = false;
   }
@@ -329,25 +436,47 @@ let isProcessingQueue = false;
 const activeXhrUploads = new Map();
 
 /**
- * Cancel an active upload
+ * Cancel an upload — both in-flight AND pending-in-queue.
+ * Previous behavior only aborted the active XHR; if the item was already
+ * in the persistent queue it would get picked up again on the next
+ * processMobileUploadQueue run, which surprised users who tapped Cancel
+ * and saw the upload re-attempt itself.
+ *
  * @param {string} recordId - Recording ID
- * @returns {Promise<{success: boolean, error?: string}>}
+ * @param {Object} [opts]
+ * @param {boolean} [opts.removeFromQueue=true] - Also drop the item from
+ *   the persistent queue so it won't auto-retry. Set false only if you
+ *   intend to keep it queued (e.g. pause semantics, not yet wired).
+ * @returns {Promise<{success: boolean, cancelled?: boolean, error?: string}>}
  */
-export const cancelUpload = async (recordId) => {
-  // Check for active XHR upload (mobile)
+export const cancelUpload = async (recordId, opts = {}) => {
+  const { removeFromQueue = true } = opts;
+  let cancelledXhr = false;
+
+  // Abort in-flight XHR if there is one
   const xhr = activeXhrUploads.get(recordId);
   if (xhr) {
     try {
       xhr.abort();
       activeXhrUploads.delete(recordId);
-      return { success: true, cancelled: true };
+      cancelledXhr = true;
     } catch (e) {
       console.error('Error aborting XHR upload:', e);
       return { success: false, error: e.message };
     }
   }
 
-  return { success: false, error: 'No active upload found' };
+  // Also remove from the persistent queue so the next queue-processing
+  // pass doesn't resurrect the upload after the user said cancel.
+  if (removeFromQueue) {
+    try {
+      removeFromMobileUploadQueue(recordId);
+    } catch (e) {
+      console.warn('cancelUpload: queue removal failed:', e);
+    }
+  }
+
+  return { success: true, cancelled: cancelledXhr, removedFromQueue: removeFromQueue };
 };
 
 /**
