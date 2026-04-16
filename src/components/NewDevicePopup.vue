@@ -1,7 +1,7 @@
 <template>
   <transition name="slide-up">
     <div
-      v-if="deviceStore.discoveredDevice"
+      v-if="deviceStore.discoveredDevice && !deviceStore.pairedDevice"
       class="new-device-popup"
     >
       <div class="popup-content">

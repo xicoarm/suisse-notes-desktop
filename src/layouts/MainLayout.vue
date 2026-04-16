@@ -383,6 +383,7 @@
     <q-footer
       v-if="isMobile() && authStore.isAuthenticated"
       class="mobile-bottom-nav"
+      :class="{ 'is-ios': $q.platform.is.ios }"
     >
       <q-tabs
         v-model="currentTab"
@@ -1154,6 +1155,20 @@ onUnmounted(() => {
   background: white;
   border-top: 1px solid #e2e8f0;
   padding-bottom: var(--android-nav-bar-height, env(safe-area-inset-bottom, 0));
+
+  // iOS: background extends to the very bottom of the screen (modern
+  // iOS look) and the tab buttons themselves carry the home-indicator
+  // padding internally. Previously padding-bottom pushed the entire
+  // footer above the home indicator, leaving a visible empty gap.
+  // Android keeps the outer padding because its gesture/button nav bar
+  // is opaque and would otherwise cover the tab icons.
+  &.is-ios {
+    padding-bottom: 0;
+
+    .mobile-nav-tabs :deep(.q-tab) {
+      padding-bottom: env(safe-area-inset-bottom, 0);
+    }
+  }
 
   .mobile-nav-tabs {
     :deep(.q-tab) {

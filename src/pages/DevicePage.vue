@@ -824,6 +824,15 @@ export default {
         } catch (e) {
           console.log('Auto-connect failed:', e.message);
         }
+      } else if (deviceStore.isConnected && deviceStore.deviceFiles.length === 0 && !deviceStore.isSyncing) {
+        // Already connected but no files in memory — could be a stale/empty state
+        // from a prior fetchFileList failure (device was recording, BLE hiccup, etc).
+        // Re-attempt so the user doesn't see an empty page on every visit.
+        try {
+          await deviceStore.fetchFileList();
+        } catch (e) {
+          console.log('DevicePage mount fetchFileList retry failed:', e.message);
+        }
       }
     });
 
