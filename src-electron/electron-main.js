@@ -1809,12 +1809,43 @@ function validateChunkSequence(chunks, ext) {
   };
 }
 
-// Helper: Write data to file with fsync to guarantee persistence to disk
+// Helper: Durable, atomic file write. Writes to a sibling .tmp file, fsyncs on a
+// write-capable handle, then renames into place. Rename is atomic on NTFS/APFS/ext4,
+// so readers never see a partial write and the final filename avoids AV flush races.
+//
+// Windows note: fsync maps to FlushFileBuffers(), which requires GENERIC_WRITE on
+// the handle — the previous 'r'-mode open produced "EPERM: operation not permitted,
+// fsync" on every Windows machine. The temp-then-rename pattern also sidesteps
+// transient AV/EDR locks on the final path, with bounded retries as a belt.
 function writeFileWithSync(filePath, data) {
-  fs.writeFileSync(filePath, data);
-  const fd = fs.openSync(filePath, 'r');
-  fs.fsyncSync(fd);
-  fs.closeSync(fd);
+  const retryableCodes = new Set(['EBUSY', 'EACCES', 'EPERM', 'EMFILE', 'ENFILE']);
+  const delays = [100, 300, 800];
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+
+  let lastErr;
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    let fd = null;
+    try {
+      fd = fs.openSync(tmpPath, 'w');
+      fs.writeSync(fd, data);
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = null;
+      fs.renameSync(tmpPath, filePath);
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch (e) { /* ignore */ }
+        fd = null;
+      }
+      try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore */ }
+      if (!retryableCodes.has(err.code) || attempt === delays.length) throw err;
+      const until = Date.now() + delays[attempt];
+      while (Date.now() < until) { /* short blocking wait — metadata writes only */ }
+    }
+  }
+  throw lastErr;
 }
 
 // Helper: Combine chunks using streaming to avoid memory issues with large files

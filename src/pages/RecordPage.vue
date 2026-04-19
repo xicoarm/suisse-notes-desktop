@@ -752,6 +752,7 @@ import { useTranscriptionSettingsStore } from '../stores/transcription-settings'
 import { useMinutesStore } from '../stores/minutes';
 import { useRecorder } from '../composables/useRecorder';
 import { isElectron, isCapacitor, isAndroid } from '../utils/platform';
+import { humanizeStorageError } from '../utils/storageErrors';
 import { uploadWithVerification } from '../services/upload';
 import { getApiUrlSync } from '../services/api';
 import { stopStorageMonitor } from '../services/storageMonitor';
@@ -1742,7 +1743,7 @@ const retryChunkCombine = async () => {
     await startAutoUpload();
   } else {
     // phase transition handled by subsequent action (setUploading/setError/reset)
-    recordingStore.error = result.error;
+    recordingStore.error = humanizeStorageError({ message: result.error, code: result.code }, t);
     recordingStore.phase = 'error';
   }
 };
