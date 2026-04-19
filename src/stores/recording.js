@@ -6,6 +6,14 @@ import { createChunkIntegrity, createRecordingIntegrity, addChunkToRecordingInte
 import { startStorageMonitor, stopStorageMonitor, checkStorageBeforeRecording } from '../services/storageMonitor';
 import { setLifecycleCallbacks, clearLifecycleCallbacks, setRecordingActive } from '../boot/lifecycle';
 import { sentryRecordingStart, sentryRecordingStop, sentryRecordingPause, sentryRecordingResume, sentryRecordingError } from '../services/sentryHelpers';
+import { humanizeStorageError } from '../utils/storageErrors';
+import { i18n } from '../boot/i18n';
+
+// Map raw Node/libuv error messages to localized, actionable text before they
+// hit the UI. See utils/storageErrors.js for the classification logic.
+function describeStorageError(error) {
+  return humanizeStorageError(error, i18n.global.t.bind(i18n.global));
+}
 
 export const useRecordingStore = defineStore('recording', {
   state: () => ({
@@ -275,7 +283,7 @@ export const useRecordingStore = defineStore('recording', {
         sentryRecordingStart(this.recordId);
         return { success: true, recordId: this.recordId, storageWarning: storageCheck.message };
       } catch (error) {
-        this.error = error.message;
+        this.error = describeStorageError(error);
         this.phase ='error';
         sentryRecordingError(this.recordId, error);
         if (isElectron()) {
@@ -341,7 +349,7 @@ export const useRecordingStore = defineStore('recording', {
 
         return { success: false, error: 'Unsupported platform' };
       } catch (error) {
-        this.error = error.message;
+        this.error = describeStorageError(error);
         this.phase ='error';
         sentryRecordingError(this.recordId, error);
         if (isElectron()) {
