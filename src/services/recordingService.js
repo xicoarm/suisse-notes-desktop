@@ -77,7 +77,25 @@ const HEALTH_SAMPLE_INTERVAL_MS = 100;
 const MIC_HEALTH_DEGRADED_SECONDS = 30;  // Show subtle hint after 30s of silence
 const MIC_HEALTH_CRITICAL_SECONDS = 60;  // Escalate to critical after 60s
 const MIC_HEALTH_RECOVERY_SECONDS = 3;
-const MAX_DURATION_SECONDS = 4 * 60 * 60 + 55 * 60; // 4h 55m
+
+// Dev/test-only env-var override helper. Honored ONLY in non-production builds
+// (Vite sets import.meta.env.PROD=true at production build time). Production
+// bundles always use the hard-coded fallback regardless of any VITE_* var —
+// this prevents a stray .env.local from shortening auto-split intervals for
+// real users.
+//
+// Supported overrides (set in .env.local — Vite only exposes VITE_ prefixed vars):
+//   VITE_SUISSE_MAX_DURATION_SECONDS            — auto-split interval (default 17700 = 4h55m)
+//   VITE_SUISSE_MEDIA_RECORDER_TIMESLICE_MS     — MediaRecorder chunk size (default 3000)
+function envNumDev(key, fallback) {
+  if (import.meta.env?.PROD) return fallback;
+  const raw = import.meta.env?.[key];
+  const n = typeof raw === 'string' ? parseFloat(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+const MAX_DURATION_SECONDS = envNumDev('VITE_SUISSE_MAX_DURATION_SECONDS', 4 * 60 * 60 + 55 * 60); // 4h 55m
+const MEDIA_RECORDER_TIMESLICE_MS = envNumDev('VITE_SUISSE_MEDIA_RECORDER_TIMESLICE_MS', 3000);
 const AUTH_KEEP_ALIVE_INTERVAL = 30 * 60 * 1000; // Refresh auth every 30 min during recording
 
 export const MIC_HEALTH_STATUS = Object.freeze({
@@ -857,23 +875,53 @@ async function performAutoSplit(recordingStore, isAutoSplitting) {
   if (isAutoSplitting.value) return;
   isAutoSplitting.value = true;
 
+  // Wait for the store's saveChunk mutex to drain.
+  // _chunkSaveQueue is reassigned on each saveChunk, so we snapshot → await → recheck
+  // to cover the case where a new saveChunk was queued while we were awaiting.
+  const drainChunkQueue = async () => {
+    for (let i = 0; i < 3; i++) {
+      const q = recordingStore._chunkSaveQueue;
+      if (!q) return;
+      try { await q; } catch (_) { /* ignore */ }
+      if (recordingStore._chunkSaveQueue === q) return; // nothing new queued while awaiting
+    }
+  };
+
   try {
-    // Pause to prevent new ondataavailable events during session creation
+    // 1. Drain any in-flight saveChunk from BEFORE we touch the recorder.
+    await drainChunkQueue();
+
+    // 2. Flush buffered data while the recorder is still 'recording'.
+    //    flushRecordingData early-returns if state !== 'recording', so calling it
+    //    AFTER pause() silently does nothing, and any buffered audio would instead
+    //    be emitted later as a stale chunk that races with createSessionFile.
+    await flushRecordingData();
+
+    // 3. Wait for the flushed chunk to be persisted before pausing.
+    await drainChunkQueue();
+
+    // 4. Pause to stop new data being gathered into the blob.
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       mediaRecorder.pause();
     }
 
-    // Flush any buffered data and wait for it to be saved to disk
-    await flushRecordingData();
+    // 5. Final drain in case pause() itself queued a dataavailable
+    //    (implementation-defined across browsers).
+    await drainChunkQueue();
 
-    // Safe to create session — no new chunks can arrive while paused
+    // 6. Create the session. Main process serializes createSessionFile with
+    //    saveChunk via withRecordingLock, so no late chunk can slip through.
     const result = await recordingStore.createSessionFile();
     if (!result.success) {
       console.error('Auto-split: Failed to create session file:', result.error);
     }
+
+    // 7. Reset chunkIndex AFTER the session was finalized.
+    //    Resetting earlier would allow a late saveChunk to overwrite chunk_0
+    //    with pre-split audio.
     recordingStore.resetChunkIndex();
 
-    // Resume recording
+    // 8. Resume.
     if (mediaRecorder && mediaRecorder.state === 'paused') {
       mediaRecorder.resume();
     }
@@ -1233,8 +1281,9 @@ export async function startRecording(options = {}) {
       recordingStore.setError(event.error?.message || 'Recording error');
     };
 
-    // P0 Data Loss Fix: Reduced from 5s to 3s to minimize crash data loss (V8)
-    mediaRecorder.start(3000);
+    // P0 Data Loss Fix: Reduced from 5s to 3s to minimize crash data loss (V8).
+    // Timeslice is overridable in dev/test via VITE_SUISSE_MEDIA_RECORDER_TIMESLICE_MS.
+    mediaRecorder.start(MEDIA_RECORDER_TIMESLICE_MS);
 
     // Start monitoring the mixed recording stream (what actually gets recorded)
     if (stream || sysStream) {

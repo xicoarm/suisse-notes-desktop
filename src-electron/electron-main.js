@@ -1745,6 +1745,27 @@ ipcMain.handle('minutes:fetch', async () => {
 
 // --- Recording (WhisperTranscribe Patterns) ---
 
+// Per-recording mutex. Serializes saveChunk, createSessionFile, and combineChunks
+// for a given recordId so their async await points cannot interleave on disk.
+// Without this, a late saveChunk can land mid-way through createSessionFile's
+// readdir->combine->cleanup pipeline and survive the cleanup, producing a phantom
+// chunk gap on the next validation pass.
+const recordingLocks = new Map();
+
+function withRecordingLock(recordId, fn) {
+  const previous = recordingLocks.get(recordId) || Promise.resolve();
+  // Swallow the previous link's error so a failure in one handler doesn't
+  // poison the next one's run.
+  const current = previous.catch(() => {}).then(fn);
+  recordingLocks.set(recordId, current);
+  current.finally(() => {
+    if (recordingLocks.get(recordId) === current) {
+      recordingLocks.delete(recordId);
+    }
+  });
+  return current;
+}
+
 // Helper: Get sessions path
 function getSessionsPath(recordId) {
   return path.join(getRecordingPath(recordId), 'sessions');
@@ -1787,24 +1808,43 @@ function getAudioMetadata(filePath) {
   });
 }
 
-// Helper: Validate chunk sequence is continuous (0, 1, 2, 3...)
+// Helper: Validate chunk sequence is continuous (0, 1, 2, 3...).
+// Walks parsed indices pairwise so each gap is recorded exactly once.
 function validateChunkSequence(chunks, ext) {
-  const sorted = sortChunksNumerically(chunks, ext);
-  const missingChunks = [];
-  for (let i = 0; i < sorted.length; i++) {
-    const actualIndex = parseInt(sorted[i].replace('chunk_', '').replace(ext, ''), 10);
-    if (actualIndex !== i) {
-      // Found a gap - record all missing indices
-      for (let missing = i; missing < actualIndex; missing++) {
-        missingChunks.push(missing);
-      }
-    }
+  if (!chunks || chunks.length === 0) {
+    return { valid: true, missingChunks: [], chunkCount: 0, expectedCount: 0, firstIndex: null, lastIndex: null, message: '' };
   }
+
+  const indices = chunks
+    .map(f => parseInt(f.replace('chunk_', '').replace(ext, ''), 10))
+    .filter(n => Number.isFinite(n))
+    .sort((a, b) => a - b);
+
+  if (indices.length === 0) {
+    return { valid: true, missingChunks: [], chunkCount: 0, expectedCount: 0, firstIndex: null, lastIndex: null, message: '' };
+  }
+
+  const missingChunks = [];
+  // Sequence must start at 0
+  for (let g = 0; g < indices[0]; g++) missingChunks.push(g);
+  // Fill gaps between adjacent indices
+  for (let i = 0; i < indices.length - 1; i++) {
+    for (let g = indices[i] + 1; g < indices[i + 1]; g++) missingChunks.push(g);
+  }
+
+  const firstIndex = indices[0];
+  const lastIndex = indices[indices.length - 1];
+  const expectedCount = lastIndex + 1;
+
   return {
     valid: missingChunks.length === 0,
     missingChunks,
+    chunkCount: indices.length,
+    expectedCount,
+    firstIndex,
+    lastIndex,
     message: missingChunks.length > 0
-      ? `Warning: Missing chunks detected (indices: ${missingChunks.slice(0, 5).join(', ')}${missingChunks.length > 5 ? '...' : ''}). Audio may have gaps.`
+      ? `${missingChunks.length} missing (${indices.length}/${expectedCount} present; first missing: ${missingChunks.slice(0, 10).join(', ')}${missingChunks.length > 10 ? '...' : ''}). Audio may have gaps.`
       : ''
   };
 }
@@ -1894,6 +1934,20 @@ async function combineChunksStreaming(chunksPath, sortedChunks, outputPath) {
   });
 }
 
+// Dev/test-only env-var override helper. Honored ONLY when the app is not
+// packaged (i.e. `quasar dev` or `electron .`). Packaged installers always use
+// the hard-coded fallback regardless of process.env — this prevents a stray
+// shell variable from shortening auto-split intervals in production.
+//
+// Supported overrides (set in .env.local or shell env):
+//   SUISSE_FFMPEG_TIMEOUT_MS  — override FFmpeg operation timeout (default 300000)
+function envNumDev(key, fallback) {
+  if (app.isPackaged) return fallback;
+  const raw = process.env[key];
+  const n = raw != null ? parseFloat(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 // Minimum file size for valid recording (1KB)
 const MIN_RECORDING_SIZE = 1024;
 
@@ -1947,8 +2001,8 @@ function calculateUploadTimeout(fileSizeBytes) {
   return Math.max(minTimeout, timeoutWithBuffer);
 }
 
-// FFmpeg operation timeout (5 minutes default)
-const FFMPEG_TIMEOUT_MS = 5 * 60 * 1000;
+// FFmpeg operation timeout (5 minutes default; overridable in dev via SUISSE_FFMPEG_TIMEOUT_MS)
+const FFMPEG_TIMEOUT_MS = envNumDev('SUISSE_FFMPEG_TIMEOUT_MS', 5 * 60 * 1000);
 
 // Fast-fail flag: once FFmpeg binary fails to spawn (ENOEXEC/ENOENT),
 // all subsequent ffmpegWithTimeout calls reject instantly instead of
@@ -2187,198 +2241,224 @@ ipcMain.handle('recording:createSession', async (event, recordId, ext, userId) =
 
 // 2. Save recording chunk - SYNCHRONOUS write (WhisperTranscribe pattern)
 ipcMain.handle('recording:saveChunk', async (event, recordId, chunkData, chunkIndex, ext, userId) => {
+  // Validate first (sync, fail fast without acquiring a lock on bogus IDs)
+  let validRecordId, validExt, validChunkIndex, validUserId;
   try {
-    // Validate inputs to prevent path traversal and injection attacks
-    const validRecordId = validateRecordId(recordId);
-    const validExt = validateExtension(ext);
-    const validChunkIndex = validateChunkIndex(chunkIndex);
-    const validUserId = userId ? validateUserId(userId) : null;
-
-    const recordPath = getRecordingPath(validRecordId);
-    const chunksPath = getChunksPath(validRecordId);
-
-    // Ensure directories exist (sync)
-    if (!fs.existsSync(recordPath)) {
-      fs.mkdirSync(recordPath, { recursive: true });
-    }
-    if (!fs.existsSync(chunksPath)) {
-      fs.mkdirSync(chunksPath, { recursive: true });
-    }
-
-    const buffer = Buffer.from(chunkData);
-    const filename = `chunk_${validChunkIndex}${validExt}`;
-    const chunkPath = path.join(chunksPath, filename);
-
-    // CRITICAL: Write + fsync to guarantee chunk is persisted to disk, not just OS cache
-    // Uses async I/O to avoid blocking the main process event loop
-    const fh = await fs.promises.open(chunkPath, 'w');
-    try {
-      await fh.write(buffer);
-      await fh.sync();
-    } finally {
-      await fh.close();
-    }
-
-    // Update active recording state for crash recovery (with userId)
-    updateActiveRecording(validRecordId, validChunkIndex + 1, validUserId);
-
-    console.log(`Chunk ${chunkIndex} saved (${buffer.length} bytes):`, chunkPath);
-    return { success: true, chunkIndex, chunkPath };
+    validRecordId = validateRecordId(recordId);
+    validExt = validateExtension(ext);
+    validChunkIndex = validateChunkIndex(chunkIndex);
+    validUserId = userId ? validateUserId(userId) : null;
   } catch (error) {
-    console.error('Error saving chunk:', error);
-    return { success: false, error: error.message, code: error.code || null };
+    console.error('saveChunk validation failed:', error);
+    return { success: false, error: error.message };
   }
+
+  return withRecordingLock(validRecordId, async () => {
+    try {
+      const recordPath = getRecordingPath(validRecordId);
+      const chunksPath = getChunksPath(validRecordId);
+
+      // Ensure directories exist (sync)
+      if (!fs.existsSync(recordPath)) {
+        fs.mkdirSync(recordPath, { recursive: true });
+      }
+      if (!fs.existsSync(chunksPath)) {
+        fs.mkdirSync(chunksPath, { recursive: true });
+      }
+
+      const buffer = Buffer.from(chunkData);
+      const filename = `chunk_${validChunkIndex}${validExt}`;
+      const chunkPath = path.join(chunksPath, filename);
+
+      // CRITICAL: Write + fsync to guarantee chunk is persisted to disk, not just OS cache
+      // Uses async I/O to avoid blocking the main process event loop
+      const fh = await fs.promises.open(chunkPath, 'w');
+      try {
+        await fh.write(buffer);
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
+
+      // Update active recording state for crash recovery (with userId)
+      updateActiveRecording(validRecordId, validChunkIndex + 1, validUserId);
+
+      console.log(`Chunk ${chunkIndex} saved (${buffer.length} bytes):`, chunkPath);
+      return { success: true, chunkIndex, chunkPath };
+    } catch (error) {
+      console.error('Error saving chunk:', error);
+      return { success: false, error: error.message, code: error.code || null };
+    }
+  });
 });
 
 // 3. Create session file - combines current chunks into a session (intermediate step)
 ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
+  // Validate first (sync, fail fast without acquiring a lock on bogus IDs)
+  let validRecordId, validExt;
   try {
-    // Validate inputs
-    const validRecordId = validateRecordId(recordId);
-    const validExt = validateExtension(ext);
-    const recordPath = getRecordingPath(validRecordId);
-    const chunksPath = getChunksPath(validRecordId);
-    const sessionsPath = getSessionsPath(validRecordId);
-
-    // Check if chunks directory exists
-    if (!fs.existsSync(chunksPath)) {
-      return { success: false, error: 'No chunks directory found' };
-    }
-
-    // Get and sort chunks
-    const allFiles = fs.readdirSync(chunksPath);
-    const chunks = allFiles.filter(f => f.startsWith('chunk_') && f.endsWith(validExt));
-
-    if (chunks.length === 0) {
-      return { success: false, error: 'No chunks found' };
-    }
-
-    const sortedChunks = sortChunksNumerically(chunks, validExt);
-
-    // Validate chunk sequence — fail if chunks are missing
-    const sequenceCheck = validateChunkSequence(chunks, validExt);
-    if (!sequenceCheck.valid) {
-      log.error('Chunk sequence gap detected:', sequenceCheck.message);
-      Sentry.captureMessage(`Chunk sequence gap: ${sequenceCheck.message}`, {
-        level: 'warning',
-        tags: { operation: 'createSessionFile' },
-        extra: { recordId: validRecordId, chunkCount: chunks.length },
-      });
-      return { success: false, error: `Missing audio chunks: ${sequenceCheck.message}` };
-    }
-
-    // Create sessions directory
-    if (!fs.existsSync(sessionsPath)) {
-      fs.mkdirSync(sessionsPath, { recursive: true });
-    }
-
-    const timestamp = Date.now();
-    const rawPath = path.join(sessionsPath, `session_${timestamp}_raw${validExt}`);
-    const finalPath = path.join(sessionsPath, `session_${timestamp}${validExt}`);
-
-    // Use streaming concatenation to avoid memory issues with large recordings
-    await combineChunksStreaming(chunksPath, sortedChunks, rawPath);
-
-    // Verify raw file was created and has content
-    const rawStats = fs.statSync(rawPath);
-    if (rawStats.size < MIN_RECORDING_SIZE) {
-      fs.unlinkSync(rawPath);
-      return { success: false, error: 'Recording too short or empty' };
-    }
-
-    console.log(`Combined ${sortedChunks.length} chunks into raw session (${rawStats.size} bytes)`);
-
-    // Validate raw file is a readable audio container before FFmpeg processing
-    let ffmpegAvailable = true;
-    try {
-      await getAudioMetadata(rawPath);
-    } catch (probeErr) {
-      // Distinguish between "ffprobe can't run" vs "file is actually corrupt"
-      const isSpawnError = probeErr.message?.includes('spawn') || probeErr.message?.includes('ENOENT') || probeErr.message?.includes('ENOEXEC') || probeErr.message?.includes('system error');
-      if (isSpawnError) {
-        log.warn('FFmpeg/ffprobe binary cannot execute — skipping FFmpeg processing, using raw concatenation:', probeErr.message);
-        ffmpegAvailable = false;
-        // Don't fail — raw concatenation is valid WebM, just skip FFmpeg step
-      } else {
-        log.error('Raw session file is not a valid audio file:', probeErr.message);
-        Sentry.captureException(probeErr, {
-          tags: { operation: 'Session file (probe validation)' },
-          extra: { rawPath, rawSize: rawStats.size, chunksCount: sortedChunks.length },
-        });
-        // Keep raw file and chunks for recovery — don't delete
-        return { success: false, error: 'Raw recording file is corrupt or unreadable' };
-      }
-    }
-
-    // Process with FFmpeg (codec copy, fallback to re-encode) - with timeout
-    // Skip FFmpeg entirely if binary is broken — use raw concatenation as-is
-    if (!ffmpegAvailable) {
-      log.info('Using raw concatenated file as session (FFmpeg unavailable)');
-      fs.renameSync(rawPath, finalPath);
-    } else {
-    try {
-      await ffmpegWithTimeout(
-        ffmpeg(rawPath)
-          .audioCodec('copy')
-          .output(finalPath),
-        FFMPEG_TIMEOUT_MS,
-        'Session file (codec copy)',
-        { reportToSentry: false } // Codec copy failure is an expected fallback, not an error
-      );
-      console.log('Session file created with codec copy');
-    } catch (err) {
-      console.warn('Codec copy failed, trying re-encode:', err.message);
-      // Fallback: re-encode if codec copy fails
-      await ffmpegWithTimeout(
-        ffmpeg(rawPath)
-          .output(finalPath),
-        FFMPEG_TIMEOUT_MS,
-        'Session file (re-encode)'
-      );
-      console.log('Session file created with re-encode');
-    }
-    } // end ffmpegAvailable else block
-
-    // Get duration via ffprobe
-    let durationMs = 0;
-    try {
-      const metadata = await getAudioMetadata(finalPath);
-      durationMs = safeParseDuration(metadata) * 1000;
-    } catch (e) {
-      console.warn('Could not get audio duration:', e);
-    }
-
-    // P0 Data Loss Fix: Validate session file BEFORE deleting source data
-    const ipcSessionValidation = validateAudioOutput(finalPath);
-    if (!ipcSessionValidation.valid) {
-      log.warn('IPC createSessionFile: Output validation warning:', ipcSessionValidation.error);
-      // Keep raw file and chunks intact for recovery — don't delete anything
-      try { fs.unlinkSync(finalPath); } catch (e) { /* ignore */ }
-      return { success: false, error: `Session file validation failed: ${ipcSessionValidation.error}` };
-    }
-
-    // Validation passed — safe to clean up raw file and chunks
-    try {
-      if (fs.existsSync(rawPath)) fs.unlinkSync(rawPath);
-      sortedChunks.forEach(f => {
-        const chunkPath = path.join(chunksPath, f);
-        if (fs.existsSync(chunkPath)) fs.unlinkSync(chunkPath);
-      });
-    } catch (e) {
-      console.warn('Could not clean up after session creation:', e);
-    }
-
-    return {
-      success: true,
-      sessionFile: finalPath,
-      durationMs,
-      sessionTimestamp: timestamp,
-      chunksProcessed: sortedChunks.length
-    };
+    validRecordId = validateRecordId(recordId);
+    validExt = validateExtension(ext);
   } catch (error) {
-    console.error('Error creating session file:', error);
+    console.error('createSessionFile validation failed:', error);
     return { success: false, error: error.message };
   }
+
+  return withRecordingLock(validRecordId, async () => {
+    try {
+      const chunksPath = getChunksPath(validRecordId);
+      const sessionsPath = getSessionsPath(validRecordId);
+
+      // Check if chunks directory exists
+      if (!fs.existsSync(chunksPath)) {
+        return { success: false, error: 'No chunks directory found' };
+      }
+
+      // Get and sort chunks
+      const allFiles = fs.readdirSync(chunksPath);
+      const chunks = allFiles.filter(f => f.startsWith('chunk_') && f.endsWith(validExt));
+
+      if (chunks.length === 0) {
+        return { success: false, error: 'No chunks found' };
+      }
+
+      const sortedChunks = sortChunksNumerically(chunks, validExt);
+
+      // Validate chunk sequence — fail if chunks are missing
+      const sequenceCheck = validateChunkSequence(chunks, validExt);
+      if (!sequenceCheck.valid) {
+        log.error('Chunk sequence gap detected:', sequenceCheck.message);
+        Sentry.captureMessage(`Chunk sequence gap: ${sequenceCheck.message}`, {
+          level: 'warning',
+          tags: { operation: 'createSessionFile' },
+          extra: {
+            recordId: validRecordId,
+            chunkCount: chunks.length,
+            firstIndex: sequenceCheck.firstIndex,
+            lastIndex: sequenceCheck.lastIndex,
+            expectedCount: sequenceCheck.expectedCount,
+            missingCount: sequenceCheck.missingChunks.length,
+            missingFirst10: sequenceCheck.missingChunks.slice(0, 10),
+          },
+        });
+        return { success: false, error: `Missing audio chunks: ${sequenceCheck.message}` };
+      }
+
+      // Create sessions directory
+      if (!fs.existsSync(sessionsPath)) {
+        fs.mkdirSync(sessionsPath, { recursive: true });
+      }
+
+      const timestamp = Date.now();
+      const rawPath = path.join(sessionsPath, `session_${timestamp}_raw${validExt}`);
+      const finalPath = path.join(sessionsPath, `session_${timestamp}${validExt}`);
+
+      // Use streaming concatenation to avoid memory issues with large recordings
+      await combineChunksStreaming(chunksPath, sortedChunks, rawPath);
+
+      // Verify raw file was created and has content
+      const rawStats = fs.statSync(rawPath);
+      if (rawStats.size < MIN_RECORDING_SIZE) {
+        fs.unlinkSync(rawPath);
+        return { success: false, error: 'Recording too short or empty' };
+      }
+
+      console.log(`Combined ${sortedChunks.length} chunks into raw session (${rawStats.size} bytes)`);
+
+      // Validate raw file is a readable audio container before FFmpeg processing
+      let ffmpegAvailable = true;
+      try {
+        await getAudioMetadata(rawPath);
+      } catch (probeErr) {
+        // Distinguish between "ffprobe can't run" vs "file is actually corrupt"
+        const isSpawnError = probeErr.message?.includes('spawn') || probeErr.message?.includes('ENOENT') || probeErr.message?.includes('ENOEXEC') || probeErr.message?.includes('system error');
+        if (isSpawnError) {
+          log.warn('FFmpeg/ffprobe binary cannot execute — skipping FFmpeg processing, using raw concatenation:', probeErr.message);
+          ffmpegAvailable = false;
+          // Don't fail — raw concatenation is valid WebM, just skip FFmpeg step
+        } else {
+          log.error('Raw session file is not a valid audio file:', probeErr.message);
+          Sentry.captureException(probeErr, {
+            tags: { operation: 'Session file (probe validation)' },
+            extra: { rawPath, rawSize: rawStats.size, chunksCount: sortedChunks.length },
+          });
+          // Keep raw file and chunks for recovery — don't delete
+          return { success: false, error: 'Raw recording file is corrupt or unreadable' };
+        }
+      }
+
+      // Process with FFmpeg (codec copy, fallback to re-encode) - with timeout
+      // Skip FFmpeg entirely if binary is broken — use raw concatenation as-is
+      if (!ffmpegAvailable) {
+        log.info('Using raw concatenated file as session (FFmpeg unavailable)');
+        fs.renameSync(rawPath, finalPath);
+      } else {
+      try {
+        await ffmpegWithTimeout(
+          ffmpeg(rawPath)
+            .audioCodec('copy')
+            .output(finalPath),
+          FFMPEG_TIMEOUT_MS,
+          'Session file (codec copy)',
+          { reportToSentry: false } // Codec copy failure is an expected fallback, not an error
+        );
+        console.log('Session file created with codec copy');
+      } catch (err) {
+        console.warn('Codec copy failed, trying re-encode:', err.message);
+        // Fallback: re-encode if codec copy fails
+        await ffmpegWithTimeout(
+          ffmpeg(rawPath)
+            .output(finalPath),
+          FFMPEG_TIMEOUT_MS,
+          'Session file (re-encode)'
+        );
+        console.log('Session file created with re-encode');
+      }
+      } // end ffmpegAvailable else block
+
+      // Get duration via ffprobe
+      let durationMs = 0;
+      try {
+        const metadata = await getAudioMetadata(finalPath);
+        durationMs = safeParseDuration(metadata) * 1000;
+      } catch (e) {
+        console.warn('Could not get audio duration:', e);
+      }
+
+      // P0 Data Loss Fix: Validate session file BEFORE deleting source data
+      const ipcSessionValidation = validateAudioOutput(finalPath);
+      if (!ipcSessionValidation.valid) {
+        log.warn('IPC createSessionFile: Output validation warning:', ipcSessionValidation.error);
+        // Keep raw file and chunks intact for recovery — don't delete anything
+        try { fs.unlinkSync(finalPath); } catch (e) { /* ignore */ }
+        return { success: false, error: `Session file validation failed: ${ipcSessionValidation.error}` };
+      }
+
+      // Validation passed — nuke the chunks directory entirely (not just the
+      // snapshot we read at the top). Under withRecordingLock, saveChunk cannot
+      // be racing; but a defensive rm -rf also protects against any historical
+      // straggler left over from an older buggy run. rawPath is under sessions/
+      // and is removed independently.
+      try {
+        if (fs.existsSync(rawPath)) fs.unlinkSync(rawPath);
+        await fs.promises.rm(chunksPath, { recursive: true, force: true });
+        fs.mkdirSync(chunksPath, { recursive: true });
+      } catch (e) {
+        console.warn('Could not clean up after session creation:', e);
+      }
+
+      return {
+        success: true,
+        sessionFile: finalPath,
+        durationMs,
+        sessionTimestamp: timestamp,
+        chunksProcessed: sortedChunks.length
+      };
+    } catch (error) {
+      console.error('Error creating session file:', error);
+      return { success: false, error: error.message };
+    }
+  });
 });
 
 // Helper function to update metadata.json on recording completion
@@ -2414,72 +2494,161 @@ function updateRecordingMetadataOnCompletion(recordId, duration, hasAudioFile) {
 
 // 4. Combine recording chunks - final combination with multiple fallbacks
 ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
+  // Validate first (sync, fail fast without acquiring a lock on bogus IDs)
+  let validRecordId, validExt;
   try {
-    // Validate inputs
-    const validRecordId = validateRecordId(recordId);
-    const validExt = validateExtension(ext);
+    validRecordId = validateRecordId(recordId);
+    validExt = validateExtension(ext);
+  } catch (error) {
+    console.error('combineChunks validation failed:', error);
+    return { success: false, error: error.message };
+  }
 
-    const recordPath = getRecordingPath(validRecordId);
-    const chunksPath = getChunksPath(validRecordId);
-    const sessionsPath = getSessionsPath(validRecordId);
-    const outputFile = `audio${validExt}`;
-    const outputPath = path.join(recordPath, outputFile);
+  return withRecordingLock(validRecordId, async () => {
+    try {
+      const recordPath = getRecordingPath(validRecordId);
+      const chunksPath = getChunksPath(validRecordId);
+      const sessionsPath = getSessionsPath(validRecordId);
+      const outputFile = `audio${validExt}`;
+      const outputPath = path.join(recordPath, outputFile);
 
-    console.log('Combining chunks for recording:', validRecordId);
+      console.log('Combining chunks for recording:', validRecordId);
 
-    // Step 1: If there are current chunks, create a session from them first
-    if (fs.existsSync(chunksPath)) {
-      const chunkFiles = fs.readdirSync(chunksPath)
-        .filter(f => f.startsWith('chunk_') && f.endsWith(validExt));
+      // Step 1: If there are current chunks, create a session from them first
+      if (fs.existsSync(chunksPath)) {
+        const chunkFiles = fs.readdirSync(chunksPath)
+          .filter(f => f.startsWith('chunk_') && f.endsWith(validExt));
 
-      if (chunkFiles.length > 0) {
-        console.log(`Found ${chunkFiles.length} chunks, creating session file...`);
-        // Note: We call the internal handler directly
-        const result = await createSessionFileInternal(validRecordId, validExt);
-        if (!result.success) {
-          console.warn('Could not create session from chunks:', result.error);
+        if (chunkFiles.length > 0) {
+          console.log(`Found ${chunkFiles.length} chunks, creating session file...`);
+          // Note: We call the internal handler directly
+          const result = await createSessionFileInternal(validRecordId, validExt);
+          if (!result.success) {
+            console.warn('Could not create session from chunks:', result.error);
+          }
         }
       }
-    }
 
-    // Step 2: Check for session files
-    if (fs.existsSync(sessionsPath)) {
-      const sessionFiles = fs.readdirSync(sessionsPath)
-        .filter(f => f.endsWith(validExt) && !f.includes('_raw'))
-        .sort((a, b) => {
-          // Sort by timestamp in filename
-          const tsA = parseInt(a.replace('session_', '').replace(validExt, ''), 10);
-          const tsB = parseInt(b.replace('session_', '').replace(validExt, ''), 10);
-          return tsA - tsB;
-        });
+      // Step 2: Check for session files
+      if (fs.existsSync(sessionsPath)) {
+        const sessionFiles = fs.readdirSync(sessionsPath)
+          .filter(f => f.endsWith(validExt) && !f.includes('_raw'))
+          .sort((a, b) => {
+            // Sort by timestamp in filename
+            const tsA = parseInt(a.replace('session_', '').replace(validExt, ''), 10);
+            const tsB = parseInt(b.replace('session_', '').replace(validExt, ''), 10);
+            return tsA - tsB;
+          });
 
-      if (sessionFiles.length > 0) {
-        console.log(`Found ${sessionFiles.length} session file(s)`);
+        if (sessionFiles.length > 0) {
+          console.log(`Found ${sessionFiles.length} session file(s)`);
 
-        // Single session - just copy it
-        if (sessionFiles.length === 1) {
-          fs.copyFileSync(path.join(sessionsPath, sessionFiles[0]), outputPath);
+          // Single session - just copy it
+          if (sessionFiles.length === 1) {
+            fs.copyFileSync(path.join(sessionsPath, sessionFiles[0]), outputPath);
 
-          // P0 Data Loss Fix: Validate output BEFORE deleting sources
-          const singleSessionValidation = validateAudioOutput(outputPath);
-          if (!singleSessionValidation.valid) {
-            log.warn('combineChunks: Single session output validation warning:', singleSessionValidation.error);
-            // Continue anyway - audio data may still be usable by the server
+            // P0 Data Loss Fix: Validate output BEFORE deleting sources
+            const singleSessionValidation = validateAudioOutput(outputPath);
+            if (!singleSessionValidation.valid) {
+              log.warn('combineChunks: Single session output validation warning:', singleSessionValidation.error);
+              // Continue anyway - audio data may still be usable by the server
+            }
+
+            // Cleanup
+            await fs.promises.rm(sessionsPath, { recursive: true, force: true });
+            if (fs.existsSync(chunksPath)) {
+              await fs.promises.rm(chunksPath, { recursive: true, force: true });
+            }
+
+            // Get actual audio duration via ffprobe
+            let audioDuration = 0;
+            try {
+              const metadata = await getAudioMetadata(outputPath);
+              audioDuration = safeParseDuration(metadata);
+            } catch (e) {
+              console.warn('Could not get audio duration for single session:', e.message);
+            }
+
+            // Merge system audio if it was captured
+            await mergeSystemAudio(outputPath, validRecordId);
+
+            // Clear active recording state - successfully combined
+            clearActiveRecording();
+
+            // Update metadata.json with completion info
+            updateRecordingMetadataOnCompletion(validRecordId, audioDuration, true);
+
+            return {
+              success: true,
+              outputPath,
+              filename: outputFile,
+              fileSizeMb: ((fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0) / (1024 * 1024)).toFixed(2),
+              duration: audioDuration
+            };
+          }
+
+          // Multiple sessions - use FFmpeg concat demuxer
+          const concatListPath = path.join(recordPath, 'concat_list.txt');
+          const listContent = sessionFiles.map(f =>
+            `file '${sessionsPath.replace(/\\/g, '/')}/${f}'`
+          ).join('\n');
+          fs.writeFileSync(concatListPath, listContent);
+
+          // Use timeout-wrapped FFmpeg with fallback
+          try {
+            await ffmpegWithTimeout(
+              ffmpeg()
+                .input(concatListPath)
+                .inputOptions(['-f', 'concat', '-safe', '0'])
+                .audioCodec('copy')
+                .output(outputPath),
+              FFMPEG_TIMEOUT_MS,
+              'Concat sessions (codec copy)',
+              { reportToSentry: false } // Codec copy failure is an expected fallback, not an error
+            );
+          } catch (err) {
+            console.warn('FFmpeg concat failed, trying re-encode:', err.message);
+            // Fallback: re-encode
+            try {
+              await ffmpegWithTimeout(
+                ffmpeg()
+                  .input(concatListPath)
+                  .inputOptions(['-f', 'concat', '-safe', '0'])
+                  .output(outputPath),
+                FFMPEG_TIMEOUT_MS,
+                'Concat sessions (re-encode)'
+              );
+            } catch (reencodeErr) {
+              console.error('Re-encode also failed:', reencodeErr.message);
+              // Clean up concat list and any partial output before throwing
+              try { fs.unlinkSync(concatListPath); } catch (e) { /* ignore */ }
+              try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
+              throw new Error(`FFmpeg concat failed: ${reencodeErr.message}`);
+            }
           }
 
           // Cleanup
-          await fs.promises.rm(sessionsPath, { recursive: true, force: true });
-          if (fs.existsSync(chunksPath)) {
-            await fs.promises.rm(chunksPath, { recursive: true, force: true });
+          fs.unlinkSync(concatListPath);
+
+          // P0 Data Loss Fix: Validate output BEFORE deleting sources
+          const multiSessionValidation = validateAudioOutput(outputPath);
+          if (!multiSessionValidation.valid) {
+            log.warn('combineChunks: Multi-session output validation warning:', multiSessionValidation.error);
+            // Continue anyway - audio data may still be usable by the server
           }
 
           // Get actual audio duration via ffprobe
-          let audioDuration = 0;
+          let multiAudioDuration = 0;
           try {
             const metadata = await getAudioMetadata(outputPath);
-            audioDuration = safeParseDuration(metadata);
+            multiAudioDuration = safeParseDuration(metadata);
           } catch (e) {
-            console.warn('Could not get audio duration for single session:', e.message);
+            console.warn('Could not get audio duration for multi session:', e.message);
+          }
+
+          await fs.promises.rm(sessionsPath, { recursive: true, force: true });
+          if (fs.existsSync(chunksPath)) {
+            await fs.promises.rm(chunksPath, { recursive: true, force: true });
           }
 
           // Merge system audio if it was captured
@@ -2489,201 +2658,120 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           clearActiveRecording();
 
           // Update metadata.json with completion info
-          updateRecordingMetadataOnCompletion(validRecordId, audioDuration, true);
+          updateRecordingMetadataOnCompletion(validRecordId, multiAudioDuration, true);
 
           return {
             success: true,
             outputPath,
             filename: outputFile,
             fileSizeMb: ((fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0) / (1024 * 1024)).toFixed(2),
-            duration: audioDuration
+            duration: multiAudioDuration
           };
         }
+      }
 
-        // Multiple sessions - use FFmpeg concat demuxer
-        const concatListPath = path.join(recordPath, 'concat_list.txt');
-        const listContent = sessionFiles.map(f =>
-          `file '${sessionsPath.replace(/\\/g, '/')}/${f}'`
-        ).join('\n');
-        fs.writeFileSync(concatListPath, listContent);
+      // Step 3: Fallback - direct chunk concatenation (if no sessions exist)
+      if (fs.existsSync(chunksPath)) {
+        const chunks = fs.readdirSync(chunksPath)
+          .filter(f => f.startsWith('chunk_') && f.endsWith(validExt));
 
-        // Use timeout-wrapped FFmpeg with fallback
-        try {
-          await ffmpegWithTimeout(
-            ffmpeg()
-              .input(concatListPath)
-              .inputOptions(['-f', 'concat', '-safe', '0'])
-              .audioCodec('copy')
-              .output(outputPath),
-            FFMPEG_TIMEOUT_MS,
-            'Concat sessions (codec copy)',
-            { reportToSentry: false } // Codec copy failure is an expected fallback, not an error
-          );
-        } catch (err) {
-          console.warn('FFmpeg concat failed, trying re-encode:', err.message);
-          // Fallback: re-encode
+        if (chunks.length > 0) {
+          console.log(`Fallback: Direct concatenation of ${chunks.length} chunks`);
+          const sortedChunks = sortChunksNumerically(chunks, validExt);
+
+          // Validate chunk sequence — fail if chunks are missing
+          const sequenceCheck = validateChunkSequence(chunks, validExt);
+          if (!sequenceCheck.valid) {
+            log.error('Chunk sequence gap detected:', sequenceCheck.message);
+            Sentry.captureMessage(`Chunk sequence gap: ${sequenceCheck.message}`, {
+              level: 'warning',
+              tags: { operation: 'combineChunks' },
+              extra: { recordId: validRecordId, chunkCount: chunks.length },
+            });
+            return { success: false, error: `Missing audio chunks: ${sequenceCheck.message}` };
+          }
+
+          // Use streaming concatenation to avoid memory issues
+          const rawConcatPath = outputPath + '.raw';
+          await combineChunksStreaming(chunksPath, sortedChunks, rawConcatPath);
+
+          // Process with FFmpeg (codec copy, fallback to re-encode) to ensure valid container
           try {
-            await ffmpegWithTimeout(
-              ffmpeg()
-                .input(concatListPath)
-                .inputOptions(['-f', 'concat', '-safe', '0'])
-                .output(outputPath),
-              FFMPEG_TIMEOUT_MS,
-              'Concat sessions (re-encode)'
-            );
-          } catch (reencodeErr) {
-            console.error('Re-encode also failed:', reencodeErr.message);
-            // Clean up concat list and any partial output before throwing
-            try { fs.unlinkSync(concatListPath); } catch (e) { /* ignore */ }
+            try {
+              await ffmpegWithTimeout(
+                ffmpeg(rawConcatPath)
+                  .audioCodec('copy')
+                  .output(outputPath),
+                FFMPEG_TIMEOUT_MS,
+                'Direct concat (codec copy)',
+                { reportToSentry: false }
+              );
+            } catch (codecCopyErr) {
+              log.warn('Direct concat codec copy failed, trying re-encode:', codecCopyErr.message);
+              await ffmpegWithTimeout(
+                ffmpeg(rawConcatPath)
+                  .output(outputPath),
+                FFMPEG_TIMEOUT_MS,
+                'Direct concat (re-encode)'
+              );
+            }
+            try { fs.unlinkSync(rawConcatPath); } catch (e) { /* ignore */ }
+          } catch (ffmpegErr) {
+            log.warn('FFmpeg processing failed for direct concat, using raw file:', ffmpegErr.message);
+            // Last resort: use the raw concatenated file as-is
             try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
-            throw new Error(`FFmpeg concat failed: ${reencodeErr.message}`);
+            fs.renameSync(rawConcatPath, outputPath);
           }
-        }
 
-        // Cleanup
-        fs.unlinkSync(concatListPath);
+          // P0 Data Loss Fix: Validate output BEFORE deleting sources
+          const directConcatValidation = validateAudioOutput(outputPath);
+          if (!directConcatValidation.valid) {
+            log.warn('combineChunks: Direct concat output validation failed:', directConcatValidation.error);
+            // Don't delete - keep the file even if validation fails, the audio data may still be usable
+            log.info('Keeping output file despite validation failure - audio may still be uploadable');
+          }
 
-        // P0 Data Loss Fix: Validate output BEFORE deleting sources
-        const multiSessionValidation = validateAudioOutput(outputPath);
-        if (!multiSessionValidation.valid) {
-          log.warn('combineChunks: Multi-session output validation warning:', multiSessionValidation.error);
-          // Continue anyway - audio data may still be usable by the server
-        }
-
-        // Get actual audio duration via ffprobe
-        let multiAudioDuration = 0;
-        try {
-          const metadata = await getAudioMetadata(outputPath);
-          multiAudioDuration = safeParseDuration(metadata);
-        } catch (e) {
-          console.warn('Could not get audio duration for multi session:', e.message);
-        }
-
-        await fs.promises.rm(sessionsPath, { recursive: true, force: true });
-        if (fs.existsSync(chunksPath)) {
-          await fs.promises.rm(chunksPath, { recursive: true, force: true });
-        }
-
-        // Merge system audio if it was captured
-        await mergeSystemAudio(outputPath, validRecordId);
-
-        // Clear active recording state - successfully combined
-        clearActiveRecording();
-
-        // Update metadata.json with completion info
-        updateRecordingMetadataOnCompletion(validRecordId, multiAudioDuration, true);
-
-        return {
-          success: true,
-          outputPath,
-          filename: outputFile,
-          fileSizeMb: ((fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0) / (1024 * 1024)).toFixed(2),
-          duration: multiAudioDuration
-        };
-      }
-    }
-
-    // Step 3: Fallback - direct chunk concatenation (if no sessions exist)
-    if (fs.existsSync(chunksPath)) {
-      const chunks = fs.readdirSync(chunksPath)
-        .filter(f => f.startsWith('chunk_') && f.endsWith(validExt));
-
-      if (chunks.length > 0) {
-        console.log(`Fallback: Direct concatenation of ${chunks.length} chunks`);
-        const sortedChunks = sortChunksNumerically(chunks, validExt);
-
-        // Validate chunk sequence — fail if chunks are missing
-        const sequenceCheck = validateChunkSequence(chunks, validExt);
-        if (!sequenceCheck.valid) {
-          log.error('Chunk sequence gap detected:', sequenceCheck.message);
-          Sentry.captureMessage(`Chunk sequence gap: ${sequenceCheck.message}`, {
-            level: 'warning',
-            tags: { operation: 'combineChunks' },
-            extra: { recordId: validRecordId, chunkCount: chunks.length },
-          });
-          return { success: false, error: `Missing audio chunks: ${sequenceCheck.message}` };
-        }
-
-        // Use streaming concatenation to avoid memory issues
-        const rawConcatPath = outputPath + '.raw';
-        await combineChunksStreaming(chunksPath, sortedChunks, rawConcatPath);
-
-        // Process with FFmpeg (codec copy, fallback to re-encode) to ensure valid container
-        try {
+          // Get actual audio duration via ffprobe
+          let directAudioDuration = 0;
           try {
-            await ffmpegWithTimeout(
-              ffmpeg(rawConcatPath)
-                .audioCodec('copy')
-                .output(outputPath),
-              FFMPEG_TIMEOUT_MS,
-              'Direct concat (codec copy)',
-              { reportToSentry: false }
-            );
-          } catch (codecCopyErr) {
-            log.warn('Direct concat codec copy failed, trying re-encode:', codecCopyErr.message);
-            await ffmpegWithTimeout(
-              ffmpeg(rawConcatPath)
-                .output(outputPath),
-              FFMPEG_TIMEOUT_MS,
-              'Direct concat (re-encode)'
-            );
+            const metadata = await getAudioMetadata(outputPath);
+            directAudioDuration = safeParseDuration(metadata);
+          } catch (e) {
+            console.warn('Could not get audio duration for direct concat:', e.message);
           }
-          try { fs.unlinkSync(rawConcatPath); } catch (e) { /* ignore */ }
-        } catch (ffmpegErr) {
-          log.warn('FFmpeg processing failed for direct concat, using raw file:', ffmpegErr.message);
-          // Last resort: use the raw concatenated file as-is
-          try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
-          fs.renameSync(rawConcatPath, outputPath);
+
+          // Cleanup
+          await fs.promises.rm(chunksPath, { recursive: true, force: true });
+
+          // Merge system audio if it was captured
+          await mergeSystemAudio(outputPath, validRecordId);
+
+          // Clear active recording state - successfully combined
+          clearActiveRecording();
+
+          // Update metadata.json with completion info
+          updateRecordingMetadataOnCompletion(validRecordId, directAudioDuration, true);
+
+          return {
+            success: true,
+            outputPath,
+            filename: outputFile,
+            fileSizeMb: ((fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0) / (1024 * 1024)).toFixed(2),
+            duration: directAudioDuration,
+            warning: sequenceCheck.message || undefined
+          };
         }
-
-        // P0 Data Loss Fix: Validate output BEFORE deleting sources
-        const directConcatValidation = validateAudioOutput(outputPath);
-        if (!directConcatValidation.valid) {
-          log.warn('combineChunks: Direct concat output validation failed:', directConcatValidation.error);
-          // Don't delete - keep the file even if validation fails, the audio data may still be usable
-          log.info('Keeping output file despite validation failure - audio may still be uploadable');
-        }
-
-        // Get actual audio duration via ffprobe
-        let directAudioDuration = 0;
-        try {
-          const metadata = await getAudioMetadata(outputPath);
-          directAudioDuration = safeParseDuration(metadata);
-        } catch (e) {
-          console.warn('Could not get audio duration for direct concat:', e.message);
-        }
-
-        // Cleanup
-        await fs.promises.rm(chunksPath, { recursive: true, force: true });
-
-        // Merge system audio if it was captured
-        await mergeSystemAudio(outputPath, validRecordId);
-
-        // Clear active recording state - successfully combined
-        clearActiveRecording();
-
-        // Update metadata.json with completion info
-        updateRecordingMetadataOnCompletion(validRecordId, directAudioDuration, true);
-
-        return {
-          success: true,
-          outputPath,
-          filename: outputFile,
-          fileSizeMb: ((fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0) / (1024 * 1024)).toFixed(2),
-          duration: directAudioDuration,
-          warning: sequenceCheck.message || undefined
-        };
       }
+
+      // Clear active recording state even on failure (no chunks found)
+      clearActiveRecording();
+
+      return { success: false, error: 'No sessions or chunks found to combine' };
+    } catch (error) {
+      console.error('Error combining chunks:', error);
+      return { success: false, error: error.message };
     }
-
-    // Clear active recording state even on failure (no chunks found)
-    clearActiveRecording();
-
-    return { success: false, error: 'No sessions or chunks found to combine' };
-  } catch (error) {
-    console.error('Error combining chunks:', error);
-    return { success: false, error: error.message };
-  }
+  });
 });
 
 // Internal helper for createSessionFile (to avoid IPC recursion)
