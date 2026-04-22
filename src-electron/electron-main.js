@@ -2192,32 +2192,59 @@ ipcMain.handle('recording:loadMetadata', async (event, recordId) => {
 
 // 1. Create recording session (creates directories)
 ipcMain.handle('recording:createSession', async (event, recordId, ext, userId) => {
+  // Step-timing for Sentry breadcrumbs. Renderer wraps this IPC in a 30s
+  // timeout; if it fires, breadcrumbs reveal which step was slow.
+  const tStart = Date.now();
+  const step = (name, startedAt, extra = {}) => {
+    Sentry.addBreadcrumb({
+      category: 'recording.createSession',
+      message: name,
+      level: 'info',
+      data: { elapsedMs: Date.now() - startedAt, ...extra }
+    });
+  };
+
   try {
     // Validate inputs to prevent path traversal attacks
+    const tValidate = Date.now();
     const validRecordId = validateRecordId(recordId);
     const validExt = validateExtension(ext);
     const validUserId = userId ? validateUserId(userId) : null;
+    step('validated', tValidate, { recordId: validRecordId });
 
-    // Check disk space before creating session
+    // Check disk space before creating session (wmic can be slow on Windows;
+    // canStartRecording now bounds the shell-out to 3s and falls back safely).
+    const tDisk = Date.now();
     const recordingsPath = getRecordingsPath();
     const diskCheck = await canStartRecording(recordingsPath);
+    step('disk-checked', tDisk, {
+      canStart: diskCheck.canStart,
+      freeSpaceMB: diskCheck.freeSpaceMB,
+      fallback: diskCheck.fallback,
+      checkElapsedMs: diskCheck.checkElapsedMs
+    });
+    if (diskCheck.fallback) {
+      log.warn(`Disk space check fell back (${diskCheck.checkError || 'timeout'}); proceeding with recording`);
+    }
     if (!diskCheck.canStart) {
       log.warn('Insufficient disk space to start recording:', diskCheck.freeSpaceMB, 'MB available');
       return { success: false, error: diskCheck.message };
     }
 
+    // Create directories synchronously to ensure they exist
+    const tDirs = Date.now();
     const recordPath = getRecordingPath(validRecordId);
     const chunksPath = getChunksPath(validRecordId);
-
-    // Create directories synchronously to ensure they exist
     if (!fs.existsSync(recordPath)) {
       fs.mkdirSync(recordPath, { recursive: true });
     }
     if (!fs.existsSync(chunksPath)) {
       fs.mkdirSync(chunksPath, { recursive: true });
     }
+    step('dirs-created', tDirs);
 
     // Write metadata.json for recording persistence and multi-account handling
+    const tMeta = Date.now();
     const metadataPath = path.join(recordPath, 'metadata.json');
     const metadata = {
       recordId: validRecordId,
@@ -2226,15 +2253,39 @@ ipcMain.handle('recording:createSession', async (event, recordId, ext, userId) =
       version: 1
     };
     writeFileWithSync(metadataPath, JSON.stringify(metadata, null, 2));
+    step('metadata-written', tMeta);
     log.info('Recording metadata written:', validRecordId, 'userId:', validUserId);
 
     // Initialize active recording state with userId
+    const tActive = Date.now();
     updateActiveRecording(validRecordId, 0, validUserId);
+    step('active-state-updated', tActive);
 
-    console.log('Recording session created:', recordId);
+    const totalMs = Date.now() - tStart;
+    if (totalMs > 5000) {
+      // Succeeded but slow — report so we can keep an eye on this path.
+      Sentry.captureMessage(`createSession slow: ${totalMs}ms`, {
+        level: 'warning',
+        tags: { operation: 'createSession' },
+        extra: {
+          totalMs,
+          recordId: validRecordId,
+          diskCheckMs: diskCheck.checkElapsedMs,
+          diskCheckFallback: diskCheck.fallback
+        }
+      });
+    }
+
+    console.log(`Recording session created: ${recordId} (${totalMs}ms)`);
     return { success: true, path: chunksPath };
   } catch (error) {
     console.error('Error creating session:', error);
+    Sentry.addBreadcrumb({
+      category: 'recording.createSession',
+      message: 'error',
+      level: 'error',
+      data: { elapsedMs: Date.now() - tStart, error: error.message }
+    });
     return { success: false, error: error.message };
   }
 });
