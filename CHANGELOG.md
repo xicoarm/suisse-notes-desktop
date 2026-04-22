@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.0.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.9...v4.0.1) (2026-04-22)
+
+
+### Bug Fixes
+
+* **recording:** bound disk-space check so createSession stops timing out on Windows ([218cfc0](https://github.com/xicoarm/suisse-notes-desktop/commit/218cfc0b39d792a386a7f0ef9985b857ae89e692))
+* **recording:** serialize per-recording IPC to prevent phantom chunk gaps ([5bb889d](https://github.com/xicoarm/suisse-notes-desktop/commit/5bb889d435b65a54b754dc295e53234ee7b7cd93))
+
 ### [3.9.8](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.7...v3.9.8) (2026-04-06)
 
 
