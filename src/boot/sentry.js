@@ -59,8 +59,27 @@ export const setContext = (name, context) => {
   SentryModule.setContext(name, context);
 };
 
-// Shared beforeSend to scrub auth tokens
-function scrubSensitiveData(event) {
+// Client-network failure modes that are almost always user-side rather than
+// our bug or a backend outage. Downgraded to 'warning' so error-level alerts
+// stop firing on user WiFi drops, while aggregate trends stay visible.
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ENOTFOUND', 'ETIMEDOUT', 'ECONNABORTED', 'ECONNRESET', 'ENETUNREACH', 'EAI_AGAIN'
+]);
+const TRANSIENT_NETWORK_STATUSES = new Set([408]);
+
+function isTransientNetworkError(err, message) {
+  if (err && TRANSIENT_NETWORK_CODES.has(err.code)) return true;
+  if (err?.response?.status && TRANSIENT_NETWORK_STATUSES.has(err.response.status)) return true;
+  if (typeof message === 'string') {
+    if (/socket hang up/i.test(message)) return true;
+    if (/network error/i.test(message)) return true;
+    if (/getaddrinfo/i.test(message)) return true;
+  }
+  return false;
+}
+
+// Shared beforeSend to scrub auth tokens + downgrade transient network errors
+function scrubSensitiveData(event, hint) {
   if (event.request?.headers?.authorization) {
     event.request.headers.authorization = '[REDACTED]';
   }
@@ -70,6 +89,11 @@ function scrubSensitiveData(event) {
         bc.data.headers.Authorization = '[REDACTED]';
       }
     });
+  }
+  const message = event.exception?.values?.[0]?.value || '';
+  if (isTransientNetworkError(hint?.originalException, message)) {
+    event.level = 'warning';
+    event.tags = { ...(event.tags || {}), transient_network: 'true' };
   }
   return event;
 }

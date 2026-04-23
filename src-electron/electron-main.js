@@ -37,11 +37,36 @@ log.transports.file.archiveLogFn = (oldLogFile) => {
 };
 
 // Initialize Sentry for crash reporting (must be early)
+// Client-network failure modes that are almost always user-side (dropped WiFi,
+// captive portal, ISP DNS hiccup, antivirus intercept) rather than our bug or
+// backend outage. We still keep them in Sentry at 'warning' level so aggregate
+// trends are visible, but they should not trigger error-level alerts.
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ENOTFOUND',      // DNS couldn't resolve host
+  'ETIMEDOUT',      // TCP connect/read timeout
+  'ECONNABORTED',   // axios cancelled the request (its own timeout fired)
+  'ECONNRESET',     // connection dropped mid-transfer
+  'ENETUNREACH',    // no route to host
+  'EAI_AGAIN'       // transient DNS failure
+]);
+const TRANSIENT_NETWORK_STATUSES = new Set([408]); // Request Timeout — server gave up waiting for client
+
+function isTransientNetworkError(err, message) {
+  if (err && TRANSIENT_NETWORK_CODES.has(err.code)) return true;
+  if (err?.response?.status && TRANSIENT_NETWORK_STATUSES.has(err.response.status)) return true;
+  if (typeof message === 'string') {
+    if (/socket hang up/i.test(message)) return true;
+    if (/network error/i.test(message)) return true;
+    if (/getaddrinfo/i.test(message)) return true;
+  }
+  return false;
+}
+
 Sentry.init({
   dsn: 'https://185912b1585eb5138079ae189a6d41ec@o4510659364716544.ingest.de.sentry.io/4510659366748240',
   environment: app.isPackaged ? 'production' : 'development',
   release: `suisse-notes@${app.getVersion()}`,
-  beforeSend(event) {
+  beforeSend(event, hint) {
     // Scrub sensitive data from error reports
     if (event.request?.headers?.authorization) {
       event.request.headers.authorization = '[REDACTED]';
@@ -50,6 +75,12 @@ Sentry.init({
     const message = event.exception?.values?.[0]?.value || '';
     if (message.includes('read-only volume') || (message.includes('read-only') && message.includes('move the application'))) {
       return null;
+    }
+    // Downgrade client-transient network errors to 'warning' so alert rules
+    // scoped to error level stop paging on user WiFi drops.
+    if (isTransientNetworkError(hint?.originalException, message)) {
+      event.level = 'warning';
+      event.tags = { ...(event.tags || {}), transient_network: 'true' };
     }
     return event;
   }
