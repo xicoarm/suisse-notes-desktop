@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.0.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.1...v4.0.2) (2026-04-23)
+
+
+### Bug Fixes
+
+* **recording:** retry rmdir on Windows transient locks to prevent ENOTEMPTY ([b2c1bf6](https://github.com/xicoarm/suisse-notes-desktop/commit/b2c1bf6688b510156c2041c71ce6bc1705b94a37))
+
 ### [4.0.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v3.9.9...v4.0.1) (2026-04-22)
 
 
