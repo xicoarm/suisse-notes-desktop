@@ -448,9 +448,9 @@ async function combineChunksForRecovery(recordId) {
           return { success: false, error: `Output validation failed: ${validation.error}` };
         }
 
-        await fs.promises.rm(sessionsPath, { recursive: true, force: true });
+        await rmDirSafeBestEffort(sessionsPath, 'recovery-single');
         if (fs.existsSync(chunksPath)) {
-          await fs.promises.rm(chunksPath, { recursive: true, force: true });
+          await rmDirSafeBestEffort(chunksPath, 'recovery-single');
         }
 
         return {
@@ -492,9 +492,9 @@ async function combineChunksForRecovery(recordId) {
           return { success: false, error: `Output validation failed: ${concatValidation.error}` };
         }
 
-        await fs.promises.rm(sessionsPath, { recursive: true, force: true });
+        await rmDirSafeBestEffort(sessionsPath, 'recovery-multi');
         if (fs.existsSync(chunksPath)) {
-          await fs.promises.rm(chunksPath, { recursive: true, force: true });
+          await rmDirSafeBestEffort(chunksPath, 'recovery-multi');
         }
 
         return {
@@ -522,7 +522,7 @@ async function combineChunksForRecovery(recordId) {
           return { success: false, error: `Output validation failed: ${fallbackValidation.error}` };
         }
 
-        await fs.promises.rm(chunksPath, { recursive: true, force: true });
+        await rmDirSafeBestEffort(chunksPath, 'recovery-direct');
 
         return {
           success: true,
@@ -586,7 +586,7 @@ async function cleanupOldOrphanedDirectories() {
             } else {
               // Empty chunks/sessions dirs — safe to clean up
               log.info(`Cleaning up old empty orphaned directory: ${dir}`);
-              await fs.promises.rm(dirPath, { recursive: true, force: true });
+              await rmDirSafeBestEffort(dirPath, 'recovery-orphans');
               cleanedCount++;
             }
           }
@@ -1888,6 +1888,47 @@ function writeFileWithSync(filePath, data) {
   throw lastErr;
 }
 
+// Helper: Recursive remove with retries that tolerate Windows transient locks.
+//
+// fs.promises.rm({ recursive: true, force: true }) defaults to maxRetries:0 and
+// does NOT retry ENOTEMPTY/EBUSY/EPERM errors. On Windows those fire routinely
+// when antivirus, Windows Defender, or Windows Search Indexer is holding a
+// transient read handle on a file we just wrote — the parent rmdir observes
+// "not empty" because the child handle hasn't been closed yet.
+//
+// maxRetries=5 with linear retryDelay=500ms gives 500+1000+1500+2000+2500 =
+// 7.5s total worst case, which covers typical AV scan windows while staying
+// well under IPC timeouts.
+async function rmDirSafe(dirPath) {
+  return fs.promises.rm(dirPath, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 500
+  });
+}
+
+// Variant that never throws. Use in post-success cleanup paths where the
+// authoritative data is already written and a stale temp dir is a disk leak,
+// not a data-loss. Logs + reports to Sentry so we can track how often this
+// fails in the wild.
+async function rmDirSafeBestEffort(dirPath, operation) {
+  try {
+    await rmDirSafe(dirPath);
+    return { success: true };
+  } catch (err) {
+    log.warn(`Cleanup failed for ${dirPath} (${operation}): ${err.code || err.message}`);
+    try {
+      Sentry.captureMessage(`rmDirSafe failed: ${err.code || 'unknown'}`, {
+        level: 'warning',
+        tags: { operation: operation || 'cleanup' },
+        extra: { dirPath, errorCode: err.code, errorMessage: err.message }
+      });
+    } catch (sentryErr) { /* never let telemetry break cleanup */ }
+    return { success: false, error: err };
+  }
+}
+
 // Helper: Combine chunks using streaming to avoid memory issues with large files
 async function combineChunksStreaming(chunksPath, sortedChunks, outputPath) {
   const tmpPath = outputPath + '.tmp';
@@ -2492,7 +2533,7 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
       // and is removed independently.
       try {
         if (fs.existsSync(rawPath)) fs.unlinkSync(rawPath);
-        await fs.promises.rm(chunksPath, { recursive: true, force: true });
+        await rmDirSafe(chunksPath);
         fs.mkdirSync(chunksPath, { recursive: true });
       } catch (e) {
         console.warn('Could not clean up after session creation:', e);
@@ -2606,9 +2647,9 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
             }
 
             // Cleanup
-            await fs.promises.rm(sessionsPath, { recursive: true, force: true });
+            await rmDirSafeBestEffort(sessionsPath, 'combineChunks-single');
             if (fs.existsSync(chunksPath)) {
-              await fs.promises.rm(chunksPath, { recursive: true, force: true });
+              await rmDirSafeBestEffort(chunksPath, 'combineChunks-single');
             }
 
             // Get actual audio duration via ffprobe
@@ -2697,9 +2738,9 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
             console.warn('Could not get audio duration for multi session:', e.message);
           }
 
-          await fs.promises.rm(sessionsPath, { recursive: true, force: true });
+          await rmDirSafeBestEffort(sessionsPath, 'combineChunks-multi');
           if (fs.existsSync(chunksPath)) {
-            await fs.promises.rm(chunksPath, { recursive: true, force: true });
+            await rmDirSafeBestEffort(chunksPath, 'combineChunks-multi');
           }
 
           // Merge system audio if it was captured
@@ -2792,7 +2833,7 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           }
 
           // Cleanup
-          await fs.promises.rm(chunksPath, { recursive: true, force: true });
+          await rmDirSafeBestEffort(chunksPath, 'combineChunks-direct');
 
           // Merge system audio if it was captured
           await mergeSystemAudio(outputPath, validRecordId);
@@ -3009,7 +3050,7 @@ ipcMain.handle('recording:getFilePath', async (event, recordId, ext) => {
 ipcMain.handle('recording:deleteRecording', async (event, recordId) => {
   try {
     const recordingDir = getRecordingPath(recordId);
-    await fs.promises.rm(recordingDir, { recursive: true, force: true });
+    await rmDirSafe(recordingDir);
     return { success: true };
   } catch (error) {
     return { success: false, error: error.message };
@@ -3843,7 +3884,7 @@ ipcMain.handle('history:delete', async (event, id, deleteFile = false, userId) =
         // Delete the recording directory
         const recordingDir = path.dirname(recording.filePath);
         if (fs.existsSync(recordingDir)) {
-          await fs.promises.rm(recordingDir, { recursive: true, force: true });
+          await rmDirSafe(recordingDir);
         }
       } catch (e) {
         console.warn('Could not delete recording file:', e);
@@ -3890,7 +3931,7 @@ ipcMain.handle('history:deleteAll', async (event, userId) => {
         try {
           const recordingDir = path.dirname(recording.filePath);
           if (fs.existsSync(recordingDir)) {
-            await fs.promises.rm(recordingDir, { recursive: true, force: true });
+            await rmDirSafe(recordingDir);
             deletedCount++;
           }
         } catch (e) {
