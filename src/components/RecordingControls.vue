@@ -9,7 +9,7 @@
       icon="mic"
       @click="$emit('start')"
     >
-      <q-tooltip>Start Recording</q-tooltip>
+      <q-tooltip>{{ t('aboutStartRecording') }}</q-tooltip>
     </q-btn>
 
     <!-- Recording State - Mute, Pause and Stop -->
@@ -24,7 +24,7 @@
         :icon="props.isMicMuted ? 'mic_off' : 'mic'"
         @click="$emit('toggleMute')"
       >
-        <q-tooltip>{{ props.isMicMuted ? 'Unmute Microphone' : 'Mute Microphone' }}</q-tooltip>
+        <q-tooltip>{{ props.isMicMuted ? t('unmuteMicrophone') : t('muteMicrophone') }}</q-tooltip>
       </q-btn>
 
       <q-btn
@@ -35,7 +35,7 @@
         class="recording-active"
         @click="$emit('pause')"
       >
-        <q-tooltip>Pause</q-tooltip>
+        <q-tooltip>{{ t('pauseTooltip') }}</q-tooltip>
       </q-btn>
 
       <q-btn
@@ -45,7 +45,7 @@
         icon="stop"
         @click="showStopDialog = true"
       >
-        <q-tooltip>Stop Recording</q-tooltip>
+        <q-tooltip>{{ t('stopRecordingTooltip') }}</q-tooltip>
       </q-btn>
     </div>
 
@@ -61,7 +61,7 @@
         :icon="props.isMicMuted ? 'mic_off' : 'mic'"
         @click="$emit('toggleMute')"
       >
-        <q-tooltip>{{ props.isMicMuted ? 'Unmute Microphone' : 'Mute Microphone' }}</q-tooltip>
+        <q-tooltip>{{ props.isMicMuted ? t('unmuteMicrophone') : t('muteMicrophone') }}</q-tooltip>
       </q-btn>
 
       <q-btn
@@ -71,7 +71,7 @@
         icon="play_arrow"
         @click="$emit('resume')"
       >
-        <q-tooltip>Resume</q-tooltip>
+        <q-tooltip>{{ t('resumeTooltip') }}</q-tooltip>
       </q-btn>
 
       <q-btn
@@ -81,7 +81,7 @@
         icon="stop"
         @click="showStopDialog = true"
       >
-        <q-tooltip>Stop Recording</q-tooltip>
+        <q-tooltip>{{ t('stopRecordingTooltip') }}</q-tooltip>
       </q-btn>
     </div>
 
@@ -94,7 +94,7 @@
         icon="fiber_manual_record"
         size="sm"
       >
-        Recording
+        {{ t('statusRecording') }}
       </q-chip>
       <q-chip
         v-else-if="recordingStore.isPaused"
@@ -103,7 +103,7 @@
         icon="pause"
         size="sm"
       >
-        Paused
+        {{ t('statusPaused') }}
       </q-chip>
     </div>
 

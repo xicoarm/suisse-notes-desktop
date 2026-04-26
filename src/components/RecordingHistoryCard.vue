@@ -256,7 +256,10 @@
         v-if="expanded && recording.filePath"
         class="card-player"
       >
-        <AudioPlayback :file-path="recording.filePath" />
+        <AudioPlayback
+          :file-path="recording.filePath"
+          :fallback-duration="recording.duration || 0"
+        />
       </div>
     </q-slide-transition>
 

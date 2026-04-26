@@ -39,7 +39,7 @@
         size="sm"
         @click="toggleMute"
       >
-        <q-tooltip>{{ isMuted ? 'Unmute' : 'Mute' }}</q-tooltip>
+        <q-tooltip>{{ isMuted ? t('unmuteTooltip') : t('muteTooltip') }}</q-tooltip>
       </q-btn>
     </div>
 
@@ -73,12 +73,13 @@
       color="primary"
       size="sm"
     />
-    <span>Loading audio...</span>
+    <span>{{ t('loadingAudio') }}</span>
   </div>
 </template>
 
 <script>
 import { ref, watch, onMounted, onUnmounted } from 'vue';
+import { useI18n } from 'vue-i18n';
 import { isElectron, isCapacitor } from '../utils/platform';
 import { readFile, getFileUri } from '../services/storage';
 
@@ -89,10 +90,15 @@ export default {
     filePath: {
       type: String,
       default: ''
+    },
+    fallbackDuration: {
+      type: Number,
+      default: 0
     }
   },
 
   setup(props) {
+    const { t } = useI18n();
     const audioElement = ref(null);
     const audioUrl = ref('');
     const isPlaying = ref(false);
@@ -102,6 +108,7 @@ export default {
     const progress = ref(0);
     const loading = ref(false);
     const error = ref(null);
+    const probedDuration = ref(false);
 
     const loadAudio = async () => {
       if (!props.filePath) {
@@ -178,14 +185,38 @@ export default {
     const onTimeUpdate = () => {
       if (!audioElement.value) return;
       currentTime.value = audioElement.value.currentTime;
-      if (duration.value > 0) {
+      if (isFinite(duration.value) && duration.value > 0) {
         progress.value = (currentTime.value / duration.value) * 100;
       }
     };
 
+    // MediaRecorder WebM/Opus has no duration in EBML header → audio.duration = Infinity until we seek past the end, which forces a durationchange event with the real value.
+    const probeInfiniteDuration = () => {
+      const el = audioElement.value;
+      if (!el || probedDuration.value) return;
+      probedDuration.value = true;
+      const onDurationChange = () => {
+        if (isFinite(el.duration) && el.duration > 0) {
+          duration.value = el.duration;
+          el.removeEventListener('durationchange', onDurationChange);
+          try { el.currentTime = 0; } catch (_) { /* ignore */ }
+        }
+      };
+      el.addEventListener('durationchange', onDurationChange);
+      try { el.currentTime = 1e101; } catch (_) { /* ignore */ }
+    };
+
     const onLoadedMetadata = () => {
       if (!audioElement.value) return;
-      duration.value = audioElement.value.duration;
+      const d = audioElement.value.duration;
+      if (isFinite(d) && d > 0) {
+        duration.value = d;
+      } else {
+        // Fall back to the stored duration so the user sees a real number,
+        // and probe the actual stream duration in the background.
+        duration.value = props.fallbackDuration || 0;
+        probeInfiniteDuration();
+      }
     };
 
     const onEnded = () => {
@@ -208,7 +239,7 @@ export default {
     };
 
     const formatTime = (seconds) => {
-      if (!seconds || isNaN(seconds)) return '0:00';
+      if (!seconds || !isFinite(seconds)) return '0:00';
 
       const mins = Math.floor(seconds / 60);
       const secs = Math.floor(seconds % 60);
@@ -221,6 +252,10 @@ export default {
         audioElement.value.pause();
         isPlaying.value = false;
       }
+      duration.value = 0;
+      currentTime.value = 0;
+      progress.value = 0;
+      probedDuration.value = false;
       loadAudio();
     });
 
@@ -239,6 +274,7 @@ export default {
     });
 
     return {
+      t,
       audioElement,
       audioUrl,
       isPlaying,

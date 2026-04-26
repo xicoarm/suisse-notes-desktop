@@ -1,7 +1,7 @@
 <template>
   <div class="audio-level-container">
     <div class="audio-level-label text-caption text-grey q-mb-xs">
-      {{ label }}
+      {{ label || t('audioLevelLabel') }}
     </div>
     <div class="audio-level-meter">
       <div
@@ -11,15 +11,18 @@
       />
     </div>
     <div class="level-indicators">
-      <span class="text-caption">Low</span>
-      <span class="text-caption">Good</span>
-      <span class="text-caption">High</span>
+      <span class="text-caption">{{ t('audioLevelLow') }}</span>
+      <span class="text-caption">{{ t('audioLevelGood') }}</span>
+      <span class="text-caption">{{ t('audioLevelHigh') }}</span>
     </div>
   </div>
 </template>
 
 <script setup>
 import { computed } from 'vue';
+import { useI18n } from 'vue-i18n';
+
+const { t } = useI18n();
 
 const props = defineProps({
   level: {
@@ -28,7 +31,7 @@ const props = defineProps({
   },
   label: {
     type: String,
-    default: 'Audio Level'
+    default: ''
   }
 });
 

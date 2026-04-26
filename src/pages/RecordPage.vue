@@ -56,7 +56,7 @@
               popup-content-class="mic-dropdown"
             >
               <template #selected-item="scope">
-                <span class="mic-selected-text">{{ scope.opt?.label || 'Select microphone' }}</span>
+                <span class="mic-selected-text">{{ scope.opt?.label || $t('selectMicrophone') }}</span>
               </template>
               <template #append>
                 <q-btn
@@ -69,7 +69,7 @@
                   :loading="loadingMicrophones"
                   @click.stop="loadMicrophones"
                 >
-                  <q-tooltip>Refresh microphones</q-tooltip>
+                  <q-tooltip>{{ $t('refreshMicrophones') }}</q-tooltip>
                 </q-btn>
               </template>
             </q-select>
@@ -198,7 +198,7 @@
         <template v-if="!recordingStore.isRecordingDead">
           <!-- Header -->
           <div class="card-header text-center">
-            <h2>Meeting Recorder</h2>
+            <h2>{{ $t('meetingRecorder') }}</h2>
             <p
               class="status-text"
               :class="statusClass"
@@ -253,7 +253,7 @@
                 @update:model-value="handleMicSwitch"
               >
                 <template #selected-item="scope">
-                  <span class="mic-switch-text">{{ scope.opt?.label || 'No microphone' }}</span>
+                  <span class="mic-switch-text">{{ scope.opt?.label || $t('noMicrophone') }}</span>
                 </template>
               </q-select>
               <q-btn
@@ -266,7 +266,7 @@
                 :loading="loadingMicrophones"
                 @click.stop="loadMicrophones"
               >
-                <q-tooltip>Refresh microphones</q-tooltip>
+                <q-tooltip>{{ $t('refreshMicrophones') }}</q-tooltip>
               </q-btn>
             </div>
           </div>
@@ -417,7 +417,7 @@
                 <q-btn
                   flat
                   color="negative"
-                  label="Dismiss"
+                  :label="$t('dismiss')"
                   @click="recordingStore.error = null"
                 />
               </template>
