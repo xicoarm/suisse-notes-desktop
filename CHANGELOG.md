@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.0.4](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.3...v4.0.4) (2026-04-26)
+
+
+### Bug Fixes
+
+* **ui:** translate recording UI to DE/FR/IT and fix WebM duration display ([e8b1545](https://github.com/xicoarm/suisse-notes-desktop/commit/e8b15457e1da0b3b2607effdc60d0763ec1ab1fd))
+
 ### [4.0.3](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.2...v4.0.3) (2026-04-23)
 
 ### [4.0.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.1...v4.0.2) (2026-04-23)
