@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.0.7](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.6...v4.0.7) (2026-04-30)
+
+
+### Bug Fixes
+
+* **auth:** SSO loading state recovers if user closes browser ([691e705](https://github.com/xicoarm/suisse-notes-desktop/commit/691e705bfc0c7ce7d92dc4d1e4237d70c99d97c3))
+
 ### [4.0.6](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.5...v4.0.6) (2026-04-30)
 
 
