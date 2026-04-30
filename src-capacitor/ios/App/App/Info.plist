@@ -75,5 +75,20 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<!-- Custom URL scheme for SSO callback (suissenotes://auth/callback?token=...&user=...) -->
+	<!-- The backend's /api/auth/<provider>/login/callback redirects here after OAuth completes. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>ch.suissenotes.mobile.sso</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>suissenotes</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

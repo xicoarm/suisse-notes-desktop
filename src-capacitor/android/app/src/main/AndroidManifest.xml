@@ -49,6 +49,15 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- SSO callback (suissenotes://auth/callback?token=...&user=...) -->
+            <!-- Backend's /api/auth/<provider>/login/callback redirects here after OAuth completes. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="suissenotes" android:host="auth" />
+            </intent-filter>
         </activity>
 
         <provider

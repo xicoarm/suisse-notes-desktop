@@ -29,6 +29,49 @@ let onLowBattery = null;
 let onCriticalBattery = null;
 
 /**
+ * Parse a deep-link URL into an SSO callback payload, or null if it isn't one.
+ * Accepted shapes:
+ *   suissenotes://auth/callback?token=<jwt>&user=<base64url-json>     (Phase 1, custom scheme)
+ *   suissenotes://auth/callback?error=<message>
+ *   https://app.suisse-notes.ch/sso/handoff?...                       (Phase 2, Universal Link / App Link — same params)
+ * Returns: { token, user } | { error } | null
+ */
+function parseSSOCallbackUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return null;
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+
+  const isCustomScheme = parsed.protocol === 'suissenotes:'
+    && parsed.host === 'auth'
+    && parsed.pathname.replace(/\/$/, '') === '/callback';
+  const isUniversalLink = parsed.protocol === 'https:'
+    && parsed.host === 'app.suisse-notes.ch'
+    && parsed.pathname.startsWith('/sso/');
+  if (!isCustomScheme && !isUniversalLink) return null;
+
+  const error = parsed.searchParams.get('error');
+  if (error) return { error };
+
+  const token = parsed.searchParams.get('token');
+  const userB64 = parsed.searchParams.get('user');
+  if (!token || !userB64) return { error: 'invalid_callback' };
+
+  try {
+    // base64url -> JSON. Convert URL-safe chars and pad before atob.
+    const std = userB64.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = std + '='.repeat((4 - (std.length % 4)) % 4);
+    const user = JSON.parse(atob(padded));
+    return { token, user };
+  } catch {
+    return { error: 'invalid_callback' };
+  }
+}
+
+/**
  * Initialize Capacitor lifecycle listeners
  * Should be called from the boot file on mobile platforms only
  */
@@ -129,10 +172,16 @@ export const initializeLifecycle = async () => {
     // Start battery monitoring (check every 60 seconds)
     await startBatteryMonitoring();
 
-    // Listen for app URL open (deep links)
+    // Listen for app URL open (deep links — incl. SSO callback)
     await App.addListener('appUrlOpen', (data) => {
       console.log('Lifecycle: App opened via URL', data.url);
-      // Handle deep links here if needed
+      const ssoPayload = parseSSOCallbackUrl(data.url);
+      if (ssoPayload) {
+        // Hand off to the LoginPage (or wherever it's listened to) via a
+        // platform-neutral CustomEvent. Mirrors the Electron auth:ssoCallback
+        // IPC channel — payload shape is { token, user } | { error }.
+        window.dispatchEvent(new CustomEvent('sso:callback', { detail: ssoPayload }));
+      }
     });
 
     // Listen for back button (Android)

@@ -136,9 +136,9 @@
           </q-btn>
         </q-form>
 
-        <!-- SSO providers (desktop only for now) -->
+        <!-- SSO providers (desktop + mobile) -->
         <div
-          v-if="isDesktopApp"
+          v-if="isDesktopApp || isMobileApp"
           class="sso-section"
         >
           <div class="sso-divider">
@@ -248,7 +248,7 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '../stores/auth';
-import { isElectron, isCapacitor } from '../utils/platform';
+import { isElectron, isCapacitor, getPlatform } from '../utils/platform';
 import { useLanguage } from '../composables/useLanguage';
 
 const router = useRouter();
@@ -256,14 +256,14 @@ const authStore = useAuthStore();
 const { t } = useI18n();
 const { languages, currentLang, currentLangShort, setLanguage, initLanguage } = useLanguage();
 const isDesktopApp = isElectron();
+const isMobileApp = isCapacitor();
 // null | 'microsoft' | 'google' — which SSO flow is currently in flight
 const ssoLoading = ref(null);
 
 // Safety timeout: if the user closes the browser without completing OAuth,
-// no callback ever arrives. Auto-clear the loading state after 3 minutes so
-// the UI isn't stuck. Cancel button below the SSO buttons does the same
-// thing on demand.
-const SSO_TIMEOUT_MS = 3 * 60 * 1000;
+// no callback ever arrives. Auto-clear the loading state so the UI isn't
+// stuck. Mobile gets a longer window because cellular MFA tends to be slower.
+const SSO_TIMEOUT_MS = isMobileApp ? 5 * 60 * 1000 : 3 * 60 * 1000;
 let ssoTimeoutHandle = null;
 
 function startSSOTimeout() {
@@ -284,10 +284,16 @@ function clearSSOTimeoutHandle() {
   }
 }
 
-function cancelSSOLogin() {
+async function cancelSSOLogin() {
   clearSSOTimeoutHandle();
   ssoLoading.value = null;
   authStore.clearError();
+  if (isMobileApp) {
+    try {
+      const { Browser } = await import('@capacitor/browser');
+      await Browser.close();
+    } catch (e) { /* already closed */ }
+  }
 }
 
 // Brand marks — inlined to avoid extra image fetches
@@ -304,20 +310,16 @@ onMounted(async () => {
     } catch (e) { /* not available */ }
   }
 
-  // Wire up SSO callback listener (Electron only)
+  // Wire up SSO callback listener — same payload shape on desktop and mobile.
+  // Electron: main process parses the suissenotes:// URL and IPC-pushes the
+  //           payload via auth:ssoCallback.
+  // Capacitor: src/boot/lifecycle.js parses appUrlOpen and dispatches a
+  //            'sso:callback' CustomEvent on window with the payload as detail.
   if (isDesktopApp && window.electronAPI?.auth?.onSSOCallback) {
-    window.electronAPI.auth.onSSOCallback(async (payload) => {
-      clearSSOTimeoutHandle();
-      ssoLoading.value = null;
-      if (!payload || payload.error) {
-        authStore.error = payload?.error || 'SSO login failed';
-        return;
-      }
-      const result = await authStore.loginWithSSO(payload);
-      if (result.success) {
-        router.push('/record');
-      }
-    });
+    window.electronAPI.auth.onSSOCallback(handleSSOPayload);
+  }
+  if (isMobileApp) {
+    window.addEventListener('sso:callback', handleSSOPayloadEvent);
   }
 });
 
@@ -332,7 +334,40 @@ onUnmounted(async () => {
   if (isDesktopApp && window.electronAPI?.auth?.removeSSOCallbackListener) {
     window.electronAPI.auth.removeSSOCallbackListener();
   }
+  if (isMobileApp) {
+    window.removeEventListener('sso:callback', handleSSOPayloadEvent);
+  }
 });
+
+async function handleSSOPayload(payload) {
+  clearSSOTimeoutHandle();
+  ssoLoading.value = null;
+  if (!payload || payload.error) {
+    authStore.error = payload?.error || 'SSO login failed';
+    // Close any in-app browser left open (mobile)
+    if (isMobileApp) {
+      try {
+        const { Browser } = await import('@capacitor/browser');
+        await Browser.close();
+      } catch (e) { /* already closed */ }
+    }
+    return;
+  }
+  const result = await authStore.loginWithSSO(payload);
+  if (result.success) {
+    if (isMobileApp) {
+      try {
+        const { Browser } = await import('@capacitor/browser');
+        await Browser.close();
+      } catch (e) { /* already closed */ }
+    }
+    router.push('/record');
+  }
+}
+
+function handleSSOPayloadEvent(event) {
+  return handleSSOPayload(event.detail);
+}
 
 const email = ref('');
 const password = ref('');
@@ -350,35 +385,44 @@ const handleLogin = async () => {
   }
 };
 
-const handleMicrosoftLogin = async () => {
-  if (!window.electronAPI?.auth?.loginWithMicrosoft) return;
+/**
+ * Open the IdP login URL in the system browser. On desktop this goes through
+ * Electron's shell.openExternal IPC; on mobile through @capacitor/browser
+ * (SFSafariViewController on iOS / Custom Tabs on Android). The completion
+ * arrives asynchronously via onSSOCallback (desktop) or the 'sso:callback'
+ * window event dispatched from src/boot/lifecycle.js (mobile).
+ */
+async function startSSOFlow(provider) {
   authStore.clearError();
-  ssoLoading.value = 'microsoft';
+  ssoLoading.value = provider;
   startSSOTimeout();
-  const result = await window.electronAPI.auth.loginWithMicrosoft();
-  if (!result?.success) {
+  try {
+    if (isDesktopApp && window.electronAPI?.auth) {
+      const fn = provider === 'microsoft'
+        ? window.electronAPI.auth.loginWithMicrosoft
+        : window.electronAPI.auth.loginWithGoogle;
+      const result = await fn();
+      if (!result?.success) {
+        throw new Error(result?.error || `Could not open ${provider} login`);
+      }
+    } else if (isMobileApp) {
+      const { Browser } = await import('@capacitor/browser');
+      const { getApiUrlSync } = await import('../services/api');
+      const platform = getPlatform();  // 'ios' | 'android'
+      const url = `${getApiUrlSync()}/api/auth/${provider}/login?client=${platform}`;
+      await Browser.open({ url });
+    } else {
+      throw new Error('SSO is not supported on this platform');
+    }
+  } catch (err) {
     clearSSOTimeoutHandle();
     ssoLoading.value = null;
-    authStore.error = result?.error || 'Could not open Microsoft login';
+    authStore.error = err?.message || `Could not open ${provider} login`;
   }
-  // On success, the system browser is now open; the actual login completes
-  // asynchronously via the auth:ssoCallback IPC event handled in onMounted.
-  // If the user closes the browser without completing, the safety timeout
-  // (or the Cancel link in the UI) clears the loading state.
-};
+}
 
-const handleGoogleLogin = async () => {
-  if (!window.electronAPI?.auth?.loginWithGoogle) return;
-  authStore.clearError();
-  ssoLoading.value = 'google';
-  startSSOTimeout();
-  const result = await window.electronAPI.auth.loginWithGoogle();
-  if (!result?.success) {
-    clearSSOTimeoutHandle();
-    ssoLoading.value = null;
-    authStore.error = result?.error || 'Could not open Google login';
-  }
-};
+const handleMicrosoftLogin = () => startSSOFlow('microsoft');
+const handleGoogleLogin = () => startSSOFlow('google');
 
 const openForgotPassword = async () => {
   const url = 'https://app.suisse-notes.ch/forgot-password';
