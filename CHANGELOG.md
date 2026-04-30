@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.0.6](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.5...v4.0.6) (2026-04-30)
+
+
+### Features
+
+* **auth:** add Google SSO button + remove create-account link ([388906f](https://github.com/xicoarm/suisse-notes-desktop/commit/388906f02ba3a4594ef1019fbb2593cb142a32b0))
+
 ### [4.0.5](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.4...v4.0.5) (2026-04-30)
 
 
