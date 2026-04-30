@@ -176,6 +176,15 @@
             />
             <span>{{ $t('signInWithGoogle') }}</span>
           </q-btn>
+          <div
+            v-if="ssoLoading"
+            class="sso-cancel"
+          >
+            <a
+              href="#"
+              @click.prevent="cancelSSOLogin"
+            >{{ $t('cancelSignIn') }}</a>
+          </div>
         </div>
 
         <!-- Links -->
@@ -225,17 +234,49 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
+import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '../stores/auth';
 import { isElectron, isCapacitor } from '../utils/platform';
 import { useLanguage } from '../composables/useLanguage';
 
 const router = useRouter();
 const authStore = useAuthStore();
+const { t } = useI18n();
 const { languages, currentLang, currentLangShort, setLanguage, initLanguage } = useLanguage();
-const isMobileApp = isCapacitor();
 const isDesktopApp = isElectron();
 // null | 'microsoft' | 'google' — which SSO flow is currently in flight
 const ssoLoading = ref(null);
+
+// Safety timeout: if the user closes the browser without completing OAuth,
+// no callback ever arrives. Auto-clear the loading state after 3 minutes so
+// the UI isn't stuck. Cancel button below the SSO buttons does the same
+// thing on demand.
+const SSO_TIMEOUT_MS = 3 * 60 * 1000;
+let ssoTimeoutHandle = null;
+
+function startSSOTimeout() {
+  clearSSOTimeoutHandle();
+  ssoTimeoutHandle = setTimeout(() => {
+    ssoTimeoutHandle = null;
+    if (ssoLoading.value) {
+      ssoLoading.value = null;
+      authStore.error = t('ssoTimedOut');
+    }
+  }, SSO_TIMEOUT_MS);
+}
+
+function clearSSOTimeoutHandle() {
+  if (ssoTimeoutHandle) {
+    clearTimeout(ssoTimeoutHandle);
+    ssoTimeoutHandle = null;
+  }
+}
+
+function cancelSSOLogin() {
+  clearSSOTimeoutHandle();
+  ssoLoading.value = null;
+  authStore.clearError();
+}
 
 // Brand marks — inlined to avoid extra image fetches
 const microsoftLogoSvg = '<svg viewBox="0 0 21 21" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="1" width="9" height="9" fill="#F25022"/><rect x="11" y="1" width="9" height="9" fill="#7FBA00"/><rect x="1" y="11" width="9" height="9" fill="#00A4EF"/><rect x="11" y="11" width="9" height="9" fill="#FFB900"/></svg>';
@@ -254,6 +295,7 @@ onMounted(async () => {
   // Wire up SSO callback listener (Electron only)
   if (isDesktopApp && window.electronAPI?.auth?.onSSOCallback) {
     window.electronAPI.auth.onSSOCallback(async (payload) => {
+      clearSSOTimeoutHandle();
       ssoLoading.value = null;
       if (!payload || payload.error) {
         authStore.error = payload?.error || 'SSO login failed';
@@ -268,6 +310,7 @@ onMounted(async () => {
 });
 
 onUnmounted(async () => {
+  clearSSOTimeoutHandle();
   if (isCapacitor()) {
     try {
       const { StatusBar, Style } = await import('@capacitor/status-bar');
@@ -299,21 +342,27 @@ const handleMicrosoftLogin = async () => {
   if (!window.electronAPI?.auth?.loginWithMicrosoft) return;
   authStore.clearError();
   ssoLoading.value = 'microsoft';
+  startSSOTimeout();
   const result = await window.electronAPI.auth.loginWithMicrosoft();
   if (!result?.success) {
+    clearSSOTimeoutHandle();
     ssoLoading.value = null;
     authStore.error = result?.error || 'Could not open Microsoft login';
   }
   // On success, the system browser is now open; the actual login completes
   // asynchronously via the auth:ssoCallback IPC event handled in onMounted.
+  // If the user closes the browser without completing, the safety timeout
+  // (or the Cancel link in the UI) clears the loading state.
 };
 
 const handleGoogleLogin = async () => {
   if (!window.electronAPI?.auth?.loginWithGoogle) return;
   authStore.clearError();
   ssoLoading.value = 'google';
+  startSSOTimeout();
   const result = await window.electronAPI.auth.loginWithGoogle();
   if (!result?.success) {
+    clearSSOTimeoutHandle();
     ssoLoading.value = null;
     authStore.error = result?.error || 'Could not open Google login';
   }
@@ -455,6 +504,22 @@ const openForgotPassword = async () => {
     width: 18px;
     height: 18px;
     flex-shrink: 0;
+  }
+}
+
+.sso-cancel {
+  margin-top: 10px;
+  text-align: center;
+
+  a {
+    color: #94a3b8;
+    font-size: 12px;
+    text-decoration: none;
+
+    &:hover {
+      color: #6366F1;
+      text-decoration: underline;
+    }
   }
 }
 
