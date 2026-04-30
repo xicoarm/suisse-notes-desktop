@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.0.9](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.8...v4.0.9) (2026-04-30)
+
+
+### Features
+
+* **auth:** mobile SSO via custom suissenotes:// scheme (Phase 1) ([0f3e747](https://github.com/xicoarm/suisse-notes-desktop/commit/0f3e747ef9567a7495b3af5196489221b10db8eb))
+
 ### [4.0.8](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.7...v4.0.8) (2026-04-30)
 
 
