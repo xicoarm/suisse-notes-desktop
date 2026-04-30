@@ -1508,21 +1508,24 @@ function getDeviceId() {
   }
 }
 
-// SSO: open the system browser at the backend's Microsoft login route. The
-// backend redirects through Microsoft and ultimately back to suissenotes://
-// auth/callback, which the OS routes to handleSSOUrl() above. The actual
-// login completion arrives asynchronously via the 'auth:ssoCallback' event.
-ipcMain.handle('auth:loginWithMicrosoft', async () => {
+// SSO: open the system browser at the backend's IdP login route. The backend
+// redirects through Microsoft/Google and ultimately back to suissenotes://
+// auth/callback, which the OS routes to handleSSOUrl() above. Actual login
+// completion arrives asynchronously via the 'auth:ssoCallback' event.
+async function openSSOBrowser(provider) {
   try {
-    const url = `${API_BASE_URL}/api/auth/microsoft/login?client=desktop`;
-    log.info('SSO: launching system browser for Microsoft login');
+    const url = `${API_BASE_URL}/api/auth/${provider}/login?client=desktop`;
+    log.info(`SSO: launching system browser for ${provider} login`);
     await shell.openExternal(url);
     return { success: true };
   } catch (error) {
-    log.error('SSO: failed to open system browser', error);
+    log.error(`SSO: failed to open system browser for ${provider}`, error);
     return { success: false, error: error.message || 'Could not open browser' };
   }
-});
+}
+
+ipcMain.handle('auth:loginWithMicrosoft', () => openSSOBrowser('microsoft'));
+ipcMain.handle('auth:loginWithGoogle', () => openSSOBrowser('google'));
 
 // Authentication - Production only (no demo mode)
 ipcMain.handle('auth:login', async (event, email, password) => {

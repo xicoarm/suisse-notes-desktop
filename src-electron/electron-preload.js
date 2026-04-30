@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     createWebSession: () => ipcRenderer.invoke('auth:createWebSession'),
     // SSO via system browser + suissenotes:// custom protocol
     loginWithMicrosoft: () => ipcRenderer.invoke('auth:loginWithMicrosoft'),
+    loginWithGoogle: () => ipcRenderer.invoke('auth:loginWithGoogle'),
     onSSOCallback: (callback) => {
       ipcRenderer.on('auth:ssoCallback', (_event, data) => callback(data));
     },
