@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.0.8](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.7...v4.0.8) (2026-04-30)
+
+
+### Bug Fixes
+
+* **auth:** allow re-clicking SSO buttons to re-open browser ([6c41b5d](https://github.com/xicoarm/suisse-notes-desktop/commit/6c41b5d98e2056604d64ab6234109c8acb2e45bf))
+
 ### [4.0.7](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.6...v4.0.7) (2026-04-30)
 
 
