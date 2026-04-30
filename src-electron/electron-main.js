@@ -149,6 +149,59 @@ app.on('child-process-gone', (event, details) => {
   }
 });
 
+// === SSO Custom Protocol (suissenotes://) ===
+// The system browser hits /api/auth/microsoft/login?client=desktop; the backend
+// callback redirects to suissenotes://auth/callback?token=...&user=<b64>. The
+// OS routes that URL to this app via either argv (Win/Linux) or 'open-url' (Mac).
+const SSO_PROTOCOL = 'suissenotes';
+
+if (process.defaultApp) {
+  // Dev mode: pass execPath + script path so the OS knows how to relaunch us
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient(SSO_PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);
+  }
+} else {
+  app.setAsDefaultProtocolClient(SSO_PROTOCOL);
+}
+
+let pendingSSOPayload = null;
+
+function handleSSOUrl(url) {
+  if (!url || typeof url !== 'string' || !url.startsWith(`${SSO_PROTOCOL}://`)) return;
+  let payload;
+  try {
+    const parsed = new URL(url);
+    if (parsed.host !== 'auth' || parsed.pathname.replace(/\/$/, '') !== '/callback') {
+      log.warn('SSO: ignoring unknown URL path:', url);
+      return;
+    }
+    const error = parsed.searchParams.get('error');
+    const token = parsed.searchParams.get('token');
+    const userB64 = parsed.searchParams.get('user');
+    if (error) {
+      payload = { error };
+    } else if (token && userB64) {
+      const userJson = Buffer.from(userB64, 'base64url').toString('utf8');
+      payload = { token, user: JSON.parse(userJson) };
+    } else {
+      payload = { error: 'invalid_callback' };
+    }
+  } catch (e) {
+    log.error('SSO: failed to parse callback URL', e.message);
+    payload = { error: 'invalid_callback' };
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.send('auth:ssoCallback', payload);
+  } else {
+    // App was launched (or relaunched) by the URL — buffer until window exists
+    pendingSSOPayload = payload;
+  }
+}
+
 // === Single Instance Lock ===
 // Prevent multiple app instances from corrupting shared electron-store files
 const gotTheLock = app.requestSingleInstanceLock();
@@ -156,12 +209,27 @@ if (!gotTheLock) {
   log.warn('Another instance is already running — quitting');
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
+    // Win/Linux deliver the deep-link URL via argv on the second instance
+    const ssoUrl = argv.find(a => typeof a === 'string' && a.startsWith(`${SSO_PROTOCOL}://`));
+    if (ssoUrl) handleSSOUrl(ssoUrl);
   });
+}
+
+// macOS deep-link handoff
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  handleSSOUrl(url);
+});
+
+// Cold-start case (Win/Linux): URL is in our own argv
+{
+  const ssoUrl = process.argv.find(a => typeof a === 'string' && a.startsWith(`${SSO_PROTOCOL}://`));
+  if (ssoUrl) handleSSOUrl(ssoUrl);
 }
 
 // Configure auto-updater logging
@@ -1003,6 +1071,15 @@ function createWindow() {
     mainWindow.loadFile('index.html');
   }
 
+  // If the app was cold-started by a suissenotes:// URL, the SSO payload was
+  // buffered before the window existed — deliver it once the renderer is ready.
+  mainWindow.webContents.once('did-finish-load', () => {
+    if (pendingSSOPayload) {
+      mainWindow.webContents.send('auth:ssoCallback', pendingSSOPayload);
+      pendingSSOPayload = null;
+    }
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -1430,6 +1507,22 @@ function getDeviceId() {
     return deviceId;
   }
 }
+
+// SSO: open the system browser at the backend's Microsoft login route. The
+// backend redirects through Microsoft and ultimately back to suissenotes://
+// auth/callback, which the OS routes to handleSSOUrl() above. The actual
+// login completion arrives asynchronously via the 'auth:ssoCallback' event.
+ipcMain.handle('auth:loginWithMicrosoft', async () => {
+  try {
+    const url = `${API_BASE_URL}/api/auth/microsoft/login?client=desktop`;
+    log.info('SSO: launching system browser for Microsoft login');
+    await shell.openExternal(url);
+    return { success: true };
+  } catch (error) {
+    log.error('SSO: failed to open system browser', error);
+    return { success: false, error: error.message || 'Could not open browser' };
+  }
+});
 
 // Authentication - Production only (no demo mode)
 ipcMain.handle('auth:login', async (event, email, password) => {

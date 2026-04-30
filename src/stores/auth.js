@@ -174,6 +174,46 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
+    /**
+     * Hydrate session state from a JWT + user object obtained out-of-band
+     * (e.g. via the SSO custom-protocol callback). Mirrors the post-success
+     * branch of login() so downstream stores see identical state.
+     */
+    async loginWithSSO({ token, user }) {
+      if (!token || !user) {
+        this.error = 'Invalid SSO callback';
+        return { success: false, error: this.error };
+      }
+      try {
+        this.user = user;
+        this.token = token;
+        this.isAuthenticated = true;
+        this.error = null;
+
+        await platformSaveToken(token);
+        await platformSaveUserInfo(user);
+
+        setUser(user);
+        this.startTokenRefresh();
+
+        try {
+          const { useDeviceStore } = await import('./device');
+          const deviceStore = useDeviceStore();
+          await deviceStore.reloadForUser();
+        } catch (e) {
+          console.warn('Device store reload after SSO login failed:', e);
+        }
+
+        resumeMobileUploadQueue(this);
+        addBreadcrumb({ category: 'auth', message: 'SSO login successful', level: 'info' });
+        return { success: true };
+      } catch (error) {
+        captureException(error, { tags: { action: 'loginWithSSO' } });
+        this.error = error.message || 'SSO login failed';
+        return { success: false, error: this.error };
+      }
+    },
+
     async register(email, password, name) {
       this.loading = true;
       this.error = null;

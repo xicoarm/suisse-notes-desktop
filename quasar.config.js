@@ -121,6 +121,13 @@ export default function (ctx) {
         productName: 'Suisse Notes',
         icon: 'src-electron/icons/icon',
 
+        // Custom URL scheme used by the SSO bridge: the system browser opens
+        // /api/auth/microsoft/login?client=desktop, and the backend callback
+        // hands the token back via suissenotes://auth/callback?token=...&user=...
+        protocols: [
+          { name: 'Suisse Notes SSO', schemes: ['suissenotes'] }
+        ],
+
         // GitHub Releases for auto-updates
         // This config is required to generate latest-mac.yml / latest.yml
         // Use -P never CLI flag to prevent upload (macOS uploads after notarization)

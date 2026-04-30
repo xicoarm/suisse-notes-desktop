@@ -136,6 +136,32 @@
           </q-btn>
         </q-form>
 
+        <!-- SSO providers (desktop only for now) -->
+        <div
+          v-if="isDesktopApp"
+          class="sso-section"
+        >
+          <div class="sso-divider">
+            <span>{{ $t('orContinueWith') }}</span>
+          </div>
+          <q-btn
+            outline
+            no-caps
+            class="sso-btn full-width"
+            size="md"
+            :loading="ssoLoading"
+            :disable="authStore.loading"
+            @click="handleMicrosoftLogin"
+          >
+            <!-- eslint-disable-next-line vue/no-v-html -->
+            <span
+              class="sso-logo"
+              v-html="microsoftLogoSvg"
+            />
+            <span>{{ $t('signInWithMicrosoft') }}</span>
+          </q-btn>
+        </div>
+
         <!-- Links -->
         <div class="login-links">
           <p v-if="!isMobileApp">
@@ -200,6 +226,11 @@ const router = useRouter();
 const authStore = useAuthStore();
 const { languages, currentLang, currentLangShort, setLanguage, initLanguage } = useLanguage();
 const isMobileApp = isCapacitor();
+const isDesktopApp = isElectron();
+const ssoLoading = ref(false);
+
+// Microsoft 4-square brand mark — inlined to avoid extra image fetch
+const microsoftLogoSvg = '<svg viewBox="0 0 21 21" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="1" width="9" height="9" fill="#F25022"/><rect x="11" y="1" width="9" height="9" fill="#7FBA00"/><rect x="1" y="11" width="9" height="9" fill="#00A4EF"/><rect x="11" y="11" width="9" height="9" fill="#FFB900"/></svg>';
 
 // Set white status bar icons for purple background on mobile
 onMounted(async () => {
@@ -210,6 +241,21 @@ onMounted(async () => {
       await StatusBar.setStyle({ style: Style.Dark });
     } catch (e) { /* not available */ }
   }
+
+  // Wire up SSO callback listener (Electron only)
+  if (isDesktopApp && window.electronAPI?.auth?.onSSOCallback) {
+    window.electronAPI.auth.onSSOCallback(async (payload) => {
+      ssoLoading.value = false;
+      if (!payload || payload.error) {
+        authStore.error = payload?.error || 'SSO login failed';
+        return;
+      }
+      const result = await authStore.loginWithSSO(payload);
+      if (result.success) {
+        router.push('/record');
+      }
+    });
+  }
 });
 
 onUnmounted(async () => {
@@ -218,6 +264,9 @@ onUnmounted(async () => {
       const { StatusBar, Style } = await import('@capacitor/status-bar');
       await StatusBar.setStyle({ style: Style.Light });
     } catch (e) { /* not available */ }
+  }
+  if (isDesktopApp && window.electronAPI?.auth?.removeSSOCallbackListener) {
+    window.electronAPI.auth.removeSSOCallbackListener();
   }
 });
 
@@ -235,6 +284,19 @@ const handleLogin = async () => {
   if (result.success) {
     router.push('/record');
   }
+};
+
+const handleMicrosoftLogin = async () => {
+  if (!window.electronAPI?.auth?.loginWithMicrosoft) return;
+  authStore.clearError();
+  ssoLoading.value = true;
+  const result = await window.electronAPI.auth.loginWithMicrosoft();
+  if (!result?.success) {
+    ssoLoading.value = false;
+    authStore.error = result?.error || 'Could not open Microsoft login';
+  }
+  // On success, the system browser is now open; the actual login completes
+  // asynchronously via the auth:ssoCallback IPC event handled in onMounted.
 };
 
 const openForgotPassword = async () => {
@@ -331,6 +393,48 @@ const openForgotPassword = async () => {
 
   span {
     flex: 1;
+  }
+}
+
+.sso-section {
+  margin-top: 4px;
+  margin-bottom: 24px;
+}
+
+.sso-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+  color: #94a3b8;
+  font-size: 12px;
+
+  &::before,
+  &::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: #e2e8f0;
+  }
+}
+
+.sso-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-color: #e2e8f0;
+  color: #1e293b;
+  font-weight: 500;
+
+  &:hover {
+    background: #f8fafc;
+  }
+
+  .sso-logo {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
   }
 }
 

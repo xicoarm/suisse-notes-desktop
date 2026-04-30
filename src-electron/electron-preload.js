@@ -42,6 +42,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getUserInfo: () => ipcRenderer.invoke('auth:getUserInfo'),
     refreshToken: () => ipcRenderer.invoke('auth:refreshToken'),
     createWebSession: () => ipcRenderer.invoke('auth:createWebSession'),
+    // SSO via system browser + suissenotes:// custom protocol
+    loginWithMicrosoft: () => ipcRenderer.invoke('auth:loginWithMicrosoft'),
+    onSSOCallback: (callback) => {
+      ipcRenderer.on('auth:ssoCallback', (_event, data) => callback(data));
+    },
+    removeSSOCallbackListener: () => {
+      ipcRenderer.removeAllListeners('auth:ssoCallback');
+    },
     // Listen for auth expired events from main process
     onExpired: (callback) => {
       ipcRenderer.on('auth:expired', (event, data) => callback(data));
