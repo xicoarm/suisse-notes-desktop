@@ -149,12 +149,18 @@
             no-caps
             class="sso-btn full-width q-mb-sm"
             size="md"
-            :loading="ssoLoading === 'microsoft'"
-            :disable="authStore.loading || ssoLoading === 'google'"
+            :disable="authStore.loading"
             @click="handleMicrosoftLogin"
           >
+            <q-spinner
+              v-if="ssoLoading === 'microsoft'"
+              class="sso-logo"
+              size="18px"
+              color="primary"
+            />
             <!-- eslint-disable-next-line vue/no-v-html -->
             <span
+              v-else
               class="sso-logo"
               v-html="microsoftLogoSvg"
             />
@@ -165,12 +171,18 @@
             no-caps
             class="sso-btn full-width"
             size="md"
-            :loading="ssoLoading === 'google'"
-            :disable="authStore.loading || ssoLoading === 'microsoft'"
+            :disable="authStore.loading"
             @click="handleGoogleLogin"
           >
+            <q-spinner
+              v-if="ssoLoading === 'google'"
+              class="sso-logo"
+              size="18px"
+              color="primary"
+            />
             <!-- eslint-disable-next-line vue/no-v-html -->
             <span
+              v-else
               class="sso-logo"
               v-html="googleLogoSvg"
             />
