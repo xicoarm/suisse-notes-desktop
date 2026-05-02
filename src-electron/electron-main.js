@@ -10,6 +10,7 @@ const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
 const Sentry = require('@sentry/electron/main');
 const { machineIdSync } = require('node-machine-id');
+const { uploadViaPresignedSas, abortDirectUpload } = require('./upload-direct');
 
 // === Log Rotation Configuration ===
 // Prevent infinite log file growth
@@ -785,6 +786,27 @@ async function processPendingUploads() {
             background: true
           });
         }
+      } else if (result.canRetry === false) {
+        // Terminal failure (413, 402, 415, 400, etc.) — drop from queue so we
+        // don't keep re-attempting a doomed upload on every app launch.
+        log.warn(`[upload] Terminal failure for pending ${upload.recordId} (status=${result.status}): ${result.error} — removing from queue`);
+        removeFromUploadQueue(upload.recordId);
+        const recordings = historyStore.get('recordings', []);
+        const recording = recordings.find(r => r.id === upload.recordId);
+        if (recording) {
+          recording.uploadStatus = 'failed';
+          recording.uploadError = result.error || 'Upload rejected by server';
+          historyStore.set('recordings', recordings);
+        }
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('upload:complete', {
+            recordId: upload.recordId,
+            success: false,
+            error: result.error,
+            terminal: true,
+            background: true,
+          });
+        }
       }
     } catch (e) {
       log.error(`Failed to upload ${upload.recordId}:`, e.message);
@@ -829,6 +851,9 @@ const activeUploads = new Map();
 const activeAbortControllers = new Map();
 // Track recordIds that were cancelled so we suppress post-cancel completion events
 const cancelledUploads = new Set();
+// audioFileIds for in-flight direct-blob uploads — used by upload:cancel to
+// best-effort clean up the staged blob in Azure when the user cancels.
+const activeDirectAudioFileIds = new Map();
 
 // Track if upload is in progress to prevent window close
 let isUploadInProgress = false;
@@ -3340,15 +3365,176 @@ async function pollMeetingTranscriptionStatus(meetingId, maxAttempts = 30) {
   return { status: 'TIMEOUT', resolved: false };
 }
 
-// Helper: Upload with retry logic
+// Helper: Upload with retry logic.
+//
+// New flow (direct-to-Azure-Blob via SAS):
+//   - POST /api/uploads/init → server returns SAS URL + block size
+//   - PUT each block directly to Azure (bypasses our app server)
+//   - PUT block list to commit
+//   - POST /api/uploads/complete → server creates meeting + dispatches transcription
+//
+// Legacy flow (formData POST to /api/desktop/upload) is still kept for
+// backward compatibility — used when:
+//   1. Server is in local-storage mode (returns mode: 'fallback' from init)
+//   2. /api/uploads/init returns 404 (older backend without these routes)
 async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
-  const retryDelays = [0, 2000, 5000, 10000]; // Exponential backoff
-
-  // Create an AbortController so upload:cancel can abort this request
   const abortController = new AbortController();
   activeAbortControllers.set(recordId, abortController);
 
   try {
+    // === Phase 1: Try direct-to-Azure-Blob upload ===
+    const directResult = await tryDirectUpload({
+      recordId,
+      filePath,
+      metadata,
+      abortController,
+      maxRetries,
+    });
+
+    if (directResult.handled) {
+      // Direct flow either succeeded or failed terminally — do not run legacy.
+      return directResult.result;
+    }
+    log.info(`[upload] Direct flow not available for ${recordId} (${directResult.reason}); falling back to legacy POST`);
+
+    // === Phase 2: Legacy formData POST fallback ===
+    return await uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, abortController);
+  } finally {
+    activeAbortControllers.delete(recordId);
+    activeDirectAudioFileIds.delete(recordId);
+  }
+}
+
+/**
+ * Try the new direct-to-Azure-Blob upload path. Returns:
+ *   { handled: true, result } — finished (success or terminal failure)
+ *   { handled: false, reason } — caller should run the legacy fallback
+ */
+async function tryDirectUpload({ recordId, filePath, metadata, abortController, maxRetries }) {
+  const authToken = await getAuthToken();
+  if (!authToken) {
+    return {
+      handled: true,
+      result: { success: false, error: 'Not authenticated. Please login first.', canRetry: false },
+    };
+  }
+
+  // Notify renderer that upload started so the UI shows progress immediately
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('upload:started', { recordId });
+  }
+
+  const onProgress = ({ progress, bytesUploaded, bytesTotal }) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('upload:progress', {
+        recordId,
+        progress,
+        bytesUploaded,
+        bytesTotal,
+      });
+    }
+  };
+
+  let lastTransientError;
+  // Outer retry handles transient init/complete failures. Per-block retry
+  // is handled inside upload-direct.js — we don't double-retry blocks.
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      const delay = Math.min(15_000, 2000 * Math.pow(2, attempt - 1));
+      log.info(`[upload] Direct retry attempt ${attempt}/${maxRetries} after ${delay}ms`);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('upload:retry', { recordId, attempt, maxRetries });
+      }
+      await sleep(delay);
+    }
+
+    if (abortController.signal.aborted) {
+      return {
+        handled: true,
+        result: { success: false, error: 'Upload cancelled', cancelled: true, canRetry: false },
+      };
+    }
+
+    let result;
+    try {
+      result = await uploadViaPresignedSas({
+        apiBaseUrl: API_BASE_URL,
+        authToken: await getAuthToken(),
+        recordId,
+        filePath,
+        metadata,
+        abortController,
+        ffmpeg,
+        onProgress,
+        onSession: ({ audioFileId }) => {
+          // Track for upload:cancel cleanup. Cleared when this function returns.
+          if (audioFileId) {
+            activeDirectAudioFileIds.set(recordId, audioFileId);
+          }
+        },
+      });
+    } catch (err) {
+      // Bubbled-up transient error from upload-direct → retry.
+      lastTransientError = err;
+      log.warn(`[upload] Direct upload transient error attempt ${attempt + 1}: ${err.message}`);
+      if (attempt >= maxRetries) {
+        Sentry.captureException(err, {
+          tags: { operation: 'upload-direct', recordId },
+          extra: { attempt: attempt + 1, maxRetries },
+        });
+        return {
+          handled: true,
+          result: {
+            success: false,
+            error: err.message || 'Upload failed after all retry attempts',
+            canRetry: true,
+          },
+        };
+      }
+      continue;
+    }
+
+    if (result.mode === 'fallback') {
+      return { handled: false, reason: 'server requested local-storage fallback' };
+    }
+
+    if (result.success) {
+      return { handled: true, result };
+    }
+
+    if (result.cancelled) {
+      return { handled: true, result };
+    }
+
+    // Direct flow returned a terminal failure — do not retry, do not fall back.
+    if (result.canRetry === false) {
+      Sentry.captureMessage(`Upload terminal failure: ${result.error}`, {
+        level: 'warning',
+        tags: { operation: 'upload-direct', recordId, status: String(result.status || 0) },
+      });
+      return { handled: true, result };
+    }
+
+    // Retryable failure — go around the loop.
+    log.warn(`[upload] Direct upload retryable failure attempt ${attempt + 1}: ${result.error}`);
+  }
+
+  // Exhausted retries on a retryable error
+  return {
+    handled: true,
+    result: {
+      success: false,
+      error: lastTransientError?.message || 'Upload failed after all retry attempts',
+      canRetry: true,
+    },
+  };
+}
+
+// Legacy formData POST upload path — only invoked when the backend
+// reports it is in local-storage mode (no Azure SAS available).
+async function uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, abortController) {
+  const retryDelays = [0, 2000, 5000, 10000]; // Exponential backoff
+
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     // Define progress tracking variables at loop scope so catch block can access them
     let progressInterval = null;
@@ -3638,10 +3824,6 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
   }
 
   return { success: false, error: 'Upload failed after all retry attempts', canRetry: true };
-  } finally {
-    // Always clean up the abort controller
-    activeAbortControllers.delete(recordId);
-  }
 }
 
 const inFlightUploads = new Set();
@@ -3674,9 +3856,14 @@ ipcMain.handle('upload:start', async (event, params) => {
 
     const result = await uploadWithRetry(recordId, filePath, metadata);
 
-    // Remove from queue on success
-    if (result.success) {
+    // Remove from queue on success OR on terminal failure (canRetry === false).
+    // The old behavior left non-retryable failures in the queue, where they
+    // would be re-attempted on every app launch and 413/402/etc forever.
+    if (result.success || result.canRetry === false) {
       removeFromUploadQueue(recordId);
+      if (!result.success) {
+        log.warn(`[upload] Removing terminal-failure ${recordId} from queue (status=${result.status}, error=${result.error})`);
+      }
     }
 
     // Suppress completion event if the upload was cancelled by the user
@@ -3805,6 +3992,25 @@ ipcMain.handle('upload:cancel', async (event, recordId) => {
   if (controller) {
     controller.abort();
     activeAbortControllers.delete(recordId);
+  }
+
+  // Best-effort cleanup of staged blob if the cancelled upload used the
+  // direct-to-Azure flow. Fires asynchronously — we don't make the user
+  // wait for blob deletion before the cancel responds.
+  const audioFileId = activeDirectAudioFileIds.get(recordId);
+  if (audioFileId) {
+    activeDirectAudioFileIds.delete(recordId);
+    getAuthToken()
+      .then((token) => {
+        if (!token) return;
+        return abortDirectUpload({
+          apiBaseUrl: API_BASE_URL,
+          authToken: token,
+          recordId,
+          audioFileId,
+        });
+      })
+      .catch((e) => log.warn(`[upload:cancel] abort cleanup failed for ${recordId}:`, e?.message));
   }
 
   // Also handle legacy TUS-based uploads
@@ -4271,8 +4477,13 @@ ipcMain.handle('systemAudio:isSupported', () => {
   };
 });
 
-// Start system audio capture — writes PCM to file alongside recording chunks
-ipcMain.handle('systemAudio:start', async (event, recordId) => {
+// Start system audio capture — writes PCM to file alongside recording chunks.
+// offsetMs is the position on the recording timeline (in milliseconds) at which
+// this capture begins. When the user toggles system audio mid-recording, we pad
+// the PCM file with leading silence so amix at stop-time aligns the captured
+// audio with the mic track. Subsequent toggles within the same recording append
+// to the existing file with silence padding for the off-gap.
+ipcMain.handle('systemAudio:start', async (event, recordId, offsetMs = 0) => {
   try {
     if (activeAudioTee) {
       log.warn('System audio already active, stopping previous session');
@@ -4294,7 +4505,34 @@ ipcMain.handle('systemAudio:start', async (event, recordId) => {
     }
 
     const pcmPath = path.join(recordPath, 'system_audio.raw');
-    const writeStream = fs.createWriteStream(pcmPath);
+
+    // 48kHz mono Int16 PCM = 2 bytes/sample * 48 samples/ms = 96 bytes/ms
+    const BYTES_PER_MS = 96;
+    let existingBytes = 0;
+    try {
+      if (fs.existsSync(pcmPath)) existingBytes = fs.statSync(pcmPath).size;
+    } catch (e) { /* treat as no existing data */ }
+    const existingMs = Math.floor(existingBytes / BYTES_PER_MS);
+    const requestedOffsetMs = Math.max(0, Math.floor(Number(offsetMs) || 0));
+    const padMs = Math.max(0, requestedOffsetMs - existingMs);
+
+    const writeStream = fs.createWriteStream(pcmPath, {
+      flags: existingBytes > 0 ? 'a' : 'w'
+    });
+
+    if (padMs > 0) {
+      const totalSilenceBytes = padMs * BYTES_PER_MS;
+      const CHUNK = 64 * 1024;
+      const fullChunk = Buffer.alloc(Math.min(CHUNK, totalSilenceBytes));
+      let written = 0;
+      while (written < totalSilenceBytes) {
+        const remaining = totalSilenceBytes - written;
+        const buf = remaining >= fullChunk.length ? fullChunk : Buffer.alloc(remaining);
+        writeStream.write(buf);
+        written += buf.length;
+      }
+      log.info(`System audio: padded ${padMs}ms of silence to align with recording offset ${requestedOffsetMs}ms`);
+    }
 
     // Spawn audiotee: 48kHz mono Int16 PCM, 200ms chunks
     const proc = require('child_process').spawn(binaryPath, [

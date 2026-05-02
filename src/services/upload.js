@@ -13,6 +13,7 @@ import { isElectron, isCapacitor, isMobile, PlatformConstants } from '../utils/p
 import { calculateUploadChecksum, verifyUploadChecksum } from './integrity';
 import { readFile, deleteFile } from './storage';
 import { sentryUploadStart, sentryUploadSuccess, sentryUploadFail } from './sentryHelpers';
+import { uploadViaPresignedSas, isTransientUploadError } from './upload-direct';
 
 // --- Persistent Mobile Upload Queue (localStorage + Preferences backup) ---
 const MOBILE_UPLOAD_QUEUE_KEY = 'mobile_upload_queue';
@@ -199,7 +200,14 @@ function _isRetryableError(error) {
     'Checksum mismatch',
     'Invalid file format',
     'Unauthorized',
-    'Forbidden'
+    'Forbidden',
+    'File too large',
+    'Insufficient minutes',
+    'Recording too long',
+    'DURATION_EXCEEDED',
+    'FILE_TOO_LARGE',
+    'BLOB_MISSING',
+    'INSUFFICIENT_MINUTES',
   ];
   return !nonRetryable.some(msg => error.includes(msg));
 }
@@ -686,12 +694,46 @@ export const uploadWithVerification = async (options) => {
 
         audioFileId = uploadResult.audioFileId;
         break;
-      } else if (isCapacitor()) {
-        // Use simple POST upload for mobile (TUS endpoint not available on server)
-        const uploadResult = await uploadFileMobileSimple(filePath, apiUrl, currentToken, metadata, onProgress, file, recordId);
+      } else if (isCapacitor() || file) {
+        // Try direct-to-Azure-Blob via SAS URL (works on iOS, Android, browser
+        // file picker). Falls through to simple POST when the server reports
+        // mode: 'fallback' (i.e. running in local-storage mode).
+        let uploadResult;
+        try {
+          uploadResult = await uploadViaPresignedSas({
+            apiBaseUrl: apiUrl,
+            authToken: currentToken,
+            recordId,
+            filePath,
+            file,
+            metadata,
+            onProgress: ({ progress, bytesUploaded, bytesTotal }) => {
+              onProgress(progress, bytesUploaded, bytesTotal);
+            },
+          });
+        } catch (transientErr) {
+          // Bubbled-up transient error from upload-direct — only network
+          // failures should land here. Surface to outer retry.
+          if (!isTransientUploadError(transientErr)) {
+            throw transientErr;
+          }
+          throw new Error(transientErr.message || 'Upload failed (network)');
+        }
+
+        if (uploadResult.mode === 'fallback') {
+          // Server is in local-storage mode — use the legacy POST.
+          uploadResult = await uploadFileMobileSimple(
+            filePath,
+            apiUrl,
+            currentToken,
+            metadata,
+            onProgress,
+            file,
+            recordId
+          );
+        }
 
         if (!uploadResult.success) {
-          // Check for token expiration
           if (isTokenExpiredError(uploadResult.error, uploadResult.status)) {
             const newToken = await getFreshToken();
             if (newToken && uploadAttempts < maxTokenRefreshAttempts) {
@@ -700,10 +742,39 @@ export const uploadWithVerification = async (options) => {
               continue;
             }
           }
-          throw new Error(uploadResult.error || 'Upload failed');
+          if (uploadResult.cancelled) {
+            return {
+              success: false,
+              canDelete: false,
+              error: 'Upload cancelled',
+              cancelled: true,
+            };
+          }
+          // Surface terminal failures with their original status so outer
+          // retry can distinguish "give up" vs "try again".
+          const err = new Error(uploadResult.error || 'Upload failed');
+          err.status = uploadResult.status;
+          err.canRetry = uploadResult.canRetry;
+          err.insufficientMinutes = uploadResult.insufficientMinutes;
+          throw err;
         }
 
         audioFileId = uploadResult.audioFileId;
+        // Direct flow already verified server-side; skip extra status poll.
+        if (uploadResult.verified) {
+          onStatusChange('complete');
+          sentryUploadSuccess(recordId, audioFileId);
+          return {
+            success: true,
+            audioFileId,
+            meetingId: uploadResult.meetingId,
+            transcriptionId: uploadResult.transcriptionId,
+            canDelete: true,
+            verified: true,
+            deduplicated: uploadResult.deduplicated,
+            gatewayFailed: uploadResult.gatewayFailed,
+          };
+        }
         break;
       } else {
         throw new Error('Unsupported platform');
