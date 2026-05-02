@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.0.10](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.9...v4.0.10) (2026-05-02)
+
+
+### Features
+
+* **upload:** direct-to-Azure-Blob uploads via presigned SAS URLs ([f89a693](https://github.com/xicoarm/suisse-notes-desktop/commit/f89a69392aa42f39dc2436bdaab4b6409ad0bc20))
+
 ### [4.0.9](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.8...v4.0.9) (2026-04-30)
 
 
