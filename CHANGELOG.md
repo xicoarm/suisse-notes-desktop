@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.0.11](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.10...v4.0.11) (2026-05-05)
+
+
+### Bug Fixes
+
+* **upload:** fall back to legacy POST when SAS init 404s or rejects 0-duration ([0a710c6](https://github.com/xicoarm/suisse-notes-desktop/commit/0a710c6f2d6933bf4d18a8faa5a5f1f0ff44e578))
+
 ### [4.0.10](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.9...v4.0.10) (2026-05-02)
 
 
