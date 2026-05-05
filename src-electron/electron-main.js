@@ -96,6 +96,15 @@ process.on('uncaughtException', (error) => {
 });
 
 process.on('unhandledRejection', (reason, promise) => {
+  const msg = reason?.message || String(reason);
+  // electron-updater's SimpleURLLoaderWrapper leaks unhandled rejections when
+  // a download chunk fails mid-transfer (network flicker, VPN reconnect,
+  // sleep/wake). The updater retries internally and surfaces a real failure
+  // via autoUpdater.on('error') if it gives up — so this rejection is noise.
+  if (/net::ERR_NETWORK_CHANGED|net::ERR_NETWORK_IO_SUSPENDED|net::ERR_INTERNET_DISCONNECTED/i.test(msg)) {
+    log.warn('Suppressed transient net:: rejection (likely auto-updater during network change):', msg);
+    return;
+  }
   log.error('Unhandled Rejection at:', promise, 'reason:', reason);
   Sentry.captureException(reason instanceof Error ? reason : new Error(String(reason)));
 });
@@ -3377,6 +3386,10 @@ async function pollMeetingTranscriptionStatus(meetingId, maxAttempts = 30) {
 // backward compatibility — used when:
 //   1. Server is in local-storage mode (returns mode: 'fallback' from init)
 //   2. /api/uploads/init returns 404 (older backend without these routes)
+//   3. /api/uploads/init returns 400 "durationSeconds is required" — the
+//      client's ffprobe duration probe failed (e.g. AV blocking ffprobe.exe
+//      on Windows). The legacy POST does its own server-side probe so it
+//      doesn't need a client-supplied duration.
 async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
   const abortController = new AbortController();
   activeAbortControllers.set(recordId, abortController);
@@ -3506,8 +3519,27 @@ async function tryDirectUpload({ recordId, filePath, metadata, abortController, 
       return { handled: true, result };
     }
 
-    // Direct flow returned a terminal failure — do not retry, do not fall back.
+    // Direct flow returned a terminal failure — do not retry, do not fall back…
+    // …unless the failure indicates the backend simply doesn't speak the SAS
+    // protocol or rejects our (sometimes-zero) client-probed duration. In
+    // those cases the legacy multipart POST path can still succeed because
+    // the server probes duration itself and has no SAS routing requirement.
     if (result.canRetry === false) {
+      if (result.status === 404) {
+        log.info(
+          `[upload] /api/uploads/init returned 404 for ${recordId} — backend lacks SAS routes; falling back to legacy POST`
+        );
+        return { handled: false, reason: 'init returned 404 (legacy backend)' };
+      }
+      if (
+        result.status === 400 &&
+        /durationSeconds.*required/i.test(result.error || '')
+      ) {
+        log.warn(
+          `[upload] /api/uploads/init rejected ${recordId} for missing durationSeconds (likely ffprobe spawn failure on client); falling back to legacy POST so the server can probe`
+        );
+        return { handled: false, reason: 'init rejected missing durationSeconds' };
+      }
       Sentry.captureMessage(`Upload terminal failure: ${result.error}`, {
         level: 'warning',
         tags: { operation: 'upload-direct', recordId, status: String(result.status || 0) },

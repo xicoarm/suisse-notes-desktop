@@ -276,12 +276,18 @@ export async function uploadViaPresignedSas(opts) {
   }
 
   if (!initResp.ok) {
-    if (initResp.status === 404) {
+    const status = initResp.status;
+    const error = initData.error || `Init failed: ${status}`;
+    if (status === 404) {
       // Backend doesn't have the new routes yet — fall back to legacy.
       return { mode: "fallback", reason: "backend_no_uploads_route" };
     }
-    const status = initResp.status;
-    const error = initData.error || `Init failed: ${status}`;
+    if (status === 400 && /durationSeconds.*required/i.test(error)) {
+      // Server requires a positive duration but the client couldn't probe one
+      // (e.g. iOS/Android codec the WebView can't read for `audio.duration`).
+      // Legacy POST probes server-side, so demote this to a fallback.
+      return { mode: "fallback", reason: "init_rejected_missing_duration" };
+    }
     if (status === 401) {
       return { mode: "azure", success: false, status: 401, error, canRetry: false };
     }
