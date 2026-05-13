@@ -275,6 +275,11 @@ export class BleDeviceManager {
     this.deviceId = bleDeviceId;
     this._notifyQueue = [];
     this._notifyWaiter = null;
+    // Clear any leftover cancel flag from a previous session — without this,
+    // a user who cancelled a download cannot reconnect until force-quit because
+    // _readNotification rejects every handshake read with "BLE download
+    // cancelled".
+    this._downloadAborted = false;
 
     // Ensure the BLE plugin knows about this device (needed for reconnection
     // to previously paired devices without a fresh scan)
@@ -419,6 +424,10 @@ export class BleDeviceManager {
     } catch { /* ignore */ }
     this.connected = false;
     this.deviceId = null;
+    // Belt-and-suspenders: any cancel flag from this session should not
+    // outlive the disconnect. connect() also resets this, but clearing here
+    // protects any reconnect path that skips the early reset.
+    this._downloadAborted = false;
   }
 
   /**
