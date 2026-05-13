@@ -501,7 +501,11 @@ export const useDeviceStore = defineStore('device', {
       try {
         const manager = getBleManager();
         const appUuid = await getOrCreateAppUuid();
-        const deviceInfo = await manager.connect(this.pairedDevice.deviceId, appUuid);
+        // Use rediscovery-aware reconnect: on iOS, runs a service-UUID-filtered
+        // scan first to repopulate the system discovery cache, which fixes the
+        // multi-day-suspension hang where centralManager.connect() never
+        // resolves until the app process is killed.
+        const deviceInfo = await manager.connectWithRediscovery(this.pairedDevice.deviceId, appUuid);
 
         this.deviceName = deviceInfo.name || deviceInfo.model || this.pairedDevice.name;
         this.deviceSN = deviceInfo.SN || this.pairedDevice.sn;

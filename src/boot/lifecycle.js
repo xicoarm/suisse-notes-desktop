@@ -4,7 +4,7 @@
  * Addresses vulnerability V2: No Graceful Shutdown on Force Quit
  */
 
-import { isCapacitor, isMobile, PlatformConstants } from '../utils/platform';
+import { isCapacitor, isMobile, isAndroid, PlatformConstants } from '../utils/platform';
 import { sentryAppBackground, sentryAppForeground, sentryNetworkChange, sentryLowBattery } from '../services/sentryHelpers';
 
 // Module-level state for lifecycle management
@@ -184,11 +184,15 @@ export const initializeLifecycle = async () => {
       }
     });
 
-    // Listen for back button (Android)
-    await App.addListener('backButton', (event) => {
-      console.log('Lifecycle: Back button pressed', event);
-      // Let Vue Router handle back navigation by default
-    });
+    // Listen for back button (Android only — the listener throws
+    // "Method not implemented" on iOS and would abort the rest of
+    // initializeLifecycle via the surrounding catch).
+    if (isAndroid()) {
+      await App.addListener('backButton', (event) => {
+        console.log('Lifecycle: Back button pressed', event);
+        // Let Vue Router handle back navigation by default
+      });
+    }
 
     lifecycleInitialized = true;
     console.log('Lifecycle: Initialized successfully');

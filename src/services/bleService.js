@@ -9,7 +9,7 @@
  * - Notify:  00001911-0000-1000-8000-00805f9b34fb (NOTIFY)
  */
 
-import { isCapacitor, isAndroid } from '../utils/platform';
+import { isCapacitor, isAndroid, isIOS } from '../utils/platform';
 import { addBreadcrumb, captureException, captureMessage } from '../boot/sentry';
 
 // BLE GATT UUIDs
@@ -343,6 +343,70 @@ export class BleDeviceManager {
       await this.disconnect();
       throw new Error(`Handshake failed: ${e.message}`);
     }
+  }
+
+  /**
+   * Reconnect to a previously paired device with iOS rediscovery first.
+   *
+   * On iOS, centralManager.connect() against a cached CBPeripheral hangs
+   * indefinitely (until the plugin's 10s timeout) when the peripheral has
+   * aged out of the system discovery cache — which happens after multi-day
+   * app suspension. The fix is to run an active service-UUID-filtered scan
+   * so iOS rediscovers the peripheral; the subsequent connect then resolves
+   * via cached discovery state.
+   *
+   * Android's connect() handles known peripherals natively, so we skip the
+   * scan there to avoid extra latency.
+   */
+  async connectWithRediscovery(bleDeviceId, appUuid, { rediscoveryTimeoutMs = 12000 } = {}) {
+    if (!this.ble) await this.initialize();
+
+    if (!isIOS()) {
+      return this.connect(bleDeviceId, appUuid);
+    }
+
+    addBreadcrumb({
+      category: 'ble',
+      message: `BLE rediscovery scan starting (target=${bleDeviceId}, timeout=${rediscoveryTimeoutMs}ms)`,
+      level: 'info'
+    });
+
+    let found = false;
+    let scanError = null;
+    try {
+      await this.ble.requestLEScan(
+        { services: [BLE_SERVICE_UUID], allowDuplicates: false },
+        (result) => {
+          if (result?.device?.deviceId === bleDeviceId) {
+            found = true;
+          }
+        }
+      );
+
+      const start = Date.now();
+      while (!found && Date.now() - start < rediscoveryTimeoutMs) {
+        await new Promise(r => setTimeout(r, 200));
+      }
+    } catch (e) {
+      scanError = e;
+      addBreadcrumb({
+        category: 'ble',
+        message: `BLE rediscovery scan error: ${e.message}`,
+        level: 'warning'
+      });
+    } finally {
+      try { await this.ble.stopLEScan(); } catch { /* ignore */ }
+    }
+
+    addBreadcrumb({
+      category: 'ble',
+      message: found
+        ? 'BLE rediscovery: target located, proceeding to connect'
+        : `BLE rediscovery: not located within timeout${scanError ? ' (scan failed)' : ''}, proceeding to connect`,
+      level: found ? 'info' : 'warning'
+    });
+
+    return this.connect(bleDeviceId, appUuid);
   }
 
   /**
