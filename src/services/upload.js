@@ -77,6 +77,27 @@ export async function recoverQueueFromPreferences() {
  * With validation and recovery from _tmp key on corruption (V12)
  * @returns {Array<{recordId: string, filePath: string, metadata: Object, retries: number, addedAt: number}>}
  */
+// Drop items older than QUEUE_ITEM_MAX_AGE_MS so an unprocessed queue
+// can't grow unbounded. Returns the cleaned array AND, if anything was
+// dropped, persists the cleaned version back to storage so the GC is a
+// one-time pay on each load rather than recomputing every getQueue().
+function _gcStaleItems(items, persistBackKey = null) {
+  if (!Array.isArray(items) || items.length === 0) return items || [];
+  const now = Date.now();
+  const fresh = items.filter(item => {
+    if (!item || typeof item.addedAt !== 'number') return true; // keep if no timestamp
+    return (now - item.addedAt) <= QUEUE_ITEM_MAX_AGE_MS;
+  });
+  const dropped = items.length - fresh.length;
+  if (dropped > 0) {
+    console.warn(`Upload queue GC: dropped ${dropped} item(s) older than ${QUEUE_ITEM_MAX_AGE_MS / (24 * 3600 * 1000)} days`);
+    if (persistBackKey) {
+      try { localStorage.setItem(persistBackKey, JSON.stringify(fresh)); } catch { /* best-effort */ }
+    }
+  }
+  return fresh;
+}
+
 export function getMobileUploadQueue() {
   try {
     const raw = localStorage.getItem(MOBILE_UPLOAD_QUEUE_KEY);
@@ -84,9 +105,10 @@ export function getMobileUploadQueue() {
       const parsed = JSON.parse(raw);
       // Validate: must be an array with valid entries
       if (Array.isArray(parsed)) {
-        return parsed.filter(item =>
+        const valid = parsed.filter(item =>
           item && typeof item.recordId === 'string' && typeof item.filePath === 'string'
         );
+        return _gcStaleItems(valid, MOBILE_UPLOAD_QUEUE_KEY);
       }
     }
   } catch {
@@ -103,10 +125,14 @@ export function getMobileUploadQueue() {
         const valid = parsed.filter(item =>
           item && typeof item.recordId === 'string' && typeof item.filePath === 'string'
         );
-        // Restore main key from _tmp
-        localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, JSON.stringify(valid));
+        const fresh = _gcStaleItems(valid, MOBILE_UPLOAD_QUEUE_KEY);
+        // Restore main key from _tmp (already done by _gcStaleItems if it
+        // dropped anything; otherwise persist the recovered set explicitly).
+        if (fresh.length === valid.length) {
+          localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, JSON.stringify(fresh));
+        }
         console.log('Upload queue recovered from _tmp key');
-        return valid;
+        return fresh;
       }
     }
   } catch {
@@ -1070,7 +1096,16 @@ const uploadFileMobileSimple = async (filePath, apiUrl, authToken, metadata, onP
     // Use original filename from metadata if available, or derive from path
     const fileName = metadata?.filename || fileObj?.name || (filePath ? filePath.split('/').pop() : 'recording.webm');
     formData.append('audio', fileBlob, fileName);
-    formData.append('metadata', JSON.stringify(metadata));
+    // Merge recordId into metadata so the backend's idempotency check
+    // (POST /api/desktop/upload route.ts:108 → findFirst({botSessionId:
+    // `desktop:${recordId}`})) actually fires. Without this, every retry
+    // of the same logical recording creates a NEW Meeting + a NEW
+    // audioFileId — server-side duplicates that burn the user's minute
+    // quota and create orphans in the Meeting table. The contract's
+    // UploadMetadata.recordId field already specifies this; we just
+    // weren't populating it.
+    const metadataWithId = recordId ? { ...metadata, recordId } : metadata;
+    formData.append('metadata', JSON.stringify(metadataWithId));
 
     // Calculate timeout based on file size (1 minute per 10MB, minimum 10 minutes)
     const fileSizeMB = fileBlob.size / (1024 * 1024);
