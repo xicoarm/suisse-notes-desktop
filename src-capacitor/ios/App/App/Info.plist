@@ -4,6 +4,11 @@
 <dict>
 	<key>CAPACITOR_DEBUG</key>
 	<string>$(CAPACITOR_DEBUG)</string>
+	<!-- App uses only Apple-provided standard encryption (HTTPS, Keychain).
+	     Declaring this skips the manual "Export Compliance" gate in TestFlight
+	     so new builds are immediately visible to testers. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
