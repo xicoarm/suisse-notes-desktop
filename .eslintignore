@@ -1,0 +1,5 @@
+# Vendored from backend (xicoarm/suisse-notes-v2). TypeScript, no local TS
+# tooling — Vite/esbuild transpiles at build time, eslint would need
+# @typescript-eslint/parser to lint it. Not worth the dependency for one
+# file. See the file's own header for the resync command.
+src/lib/api/desktop-contract.ts

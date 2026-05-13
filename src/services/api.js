@@ -34,10 +34,6 @@ export const API_ENDPOINTS = {
   upload: '/api/desktop/upload',
   uploadStatus: (audioFileId) => `/api/desktop/upload/${audioFileId}/status`,
 
-  // Transcription
-  transcribe: (audioFileId) => `/api/desktop/audio/${audioFileId}/transcribe`,
-  transcriptionStatus: (audioFileId) => `/api/desktop/audio/${audioFileId}/transcription`,
-
   // History
   history: '/api/desktop/history',
   recording: (recordingId) => `/api/desktop/recording/${recordingId}`,

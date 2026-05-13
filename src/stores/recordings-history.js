@@ -1,8 +1,45 @@
 import { defineStore } from 'pinia';
 import { useAuthStore } from './auth';
 import { useRecordingStore } from './recording';
-import { isElectron, isCapacitor } from '../utils/platform';
+import { isElectron, isCapacitor, getPlatform } from '../utils/platform';
 import { getApiUrlSync } from '../services/api';
+
+// Map a client `recording` object to the contract's RegisterRecordingRequest
+// shape (see src/lib/api/desktop-contract.ts → POST /api/desktop/recording).
+// The server only persists these four fields on register — any other client
+// state (filePath, fileSize, uploadStatus, source, deviceFilename) stays
+// client-side. Resync to the server happens via the upload + PATCH endpoints.
+function _toRegisterRequest(recording) {
+  return {
+    recordId: recording.id,
+    title: recording.title || undefined,
+    platform: getPlatform(),
+    startedAt: recording.createdAt || undefined,
+  };
+}
+
+// Map a client `updates` object to the contract's UpdateRecordingRequest
+// (PATCH /api/desktop/recording/{recordId}). The contract only accepts three
+// fields: { title?, status?, durationSeconds? } where status is one of
+// "RECORDING" | "UPLOADING" | "CANCELLED" (server owns the other transitions).
+// Anything else is silently dropped — those values are local-only client state.
+function _toUpdateRequest(updates) {
+  const out = {};
+  if (typeof updates?.title === 'string') out.title = updates.title;
+  if (typeof updates?.duration === 'number' && isFinite(updates.duration)) {
+    out.durationSeconds = Math.max(0, Math.round(updates.duration));
+  }
+  // Map the client's `uploadStatus` (richer enum) onto the contract's
+  // narrower `status`. Only the three client-owned transitions cross the
+  // wire; uploaded/failed/pending/transferring are server- or local-side.
+  if (typeof updates?.uploadStatus === 'string') {
+    if (updates.uploadStatus === 'uploading') out.status = 'UPLOADING';
+    else if (updates.uploadStatus === 'cancelled') out.status = 'CANCELLED';
+    // 'recording' (live capture) maps to RECORDING if we ever PATCH from there
+    else if (updates.uploadStatus === 'recording') out.status = 'RECORDING';
+  }
+  return out;
+}
 
 // Auto-retry constants
 const RETRY_INITIAL_DELAY_MS = 60_000;   // 1 minute
@@ -170,9 +207,11 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
       const unsynced = this.recordings.filter(r => r._serverSynced === false);
       for (const recording of unsynced) {
         try {
-          await _serverFetch('/api/desktop/history', {
+          // POST /api/desktop/recording is the contract endpoint for
+          // registering a single recording. Idempotent on recordId.
+          await _serverFetch('/api/desktop/recording', {
             method: 'POST',
-            body: JSON.stringify(recording)
+            body: JSON.stringify(_toRegisterRequest(recording))
           });
           recording._serverSynced = true;
         } catch {
@@ -311,18 +350,25 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
           }
           return { success: false, error: result.error };
         } else {
-          // Mobile/Web: POST to server, update local cache
+          // Mobile/Web: POST to server (contract endpoint registers a
+          // single recording), update local cache. Idempotent on recordId
+          // — calling twice returns the existing server-side resource.
           try {
-            const data = await _serverFetch('/api/desktop/history', {
+            const data = await _serverFetch('/api/desktop/recording', {
               method: 'POST',
-              body: JSON.stringify(recordingWithUser)
+              body: JSON.stringify(_toRegisterRequest(recordingWithUser))
             });
 
-            const saved = data.recording || recordingWithUser;
-            saved._serverSynced = true;
-            this.recordings.unshift(saved);
+            // Server returns { recording: RecordingResource } but the client
+            // keeps its richer local shape (filePath, uploadStatus, etc.).
+            // Mark synced so the retry loop skips it next time.
+            recordingWithUser._serverSynced = true;
+            // Adopt server-side meetingId/audioFileId if returned, otherwise
+            // keep local-only state intact.
+            if (data?.recording?.meetingId) recordingWithUser.meetingId = data.recording.meetingId;
+            this.recordings.unshift(recordingWithUser);
             _setCachedRecordings(userId, this.recordings);
-            return { success: true, recording: saved };
+            return { success: true, recording: recordingWithUser };
           } catch (error) {
             // Server failed — save to local cache only so history isn't lost
             console.warn('Could not save recording to server, caching locally:', error);
@@ -372,13 +418,20 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
           }
           _setCachedRecordings(userId, this.recordings);
 
-          try {
-            await _serverFetch(`/api/desktop/recording/${id}`, {
-              method: 'PATCH',
-              body: JSON.stringify(updates)
-            });
-          } catch (error) {
-            console.warn('Could not update recording on server:', error);
+          // Only PATCH the server if there's a contract-compliant change
+          // (title / status transition the client owns / durationSeconds).
+          // Other local-only fields like filePath, audioFileId, transcriptionId
+          // are dropped — they're either server-managed or local cache.
+          const patchBody = _toUpdateRequest(updates);
+          if (Object.keys(patchBody).length > 0) {
+            try {
+              await _serverFetch(`/api/desktop/recording/${id}`, {
+                method: 'PATCH',
+                body: JSON.stringify(patchBody)
+              });
+            } catch (error) {
+              console.warn('Could not update recording on server:', error);
+            }
           }
 
           return { success: true };
@@ -406,18 +459,15 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
           }
           return { success: false, error: result.error };
         } else {
-          // Mobile/Web: remove locally and try server
+          // Mobile/Web: remove locally. The desktop API contract does NOT
+          // include DELETE on /api/desktop/recording/{recordId} (see
+          // src/lib/api/desktop-contract.ts DESKTOP_API_CONTRACT) — the
+          // server intentionally has no client-side delete to prevent
+          // accidental loss of uploaded transcriptions. Local removal hides
+          // it from the user's history list; the server-side meeting can be
+          // archived/deleted later through the meeting UI.
           this.recordings = this.recordings.filter(r => r.id !== id);
           _setCachedRecordings(userId, this.recordings);
-
-          try {
-            await _serverFetch(`/api/desktop/recording/${id}`, {
-              method: 'DELETE'
-            });
-          } catch (error) {
-            console.warn('Could not delete recording on server:', error);
-          }
-
           return { success: true };
         }
       } catch (error) {
