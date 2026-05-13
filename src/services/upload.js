@@ -537,20 +537,54 @@ const readFileData = async (filePath) => {
  * @param {string} audioFileId - Server-assigned file ID
  * @param {string} localChecksum - Local file checksum for verification
  * @param {number} maxAttempts - Maximum polling attempts
+ * @param {string} [authToken] - Bearer token. The status route requires auth
+ *   (matches the contract in src/lib/api/desktop-contract.ts). Without this
+ *   every poll returns 401, the client retries 15 times, then mistakenly
+ *   raises "Server confirmation timeout" — even though the audio actually
+ *   uploaded fine. Pure bug, see commit history.
  * @returns {Promise<{persisted: boolean, verified: boolean, error?: string}>}
  */
-const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts = 15) => {
+const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts = 15, authToken = null, getFreshToken = null) => {
   const pollInterval = 2000; // 2 seconds between polls
+  let currentToken = authToken;
+  // We only refresh-and-retry once per poll session — if the second attempt
+  // also 401s, the token can't be saved and we accept trust-based fallback
+  // (the audio bytes already landed via the authenticated POST).
+  let didTokenRefresh = false;
+  const buildHeaders = () => (currentToken ? { Authorization: `Bearer ${currentToken}` } : {});
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const response = await fetch(`${apiUrl}/api/desktop/upload/${audioFileId}/status`);
+      const response = await fetch(`${apiUrl}/api/desktop/upload/${audioFileId}/status`, { headers: buildHeaders() });
 
       if (!response.ok) {
         // Server doesn't support status endpoint yet, fall back to trust-based
         if (response.status === 404) {
           console.warn('Upload status endpoint not available, using trust-based confirmation');
           return { persisted: true, verified: false, fallback: true };
+        }
+        // 401: try one token refresh on the first occurrence, then retry the
+        // same poll attempt. If that's also 401, fall back to trust-based —
+        // the user shouldn't see "failed" because of a polling-side auth
+        // problem after the audio bytes already landed via the authenticated
+        // POST. Refresh is at most once per pollServerStatus call.
+        if (response.status === 401) {
+          if (!didTokenRefresh && typeof getFreshToken === 'function') {
+            didTokenRefresh = true;
+            try {
+              const newToken = await getFreshToken();
+              if (newToken && newToken !== currentToken) {
+                currentToken = newToken;
+                console.warn('Upload status endpoint returned 401; refreshed token and retrying once');
+                attempt--; // retry the same attempt with the new token
+                continue;
+              }
+            } catch (refreshErr) {
+              console.warn('Upload status token refresh threw:', refreshErr.message);
+            }
+          }
+          console.warn('Upload status endpoint returned 401; using trust-based confirmation');
+          return { persisted: true, verified: false, fallback: true, authError: true };
         }
         throw new Error(`Status check failed: ${response.status}`);
       }
@@ -766,6 +800,16 @@ export const uploadWithVerification = async (options) => {
         }
 
         audioFileId = uploadResult.audioFileId;
+        // Guard: if the server reported success=true but didn't echo back an
+        // audioFileId (we've seen this with malformed response bodies or
+        // legacy endpoints returning 200 with an unexpected schema), treat
+        // the upload as failed. We CANNOT poll a null audioFileId for status
+        // and we CANNOT later link a transcription to a missing id — the
+        // recording would be effectively orphaned server-side. Better to
+        // fail loudly and let the user retry than silently lose the link.
+        if (!audioFileId) {
+          throw new Error('Upload reported success but server returned no audioFileId');
+        }
         // Direct flow already verified server-side; skip extra status poll.
         if (uploadResult.verified) {
           onStatusChange('complete');
@@ -789,7 +833,7 @@ export const uploadWithVerification = async (options) => {
 
     // Phase 2: Verify server persistence
     onStatusChange('verifying');
-    const verification = await pollServerStatus(apiUrl, audioFileId, localChecksum);
+    const verification = await pollServerStatus(apiUrl, audioFileId, localChecksum, 15, currentToken, getFreshToken);
 
     if (!verification.persisted) {
       console.error('Server did not confirm file persistence:', verification.error);
@@ -1034,12 +1078,27 @@ const uploadFileMobileSimple = async (filePath, apiUrl, authToken, metadata, onP
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const response = JSON.parse(xhr.responseText);
-            resolve({
-              success: true,
-              audioFileId: response.audioFileId || response.id
-            });
+            const fileId = response.audioFileId || response.id;
+            if (!fileId) {
+              // 2xx response but no audioFileId in the body — the bytes may
+              // have landed but we have no handle to verify or link the
+              // transcription. Treat as a retryable failure so the user
+              // doesn't end up with a recording orphaned on the server.
+              resolve({
+                success: false,
+                error: 'Server returned success but no audioFileId',
+                canRetry: true,
+              });
+            } else {
+              resolve({ success: true, audioFileId: fileId });
+            }
           } catch (e) {
-            resolve({ success: true, audioFileId: null });
+            // 2xx but unparseable body — same reasoning as the no-id case.
+            resolve({
+              success: false,
+              error: 'Server returned malformed response body',
+              canRetry: true,
+            });
           }
         } else if (xhr.status === 401) {
           // Token expired - signal for retry with refresh

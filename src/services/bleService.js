@@ -637,6 +637,22 @@ export class BleDeviceManager {
    */
   /**
    * Abort an in-progress download. Causes downloadFile() to reject.
+   *
+   * Cancellation protocol:
+   *   1. Set _downloadAborted = true. _readNotification() checks this
+   *      synchronously at entry and immediately rejects with
+   *      "BLE download cancelled" — so any subsequent reads short-circuit.
+   *   2. If a _readNotification() is already in flight (the 30s wait inside
+   *      downloadFile's chunk loop, or a similar wait in the sync-state
+   *      cleanup), it has registered _notifyWaiter. We reject that waiter
+   *      directly, which clearTimeout's its internal timer and rejects its
+   *      promise — the in-flight await throws within a microtask.
+   *   3. Null out _notifyWaiter BEFORE invoking reject so a notification
+   *      racing through _onNotify can't find a stale reference.
+   *
+   * downloadFile()'s outer catch then sees err.message === 'BLE download
+   * cancelled', runs the cancel cleanup (delete partial file, mark skipped),
+   * and re-throws 'cancelled' to the caller.
    */
   abortDownload() {
     this._downloadAborted = true;

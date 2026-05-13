@@ -237,14 +237,17 @@
           <q-tooltip>{{ expanded ? $t('hide') : $t('play') }}</q-tooltip>
         </q-btn>
 
+        <!-- For recordings WITHOUT a local file (so no expand): keep a small
+             delete icon in the row. Red so it's clearly destructive. For
+             recordings WITH a file, the delete action lives inside the
+             expandable section below — less misclick surface. -->
         <q-btn
+          v-if="!recording.filePath && !uploading"
           flat
           round
-          class="delete-btn"
-          :icon="isRecoverable ? 'delete_outline' : 'delete_forever'"
-          :color="isRecoverable ? 'grey-7' : 'negative'"
+          icon="delete_forever"
+          color="negative"
           size="sm"
-          :disable="uploading"
           @click="onDelete"
         >
           <q-tooltip>{{ $t('delete') }}</q-tooltip>
@@ -261,6 +264,17 @@
           :file-path="recording.filePath"
           :fallback-duration="recording.duration || 0"
         />
+        <div class="card-player-actions">
+          <q-btn
+            flat
+            no-caps
+            :icon="isRecoverable ? 'delete_outline' : 'delete_forever'"
+            :color="isRecoverable ? 'grey-7' : 'negative'"
+            :label="$t('delete')"
+            :disable="uploading"
+            @click="onDelete"
+          />
+        </div>
       </div>
     </q-slide-transition>
 
@@ -351,8 +365,15 @@ export default {
     // only drops the local file — the cloud copy is still available. Without a
     // cloud copy, delete is permanent loss, so the dialog escalates and the
     // "also delete file from disk" checkbox defaults to unchecked.
+    //
+    // pending_verification counts as recoverable: the upload succeeded, the
+    // bytes are on the server, the audioFileId is known. The only thing we
+    // haven't yet confirmed is the post-upload status poll (often a server
+    // race or trust-based fallback). The user shouldn't lose this recording.
     const isRecoverable = computed(() =>
-      props.recording.uploadStatus === 'uploaded' && !!props.recording.audioFileId
+      (props.recording.uploadStatus === 'uploaded' ||
+       props.recording.uploadStatus === 'pending_verification')
+      && !!props.recording.audioFileId
     );
 
     const formattedDate = computed(() => {
@@ -380,6 +401,11 @@ export default {
         pending: 'statusPending',
         uploading: 'statusUploading',
         uploaded: 'statusUploaded',
+        // 'pending_verification' = audio bytes uploaded successfully, but
+        // server-side persistence check timed out / fell back to trust-based.
+        // The file IS on the server, we just haven't been able to confirm it
+        // yet. Soft state — the recording is safely on the server.
+        pending_verification: 'statusPendingVerification',
         failed: 'statusFailed',
         recording: 'statusRecording',
         cancelled: 'statusCancelled',
@@ -660,17 +686,24 @@ export default {
   flex-shrink: 0;
 }
 
-// Constant 8px breathing room before the destructive action, applied on
-// the button itself so the gap doesn't shift with the preceding button
-// set (which varies by upload status).
-.delete-btn {
-  margin-left: 8px;
-}
-
 .card-player {
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px solid #e2e8f0;
+}
+
+// Right-aligned action area below the audio player. Hosts the delete
+// button (red, with label) so destructive actions live inside the
+// expanded section rather than next to the small action icons — the
+// previous adjacency between retry/upload and delete was causing
+// users to mis-tap delete and permanently lose unrecoverable
+// recordings. See commit 5045bc6 / 7bc7e8d for the prior approach.
+.card-player-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #e2e8f0;
 }
 
 .delete-dialog {

@@ -867,11 +867,21 @@ export const useDeviceStore = defineStore('device', {
 
         if (result.success) {
           await historyStore.updateRecording(recordId, {
-            uploadStatus: 'uploaded',
+            uploadStatus: result.verified === false ? 'pending_verification' : 'uploaded',
             transcriptionId: result.transcriptionId,
             audioFileId: result.audioFileId
           });
-          addBreadcrumb({ category: 'ble', message: `Device file uploaded: ${file.file}`, level: 'info' });
+          addBreadcrumb({
+            category: 'ble',
+            message: `Device file uploaded: ${file.file}${result.verified === false ? ' (verification pending)' : ''}`,
+            level: 'info'
+          });
+          // Mark synced only on true success — the BLE file no longer needs
+          // re-downloading. On upload failure (soft or hard), DON'T mark synced
+          // so the next syncAllNew picks it up and the user isn't forced
+          // through per-card retry. The local filePath is preserved so the
+          // user's per-card retry button still works without a re-download.
+          await this._addSyncedFile(file.file);
         } else {
           await historyStore.updateRecording(recordId, {
             uploadStatus: 'failed',
@@ -883,9 +893,6 @@ export const useDeviceStore = defineStore('device', {
           });
           softUploadError = result.error || 'Upload failed';
         }
-
-        // Mark as synced (file is on phone now)
-        await this._addSyncedFile(file.file);
 
       } catch (err) {
         const isCancelled = this._cancelRequested ||
@@ -929,8 +936,13 @@ export const useDeviceStore = defineStore('device', {
         // Non-cancel hard error (BLE download, filesystem write, or upload
         // threw). Mark pending so the per-card retry button can drive a fresh
         // attempt, and propagate so the caller knows not to report success.
+        // Deliberately NOT calling _addSyncedFile — the BLE file is either
+        // not on phone at all (download failed) or is partially written
+        // (save failed) or is on phone but unuploaded (upload threw). In
+        // every case we want the next syncAllNew to attempt this file again
+        // rather than skipping it because the syncedFiles set thinks we're
+        // done with it.
         await historyStore.updateRecording(recordId, { uploadStatus: 'pending' });
-        await this._addSyncedFile(file.file);
         captureException(err, {
           tags: { action: 'ble_upload' },
           extra: { filename: file.file, recordId }
