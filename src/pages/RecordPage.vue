@@ -96,6 +96,7 @@
                 v-model="systemAudioEnabled"
                 color="primary"
                 size="sm"
+                :disable="recordingStore.isPaused"
                 @update:model-value="toggleSystemAudio"
               />
             </div>
@@ -225,6 +226,7 @@
               color="primary"
               size="sm"
               dense
+              :disable="recordingStore.isPaused"
               @update:model-value="toggleSystemAudio"
             />
           </div>
@@ -825,10 +827,19 @@ const handleMicSwitch = async (newDeviceId) => {
   }
 };
 
-// System audio toggle functionality
+// System audio toggle functionality.
+// While paused, toggling ON desyncs the merged audio because AudioTee runs
+// in wall-clock time and would write PCM during the pause window — see
+// useRecorder.toggleSystemAudioDuringRecording (bug_005). UI should
+// disable the switch while paused; this is the runtime safety net for the
+// case where the disabled-prop binding hasn't propagated yet or is bypassed.
 const toggleSystemAudio = async (enabled) => {
-  if (recordingStore.isRecording || recordingStore.isPaused) {
-    // Toggle dynamically during recording
+  if (recordingStore.isPaused) {
+    // Defensive: useRecorder will also reject this, but a no-op here keeps
+    // the UI tidy (no spinner / no error toast unless the user really tries).
+    return;
+  }
+  if (recordingStore.isRecording) {
     await toggleSystemAudioDuringRecording(enabled);
   } else {
     await setSystemAudioEnabled(enabled);

@@ -214,18 +214,85 @@ export function useRecorder() {
     await recordingService.cancelRecording(recordingStore, stopSystemAudio);
   };
 
-  // Toggle system audio during an active recording
+  // Toggle system audio during an active recording.
+  //
+  // Three failure modes the ultrareview surfaced (all desktop-only, all
+  // shipped in v4.0.11):
+  //
+  //   bug_001 — On Windows, `addSystemAudioStream` returns false if the
+  //   mixing pipeline was torn down or createMediaStreamSource threw.
+  //   The previous code ignored that and proceeded to mark the toggle ON,
+  //   leaving the UI lying that capture was active. Now we check it.
+  //
+  //   bug_002 — On macOS, `captureSystemAudio` resolves to literal `true`
+  //   (AudioTee writes PCM to disk directly, no MediaStream). The
+  //   `instanceof MediaStream` check fell through silently, so
+  //   recordingService.systemAudioActive stayed false even during active
+  //   capture — wrong silence-warning copy and aggressive thresholds. Now
+  //   we call setSystemAudioActive(true) for the AudioTee path.
+  //
+  //   bug_005 — If invoked while recording is paused, the offsetMs is
+  //   frozen at pause-time but AudioTee spawns immediately and writes
+  //   wall-clock PCM through the pause window — silent ~30 s desync on
+  //   resume. Refusing the toggle while paused is the smallest correct
+  //   fix; UI should also disable the toggle while isPaused, but the
+  //   guard here prevents the corruption regardless of UI state.
   const toggleSystemAudioDuringRecording = async (enabled) => {
     if (enabled) {
-      // Start AudioTee capture in main process (writes to file)
-      const result = await captureSystemAudio(recordingStore.recordId);
-      if (result) {
-        await setSystemAudioEnabled(true);
+      // bug_005 guard: refuse the toggle if we're not actively recording.
+      // AudioTee runs in wall-clock time and would desync from the mic
+      // timeline by pause_duration if started during a pause window.
+      if (recordingStore.isPaused) {
+        console.warn('Refusing system-audio toggle while recording is paused (would desync merge)');
+        return { success: false, error: 'Cannot toggle system audio while paused. Resume recording first.' };
       }
+      if (!recordingStore.isRecording) {
+        console.warn('Refusing system-audio toggle while not actively recording');
+        return { success: false, error: 'No active recording to attach system audio to.' };
+      }
+
+      // Pass current recording offset so macOS AudioTee can pad with silence
+      // and align the captured PCM with the mic timeline at merge time.
+      const offsetMs = Math.max(0, Math.round((recordingStore.duration || 0) * 1000));
+      const result = await captureSystemAudio(recordingStore.recordId, offsetMs);
+      if (!result) {
+        return { success: false, error: 'Failed to start system audio capture' };
+      }
+
+      if (result instanceof MediaStream) {
+        // Windows: desktopCapturer returns a MediaStream that must be wired
+        // into the active mixing pipeline.
+        const attached = recordingService.addSystemAudioStream(result);
+        if (!attached) {
+          // bug_001: mixing pipeline torn down OR createMediaStreamSource
+          // threw. Tear down the captured stream and the OS-level capture
+          // so the recording indicator and OS resources are released,
+          // and DO NOT flip the toggle ON — the user would otherwise see
+          // "system audio recording" in the UI while nothing was in the mix.
+          try { result.getTracks().forEach(t => t.stop()); } catch { /* ignore */ }
+          await stopSystemAudio();
+          return { success: false, error: 'Could not attach system audio to the active recording' };
+        }
+      } else {
+        // macOS: AudioTee. No MediaStream to attach; tell recordingService
+        // capture is active so silence warnings use the gentler messages
+        // and the relaxed thresholds (120s / 300s).
+        recordingService.setSystemAudioActive(true);
+      }
+
+      await setSystemAudioEnabled(true);
+      return { success: true };
     } else {
-      // Stop AudioTee capture
+      // Detach from the live mix (Windows) or just clear the flag (macOS,
+      // since there was no MediaStream attached), then stop the underlying
+      // capture source. removeSystemAudioStream is a no-op if no Windows
+      // stream was attached; the explicit setSystemAudioActive(false) covers
+      // the macOS path where systemStream is null.
+      recordingService.removeSystemAudioStream();
+      recordingService.setSystemAudioActive(false);
       await stopSystemAudio();
       await setSystemAudioEnabled(false);
+      return { success: true };
     }
   };
 

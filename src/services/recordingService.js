@@ -397,6 +397,31 @@ export function addSystemAudioStream(sysStream) {
 }
 
 /**
+ * Mark system audio capture as active (or inactive) without wiring a
+ * MediaStream into the Web Audio mixing pipeline. Used by the macOS
+ * AudioTee path, which captures system audio in the main process and
+ * writes PCM directly to disk — there is no MediaStream to attach.
+ *
+ * Without this, recordingService.systemAudioActive stayed false during
+ * AudioTee capture, so `getMicHealthMessage` showed the strict
+ * "no microphone input" wording instead of the gentler "mic is silent —
+ * system audio is still being recorded" copy, and the relaxed silence
+ * thresholds (120 s / 300 s) never kicked in. See ultrareview bug_002.
+ */
+export function setSystemAudioActive(active) {
+  const next = !!active;
+  if (systemAudioActive === next) return;
+  systemAudioActive = next;
+  emit('systemAudioChange', next);
+  updateMicHealthState(
+    micHealthState.status,
+    micHealthState.reasonCode,
+    micHealthState.message,
+    { systemAudioActive: next }
+  );
+}
+
+/**
  * Remove system audio from the active recording mix
  */
 export function removeSystemAudioStream() {

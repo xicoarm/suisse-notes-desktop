@@ -52,7 +52,10 @@ export function useSystemAudio() {
   };
 
   // Start system audio capture — platform-specific
-  const startCapture = async (recordId) => {
+  // offsetMs: recording-timeline offset at which capture begins (for mid-recording
+  //           toggles on macOS, AudioTee pads the file with silence to align with
+  //           the mic track at merge time). 0 when starting at recording start.
+  const startCapture = async (recordId, offsetMs = 0) => {
     if (!systemAudioEnabled.value || !isSupported.value || !isElectron()) return null;
 
     isLoading.value = true;
@@ -67,7 +70,7 @@ export function useSystemAudio() {
       }
 
       // macOS: use AudioTee via main process
-      const result = await window.electronAPI.systemAudio.start(recordId);
+      const result = await window.electronAPI.systemAudio.start(recordId, offsetMs);
       if (!result.success) {
         error.value = result.error;
         if (result.error?.includes('permission') || result.error?.includes('denied')) {
@@ -158,8 +161,8 @@ export function useSystemAudio() {
   };
 
   // Legacy API compat — captureSystemAudio now delegates to startCapture
-  const captureSystemAudio = async (recordId) => {
-    return startCapture(recordId);
+  const captureSystemAudio = async (recordId, offsetMs = 0) => {
+    return startCapture(recordId, offsetMs);
   };
 
   return {
