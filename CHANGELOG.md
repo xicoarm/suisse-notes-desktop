@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [4.1.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.11...v4.1.0) (2026-05-13)
+
+
+### Features
+
+* **contract:** vendor desktop API contract + client-side drift guard ([e2f6baa](https://github.com/xicoarm/suisse-notes-desktop/commit/e2f6baa0260d839edb8daf3d39b18d64eddf666f))
+
+
+### Bug Fixes
+
+* **ble:** Phase 3 — reconnect mutex + post-timeout stale-notification drop ([1270d18](https://github.com/xicoarm/suisse-notes-desktop/commit/1270d18de273fb2668aef9679670d834828e355b))
+* **ble:** reset _downloadAborted on connect/disconnect so cancel doesn't permanently brick reconnect ([c1da123](https://github.com/xicoarm/suisse-notes-desktop/commit/c1da1231fa93ffc548a7c6adcafe4b056e6775a2))
+* **ble:** scan before reconnect on iOS to fix multi-day suspension hang ([68301cb](https://github.com/xicoarm/suisse-notes-desktop/commit/68301cb9afe86543c6594417f81045b57ff873ef))
+* **ci:** build iOS on macos-26 (Xcode 26) to satisfy Apple SDK requirement ([4670345](https://github.com/xicoarm/suisse-notes-desktop/commit/4670345b40fff19e90633ed34142af223151c945))
+* **desktop-audio:** forward offsetMs from preload bridge to main process ([cb3c758](https://github.com/xicoarm/suisse-notes-desktop/commit/cb3c758abf88655e6dd444556055498616a6feb8))
+* **desktop-audio:** system-audio toggle integrity (bug_001, bug_002, bug_005) ([22bd174](https://github.com/xicoarm/suisse-notes-desktop/commit/22bd17422e8b555d0be758df299d11d2deb59556))
+* **history:** drop card divider, restore original button spacing ([417ca4d](https://github.com/xicoarm/suisse-notes-desktop/commit/417ca4df4b42a12cf877d82be4e77c001735ce43))
+* **history:** make recording delete safer in history list ([5045bc6](https://github.com/xicoarm/suisse-notes-desktop/commit/5045bc6ce8bae5cd4fdb75fed67bb8bc6516040f))
+* **ios:** declare non-exempt encryption to skip TestFlight compliance prompt ([1a2c701](https://github.com/xicoarm/suisse-notes-desktop/commit/1a2c7019264b3f3d31e72d7927a41ad482637130))
+* **layout:** remove iOS bottom-nav safe-area padding so menu sits flush ([41b09dd](https://github.com/xicoarm/suisse-notes-desktop/commit/41b09dd1cdeca8e60f26d3f83e1254a938d66839))
+* **sentry:** restore non-transaction event delivery + close 3 silent paths ([0339147](https://github.com/xicoarm/suisse-notes-desktop/commit/0339147ee022e84192f027d5d51cd8a30e36b708))
+* **sso:** use ASWebAuthenticationSession on iOS so OAuth callback returns to app ([ca743cc](https://github.com/xicoarm/suisse-notes-desktop/commit/ca743cc48b63fa8375dec9c5862e6faae21a0936))
+* **sync:** stop reporting "Sync complete" when uploads actually failed ([8cbbe91](https://github.com/xicoarm/suisse-notes-desktop/commit/8cbbe914d183b8bc59de5b45a4c17177aaf8699e))
+* **upload+ble:** Phase 1 — stop the silent-failure traps in upload + BLE cancel ([15ea64c](https://github.com/xicoarm/suisse-notes-desktop/commit/15ea64c389168869b6a5d42ec8c5ca84539cdc72))
+* **upload:** recognize server contract status enum in pollServerStatus ([5c950fa](https://github.com/xicoarm/suisse-notes-desktop/commit/5c950fa2c2aad940e690f5df565d7eb68ee63fcf))
+* **upload:** use Capacitor.convertFileSrc for iOS 26 WKWebView compatibility ([7bc7e8d](https://github.com/xicoarm/suisse-notes-desktop/commit/7bc7e8df3ce411abc759f3f1f2bbc58536b7a6e8))
+* **upload:** wire recordId into POST metadata + GC stale queue items ([48644be](https://github.com/xicoarm/suisse-notes-desktop/commit/48644bed4a1b8baee2002825fd04c6d27506549e))
+
 ### [4.0.11](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.10...v4.0.11) (2026-05-05)
 
 
