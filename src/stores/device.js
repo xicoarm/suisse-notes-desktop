@@ -158,6 +158,13 @@ export const useDeviceStore = defineStore('device', {
     _intentionalDisconnect: false,
     _appStateListener: null,
     _initialized: false,
+    // Mutex shared between _scheduleReconnect's exponential-backoff loop,
+    // _startPersistentReconnect's 15s interval, and retryConnect. Prevents
+    // two reconnect paths from racing into autoConnect() simultaneously and
+    // sending two concurrent BLE connect requests for the same device. The
+    // autoConnect 'connecting' guard only catches double-tap on a single
+    // call stack; this catches cross-timer races.
+    _reconnectInProgress: false,
 
     // Persistent reconnect & discovery
     _persistentReconnectTimer: null,
@@ -1189,6 +1196,18 @@ export const useDeviceStore = defineStore('device', {
             this.connectionState === 'lost') {
           return;
         }
+        // Cross-timer mutex — see _reconnectInProgress comment in state.
+        // If the persistent-reconnect timer is mid-attempt, skip this round
+        // and let the next scheduled backoff try (we don't burn the
+        // _reconnectAttempts counter for a skipped tick).
+        if (this._reconnectInProgress) {
+          addBreadcrumb({ category: 'ble', message: 'Skipped scheduled reconnect — another path is in progress', level: 'info' });
+          // Re-arm at the next backoff slot so we don't dead-end.
+          const delay = Math.min(5000 * Math.pow(1.5, Math.max(this._reconnectAttempts - 1, 0)), 30000);
+          this._reconnectTimer = setTimeout(attempt, delay);
+          return;
+        }
+        this._reconnectInProgress = true;
 
         this._reconnectAttempts++;
         addBreadcrumb({
@@ -1221,6 +1240,8 @@ export const useDeviceStore = defineStore('device', {
           // Backoff: 5s, 7.5s, 11s, 17s, 25s, 30s (capped)
           const delay = Math.min(5000 * Math.pow(1.5, this._reconnectAttempts - 1), 30000);
           this._reconnectTimer = setTimeout(attempt, delay);
+        } finally {
+          this._reconnectInProgress = false;
         }
       };
 
@@ -1244,6 +1265,18 @@ export const useDeviceStore = defineStore('device', {
         this.connectionState = 'disconnected';
       }
       this._intentionalDisconnect = false;
+      // Honor the cross-timer reconnect mutex — if a background path is
+      // already running, the user's manual tap shouldn't race a duplicate
+      // BLE connect onto the wire. Wait briefly then proceed.
+      if (this._reconnectInProgress) {
+        addBreadcrumb({ category: 'ble', message: 'retryConnect: another reconnect in progress, waiting…', level: 'info' });
+        // Brief wait — at most one BLE connect round-trip (~12s rediscovery + connect timeout).
+        // After 13s, if still locked, proceed anyway (caller's UI feedback matters).
+        for (let i = 0; i < 13 && this._reconnectInProgress; i++) {
+          await new Promise(r => setTimeout(r, 1000));
+        }
+      }
+      this._reconnectInProgress = true;
       try {
         return await this.autoConnect();
       } catch (e) {
@@ -1251,6 +1284,8 @@ export const useDeviceStore = defineStore('device', {
         // immediately, but propagate the error so UI can notify the user.
         this._scheduleReconnect(1500);
         throw e;
+      } finally {
+        this._reconnectInProgress = false;
       }
     },
 
@@ -1277,6 +1312,11 @@ export const useDeviceStore = defineStore('device', {
         if (!this.pairedDevice || this._intentionalDisconnect) return;
         if (this.connectionState !== 'disconnected') return;
         if (document.hidden) return; // Only when app is in foreground
+        // Cross-timer mutex — if scheduled-reconnect is mid-attempt OR a
+        // retryConnect is in flight, skip this safety-net tick. The next
+        // interval (15s later) will retry.
+        if (this._reconnectInProgress) return;
+        this._reconnectInProgress = true;
 
         try {
           addBreadcrumb({ category: 'ble', message: 'Persistent reconnect attempt', level: 'info' });
@@ -1284,6 +1324,8 @@ export const useDeviceStore = defineStore('device', {
           addBreadcrumb({ category: 'ble', message: 'Persistent reconnect succeeded', level: 'info' });
         } catch {
           // Will try again on next interval
+        } finally {
+          this._reconnectInProgress = false;
         }
       }, RECONNECT_INTERVAL_MS);
     },

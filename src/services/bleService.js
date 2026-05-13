@@ -83,6 +83,12 @@ export class BleDeviceManager {
     // Notification queue for async response handling
     this._notifyQueue = [];
     this._notifyWaiter = null;
+    // Timestamp of the last _readNotification timeout. If a notification
+    // arrives shortly after a timeout (the device's response in flight
+    // when we gave up), it's stale data for a command we already abandoned
+    // — queueing it would poison the next command's read. _onNotify drops
+    // notifications inside this window.
+    this._lastReadTimeoutAt = 0;
     this._onDisconnectCallback = null;
     this._recordingStateCallback = null;
     this._downloadAborted = false;
@@ -923,6 +929,20 @@ export class BleDeviceManager {
       this._notifyWaiter = null;
       waiter.resolve(data);
     } else {
+      // No waiter. If we just timed out a _readNotification within the
+      // last 5 s, this notification is almost certainly the late-arriving
+      // response for that abandoned command. Queueing it would poison the
+      // next command's _readNotification with stale bytes — exactly the
+      // kind of corruption that produced the "stale-response cascade"
+      // bug. Drop instead.
+      if (Date.now() - this._lastReadTimeoutAt < 5000) {
+        addBreadcrumb({
+          category: 'ble',
+          message: `Dropped late notification (within 5s of prior timeout, ${data.length} bytes)`,
+          level: 'warning'
+        });
+        return;
+      }
       this._notifyQueue.push(data);
     }
   }
@@ -988,6 +1008,9 @@ export class BleDeviceManager {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this._notifyWaiter = null;
+        // Record the timeout so _onNotify drops any late-arriving response
+        // for the now-abandoned command within the next 5 s window.
+        this._lastReadTimeoutAt = Date.now();
         reject(new Error('BLE response timeout'));
       }, timeout);
 
