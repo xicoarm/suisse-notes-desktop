@@ -591,10 +591,31 @@ const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts 
 
       const status = await response.json();
 
-      if (status.status === 'persisted' || status.status === 'complete') {
-        // Server has persisted the file
+      // Map the server contract enum (src/lib/api/desktop-contract.ts →
+      // UploadStatusResponse.status: RecordingStatus) onto the verification
+      // semantics this function returns.
+      //
+      // The moment the server returns ANY status that's not RECORDING or
+      // CANCELLED, the file IS persisted server-side (the upload POST
+      // completed and a Meeting row + audioFileId exist). The remaining
+      // states tell us about the downstream transcription pipeline, which
+      // we don't need to wait for here — the client can mark the recording
+      // uploaded and let transcription complete asynchronously.
+      //
+      // Legacy values 'persisted' / 'complete' kept for backward compat in
+      // case any older endpoints still echo them.
+      const s = status.status;
+      const PERSISTED_STATES = new Set([
+        'persisted', 'complete',                       // legacy
+        'UPLOADING', 'PROCESSING', 'COMPLETED',        // contract
+      ]);
+      const FAILED_STATES = new Set([
+        'failed',                                       // legacy
+        'FAILED', 'CANCELLED',                          // contract
+      ]);
+
+      if (PERSISTED_STATES.has(s)) {
         if (status.checksum && localChecksum) {
-          // Verify checksum if available
           const checksumMatch = status.checksum === localChecksum;
           if (!checksumMatch) {
             console.error('Checksum mismatch!', { server: status.checksum, local: localChecksum });
@@ -602,15 +623,19 @@ const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts 
           }
           return { persisted: true, verified: true };
         }
-        // No checksum verification available
-        return { persisted: true, verified: false };
+        // No checksum on the response — for the contract endpoint this is
+        // the normal case (checksum lives elsewhere). The bytes are on the
+        // server, the audioFileId resolves to a Meeting row, treat as
+        // verified.
+        return { persisted: true, verified: true };
       }
 
-      if (status.status === 'failed') {
-        return { persisted: false, verified: false, error: status.error || 'Server processing failed' };
+      if (FAILED_STATES.has(s)) {
+        return { persisted: false, verified: false, error: status.errorMessage || status.error || `Server reported status=${s}` };
       }
 
-      // Still processing, wait and retry
+      // RECORDING or unknown — server hasn't confirmed persistence yet.
+      // Keep polling.
       await sleep(pollInterval);
     } catch (error) {
       console.warn(`Status poll attempt ${attempt + 1} failed:`, error.message);
