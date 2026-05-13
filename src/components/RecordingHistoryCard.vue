@@ -237,14 +237,10 @@
           <q-tooltip>{{ expanded ? $t('hide') : $t('play') }}</q-tooltip>
         </q-btn>
 
-        <span
-          v-if="!uploading"
-          class="action-divider"
-          aria-hidden="true"
-        />
         <q-btn
           flat
           round
+          class="delete-btn"
           :icon="isRecoverable ? 'delete_outline' : 'delete_forever'"
           :color="isRecoverable ? 'grey-7' : 'negative'"
           size="sm"
@@ -660,14 +656,15 @@ export default {
 .card-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
+  flex-shrink: 0;
 }
 
-.action-divider {
-  width: 1px;
-  height: 20px;
-  background: #e2e8f0;
-  margin: 0 4px;
+// Constant 8px breathing room before the destructive action, applied on
+// the button itself so the gap doesn't shift with the preceding button
+// set (which varies by upload status).
+.delete-btn {
+  margin-left: 8px;
 }
 
 .card-player {
