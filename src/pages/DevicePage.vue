@@ -697,7 +697,15 @@ export default {
         await deviceStore.syncAllNew();
         $q.notify({ type: 'positive', message: t('syncComplete') });
       } catch (e) {
-        if (e.message !== 'cancelled') {
+        if (e.message === 'cancelled') return;
+        if (e.failureCount) {
+          $q.notify({
+            type: 'warning',
+            message: t('syncPartialFailure', { failed: e.failureCount, total: e.totalCount }),
+            caption: t('retryFromRecordingCard'),
+            timeout: 6000
+          });
+        } else {
           $q.notify({ type: 'negative', message: t('syncFailed'), caption: e.message, timeout: 5000 });
         }
       }

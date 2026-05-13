@@ -695,6 +695,10 @@ export const useDeviceStore = defineStore('device', {
 
       sendLocalNotification(NOTIF_SYNC_PROGRESS, t('bleTransferBanner'), t('bleTransferDetecting', { count: newFiles.length }));
 
+      // Collect per-file failures across the batch so we can report an
+      // accurate result at the end instead of silently completing.
+      const failures = [];
+
       try {
         for (const file of newFiles) {
           if (this._cancelRequested) break;
@@ -704,19 +708,33 @@ export const useDeviceStore = defineStore('device', {
           try {
             await this._downloadAndUpload(file);
           } catch (perFileErr) {
-            // Per-file cancel advances to the next file instead of aborting the
-            // whole batch. Only a user-initiated FULL cancel (set via
-            // cancelSync()) breaks the outer loop above. A non-cancel error
-            // propagates out so the batch enters 'error' state.
+            // Per-file cancel (single-file UI cancel without a full-batch
+            // cancel): drop this file and continue to the next.
             if (perFileErr.message === 'cancelled' && !this._cancelRequested) {
               addBreadcrumb({ category: 'ble', message: `Skipped ${file.file} (per-file cancel) — continuing batch`, level: 'info' });
               continue;
             }
-            throw perFileErr;
+            // Full-batch user cancel: stop processing further files but let
+            // the outer cancel handler set the final state.
+            if (this._cancelRequested) {
+              throw perFileErr;
+            }
+            // Real failure: record it, continue with the next file.
+            failures.push({ file: file.file, error: perFileErr.message });
+            addBreadcrumb({ category: 'ble', message: `Sync failed for ${file.file}: ${perFileErr.message} — continuing batch`, level: 'warning' });
           }
         }
         if (this._cancelRequested) {
           this.syncState = 'idle';
+        } else if (failures.length > 0) {
+          this.syncState = 'error';
+          this.syncError = `${failures.length}/${newFiles.length} failed`;
+          this.syncErrorPhase = this.syncPhase;
+          const aggregateErr = new Error(this.syncError);
+          aggregateErr.failureCount = failures.length;
+          aggregateErr.totalCount = newFiles.length;
+          aggregateErr.failures = failures;
+          throw aggregateErr;
         } else {
           this.syncState = 'complete';
           sendLocalNotification(NOTIF_SYNC_COMPLETE, t('syncComplete'), t('bleSyncCompleteBody', { count: newFiles.length }));
@@ -727,9 +745,13 @@ export const useDeviceStore = defineStore('device', {
           this.syncErrorPhase = null;
           return;
         }
-        this.syncState = 'error';
-        this.syncError = e.message;
-        this.syncErrorPhase = this.syncPhase;
+        // Aggregate (failureCount set) or single hard error — both surface
+        // to the UI so the toast can be honest about what happened.
+        if (this.syncState !== 'error') {
+          this.syncState = 'error';
+          this.syncError = e.message;
+          this.syncErrorPhase = this.syncPhase;
+        }
         throw e;
       } finally {
         this.currentSyncFile = null;
@@ -763,6 +785,13 @@ export const useDeviceStore = defineStore('device', {
         source: 'device',
         deviceFilename: file.file
       });
+
+      // Captures a soft upload failure (uploadWithVerification returned
+      // success=false) so we can throw AFTER the try/catch — throwing from
+      // inside the try falls into the catch block and clobbers the 'failed'
+      // status with 'pending'. Until this is propagated, syncAllNew used to
+      // claim "Sync complete" while recordings stayed visibly broken.
+      let softUploadError = null;
 
       try {
         // Phase 1: BLE download
@@ -852,6 +881,7 @@ export const useDeviceStore = defineStore('device', {
             tags: { action: 'ble_upload' },
             extra: { filename: file.file, recordId, error: result.error }
           });
+          softUploadError = result.error || 'Upload failed';
         }
 
         // Mark as synced (file is on phone now)
@@ -896,13 +926,23 @@ export const useDeviceStore = defineStore('device', {
           throw new Error('cancelled');
         }
 
-        // Non-cancel error: keep as pending for auto-retry
+        // Non-cancel hard error (BLE download, filesystem write, or upload
+        // threw). Mark pending so the per-card retry button can drive a fresh
+        // attempt, and propagate so the caller knows not to report success.
         await historyStore.updateRecording(recordId, { uploadStatus: 'pending' });
         await this._addSyncedFile(file.file);
         captureException(err, {
           tags: { action: 'ble_upload' },
           extra: { filename: file.file, recordId }
         });
+        throw err;
+      }
+
+      // Soft upload failure (uploadWithVerification returned success=false).
+      // History is already marked 'failed'. Propagate so syncAllNew counts it
+      // and the UI doesn't show "Sync complete" over a broken result.
+      if (softUploadError) {
+        throw new Error(softUploadError);
       }
     },
 
@@ -944,12 +984,16 @@ export const useDeviceStore = defineStore('device', {
             uploadStatus: 'failed',
             uploadError: result.error || 'Upload failed'
           });
+          // Propagate so the UI shows the retry actually failed rather than
+          // a misleading "Sync complete" toast.
+          throw new Error(result.error || 'Upload failed');
         }
       } catch (err) {
         await historyStore.updateRecording(rec.id, {
           uploadStatus: 'failed',
           uploadError: err.message
         });
+        throw err;
       }
     },
 
