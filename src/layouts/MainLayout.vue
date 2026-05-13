@@ -382,7 +382,7 @@
     <!-- Mobile Bottom Navigation -->
     <q-footer
       v-if="isMobile() && authStore.isAuthenticated"
-      class="mobile-bottom-nav"
+      :class="['mobile-bottom-nav', { 'mobile-bottom-nav--no-safe-area': isIOS() }]"
     >
       <q-tabs
         v-model="currentTab"
@@ -426,7 +426,7 @@ import { useAuthStore } from '../stores/auth';
 import { useRecordingStore } from '../stores/recording';
 import { useMinutesStore } from '../stores/minutes';
 import { useRouter, useRoute } from 'vue-router';
-import { isElectron, isMobile } from '../utils/platform';
+import { isElectron, isMobile, isIOS } from '../utils/platform';
 import { useLanguage } from '../composables/useLanguage';
 import BleTransferBanner from '../components/BleTransferBanner.vue';
 import NewDevicePopup from '../components/NewDevicePopup.vue';
@@ -1154,6 +1154,13 @@ onUnmounted(() => {
   background: white;
   border-top: 1px solid #e2e8f0;
   padding-bottom: var(--android-nav-bar-height, env(safe-area-inset-bottom, 0));
+
+  // On iOS we don't want any reserved space below the tab bar — the menu
+  // should sit flush at the bottom edge. Android keeps the inset because
+  // the system nav bar lives there.
+  &--no-safe-area {
+    padding-bottom: 0;
+  }
 
   .mobile-nav-tabs {
     :deep(.q-tab) {
