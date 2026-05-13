@@ -81,18 +81,43 @@ async function readBlobFromCapacitorPath(filePath) {
     captureMessage(`upload: readBlob getFileUri FAILED — ${uriResult.error}`, "error");
     throw new Error(uriResult.error || "Could not resolve file URI");
   }
-  let uri = uriResult.uri;
-  // On Android, Capacitor returns a real `file://` URL. On iOS the format
-  // is similar. Both are accepted by WebView fetch().
-  if (uri && !/^file:|^https?:/.test(uri)) {
-    uri = `file://${uri}`;
+  let rawUri = uriResult.uri;
+  if (rawUri && !/^file:|^https?:/.test(rawUri)) {
+    rawUri = `file://${rawUri}`;
   }
-  captureMessage(`upload: readBlob fetch URI=${uri.slice(0, 80)}...`, "info");
+
+  // iOS 26 WKWebView blocks fetch() of raw file:// URIs to the app's
+  // Documents directory. Capacitor.convertFileSrc rewrites file:// into
+  // a capacitor://localhost/_capacitor_file_/... URL served by Capacitor's
+  // native bridge, which the WebView IS allowed to fetch. Without this,
+  // every upload from an iOS 26-built bundle dies with "Load failed ()".
+  let fetchableUri = rawUri;
+  if (isCapacitor()) {
+    try {
+      const { Capacitor } = await import('@capacitor/core');
+      if (typeof Capacitor.convertFileSrc === 'function') {
+        fetchableUri = Capacitor.convertFileSrc(rawUri);
+      }
+    } catch (e) {
+      captureMessage(`upload: readBlob Capacitor.convertFileSrc unavailable — ${e.message}`, "warning");
+    }
+  }
+
+  captureMessage(`upload: readBlob fetch URI=${fetchableUri.slice(0, 90)}`, "info");
   let resp;
   try {
-    resp = await fetch(uri);
+    resp = await fetch(fetchableUri);
   } catch (fetchErr) {
-    captureMessage(`upload: readBlob fetch(file://) THREW — name=${fetchErr.name} msg=${fetchErr.message}`, "error");
+    captureMessage(`upload: readBlob fetch THREW — name=${fetchErr.name} msg=${fetchErr.message}`, "error");
+    // If convertFileSrc gave us a capacitor:// URI that still failed, fall
+    // back to native Filesystem.readFile (slower, base64-roundtrip, but
+    // works on every iOS version since Capacitor has supported it).
+    if (isCapacitor() && fetchableUri !== rawUri) {
+      captureMessage(`upload: readBlob falling back to Filesystem.readFile (base64)`, "warning");
+      const blob = await _readBlobViaFilesystemReadFile(filePath);
+      captureMessage(`upload: readBlob OK via Filesystem.readFile — size=${blob.size} bytes`, "info");
+      return blob;
+    }
     throw fetchErr;
   }
   if (!resp.ok) {
@@ -102,6 +127,23 @@ async function readBlobFromCapacitorPath(filePath) {
   const blob = await resp.blob();
   captureMessage(`upload: readBlob OK — size=${blob.size} bytes, type=${blob.type}`, "info");
   return blob;
+}
+
+// Slow-path fallback: read the file as base64 via Capacitor's native bridge,
+// then decode in JS. Used only when convertFileSrc + WebView fetch both
+// fail. Costs ~2x memory (base64 string + decoded bytes simultaneously)
+// but works regardless of WKWebView restrictions.
+async function _readBlobViaFilesystemReadFile(filePath) {
+  const { Filesystem, Directory } = await import('@capacitor/filesystem');
+  const { data } = await Filesystem.readFile({
+    path: filePath,
+    directory: Directory.Documents,
+  });
+  // data is a base64 string on iOS/Android when no encoding is specified.
+  const binary = atob(typeof data === 'string' ? data : '');
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: detectContentType(filePath) });
 }
 
 /**
