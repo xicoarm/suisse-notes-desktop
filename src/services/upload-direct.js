@@ -20,6 +20,7 @@
 
 import { getFileUri } from "./storage";
 import { isCapacitor } from "../utils/platform";
+import { captureMessage } from "../boot/sentry";
 
 // HTTP status codes that should never be retried — the request will fail
 // identically next time. Mirrors the desktop side.
@@ -74,8 +75,10 @@ function sleep(ms) {
  * Uses fetch() on the file:// URI which streams the bytes natively.
  */
 async function readBlobFromCapacitorPath(filePath) {
+  captureMessage(`upload: readBlob start path=${filePath}`, "info");
   const uriResult = await getFileUri(filePath);
   if (!uriResult.success) {
+    captureMessage(`upload: readBlob getFileUri FAILED — ${uriResult.error}`, "error");
     throw new Error(uriResult.error || "Could not resolve file URI");
   }
   let uri = uriResult.uri;
@@ -84,11 +87,21 @@ async function readBlobFromCapacitorPath(filePath) {
   if (uri && !/^file:|^https?:/.test(uri)) {
     uri = `file://${uri}`;
   }
-  const resp = await fetch(uri);
+  captureMessage(`upload: readBlob fetch URI=${uri.slice(0, 80)}...`, "info");
+  let resp;
+  try {
+    resp = await fetch(uri);
+  } catch (fetchErr) {
+    captureMessage(`upload: readBlob fetch(file://) THREW — name=${fetchErr.name} msg=${fetchErr.message}`, "error");
+    throw fetchErr;
+  }
   if (!resp.ok) {
+    captureMessage(`upload: readBlob fetch returned non-OK status=${resp.status}`, "error");
     throw new Error(`Could not read file (status ${resp.status})`);
   }
-  return await resp.blob();
+  const blob = await resp.blob();
+  captureMessage(`upload: readBlob OK — size=${blob.size} bytes, type=${blob.type}`, "info");
+  return blob;
 }
 
 /**
@@ -249,6 +262,7 @@ export async function uploadViaPresignedSas(opts) {
   const durationSeconds = Number(metadata?.duration) || 0;
 
   // 2. Init.
+  captureMessage(`upload: POST /api/uploads/init starting — host=${apiBaseUrl} size=${fileSize}`, "info");
   let initResp, initData;
   try {
     initResp = await fetch(`${apiBaseUrl}/api/uploads/init`, {
@@ -267,10 +281,13 @@ export async function uploadViaPresignedSas(opts) {
       signal: abortSignal,
     });
     initData = await initResp.json().catch(() => ({}));
+    captureMessage(`upload: POST /api/uploads/init returned status=${initResp.status} mode=${initData?.mode || '-'}`, "info");
   } catch (err) {
     if (err?.name === "AbortError") {
+      captureMessage("upload: POST /api/uploads/init ABORTED by caller", "warning");
       return { mode: "azure", success: false, cancelled: true, canRetry: false };
     }
+    captureMessage(`upload: POST /api/uploads/init THREW — name=${err.name} msg=${err.message}`, "error");
     // Network-level failure → caller can retry
     throw err;
   }

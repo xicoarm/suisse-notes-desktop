@@ -13,6 +13,7 @@ import { isElectron, isCapacitor, isMobile, PlatformConstants } from '../utils/p
 import { calculateUploadChecksum, verifyUploadChecksum } from './integrity';
 import { readFile, deleteFile } from './storage';
 import { sentryUploadStart, sentryUploadSuccess, sentryUploadFail } from './sentryHelpers';
+import { captureMessage } from '../boot/sentry';
 import { uploadViaPresignedSas, isTransientUploadError } from './upload-direct';
 
 // --- Persistent Mobile Upload Queue (localStorage + Preferences backup) ---
@@ -698,6 +699,7 @@ export const uploadWithVerification = async (options) => {
         // Try direct-to-Azure-Blob via SAS URL (works on iOS, Android, browser
         // file picker). Falls through to simple POST when the server reports
         // mode: 'fallback' (i.e. running in local-storage mode).
+        captureMessage(`upload: uploadWithVerification entering SAS path — recordId=${recordId} hasFile=${!!file} hasFilePath=${!!filePath}`, 'info');
         let uploadResult;
         try {
           uploadResult = await uploadViaPresignedSas({
@@ -711,9 +713,11 @@ export const uploadWithVerification = async (options) => {
               onProgress(progress, bytesUploaded, bytesTotal);
             },
           });
+          captureMessage(`upload: uploadViaPresignedSas returned mode=${uploadResult?.mode} success=${uploadResult?.success}`, 'info');
         } catch (transientErr) {
           // Bubbled-up transient error from upload-direct — only network
           // failures should land here. Surface to outer retry.
+          captureMessage(`upload: uploadViaPresignedSas THREW — transient=${isTransientUploadError(transientErr)} name=${transientErr.name} msg=${transientErr.message}`, 'error');
           if (!isTransientUploadError(transientErr)) {
             throw transientErr;
           }
@@ -722,6 +726,7 @@ export const uploadWithVerification = async (options) => {
 
         if (uploadResult.mode === 'fallback') {
           // Server is in local-storage mode — use the legacy POST.
+          captureMessage(`upload: falling back to legacy POST /api/desktop/upload reason=${uploadResult.reason || '-'}`, 'info');
           uploadResult = await uploadFileMobileSimple(
             filePath,
             apiUrl,
@@ -731,6 +736,7 @@ export const uploadWithVerification = async (options) => {
             file,
             recordId
           );
+          captureMessage(`upload: legacy POST returned success=${uploadResult?.success} status=${uploadResult?.status || '-'} error=${uploadResult?.error || '-'}`, uploadResult?.success ? 'info' : 'warning');
         }
 
         if (!uploadResult.success) {
