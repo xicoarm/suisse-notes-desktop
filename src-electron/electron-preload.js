@@ -220,7 +220,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // System Audio (AudioTee — macOS 14.2+ Core Audio Taps)
   systemAudio: {
     isSupported: () => ipcRenderer.invoke('systemAudio:isSupported'),
-    start: (recordId) => ipcRenderer.invoke('systemAudio:start', recordId),
+    start: (recordId, offsetMs = 0) => ipcRenderer.invoke('systemAudio:start', recordId, offsetMs),
     stop: () => ipcRenderer.invoke('systemAudio:stop'),
     // Legacy (kept for backward compat)
     getSources: () => ipcRenderer.invoke('systemAudio:getSources'),
