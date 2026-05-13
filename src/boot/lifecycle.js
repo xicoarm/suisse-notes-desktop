@@ -6,6 +6,7 @@
 
 import { isCapacitor, isMobile, isAndroid, PlatformConstants } from '../utils/platform';
 import { sentryAppBackground, sentryAppForeground, sentryNetworkChange, sentryLowBattery } from '../services/sentryHelpers';
+import { captureMessage } from './sentry';
 
 // Module-level state for lifecycle management
 let lifecycleInitialized = false;
@@ -172,10 +173,18 @@ export const initializeLifecycle = async () => {
     // Start battery monitoring (check every 60 seconds)
     await startBatteryMonitoring();
 
-    // Listen for app URL open (deep links — incl. SSO callback)
+    // Listen for app URL open (deep links — incl. SSO callback).
+    // Diagnostic Sentry breadcrumbs prove the iOS/Android deep-link routing
+    // reached the JS layer when SSO seems to "do nothing" after the OAuth
+    // round trip.
     await App.addListener('appUrlOpen', (data) => {
       console.log('Lifecycle: App opened via URL', data.url);
+      try { captureMessage(`sso: appUrlOpen fired url=${(data.url || '').slice(0, 200)}`, 'info'); } catch { /* sentry not loaded */ }
       const ssoPayload = parseSSOCallbackUrl(data.url);
+      try {
+        const tag = ssoPayload ? (ssoPayload.error ? 'error:' + ssoPayload.error : 'success+token') : 'null';
+        captureMessage(`sso: parseSSOCallbackUrl result=${tag}`, 'info');
+      } catch { /* sentry not loaded */ }
       if (ssoPayload) {
         // Hand off to the LoginPage (or wherever it's listened to) via a
         // platform-neutral CustomEvent. Mirrors the Electron auth:ssoCallback

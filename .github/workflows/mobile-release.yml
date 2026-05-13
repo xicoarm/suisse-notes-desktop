@@ -271,11 +271,15 @@ jobs:
             const p = 'src-capacitor/ios/App/App/capacitor.config.json';
             const c = JSON.parse(fs.readFileSync(p, 'utf8'));
             if (!c.packageClassList) c.packageClassList = [];
-            if (!c.packageClassList.includes('BackgroundRecordingPlugin')) {
-              c.packageClassList.push('BackgroundRecordingPlugin');
-              fs.writeFileSync(p, JSON.stringify(c, null, '\t'));
-              console.log('Added BackgroundRecordingPlugin to packageClassList');
+            let changed = false;
+            for (const cls of ['BackgroundRecordingPlugin', 'SSOAuthPlugin']) {
+              if (!c.packageClassList.includes(cls)) {
+                c.packageClassList.push(cls);
+                console.log('Added', cls, 'to packageClassList');
+                changed = true;
+              }
             }
+            if (changed) fs.writeFileSync(p, JSON.stringify(c, null, '\t'));
           "
 
       # Note: This project uses Swift Package Manager (SPM), not CocoaPods

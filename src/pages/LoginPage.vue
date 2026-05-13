@@ -250,6 +250,7 @@ import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '../stores/auth';
 import { isElectron, isCapacitor, getPlatform } from '../utils/platform';
 import { useLanguage } from '../composables/useLanguage';
+import { captureMessage } from '../boot/sentry';
 
 const router = useRouter();
 const authStore = useAuthStore();
@@ -289,10 +290,8 @@ async function cancelSSOLogin() {
   ssoLoading.value = null;
   authStore.clearError();
   if (isMobileApp) {
-    try {
-      const { Browser } = await import('@capacitor/browser');
-      await Browser.close();
-    } catch (e) { /* already closed */ }
+    const { closeSSO } = await import('../services/ssoAuth');
+    await closeSSO();
   }
 }
 
@@ -340,26 +339,28 @@ onUnmounted(async () => {
 });
 
 async function handleSSOPayload(payload) {
+  try {
+    captureMessage(`sso: handleSSOPayload entry hasToken=${!!payload?.token} hasError=${!!payload?.error}`, 'info');
+  } catch { /* sentry not loaded */ }
   clearSSOTimeoutHandle();
   ssoLoading.value = null;
   if (!payload || payload.error) {
-    authStore.error = payload?.error || 'SSO login failed';
-    // Close any in-app browser left open (mobile)
+    // User-cancel is silent (no error banner); other errors show in red.
+    authStore.error = payload?.error === 'canceled' ? null : (payload?.error || 'SSO login failed');
     if (isMobileApp) {
-      try {
-        const { Browser } = await import('@capacitor/browser');
-        await Browser.close();
-      } catch (e) { /* already closed */ }
+      const { closeSSO } = await import('../services/ssoAuth');
+      await closeSSO();
     }
     return;
   }
   const result = await authStore.loginWithSSO(payload);
+  try {
+    captureMessage(`sso: loginWithSSO returned success=${result.success}`, 'info');
+  } catch { /* sentry not loaded */ }
   if (result.success) {
     if (isMobileApp) {
-      try {
-        const { Browser } = await import('@capacitor/browser');
-        await Browser.close();
-      } catch (e) { /* already closed */ }
+      const { closeSSO } = await import('../services/ssoAuth');
+      await closeSSO();
     }
     router.push('/record');
   }
@@ -406,11 +407,15 @@ async function startSSOFlow(provider) {
         throw new Error(result?.error || `Could not open ${provider} login`);
       }
     } else if (isMobileApp) {
-      const { Browser } = await import('@capacitor/browser');
+      const { openSSO } = await import('../services/ssoAuth');
       const { getApiUrlSync } = await import('../services/api');
       const platform = getPlatform();  // 'ios' | 'android'
       const url = `${getApiUrlSync()}/api/auth/${provider}/login?client=${platform}`;
-      await Browser.open({ url });
+      // On iOS this awaits ASWebAuthenticationSession's completion and
+      // dispatches 'sso:callback' itself; on Android it just opens Custom
+      // Tabs and the deep-link/lifecycle.js path delivers the callback
+      // event later.
+      await openSSO({ url, callbackScheme: 'suissenotes' });
     } else {
       throw new Error('SSO is not supported on this platform');
     }
