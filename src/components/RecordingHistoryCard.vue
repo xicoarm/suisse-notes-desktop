@@ -237,11 +237,16 @@
           <q-tooltip>{{ expanded ? $t('hide') : $t('play') }}</q-tooltip>
         </q-btn>
 
+        <span
+          v-if="!uploading"
+          class="action-divider"
+          aria-hidden="true"
+        />
         <q-btn
           flat
           round
-          icon="delete_outline"
-          color="grey-7"
+          :icon="isRecoverable ? 'delete_outline' : 'delete_forever'"
+          :color="isRecoverable ? 'grey-7' : 'negative'"
           size="sm"
           :disable="uploading"
           @click="onDelete"
@@ -268,10 +273,13 @@
       <q-card class="delete-dialog">
         <q-card-section>
           <div class="text-h6">
-            {{ $t('deleteRecordingTitle') }}
+            {{ isRecoverable ? $t('deleteRecordingTitle') : $t('deleteRecordingTitleUnrecoverable') }}
           </div>
-          <div class="text-grey-7 q-mt-sm">
-            {{ $t('deleteRecordingMessage') }}
+          <div
+            class="q-mt-sm"
+            :class="isRecoverable ? 'text-grey-7' : 'text-negative'"
+          >
+            {{ isRecoverable ? $t('deleteRecordingMessage') : $t('deleteRecordingMessageUnrecoverable') }}
           </div>
         </q-card-section>
 
@@ -343,6 +351,14 @@ export default {
     const linkLoading = ref(false);
     const isDesktop = isElectron();
 
+    // A recording is "recoverable" once it has a cloud copy. Deleting it then
+    // only drops the local file — the cloud copy is still available. Without a
+    // cloud copy, delete is permanent loss, so the dialog escalates and the
+    // "also delete file from disk" checkbox defaults to unchecked.
+    const isRecoverable = computed(() =>
+      props.recording.uploadStatus === 'uploaded' && !!props.recording.audioFileId
+    );
+
     const formattedDate = computed(() => {
       const data = historyStore.formatDateData(props.recording.createdAt);
       return data.formatted || '';
@@ -360,9 +376,7 @@ export default {
       props.uploading ? 'uploading' : props.recording.uploadStatus
     );
 
-    const isUploaded = computed(() =>
-      props.recording.uploadStatus === 'uploaded' && !!props.recording.audioFileId
-    );
+    const isUploaded = isRecoverable;
 
     const statusLabel = computed(() => {
       if (props.uploading) return t('statusUploading');
@@ -418,6 +432,11 @@ export default {
     };
 
     const onDelete = () => {
+      // Reset the "delete file from disk" checkbox each time so the default
+      // matches the current recording's recoverability — unchecked when the
+      // recording has no cloud copy yet, so accidental confirmation still
+      // leaves the audio file on disk for manual recovery.
+      deleteFile.value = isRecoverable.value;
       showDeleteDialog.value = true;
     };
 
@@ -437,6 +456,7 @@ export default {
       formattedSize,
       currentStatus,
       isUploaded,
+      isRecoverable,
       statusLabel,
       onCardClick,
       onCopyLink,
@@ -639,7 +659,15 @@ export default {
 
 .card-actions {
   display: flex;
-  gap: 2px;
+  align-items: center;
+  gap: 6px;
+}
+
+.action-divider {
+  width: 1px;
+  height: 20px;
+  background: #e2e8f0;
+  margin: 0 4px;
 }
 
 .card-player {
