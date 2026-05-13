@@ -365,14 +365,11 @@ export class BleDeviceManager {
       return this.connect(bleDeviceId, appUuid);
     }
 
-    addBreadcrumb({
-      category: 'ble',
-      message: `BLE rediscovery scan starting (target=${bleDeviceId}, timeout=${rediscoveryTimeoutMs}ms)`,
-      level: 'info'
-    });
+    captureMessage(`BLE rediscovery scan starting (target=${bleDeviceId}, timeout=${rediscoveryTimeoutMs}ms)`, 'info');
 
     let found = false;
     let scanError = null;
+    const scanStart = Date.now();
     try {
       await this.ble.requestLEScan(
         { services: [BLE_SERVICE_UUID], allowDuplicates: false },
@@ -383,28 +380,22 @@ export class BleDeviceManager {
         }
       );
 
-      const start = Date.now();
-      while (!found && Date.now() - start < rediscoveryTimeoutMs) {
+      while (!found && Date.now() - scanStart < rediscoveryTimeoutMs) {
         await new Promise(r => setTimeout(r, 200));
       }
     } catch (e) {
       scanError = e;
-      addBreadcrumb({
-        category: 'ble',
-        message: `BLE rediscovery scan error: ${e.message}`,
-        level: 'warning'
-      });
+      captureMessage(`BLE rediscovery scan error: ${e.message}`, 'warning');
     } finally {
       try { await this.ble.stopLEScan(); } catch { /* ignore */ }
     }
 
-    addBreadcrumb({
-      category: 'ble',
-      message: found
-        ? 'BLE rediscovery: target located, proceeding to connect'
-        : `BLE rediscovery: not located within timeout${scanError ? ' (scan failed)' : ''}, proceeding to connect`,
-      level: found ? 'info' : 'warning'
-    });
+    const elapsedMs = Date.now() - scanStart;
+    if (found) {
+      captureMessage(`BLE rediscovery: target located in ${elapsedMs}ms, proceeding to connect`, 'info');
+    } else {
+      captureMessage(`BLE rediscovery: NOT located in ${elapsedMs}ms${scanError ? ' (scan errored)' : ''} — falling through to connect anyway`, 'warning');
+    }
 
     return this.connect(bleDeviceId, appUuid);
   }

@@ -1132,8 +1132,13 @@ export const useDeviceStore = defineStore('device', {
           await this.syncAllNew();
         }
       } catch (e) {
-        // Connection may have dropped — stop polling to avoid noise
+        // Connection may have dropped — stop polling to avoid noise.
+        // Capture so we can see WHY auto-sync stopped instead of going dark.
         console.log('Auto-sync poll error:', e.message);
+        captureException(e, {
+          tags: { action: 'auto_sync_poll' },
+          extra: { failureCount: e.failureCount, totalCount: e.totalCount }
+        });
         this.stopAutoSync();
       }
     },

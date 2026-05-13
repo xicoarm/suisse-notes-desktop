@@ -242,6 +242,7 @@ import { isElectron, isCapacitor, isMobile as isMobilePlatform } from '../utils/
 import { uploadWithVerification } from '../services/upload';
 import { getApiUrlSync } from '../services/api';
 import { pickAudioFile } from '../services/filePicker';
+import { captureException } from '../boot/sentry';
 import RecordingHistoryCard from '../components/RecordingHistoryCard.vue';
 
 export default {
@@ -392,6 +393,11 @@ export default {
             uploadError: result.error
           });
 
+          captureException(new Error(`History upload failed: ${result.error || 'unknown'}`), {
+            tags: { action: 'history_upload', upload_path: 'history_card' },
+            extra: { recordingId: recording.id, status: result.status, source: recording.source }
+          });
+
           $q.notify({
             type: 'negative',
             message: result.error || 'Upload failed',
@@ -402,6 +408,11 @@ export default {
         await historyStore.updateRecording(recording.id, {
           uploadStatus: 'failed',
           uploadError: error.message
+        });
+
+        captureException(error, {
+          tags: { action: 'history_upload', upload_path: 'history_card' },
+          extra: { recordingId: recording.id, source: recording.source }
         });
 
         $q.notify({
@@ -471,6 +482,10 @@ export default {
         }
       } catch (e) {
         console.warn('Resync error:', e);
+        captureException(e, {
+          tags: { action: 'history_resync' },
+          extra: { recordingId: recording.id, deviceFilename: recording.deviceFilename }
+        });
       }
     };
 

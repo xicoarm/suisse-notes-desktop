@@ -189,62 +189,37 @@ async function initCapacitor(app, router) {
     const SentryVue = await import('@sentry/vue');
     SentryModule = SentryVue;
 
-    // Try Capacitor wrapper first, fall back to Vue-only init if native bridge unavailable
-    let initialized = false;
-    try {
-      const SentryCapacitor = await import('@sentry/capacitor');
-      SentryCapacitor.init(
-        {
-          app,
-          dsn,
-          environment: import.meta.env.DEV ? 'development' : 'production',
-          release: `ch.suissenotes.mobile@${appVersion}`,
-          dist: platform,
-          enableNative: false,
-          enableNativeCrashHandling: false,
-          integrations: [
-            SentryVue.vueIntegration({
-              app,
-              attachProps: true,
-              logErrors: true,
-              trackComponents: true,
-            }),
-            SentryVue.browserTracingIntegration({ router }),
-          ],
-          tracesSampleRate: 0.1,
-          beforeSend: scrubSensitiveData,
-          beforeBreadcrumb: filterBreadcrumbs,
-        },
-        SentryVue.init
-      );
-      initialized = true;
-    } catch (capacitorErr) {
-      console.warn('Sentry: Capacitor wrapper failed, falling back to Vue-only init:', capacitorErr.message);
-    }
-
-    // Fallback: init without Capacitor wrapper
-    if (!initialized) {
-      SentryVue.init({
-        app,
-        dsn,
-        environment: import.meta.env.DEV ? 'development' : 'production',
-        release: `ch.suissenotes.mobile@${appVersion}`,
-        integrations: [
-          SentryVue.vueIntegration({ app, attachProps: true, logErrors: true, trackComponents: true }),
-          SentryVue.browserTracingIntegration({ router }),
-        ],
-        tracesSampleRate: 0.1,
-        beforeSend: scrubSensitiveData,
-        beforeBreadcrumb: filterBreadcrumbs,
-      });
-    }
+    // Use @sentry/vue directly. The @sentry/capacitor 2.4.1 wrapper appeared
+    // to silently drop captureMessage / captureException events when the app
+    // was built with the iOS 26 SDK on macos-26 — transactions still arrived
+    // (those go through pure-JS browserTracingIntegration) but errors and
+    // info messages did not. Going through @sentry/vue directly means
+    // straight HTTPS to the ingest endpoint, no native bridge. We had
+    // enableNative: false already, so we weren't relying on native crash
+    // capture anyway. Tag dist explicitly so iOS/Android filtering still
+    // works.
+    SentryVue.init({
+      app,
+      dsn,
+      environment: import.meta.env.DEV ? 'development' : 'production',
+      release: `ch.suissenotes.mobile@${appVersion}`,
+      dist: platform,
+      integrations: [
+        SentryVue.vueIntegration({ app, attachProps: true, logErrors: true, trackComponents: true }),
+        SentryVue.browserTracingIntegration({ router }),
+      ],
+      tracesSampleRate: 0.1,
+      beforeSend: scrubSensitiveData,
+      beforeBreadcrumb: filterBreadcrumbs,
+    });
 
     sentryInitialized = true;
 
     SentryVue.setTag('platform', platform);
     SentryVue.setTag('app.version', appVersion);
+    SentryVue.setTag('dist', platform);
 
-    console.log(`Sentry: Initialized for ${platform} (v${appVersion})`);
+    console.log(`Sentry: Initialized for ${platform} (v${appVersion}) via @sentry/vue`);
   } catch (error) {
     console.error('Sentry: Failed to initialize', error);
   }
