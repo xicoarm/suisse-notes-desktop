@@ -3254,6 +3254,22 @@ async function pollServerStatus(audioFileId, maxAttempts = 15) {
   const pollInterval = 2000; // 2 seconds between polls
   const authToken = await getAuthToken();
 
+  // Status semantics — keep in lockstep with the renderer copy in
+  // src/services/upload.js and the server contract in
+  // src/lib/api/desktop-contract.ts (RecordingStatus). The moment the server
+  // returns any persisted state, the bytes are on the server and the
+  // audioFileId resolves to a Meeting row — we don't need to wait for
+  // downstream transcription. Legacy lowercase values are kept for any
+  // older endpoint that still echoes them.
+  const PERSISTED_STATES = new Set([
+    'persisted', 'complete', 'processing',         // legacy
+    'UPLOADING', 'PROCESSING', 'COMPLETED',        // contract
+  ]);
+  const FAILED_STATES = new Set([
+    'failed',                                       // legacy
+    'FAILED', 'CANCELLED',                          // contract
+  ]);
+
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const response = await axios.get(
@@ -3270,18 +3286,18 @@ async function pollServerStatus(audioFileId, maxAttempts = 15) {
       if (response.data) {
         const status = response.data.status;
 
-        if (status === 'persisted' || status === 'complete' || status === 'processing') {
-          // Server has confirmed file is persisted
+        if (PERSISTED_STATES.has(status)) {
           log.info(`Upload verification successful for ${audioFileId}: status=${status}`);
           return { persisted: true, verified: true };
         }
 
-        if (status === 'failed') {
-          log.error(`Server reported upload failed for ${audioFileId}:`, response.data.error);
-          return { persisted: false, verified: false, error: response.data.error || 'Server processing failed' };
+        if (FAILED_STATES.has(status)) {
+          const errMsg = response.data.errorMessage || response.data.error || `Server reported status=${status}`;
+          log.error(`Server reported upload failed for ${audioFileId}:`, errMsg);
+          return { persisted: false, verified: false, error: errMsg };
         }
 
-        // Still processing, wait and retry
+        // RECORDING or unknown — server hasn't confirmed persistence yet.
         log.info(`Upload status for ${audioFileId}: ${status}, waiting...`);
       }
 
@@ -3291,6 +3307,15 @@ async function pollServerStatus(audioFileId, maxAttempts = 15) {
       if (error.response && error.response.status === 404) {
         log.warn('Upload status endpoint not available, using trust-based confirmation');
         return { persisted: true, verified: false, fallback: true };
+      }
+
+      // 401 on the status endpoint after the authenticated POST already
+      // landed the bytes — don't punish the user for a polling-side auth
+      // problem. Treat as trust-based, the renderer-side poller does the
+      // same. See src/services/upload.js pollServerStatus.
+      if (error.response && error.response.status === 401) {
+        log.warn('Upload status endpoint returned 401; using trust-based confirmation');
+        return { persisted: true, verified: false, fallback: true, authError: true };
       }
 
       log.warn(`Status poll attempt ${attempt + 1} failed:`, error.message);
