@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.1.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.1.0...v4.1.2) (2026-05-15)
+
+
+### Bug Fixes
+
+* **desktop-upload:** recognize contract status enum in Electron poller ([40257b9](https://github.com/xicoarm/suisse-notes-desktop/commit/40257b9724678113d8b85a7af0b0fa80b4c79d4a))
+
 ## [4.1.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.0.11...v4.1.0) (2026-05-13)
 
 
