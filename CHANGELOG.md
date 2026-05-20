@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.1.3](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.1.2...v4.1.3) (2026-05-20)
+
+
+### Bug Fixes
+
+* **upload:** stable recordId per source file in file-import path ([6d46e83](https://github.com/xicoarm/suisse-notes-desktop/commit/6d46e835a92f213d78a7c193e26ae3b90c166e08))
+
 ### [4.1.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.1.0...v4.1.2) (2026-05-15)
 
 
