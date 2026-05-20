@@ -519,6 +519,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { v4 as uuidv4 } from 'uuid';
 import { useRouter } from 'vue-router';
 import { useQuasar } from 'quasar';
 import { useI18n } from 'vue-i18n';
@@ -604,6 +605,54 @@ const currentDuration = ref(0);
 // File preview state (before upload starts)
 const hasSelectedFile = ref(false);
 const selectedFile = ref(null); // For mobile - stores the File object
+
+// Stable recordId for the currently-selected file. Minted at file-pick
+// time (not at upload time) so retries reuse it. Server dedupes by
+// botSessionId = "desktop:${recordId}" — re-minting on each upload
+// attempt makes the server see "different recordings" and double-bill.
+const currentRecordId = ref(null);
+
+// Persistent map: file fingerprint -> { recordId, savedAt }.
+// Lets the same recordId survive an app restart, so a user who picks
+// the same OS file tomorrow (after a failed upload) reuses yesterday's
+// id and the server dedupes instead of creating a second Meeting.
+const IMPORT_RECORD_ID_KEY = 'upload:fileImportRecordIds:v1';
+const IMPORT_RECORD_ID_TTL_MS = 30 * 24 * 3600 * 1000;
+
+function _loadImportMap() {
+  try {
+    const raw = localStorage.getItem(IMPORT_RECORD_ID_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+function _saveImportMap(map) {
+  try { localStorage.setItem(IMPORT_RECORD_ID_KEY, JSON.stringify(map)); } catch { /* best-effort */ }
+}
+
+function _fingerprintForImport({ filePath, filename, fileSize }) {
+  // Path is the strongest signal on desktop. On mobile (Capacitor),
+  // File objects have no real OS path so fall back to filename+size.
+  return filePath
+    ? `path:${filePath}|${fileSize || 0}`
+    : `name:${filename || ''}|${fileSize || 0}`;
+}
+
+function _resolveOrMintImportRecordId(fp) {
+  const map = _loadImportMap();
+  const entry = map[fp];
+  if (entry?.recordId && (Date.now() - (entry.savedAt || 0)) < IMPORT_RECORD_ID_TTL_MS) {
+    return entry.recordId;
+  }
+  const recordId = uuidv4();
+  map[fp] = { recordId, savedAt: Date.now() };
+  // GC any entries older than TTL while we're here.
+  for (const [k, v] of Object.entries(map)) {
+    if (!v?.savedAt || (Date.now() - v.savedAt) >= IMPORT_RECORD_ID_TTL_MS) delete map[k];
+  }
+  _saveImportMap(map);
+  return recordId;
+}
 
 const currentAudioFileId = computed(() => recordingStore.audioFileId);
 const displayProgress = computed(() => recordingStore.uploadProgress);
@@ -780,6 +829,9 @@ const setFilePreview = (filePath, fileSize, filename, duration, file) => {
   currentDuration.value = duration || 0;
   selectedFile.value = file; // For mobile
   hasSelectedFile.value = true;
+  currentRecordId.value = _resolveOrMintImportRecordId(
+    _fingerprintForImport({ filePath, filename, fileSize })
+  );
 };
 
 // Clear file selection and go back to idle
@@ -790,6 +842,7 @@ const clearFileSelection = () => {
   currentFileSize.value = 0;
   currentFilename.value = '';
   currentDuration.value = 0;
+  currentRecordId.value = null;
 };
 
 // User confirms and starts the upload
@@ -852,7 +905,13 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
   uploadError.value = null;
   retryAttempt.value = 0;
 
-  const recordId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  // recordId is minted in setFilePreview() at file-pick time and persisted
+  // per file-fingerprint, so a re-pick after failure reuses the same id and
+  // the server dedupes. Fallback mint only protects against caller misuse.
+  const recordId = currentRecordId.value || _resolveOrMintImportRecordId(
+    _fingerprintForImport({ filePath, filename, fileSize })
+  );
+  currentRecordId.value = recordId;
   recordingStore.recordId = recordId;
 
   currentFilePath.value = filePath;
@@ -984,7 +1043,13 @@ const startMobileUpload = async (file, fileSize, filename) => {
   uploadError.value = null;
   retryAttempt.value = 0;
 
-  const recordId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  // recordId is minted in setFilePreview() at file-pick time and persisted
+  // per file-fingerprint, so a re-pick after failure reuses the same id and
+  // the server dedupes. Fallback mint only protects against caller misuse.
+  const recordId = currentRecordId.value || _resolveOrMintImportRecordId(
+    _fingerprintForImport({ filePath: null, filename, fileSize })
+  );
+  currentRecordId.value = recordId;
   recordingStore.recordId = recordId;
 
   currentFileSize.value = fileSize;
@@ -1199,6 +1264,7 @@ const handleReset = () => {
   currentDuration.value = 0;
   hasSelectedFile.value = false;
   selectedFile.value = null;
+  currentRecordId.value = null;
 };
 
 const formatBytes = (bytes) => {
