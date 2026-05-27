@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.1.4](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.1.3...v4.1.4) (2026-05-27)
+
+
+### Bug Fixes
+
+* **ffmpeg:** probe binaries at startup, stall-watchdog on stuck merges ([c220e87](https://github.com/xicoarm/suisse-notes-desktop/commit/c220e870ed4761eceacd6f261741bf01d561a4dc))
+
 ### [4.1.3](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.1.2...v4.1.3) (2026-05-20)
 
 
