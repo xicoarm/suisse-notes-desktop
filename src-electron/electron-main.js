@@ -1167,6 +1167,13 @@ app.whenReady().then(() => {
     app.setAppUserModelId('com.suisse-notes.desktop');
   }
 
+  // Probe the bundled ffmpeg/ffprobe binaries in the background. Don't await:
+  // a slow/missing binary must not block app startup. Every downstream call
+  // site consults `binaryHealth` and falls back gracefully if either is broken.
+  probeBundledBinaries().catch(err => {
+    log.error('Binary health probe threw:', err);
+  });
+
   // Remove the default menu bar (File, Edit, View, etc.)
   Menu.setApplicationMenu(null);
 
@@ -1949,17 +1956,15 @@ function safeParseDuration(metadata) {
 
 // Helper: Get audio metadata via ffprobe
 function getAudioMetadata(filePath) {
-  // Fast-fail if FFmpeg/ffprobe binary is known to be broken
-  if (ffmpegSpawnBroken) {
-    return Promise.reject(new Error('ffprobe binary unavailable (spawn failed previously)'));
+  // Fast-fail if ffprobe binary is known to be broken (startup probe or earlier call)
+  if (binaryHealth.ffprobe.available === false) {
+    return Promise.reject(new Error(`ffprobe binary unavailable (${binaryHealth.ffprobe.error || 'spawn failed'})`));
   }
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(filePath, (err, metadata) => {
       if (err) {
-        // Detect spawn failures so future calls fast-fail
         if (isSpawnError(err)) {
-          ffmpegSpawnBroken = true;
-          log.error(`ffprobe binary cannot execute (${err.message}) — all FFmpeg operations will be skipped`);
+          markBinaryUnavailable('ffprobe', err, 'getAudioMetadata');
         }
         reject(err);
       } else {
@@ -2206,33 +2211,198 @@ function calculateUploadTimeout(fileSizeBytes) {
 // FFmpeg operation timeout (5 minutes default; overridable in dev via SUISSE_FFMPEG_TIMEOUT_MS)
 const FFMPEG_TIMEOUT_MS = envNumDev('SUISSE_FFMPEG_TIMEOUT_MS', 5 * 60 * 1000);
 
-// Fast-fail flag: once FFmpeg binary fails to spawn (ENOEXEC/ENOENT),
-// all subsequent ffmpegWithTimeout calls reject instantly instead of
-// waiting through 5-minute timeout cascades.
-let ffmpegSpawnBroken = false;
+// Stderr-silence watchdog: a healthy ffmpeg job emits progress lines every few
+// seconds. If we go this long without any stderr/progress/start signal, the
+// process is stuck — kill it instead of waiting out the 5-minute wall clock.
+// Hit in production when the binary spawns but stalls (Sentry ec5d511f, 2026-05-27).
+const FFMPEG_STDERR_SILENCE_MS = 30 * 1000;
+const FFMPEG_STDERR_POLL_MS = 5 * 1000;
+
+// Single source of truth for bundled-binary health. Populated by the startup
+// probe (probeBundledBinaries) and updated by any subsequent spawn failure
+// surfaced through ffmpegWithTimeout or getAudioMetadata. `available === null`
+// means "not probed yet" — code paths should NOT fast-fail on null, only on
+// explicit `false`, so they don't reject before the probe runs.
+const binaryHealth = {
+  ffmpeg: { available: null, errno: null, error: null, path: null, sizeBytes: null, mode: null, versionLine: null },
+  ffprobe: { available: null, errno: null, error: null, path: null, sizeBytes: null, mode: null, versionLine: null },
+};
+let binaryHealthReported = false;
 
 function isSpawnError(err) {
   const msg = (err?.message || '').toLowerCase();
   return msg.includes('spawn') || msg.includes('enoent') || msg.includes('enoexec') || msg.includes('system error -8');
 }
 
+// Resolve the same ffmpeg/ffprobe paths that fluent-ffmpeg was configured with
+// at module load. We re-derive instead of poking fluent-ffmpeg internals.
+function resolveBundledBinaryPaths() {
+  const isWin = process.platform === 'win32';
+  if (app.isPackaged) {
+    const dir = path.join(process.resourcesPath, 'ffmpeg');
+    return {
+      ffmpeg: path.join(dir, isWin ? 'ffmpeg.exe' : 'ffmpeg'),
+      ffprobe: path.join(dir, isWin ? 'ffprobe.exe' : 'ffprobe'),
+    };
+  }
+  try {
+    return {
+      ffmpeg: require('@ffmpeg-installer/ffmpeg').path,
+      ffprobe: require('@ffprobe-installer/ffprobe').path,
+    };
+  } catch (_) {
+    return { ffmpeg: null, ffprobe: null };
+  }
+}
+
+function probeBinary(binPath, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    const record = {
+      available: false,
+      errno: null,
+      error: null,
+      path: binPath,
+      sizeBytes: null,
+      mode: null,
+      versionLine: null,
+    };
+
+    if (!binPath) {
+      record.error = 'binary path unresolved';
+      return resolve(record);
+    }
+
+    try {
+      const stat = fs.statSync(binPath);
+      record.sizeBytes = stat.size;
+      record.mode = (stat.mode & 0o777).toString(8);
+    } catch (statErr) {
+      record.error = `stat failed: ${statErr.message}`;
+      record.errno = statErr.code || null;
+      return resolve(record);
+    }
+
+    const { spawn } = require('child_process');
+    let child;
+    try {
+      child = spawn(binPath, ['-version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (spawnErr) {
+      record.error = `spawn threw: ${spawnErr.message}`;
+      record.errno = spawnErr.code || null;
+      return resolve(record);
+    }
+
+    let stdout = '';
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      try { child.kill('SIGKILL'); } catch (_) { /* ignore */ }
+      resolve(record);
+    };
+
+    const timer = setTimeout(() => {
+      record.error = `probe timed out after ${timeoutMs}ms`;
+      finish();
+    }, timeoutMs);
+
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      record.error = err.message;
+      record.errno = err.code || null;
+      finish();
+    });
+    child.on('exit', (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        record.available = true;
+        record.versionLine = (stdout.split('\n')[0] || '').slice(0, 200);
+      } else {
+        record.error = `exit ${code}${signal ? ' (' + signal + ')' : ''}`;
+      }
+      finish();
+    });
+  });
+}
+
+// Runs once at app.whenReady. Probes both binaries in parallel; results are
+// stashed in `binaryHealth` for every downstream call site to consult.
+async function probeBundledBinaries() {
+  const { ffmpeg: ffmpegPath, ffprobe: ffprobePath } = resolveBundledBinaryPaths();
+  const [ffmpegResult, ffprobeResult] = await Promise.all([
+    probeBinary(ffmpegPath),
+    probeBinary(ffprobePath),
+  ]);
+  Object.assign(binaryHealth.ffmpeg, ffmpegResult);
+  Object.assign(binaryHealth.ffprobe, ffprobeResult);
+
+  log.info('Binary health probe result:', {
+    ffmpeg: { available: binaryHealth.ffmpeg.available, errno: binaryHealth.ffmpeg.errno, error: binaryHealth.ffmpeg.error, versionLine: binaryHealth.ffmpeg.versionLine },
+    ffprobe: { available: binaryHealth.ffprobe.available, errno: binaryHealth.ffprobe.errno, error: binaryHealth.ffprobe.error, versionLine: binaryHealth.ffprobe.versionLine },
+  });
+
+  if (binaryHealth.ffmpeg.available === false || binaryHealth.ffprobe.available === false) {
+    reportBinaryHealthOnce('startup-probe');
+  }
+}
+
+function reportBinaryHealthOnce(triggerSource) {
+  if (binaryHealthReported) return;
+  binaryHealthReported = true;
+  Sentry.captureMessage('Bundled FFmpeg/ffprobe binary unavailable', {
+    level: 'error',
+    tags: {
+      operation: 'binaryHealth',
+      'binary.platform': process.platform,
+      'binary.arch': process.arch,
+    },
+    extra: {
+      trigger: triggerSource,
+      ffmpeg: { ...binaryHealth.ffmpeg },
+      ffprobe: { ...binaryHealth.ffprobe },
+    },
+  });
+}
+
+function markBinaryUnavailable(kind, err, triggerSource) {
+  const slot = binaryHealth[kind];
+  if (!slot || slot.available === false) return;
+  slot.available = false;
+  slot.error = slot.error || err?.message || 'unknown';
+  slot.errno = slot.errno || err?.code || null;
+  log.error(`${kind} binary cannot execute (${slot.error}) — all ${kind} operations will be skipped`);
+  reportBinaryHealthOnce(triggerSource);
+}
+
 // Execute FFmpeg command with timeout + Sentry tracking
 function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operationName = 'FFmpeg', { reportToSentry = true } = {}) {
-  // Fast-fail if FFmpeg binary is known to be broken
-  if (ffmpegSpawnBroken) {
-    return Promise.reject(new Error(`FFmpeg binary unavailable (spawn failed previously) ��� skipping ${operationName}`));
+  // Fast-fail if FFmpeg binary is known to be broken (startup probe or earlier call)
+  if (binaryHealth.ffmpeg.available === false) {
+    return Promise.reject(new Error(`FFmpeg binary unavailable (${binaryHealth.ffmpeg.error || 'spawn failed'}) — skipping ${operationName}`));
   }
 
   const startTime = Date.now();
   return new Promise((resolve, reject) => {
-    const timeoutId = setTimeout(() => {
+    let lastStderrAt = Date.now();
+    let processStarted = false;
+
+    let wallTimer = null;
+    let silenceTimer = null;
+    const cleanup = () => {
+      if (wallTimer) { clearTimeout(wallTimer); wallTimer = null; }
+      if (silenceTimer) { clearInterval(silenceTimer); silenceTimer = null; }
+    };
+
+    wallTimer = setTimeout(() => {
+      cleanup();
       const elapsed = Date.now() - startTime;
       log.warn(`${operationName} operation timed out after ${timeoutMs}ms`);
       // Always report timeouts — they are never expected
       Sentry.captureMessage(`FFmpeg timeout: ${operationName} after ${(elapsed / 1000).toFixed(1)}s`, {
         level: 'error',
         tags: { operation: operationName },
-        extra: { timeoutMs, elapsedMs: elapsed },
+        extra: { timeoutMs, elapsedMs: elapsed, processStarted },
       });
       try {
         ffmpegCommand.kill('SIGKILL');
@@ -2242,22 +2412,47 @@ function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operati
       reject(new Error(`${operationName} operation timed out`));
     }, timeoutMs);
 
+    // Stderr-silence watchdog: kill stuck processes long before the 5-min wall clock.
+    // We accept up to FFMPEG_STDERR_SILENCE_MS of silence after the last signal
+    // (start / stderr line / progress event). Healthy jobs send stderr every
+    // few seconds; silence means the process is wedged.
+    silenceTimer = setInterval(() => {
+      const silentFor = Date.now() - lastStderrAt;
+      if (silentFor < FFMPEG_STDERR_SILENCE_MS) return;
+      cleanup();
+      const elapsed = Date.now() - startTime;
+      log.warn(`${operationName} stderr silent for ${silentFor}ms — killing process`);
+      Sentry.captureMessage(`FFmpeg stalled: ${operationName} silent for ${(silentFor / 1000).toFixed(0)}s`, {
+        level: 'error',
+        tags: { operation: operationName },
+        extra: { silentMs: silentFor, elapsedMs: elapsed, timeoutMs, processStarted },
+      });
+      try {
+        ffmpegCommand.kill('SIGKILL');
+      } catch (e) {
+        log.error('Error killing stalled FFmpeg process:', e);
+      }
+      reject(new Error(`${operationName} stalled (no stderr for ${(silentFor / 1000).toFixed(0)}s)`));
+    }, FFMPEG_STDERR_POLL_MS);
+
     ffmpegCommand
+      .on('start', () => { processStarted = true; lastStderrAt = Date.now(); })
+      .on('stderr', () => { lastStderrAt = Date.now(); })
+      .on('progress', () => { lastStderrAt = Date.now(); })
       .on('end', () => {
-        clearTimeout(timeoutId);
+        cleanup();
         resolve();
       })
       .on('error', (err) => {
-        clearTimeout(timeoutId);
-        // Detect spawn failures and set the fast-fail flag for all future calls
+        cleanup();
+        // Detect spawn failures and update the unified health record
         if (isSpawnError(err)) {
-          ffmpegSpawnBroken = true;
-          log.error(`FFmpeg binary cannot execute (${err.message}) — all FFmpeg operations will be skipped`);
+          markBinaryUnavailable('ffmpeg', err, `ffmpegWithTimeout:${operationName}`);
         }
         if (reportToSentry) {
           Sentry.captureException(err, {
             tags: { operation: operationName },
-            extra: { elapsedMs: Date.now() - startTime, spawnBroken: ffmpegSpawnBroken },
+            extra: { elapsedMs: Date.now() - startTime, ffmpegAvailable: binaryHealth.ffmpeg.available, processStarted },
           });
         }
         reject(err);
@@ -2276,8 +2471,8 @@ async function mergeSystemAudio(micPath, recordId) {
     try { fs.unlinkSync(systemAudioPath); } catch (e) { /* ignore */ }
     return micPath;
   }
-  if (ffmpegSpawnBroken) {
-    log.warn('FFmpeg unavailable — skipping system audio merge');
+  if (binaryHealth.ffmpeg.available === false) {
+    log.warn(`FFmpeg unavailable (${binaryHealth.ffmpeg.error || 'spawn failed'}) — skipping system audio merge, keeping mic-only`);
     return micPath;
   }
 
@@ -3075,8 +3270,10 @@ async function createSessionFileInternal(recordId, ext) {
     return { success: false, error: 'Recording too short or empty' };
   }
 
-  // Validate raw file is a readable audio container before FFmpeg processing
-  let ffmpegAvailable = !ffmpegSpawnBroken;
+  // Validate raw file is a readable audio container before FFmpeg processing.
+  // Skip if either binary is known-broken — raw concatenation is a valid WebM,
+  // we just lose the codec-copy/remux pass.
+  let ffmpegAvailable = binaryHealth.ffmpeg.available !== false && binaryHealth.ffprobe.available !== false;
   if (ffmpegAvailable) {
     try {
       await getAudioMetadata(rawPath);
