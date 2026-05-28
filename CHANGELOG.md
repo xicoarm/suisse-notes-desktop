@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.1.5](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.1.4...v4.1.5) (2026-05-28)
+
+
+### Bug Fixes
+
+* **ci:** fetch LFS binaries on release, sign real ffmpeg + ffprobe paths ([8f60264](https://github.com/xicoarm/suisse-notes-desktop/commit/8f6026410a05278b21709fadcf4aafc8a0a66c41))
+
 ### [4.1.4](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.1.3...v4.1.4) (2026-05-27)
 
 
