@@ -338,6 +338,7 @@ import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useShareLink } from '../composables/useShareLink';
 import { isElectron } from '../utils/platform';
 import { exportAudio } from '../services/export';
+import { captureMessage } from '../boot/sentry';
 import AudioPlayback from './AudioPlayback.vue';
 
 export default {
@@ -482,10 +483,14 @@ export default {
           }
         } else if (!res.cancelled) {
           // User-cancelled save/share is silent; anything else is an error.
-          $q.notify({ type: 'negative', message: t('exportFailed'), timeout: 4000 });
+          // Log to Sentry AND surface the underlying reason in the toast so the
+          // exact failure is diagnosable both remotely and on-device.
+          captureMessage(`export: onExport failure reason=${res.error || 'unknown'}`, 'error');
+          $q.notify({ type: 'negative', message: t('exportFailed'), caption: res.error, timeout: 6000 });
         }
       } catch (e) {
-        $q.notify({ type: 'negative', message: t('exportFailed'), timeout: 4000 });
+        captureMessage(`export: onExport threw — ${e?.name}: ${e?.message}`, 'error');
+        $q.notify({ type: 'negative', message: t('exportFailed'), caption: e?.message, timeout: 6000 });
       } finally {
         exporting.value = false;
       }
