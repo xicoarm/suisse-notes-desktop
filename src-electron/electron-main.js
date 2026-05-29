@@ -4670,6 +4670,35 @@ ipcMain.handle('dialog:openFile', async (event, options) => {
   }
 });
 
+// Export/save a recording's audio file to a user-chosen location (Save As).
+// srcPath MUST be a recording inside userData/recordings — validateFilePath
+// enforces that, so this handler can never copy an arbitrary file off disk.
+ipcMain.handle('dialog:saveFile', async (event, srcPath, suggestedName) => {
+  try {
+    const validated = validateFilePath(srcPath); // throws if outside recordings dir
+    await fs.promises.access(validated); // ensure the source still exists on disk
+
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save Audio',
+      defaultPath: suggestedName || path.basename(validated),
+      filters: [
+        { name: 'Audio', extensions: ['webm', 'm4a', 'mp3', 'opus', 'ogg', 'wav', 'aac'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+
+    if (result.canceled || !result.filePath) {
+      return { success: false, cancelled: true };
+    }
+
+    await fs.promises.copyFile(validated, result.filePath);
+    return { success: true, savedPath: result.filePath };
+  } catch (error) {
+    log.warn('Error saving audio file:', error?.message);
+    return { success: false, error: error.message };
+  }
+});
+
 // Handle dropped file - get file info from path
 ipcMain.handle('dialog:getDroppedFilePath', async (event, filePath) => {
   try {

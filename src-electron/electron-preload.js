@@ -214,6 +214,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Dialog (for file selection)
   dialog: {
     openFile: (options) => ipcRenderer.invoke('dialog:openFile', options),
+    saveFile: (srcPath, suggestedName) => ipcRenderer.invoke('dialog:saveFile', srcPath, suggestedName),
     getDroppedFilePath: (filePath) => ipcRenderer.invoke('dialog:getDroppedFilePath', filePath)
   },
 

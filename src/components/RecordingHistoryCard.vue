@@ -268,6 +268,16 @@
           <q-btn
             flat
             no-caps
+            :icon="isDesktop ? 'download' : 'share'"
+            color="grey-7"
+            :label="isDesktop ? $t('downloadAudio') : $t('exportAudio')"
+            :loading="exporting"
+            :disable="uploading || exporting"
+            @click="onExport"
+          />
+          <q-btn
+            flat
+            no-caps
             :icon="isRecoverable ? 'delete_outline' : 'delete_forever'"
             :color="isRecoverable ? 'grey-7' : 'negative'"
             :label="$t('delete')"
@@ -327,6 +337,7 @@ import { useQuasar } from 'quasar';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useShareLink } from '../composables/useShareLink';
 import { isElectron } from '../utils/platform';
+import { exportAudio } from '../services/export';
 import AudioPlayback from './AudioPlayback.vue';
 
 export default {
@@ -359,6 +370,7 @@ export default {
     const showDeleteDialog = ref(false);
     const deleteFile = ref(true);
     const linkLoading = ref(false);
+    const exporting = ref(false);
     const isDesktop = isElectron();
 
     // A recording is "recoverable" once it has a cloud copy. Deleting it then
@@ -453,6 +465,32 @@ export default {
       }
     };
 
+    // Export/download the recording's local audio file. Desktop opens a native
+    // Save-As dialog; mobile opens the native share sheet ("Save to Files",
+    // AirDrop, etc.). Only available when a local file is present (the button
+    // lives inside the expanded section, which is itself gated on filePath).
+    const onExport = async () => {
+      if (exporting.value || !props.recording.filePath) return;
+      exporting.value = true;
+      try {
+        const res = await exportAudio(props.recording);
+        if (res.success) {
+          // Desktop: confirm the save. Mobile: the share sheet is its own
+          // feedback, so we stay silent on success.
+          if (isDesktop) {
+            $q.notify({ type: 'positive', message: t('exportSaved'), timeout: 2500 });
+          }
+        } else if (!res.cancelled) {
+          // User-cancelled save/share is silent; anything else is an error.
+          $q.notify({ type: 'negative', message: t('exportFailed'), timeout: 4000 });
+        }
+      } catch (e) {
+        $q.notify({ type: 'negative', message: t('exportFailed'), timeout: 4000 });
+      } finally {
+        exporting.value = false;
+      }
+    };
+
     const onDelete = () => {
       // Reset the "delete file from disk" checkbox each time so the default
       // matches the current recording's recoverability — unchecked when the
@@ -473,6 +511,7 @@ export default {
       showDeleteDialog,
       deleteFile,
       linkLoading,
+      exporting,
       formattedDate,
       formattedDuration,
       formattedSize,
@@ -484,6 +523,7 @@ export default {
       onCopyLink,
       onCancelTransfer,
       openFileLocation,
+      onExport,
       isDesktop,
       onDelete,
       confirmDelete
