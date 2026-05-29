@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [4.2.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.1.5...v4.2.0) (2026-05-29)
+
+
+### Features
+
+* **history:** export/download a meeting's audio from the History card ([5baba8d](https://github.com/xicoarm/suisse-notes-desktop/commit/5baba8df92c60a9e0b7de242a8407ab4def21a0a))
+
+
+### Bug Fixes
+
+* **upload:** stop Android WebView OOM crash on large recording uploads ([29fdaa5](https://github.com/xicoarm/suisse-notes-desktop/commit/29fdaa5ad065a9d9f07eb7a377427dbd77681399))
+
 ### [4.1.5](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.1.4...v4.1.5) (2026-05-28)
 
 
