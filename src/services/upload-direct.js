@@ -74,7 +74,7 @@ function sleep(ms) {
  * Read a Capacitor file path into a Blob without loading into JS as base64.
  * Uses fetch() on the file:// URI which streams the bytes natively.
  */
-async function readBlobFromCapacitorPath(filePath) {
+export async function readBlobFromCapacitorPath(filePath) {
   captureMessage(`upload: readBlob start path=${filePath}`, "info");
   const uriResult = await getFileUri(filePath);
   if (!uriResult.success) {
@@ -129,12 +129,41 @@ async function readBlobFromCapacitorPath(filePath) {
   return blob;
 }
 
+// Hard ceiling for the base64 last-resort path below. The disk-backed fetch()
+// path in readBlobFromCapacitorPath is memory-safe at any size, but this
+// fallback is NOT: Filesystem.readFile returns the whole file as a base64
+// string (UTF-16 in the JS engine ≈ 2.7x the file size), which atob() turns
+// into another full-size binary string, which is copied into a Uint8Array and
+// then a Blob — ~3-4x the file size resident at once. Above this size that
+// reliably OOM-kills the Android System WebView renderer with NO JS exception
+// (the "app crashes every upload" incident). Refuse with a clear retryable
+// error instead of silently crashing the app.
+const BASE64_FALLBACK_MAX_BYTES = 80 * 1024 * 1024; // 80 MB
+
 // Slow-path fallback: read the file as base64 via Capacitor's native bridge,
 // then decode in JS. Used only when convertFileSrc + WebView fetch both
-// fail. Costs ~2x memory (base64 string + decoded bytes simultaneously)
+// fail. Costs ~3-4x memory (base64 string + decoded bytes simultaneously)
 // but works regardless of WKWebView restrictions.
 async function _readBlobViaFilesystemReadFile(filePath) {
   const { Filesystem, Directory } = await import('@capacitor/filesystem');
+  // Guard against OOM: never base64-decode a large file. stat() is cheap and
+  // does not load the file. If stat fails for an unrelated reason, fall through
+  // to the original best-effort behavior rather than blocking a small upload.
+  try {
+    const { size } = await Filesystem.stat({ path: filePath, directory: Directory.Documents });
+    if (typeof size === 'number' && size > BASE64_FALLBACK_MAX_BYTES) {
+      captureMessage(
+        `upload: readBlob base64 fallback REFUSED — size=${size} exceeds ${BASE64_FALLBACK_MAX_BYTES} (would OOM the WebView)`,
+        'error'
+      );
+      const e = new Error('This recording is too large to upload on this device. Please connect to Wi-Fi and try again, or upload from the desktop app.');
+      e.tooLargeForBase64 = true;
+      throw e;
+    }
+  } catch (statErr) {
+    if (statErr?.tooLargeForBase64) throw statErr;
+    captureMessage(`upload: readBlob base64 fallback stat failed (${statErr?.message}) — proceeding best-effort`, 'warning');
+  }
   const { data } = await Filesystem.readFile({
     path: filePath,
     directory: Directory.Documents,

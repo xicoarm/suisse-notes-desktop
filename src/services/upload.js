@@ -14,7 +14,7 @@ import { calculateUploadChecksum, verifyUploadChecksum } from './integrity';
 import { readFile, deleteFile } from './storage';
 import { sentryUploadStart, sentryUploadSuccess, sentryUploadFail } from './sentryHelpers';
 import { captureMessage } from '../boot/sentry';
-import { uploadViaPresignedSas, isTransientUploadError } from './upload-direct';
+import { uploadViaPresignedSas, isTransientUploadError, readBlobFromCapacitorPath } from './upload-direct';
 
 // --- Persistent Mobile Upload Queue (localStorage + Preferences backup) ---
 const MOBILE_UPLOAD_QUEUE_KEY = 'mobile_upload_queue';
@@ -1080,14 +1080,26 @@ const uploadFileMobileSimple = async (filePath, apiUrl, authToken, metadata, onP
       // Use the File object directly (from file picker)
       fileBlob = fileObj;
     } else if (filePath) {
-      // Read from Capacitor filesystem
-      const fileResult = await readFile(filePath);
-      if (!fileResult.success) {
-        throw new Error(fileResult.error || 'Failed to read file for upload');
-      }
-      // Detect MIME type from file path
-      const mimeType = filePath.endsWith('.opus') ? 'audio/ogg' : 'audio/webm';
-      fileBlob = new Blob([fileResult.data], { type: mimeType });
+      // Read the file as a DISK-BACKED Blob (fetch over the capacitor file URI).
+      //
+      // Do NOT use storage.readFile() here. On Capacitor that returns the whole
+      // file as a base64 string which is then decoded to an ArrayBuffer and
+      // copied into a Blob — ~3-4x the file size resident in the JS heap at
+      // once. On large recordings that OOM-kills the Android System WebView
+      // renderer with no JS exception (the "crashes every upload" incident:
+      // Android dies as low as ~48 MB while iOS survives ~250 MB on the same
+      // path). readBlobFromCapacitorPath yields a disk-backed Blob whose bytes
+      // the WebView streams from disk into the multipart body, keeping the heap
+      // flat. It is the SAME reader the SAS path already calls successfully for
+      // this exact file moments earlier (the `readBlob OK size=` breadcrumb),
+      // so it cannot regress devices on which the legacy path works today.
+      //
+      // Note: the resulting Blob's content-type is whatever the capacitor file
+      // server reports (e.g. "video/webm"), not the previous hard-coded
+      // "audio/webm". This is safe: /api/desktop/upload derives the stored
+      // extension from the filename (getSafeFileExtension), enforces no
+      // content-type allowlist, and ffprobes the bytes regardless of MIME.
+      fileBlob = await readBlobFromCapacitorPath(filePath);
     } else {
       throw new Error('No file provided for upload');
     }
@@ -1196,6 +1208,10 @@ const uploadFileMobileSimple = async (filePath, apiUrl, authToken, metadata, onP
       xhr.open('POST', `${apiUrl}/api/desktop/upload`);
       xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
       xhr.timeout = timeoutMs;
+      // Telemetry: confirms the legacy POST is sending a disk-backed Blob.
+      // If the renderer is OOM-killed mid-upload there is no JS exception, so a
+      // missing "legacy POST returned" after this breadcrumb pinpoints send().
+      captureMessage(`upload: legacy POST sending blob size=${fileBlob.size} type=${fileBlob.type || '-'}`, 'info');
       xhr.send(formData);
     });
   } catch (error) {
