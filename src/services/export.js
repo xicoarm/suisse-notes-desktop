@@ -119,45 +119,41 @@ async function shareViaSheet(filePath, filename) {
     return { success: false, error: 'source_missing' };
   }
 
-  // 2. Stage the file in Cache under the friendly name (native copy — no JS-heap
-  //    buffering). Overwrite any stale same-named copy first. Do NOT delete it
-  //    afterwards: the receiving app may still be reading the URI after the
-  //    sheet dismisses; the OS reclaims Cache under pressure.
+  // 2. Resolve a shareable URI. Prefer a friendly-named copy staged in Cache
+  //    (native copy — no JS-heap buffering, so multi-hour files don't OOM).
+  //    If the copy fails for ANY reason, fall back to sharing the original file
+  //    in place. file_paths.xml covers both Cache and the recording directory,
+  //    so either is shareable on Android; on iOS both file:// URIs share fine.
+  let shareUri;
   try {
-    await Filesystem.deleteFile({ path: filename, directory: Directory.Cache });
-  } catch (_) {
-    // no stale copy — fine
-  }
-
-  let cacheUri;
-  try {
+    try {
+      await Filesystem.deleteFile({ path: filename, directory: Directory.Cache });
+    } catch (_) {
+      // no stale copy — fine
+    }
     const res = await Filesystem.copy({
       from: filePath,
       directory: Directory.Documents,
       to: filename,
       toDirectory: Directory.Cache,
     });
-    cacheUri = res?.uri;
-  } catch (e) {
-    captureMessage(`export: copy FAILED — ${e?.name}: ${e?.message}`, 'error');
-    return { success: false, error: `copy: ${e?.message || 'failed'}` };
-  }
-
-  // copy() returns the destination uri on success; fall back to getUri.
-  if (!cacheUri) {
+    // copy() returns the destination uri on success; fall back to getUri.
+    shareUri = res?.uri || (await Filesystem.getUri({ path: filename, directory: Directory.Cache })).uri;
+    captureMessage(`export: staged copy uri=${shareUri}`, 'info');
+  } catch (copyErr) {
+    captureMessage(`export: cache-copy failed (${copyErr?.message}) — sharing original in place`, 'warning');
     try {
-      const u = await Filesystem.getUri({ path: filename, directory: Directory.Cache });
-      cacheUri = u?.uri;
-    } catch (e) {
-      captureMessage(`export: getUri FAILED — ${e?.message}`, 'error');
-      return { success: false, error: `getUri: ${e?.message || 'failed'}` };
+      shareUri = (await Filesystem.getUri({ path: filePath, directory: Directory.Documents })).uri;
+      captureMessage(`export: original uri=${shareUri}`, 'info');
+    } catch (uriErr) {
+      captureMessage(`export: getUri original FAILED — ${uriErr?.message}`, 'error');
+      return { success: false, error: `uri: ${uriErr?.message || 'failed'}` };
     }
   }
-  captureMessage(`export: staged uri=${cacheUri}`, 'info');
 
   // 3. Open the native share sheet.
   try {
-    await Share.share({ title: filename, files: [cacheUri] });
+    await Share.share({ title: filename, files: [shareUri] });
     captureMessage('export: share completed', 'info');
     return { success: true, shared: true };
   } catch (e) {

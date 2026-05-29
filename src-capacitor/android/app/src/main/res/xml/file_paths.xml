@@ -1,5 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <external-path name="my_images" path="." />
+    <!-- Cover every standard location so @capacitor/share's FileProvider can
+         hand a content:// URI to the receiving app regardless of where the
+         file lives (Directory.Cache for the staged export copy, Directory.
+         Documents for the original recording). Without the location declared
+         here, FileProvider.getUriForFile throws "failed to find configured
+         root" and the share fails on Android. -->
+    <files-path name="my_files" path="." />
     <cache-path name="my_cache_images" path="." />
+    <external-path name="my_images" path="." />
+    <external-files-path name="my_external_files" path="." />
+    <external-cache-path name="my_external_cache" path="." />
 </paths>

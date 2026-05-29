@@ -101,6 +101,21 @@ describe('exportAudio', () => {
     expect(res).toEqual({ success: true, shared: true });
   });
 
+  it('on Capacitor, falls back to sharing the original in place if the cache copy fails', async () => {
+    mocks.isCapacitor.mockReturnValue(true);
+    mocks.fsStat.mockResolvedValue({ size: 10 });
+    mocks.fsDelete.mockResolvedValue({});
+    mocks.fsCopy.mockRejectedValue(new Error('copy not permitted'));
+    mocks.fsGetUri.mockResolvedValue({ uri: 'file:///docs/recordings/r1/combined.webm' });
+    mocks.share.mockResolvedValue({});
+
+    const res = await exportAudio({ title: 'x', filePath: 'recordings/r1/combined.webm' });
+
+    expect(mocks.fsGetUri).toHaveBeenCalledWith({ path: 'recordings/r1/combined.webm', directory: 'DOCUMENTS' });
+    expect(mocks.share).toHaveBeenCalledWith({ title: 'x.webm', files: ['file:///docs/recordings/r1/combined.webm'] });
+    expect(res).toEqual({ success: true, shared: true });
+  });
+
   it('on Capacitor, returns source_missing (without copying) when the file is gone', async () => {
     mocks.isCapacitor.mockReturnValue(true);
     mocks.fsStat.mockRejectedValue(new Error('File does not exist'));
