@@ -822,6 +822,18 @@ let minutesLimitSeconds = null;
 let limitWarningShown = false;
 const LIMIT_WARNING_SECONDS = 300; // 5 minutes warning before limit
 
+// Auto-split scheduling (Bug D fix). The auto-split predicate is gated on an
+// absolute, advancing threshold rather than the raw `elapsed >= MAX_DURATION`
+// check. Previously the predicate stayed permanently true once elapsed crossed
+// MAX_DURATION (the baseline was never advanced), so the split re-fired every
+// 1s tick and shredded the chunk set (createSessionFile churn + chunkIndex
+// resets racing in-flight saveChunks). Module-level so it survives pause/resume
+// (resumeRecording creates a fresh interval). Reset on start/stop.
+let nextAutoSplitAtSeconds = MAX_DURATION_SECONDS;
+// On a FAILED split we don't want to retry every tick (the Bug D runaway), nor
+// give up forever — back off and retry after this many seconds.
+const AUTOSPLIT_RETRY_SECONDS = 300;
+
 /**
  * Start duration tracking with optional minutes limit
  * @param {Object} recordingStore - Recording store instance
@@ -838,6 +850,7 @@ function startDurationTracking(recordingStore, isAutoSplitting, maxSeconds = nul
   const startTime = Date.now();
   minutesLimitSeconds = maxSeconds;
   limitWarningShown = false;
+  nextAutoSplitAtSeconds = MAX_DURATION_SECONDS; // fresh recording → first split at MAX_DURATION
 
   durationInterval = setInterval(async () => {
     if (recordingStore.isRecording) {
@@ -864,8 +877,8 @@ function startDurationTracking(recordingStore, isAutoSplitting, maxSeconds = nul
         }
       }
 
-      // Original auto-split logic for max file duration
-      if (elapsed >= MAX_DURATION_SECONDS && !isAutoSplitting.value) {
+      // Auto-split at the advancing threshold (edge-triggered — see Bug D note).
+      if (elapsed >= nextAutoSplitAtSeconds && !isAutoSplitting.value) {
         await performAutoSplit(recordingStore, isAutoSplitting);
       }
     }
@@ -883,6 +896,7 @@ function stopDurationTracking() {
   // Reset limit state
   minutesLimitSeconds = null;
   limitWarningShown = false;
+  nextAutoSplitAtSeconds = MAX_DURATION_SECONDS;
 }
 
 /**
@@ -937,14 +951,24 @@ async function performAutoSplit(recordingStore, isAutoSplitting) {
     // 6. Create the session. Main process serializes createSessionFile with
     //    saveChunk via withRecordingLock, so no late chunk can slip through.
     const result = await recordingStore.createSessionFile();
-    if (!result.success) {
-      console.error('Auto-split: Failed to create session file:', result.error);
-    }
 
-    // 7. Reset chunkIndex AFTER the session was finalized.
-    //    Resetting earlier would allow a late saveChunk to overwrite chunk_0
-    //    with pre-split audio.
-    recordingStore.resetChunkIndex();
+    if (result.success) {
+      // Schedule the NEXT split a full cycle later — this advancing threshold
+      // is the Bug D fix: it makes the predicate edge-triggered so it cannot
+      // re-fire every tick once elapsed has crossed it.
+      nextAutoSplitAtSeconds += MAX_DURATION_SECONDS;
+
+      // 7. Reset chunkIndex AFTER the session was finalized. Resetting earlier
+      //    would allow a late saveChunk to overwrite chunk_0 with pre-split audio.
+      recordingStore.resetChunkIndex();
+    } else {
+      // Split failed: KEEP the chunks (do NOT reset — resetting here would
+      // orphan the just-recorded audio and resume into a context that
+      // overwrites chunk_0). Back off so we retry in a few minutes rather than
+      // hammering createSessionFile every 1s tick (the Bug D runaway).
+      console.error('Auto-split: Failed to create session file:', result.error);
+      nextAutoSplitAtSeconds += AUTOSPLIT_RETRY_SECONDS;
+    }
 
     // 8. Resume.
     if (mediaRecorder && mediaRecorder.state === 'paused') {
@@ -952,6 +976,9 @@ async function performAutoSplit(recordingStore, isAutoSplitting) {
     }
   } catch (error) {
     console.error('Error during auto-split:', error);
+    // Back off so an exception mid-split doesn't re-trigger the predicate every
+    // 1s tick (Bug D runaway). The chunks are left intact for recovery.
+    nextAutoSplitAtSeconds += AUTOSPLIT_RETRY_SECONDS;
     // Ensure recording resumes even on error
     if (mediaRecorder && mediaRecorder.state === 'paused') {
       mediaRecorder.resume();
@@ -1497,8 +1524,8 @@ export function resumeRecording(recordingStore, isAutoSplitting, maxRecordingSec
           }
         }
 
-        // Original auto-split logic
-        if (newDuration >= MAX_DURATION_SECONDS && !isAutoSplitting.value) {
+        // Auto-split at the advancing threshold (edge-triggered — see Bug D note).
+        if (newDuration >= nextAutoSplitAtSeconds && !isAutoSplitting.value) {
           await performAutoSplit(recordingStore, isAutoSplitting);
         }
       }
