@@ -280,6 +280,17 @@
             </div>
           </div>
 
+          <!-- Mobile only: a discreet line reminding the user to keep the app in
+               the foreground. The WebView recorder is suspended if the OS
+               backgrounds the app, and the screen wake-lock can't prevent a
+               manual app-switch. Fine, grey, unobtrusive. -->
+          <div
+            v-if="isCapacitor() && (recordingStore.isRecording || recordingStore.isPaused)"
+            class="foreground-hint"
+          >
+            {{ $t('keepAppForeground') }}
+          </div>
+
           <!-- Audio Level Meter -->
           <div class="level-section">
             <div class="mic-health-row">
@@ -1926,6 +1937,16 @@ const removeSessionWord = (word) => {
   @media (max-width: 600px) {
     padding: 16px;
   }
+}
+
+// Discreet mobile "keep the app open" hint — fine, grey, borderless, unobtrusive.
+.foreground-hint {
+  text-align: center;
+  font-size: 12px;
+  color: #9ca3af;
+  margin-top: 6px;
+  letter-spacing: 0.2px;
+  opacity: 0.85;
 }
 
 .record-container {

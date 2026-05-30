@@ -3,7 +3,7 @@ import { useRecordingStore } from '../stores/recording';
 import { useAuthStore } from '../stores/auth';
 import { useMinutesStore } from '../stores/minutes';
 import { useSystemAudio } from './useSystemAudio';
-import { isElectron } from '../utils/platform';
+import { isElectron, isCapacitor } from '../utils/platform';
 import * as recordingService from '../services/recordingService';
 
 /**
@@ -50,6 +50,28 @@ export function useRecorder() {
   // chunk-save failures must be visible to the user, not silently swallowed.
   const captureStalled = ref(null); // null | { secondsSinceLastChunk, savedChunks }
   const chunkSaveError = ref(null); // null | { consecutiveErrors, error, diskFull }
+
+  // Screen Wake Lock — keep the screen on during a mobile recording so it does
+  // not auto-lock (which suspends the WebView recorder). Pure JS, best-effort
+  // (Android WebView + iOS 16.4+); the lock auto-releases when the page is
+  // hidden, so we re-acquire on foreground. This is the invisible half of the
+  // long-recording mitigation; the discreet on-screen hint is the visible half.
+  let wakeLockSentinel = null;
+  const requestWakeLock = async () => {
+    if (!isCapacitor() || typeof navigator === 'undefined' || !('wakeLock' in navigator)) return;
+    if (wakeLockSentinel) return;
+    try {
+      wakeLockSentinel = await navigator.wakeLock.request('screen');
+      wakeLockSentinel.addEventListener('release', () => { wakeLockSentinel = null; });
+    } catch (e) {
+      // Denied / unsupported / page not visible — best effort; the hint covers it.
+      wakeLockSentinel = null;
+    }
+  };
+  const releaseWakeLock = async () => {
+    try { await wakeLockSentinel?.release(); } catch (_) { /* ignore */ }
+    wakeLockSentinel = null;
+  };
   const isMicHealthy = computed(() => recordingHealth.value?.status === 'ok');
   const recordingHealthMessage = computed(() => recordingHealth.value?.message || null);
 
@@ -192,6 +214,8 @@ export function useRecorder() {
       // baseline — otherwise the first post-resume tick reads the whole hidden
       // gap as a capture stall and fires a false warning.
       recordingService.notifyForegrounded();
+      // The screen wake lock auto-releases when hidden — re-acquire it.
+      if (recordingStore.isRecording) requestWakeLock();
     }
   };
 
@@ -220,7 +244,7 @@ export function useRecorder() {
     // Use user's remaining minutes as max duration if not specified
     const maxSeconds = maxRecordingSeconds ?? minutesStore.remainingSeconds;
 
-    return await recordingService.startRecording({
+    const startResult = await recordingService.startRecording({
       recordingStore,
       authStore,
       deviceId: micId,
@@ -229,6 +253,10 @@ export function useRecorder() {
       isAutoSplitting,
       maxRecordingSeconds: maxSeconds > 0 ? maxSeconds : null
     });
+    if (startResult && startResult.success) {
+      requestWakeLock(); // keep the screen awake while recording (mobile)
+    }
+    return startResult;
   };
 
   // Pause recording
@@ -252,11 +280,13 @@ export function useRecorder() {
 
   // Stop recording
   const stopRecording = async () => {
+    releaseWakeLock();
     return await recordingService.stopRecording(recordingStore, stopSystemAudio);
   };
 
   // Cancel recording (discard without processing)
   const cancelRecording = async () => {
+    releaseWakeLock();
     await recordingService.cancelRecording(recordingStore, stopSystemAudio);
   };
 
