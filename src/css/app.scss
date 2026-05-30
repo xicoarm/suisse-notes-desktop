@@ -488,6 +488,10 @@ h4 {
 .modern-dialog {
   .q-dialog__inner {
     padding: $space-8;
+    // Keep modern dialog content clear of the Android nav bar / iOS home
+    // indicator (this portal renders outside the layout). See the safe-area
+    // block below for why --android-nav-bar-height is needed on Android.
+    padding-bottom: calc(#{$space-8} + var(--app-safe-area-bottom, 0px));
   }
 
   .q-card {
@@ -498,6 +502,38 @@ h4 {
   .q-card__section--vert {
     padding: $space-6 $space-8;
   }
+}
+
+// ==================== SAFE-AREA: PORTAL UI (dialogs + toasts) ====================
+// Quasar renders dialogs and notifications in a body-level portal OUTSIDE the
+// app layout, so the layout's safe-area padding never reaches them and the
+// Android system navigation bar (or iOS home indicator) overlaps their bottom
+// edge — e.g. a bottom-sheet dialog's last action (stop-recording "Cancel &
+// Delete") or a bottom toast. Push them clear using the SAME bottom inset the
+// bottom nav uses: MainActivity.java injects --android-nav-bar-height on Android
+// (where env(safe-area-inset-bottom) is 0 under edge-to-edge); iOS leaves that
+// var unset and env() supplies the real value. Both resolve to 0 on desktop/web,
+// so nothing changes there.
+:root {
+  --app-safe-area-bottom: max(env(safe-area-inset-bottom, 0px), var(--android-nav-bar-height, 0px));
+}
+
+// Bottom-sheet dialogs (position="bottom") — lift the whole card above the bar.
+.q-dialog__inner--bottom {
+  padding-bottom: var(--app-safe-area-bottom);
+}
+// Centered/standard dialogs — keep Quasar's 24px default and add the inset so a
+// tall dialog's bottom buttons can't slide under the bar.
+.q-dialog__inner--minimized {
+  padding-bottom: calc(24px + var(--app-safe-area-bottom));
+}
+// Toasts/notifications stacked at the bottom (Quasar's default position).
+.q-notifications__list--bottom {
+  padding-bottom: var(--app-safe-area-bottom);
+}
+// And top toasts clear of the status bar (harmless 0 on desktop).
+.q-notifications__list--top {
+  padding-top: env(safe-area-inset-top, 0px);
 }
 
 // ==================== FORM INPUTS ====================
