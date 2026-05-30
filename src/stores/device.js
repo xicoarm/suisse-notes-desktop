@@ -254,9 +254,12 @@ export const useDeviceStore = defineStore('device', {
       // Load user-scoped data (may be empty if no user is authenticated yet)
       await this._loadUserData();
 
-      // Start persistent background timers
+      // Start persistent background timers — reconnect to an ALREADY-paired
+      // device only. Background NEW-device discovery + its bottom auto-prompt
+      // popup ("Reject / Connect") were removed: pairing a new device is done
+      // explicitly from the Settings/Device page, so the unsolicited popup was
+      // unwanted (and the 60s background scan it drove wasted battery/BLE).
       this._startPersistentReconnect();
-      this._startBackgroundDiscovery();
     },
 
     /**
