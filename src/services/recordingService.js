@@ -3,7 +3,7 @@
  * This allows recording to persist across navigation
  */
 
-import { isAndroid } from '../utils/platform';
+import { isAndroid, isElectron } from '../utils/platform';
 import { captureMessage } from '../boot/sentry';
 
 let BackgroundRecording = null;
@@ -953,7 +953,15 @@ function stopDurationTracking() {
   // Reset limit state
   minutesLimitSeconds = null;
   limitWarningShown = false;
-  nextAutoSplitAtSeconds = MAX_DURATION_SECONDS;
+  // A4: do NOT reset nextAutoSplitAtSeconds here. pauseRecording() calls
+  // stopDurationTracking(), and the auto-split threshold (and savedChunkCount /
+  // lastWallClockSec) must survive pause→resume — resetting the threshold caused
+  // a spurious re-split on resume after a recording had already auto-split. It is
+  // reset for a fresh recording in startDurationTracking(). Watchdog-episode
+  // state IS safe to clear (resume re-inits it, and clearing it lets a stall
+  // warning clear on stop/pause — B3):
+  lastSuccessfulChunkAt = 0;
+  stallWarned = false;
 }
 
 /**
@@ -962,6 +970,17 @@ function stopDurationTracking() {
  */
 export function getMinutesLimitSeconds() {
   return minutesLimitSeconds;
+}
+
+/**
+ * Monotonic wall-clock seconds of the current recording (survives pause/resume).
+ * Use this — NOT recordingStore.duration, which now holds the clamped
+ * captured-audio value — wherever true elapsed time is needed (e.g. the macOS
+ * system-audio alignment offset (A5) and the final-duration fallback when
+ * ffprobe can't read the file (A6)).
+ */
+export function getWallClockSeconds() {
+  return lastWallClockSec;
 }
 
 /**
@@ -1017,7 +1036,15 @@ async function performAutoSplit(recordingStore, isAutoSplitting) {
 
       // 7. Reset chunkIndex AFTER the session was finalized. Resetting earlier
       //    would allow a late saveChunk to overwrite chunk_0 with pre-split audio.
-      recordingStore.resetChunkIndex();
+      //    C1: only on Electron — there createSessionFile rolls the chunks into a
+      //    finalized session file, so chunk_0 is free to reuse. On mobile
+      //    createSessionFile is a no-op flush (chunks stay in the same dir), so
+      //    resetting would overwrite chunk_000000 of the first ~5h segment →
+      //    silent total-segment loss. Keep the monotonic index on mobile until
+      //    it has real per-segment directories.
+      if (isElectron()) {
+        recordingStore.resetChunkIndex();
+      }
     } else {
       // Split failed: KEEP the chunks (do NOT reset — resetting here would
       // orphan the just-recorded audio and resume into a context that
@@ -1042,6 +1069,12 @@ async function performAutoSplit(recordingStore, isAutoSplitting) {
     }
   } finally {
     isAutoSplitting.value = false;
+    // The split paused capture for the (possibly multi-minute) merge and the new
+    // segment hasn't produced a chunk yet. Reset the watchdog episode so it does
+    // NOT read the merge gap as a stall (B1), and so a genuine post-split stall
+    // can warn again.
+    lastSuccessfulChunkAt = Date.now();
+    stallWarned = false;
   }
 }
 
