@@ -1221,6 +1221,17 @@ const uploadFileMobileSimple = async (filePath, apiUrl, authToken, metadata, onP
             errorMsg = errData.error || errData.message || 'Token expired';
           } catch (e) { /* ignore parse errors */ }
           resolve({ success: false, error: errorMsg, status: 401 });
+        } else if (xhr.status === 413) {
+          // DUREC-5: the recording exceeds the backend's 500MB cap (verified on
+          // the deployed /api/desktop/upload route). Retrying can never succeed,
+          // so mark it terminal (canRetry:false) and surface the server's clear
+          // "File too large. Maximum size is 500MB" message instead of looping.
+          let errorMsg = 'File too large. Maximum size is 500MB.';
+          try {
+            const errData = JSON.parse(xhr.responseText);
+            errorMsg = errData.error || errData.message || errorMsg;
+          } catch (e) { /* ignore parse errors */ }
+          resolve({ success: false, error: errorMsg, status: 413, canRetry: false });
         } else {
           let errorMsg = `Upload failed with status ${xhr.status}`;
           try {
@@ -1301,11 +1312,22 @@ export const uploadWithRetry = async (options) => {
 const isRetryableError = (error) => {
   if (!error) return false;
 
+  // DUREC-5: keep this terminal-error list aligned with _isRetryableError (used
+  // by the background queue) so the immediate uploadWithRetry doesn't burn
+  // retries on a 413 "File too large"/duration/minutes rejection that will fail
+  // identically every time.
   const nonRetryable = [
     'Checksum mismatch',
     'Invalid file format',
     'Unauthorized',
-    'Forbidden'
+    'Forbidden',
+    'File too large',
+    'too large',
+    'Insufficient minutes',
+    'Recording too long',
+    'DURATION_EXCEEDED',
+    'FILE_TOO_LARGE',
+    'INSUFFICIENT_MINUTES',
   ];
 
   return !nonRetryable.some(msg => error.includes(msg));
