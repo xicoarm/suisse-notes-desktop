@@ -5,6 +5,7 @@ import { useMinutesStore } from '../stores/minutes';
 import { useSystemAudio } from './useSystemAudio';
 import { isElectron, isCapacitor } from '../utils/platform';
 import * as recordingService from '../services/recordingService';
+import { captureMessage } from '../boot/sentry';
 
 /**
  * Platform-aware recorder composable
@@ -244,6 +245,15 @@ export function useRecorder() {
             savedChunks: recordingService.getSavedChunkCount(),
             backgroundGap: true,
           };
+          // Telemetry: log the background capture gap so we can measure how
+          // often the WebView is actually suspended mid-recording (incoming
+          // call / lock screen / app switch). This incidence drives the
+          // decision on whether the native background-capture follow-up is
+          // worth its risk/effort. Platform tag lets us split iOS vs Android.
+          captureMessage(
+            `recording: background capture gap — hidden ${hiddenSec}s, only ${savedDuring} chunk(s) persisted (~${Math.round(expectedChunks)} expected)`,
+            'warning'
+          );
         }
       }
       hiddenSnapshot = null;
