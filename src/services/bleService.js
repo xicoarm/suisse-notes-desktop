@@ -296,10 +296,16 @@ export class BleDeviceManager {
         this.connected = false;
         this.deviceId = null;
         addBreadcrumb({ category: 'ble', message: `BLE disconnected: ${deviceId}`, level: 'warning' });
+        // BT-2: immediately fail any in-flight notification read so an active
+        // download/getFileList doesn't block for the full 30s-per-chunk timeout
+        // — a lost device could otherwise hang a multi-chunk transfer for ~50
+        // minutes. Uses a disconnect error (NOT the cancel sentinel) so the
+        // caller retries the file on reconnect instead of skipping it.
+        this._failInflightOnDisconnect();
         if (this._onDisconnectCallback) {
           this._onDisconnectCallback(deviceId);
         }
-      });
+      }, { timeout: 15000 }); // BT-4: bound the connect attempt so an unreachable device can't hang indefinitely
       addBreadcrumb({ category: 'ble', message: 'BLE connected, starting notifications', level: 'info' });
     } catch (e) {
       captureException(e, { tags: { action: 'ble_connect' }, extra: { bleDeviceId } });
@@ -454,6 +460,9 @@ export class BleDeviceManager {
    */
   async unpair() {
     if (this.connected && this.deviceId) {
+      // BT-5: abort any in-flight download BEFORE tearing down, so a concurrent
+      // transfer can't proceed into the disconnected state and corrupt history.
+      this.abortDownload();
       const release = await this._acquireLock();
       try {
         await this._write(buildCmd(CMD_UNPAIR));
@@ -676,6 +685,24 @@ export class BleDeviceManager {
       this._notifyWaiter = null;
       waiter.reject(new Error('BLE download cancelled'));
     }
+  }
+
+  /**
+   * BT-2: called when the underlying BLE link drops. Rejects any in-flight
+   * _readNotification right away so downloadFile/getFileList unwind in a
+   * microtask instead of waiting out the per-read timeout. Deliberately does
+   * NOT set _downloadAborted (that is the user-cancel sentinel) and uses a
+   * distinct "disconnected" error so the caller treats the file as retryable
+   * (resumes on reconnect) rather than user-cancelled (skipped).
+   */
+  _failInflightOnDisconnect() {
+    if (this._notifyWaiter && this._notifyWaiter.reject) {
+      const waiter = this._notifyWaiter;
+      this._notifyWaiter = null;
+      waiter.reject(new Error('BLE disconnected during transfer'));
+    }
+    // Any notification that lands right after the drop is stale — drop it.
+    this._lastReadTimeoutAt = Date.now();
   }
 
   async downloadFile(filename, onProgress = null, totalSize = 0) {
