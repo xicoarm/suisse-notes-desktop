@@ -847,6 +847,10 @@ let lastSuccessfulChunkAt = 0;
 let savedChunkCount = 0;
 let lastWallClockSec = 0;
 let stallWarned = false;
+// C3: latch the disk-full emergency-stop event. The recorder keeps emitting a
+// blob every timeslice, so without a latch the diskFull chunkSaveFailure re-fires
+// every ~3s and launches concurrent stopRecording() calls (double-combine/thrash).
+let diskFullWarned = false;
 const STALL_WARN_MS = 30000; // ~10 timeslices with no persisted chunk while 'recording'
 
 /**
@@ -903,6 +907,7 @@ function startDurationTracking(recordingStore, isAutoSplitting, maxSeconds = nul
   savedChunkCount = 0;
   stallWarned = false;
   lastWallClockSec = 0;
+  diskFullWarned = false;
 
   durationInterval = setInterval(async () => {
     if (recordingStore.isRecording) {
@@ -1367,13 +1372,16 @@ export async function startRecording(options = {}) {
             recordingStore.chunkSaveErrors++;
             console.error('Chunk save failed:', result.error, `(${recordingStore.chunkSaveErrors} consecutive failures)`);
 
-            // Disk full: emergency stop immediately
+            // Disk full: emergency stop immediately — emit ONCE per episode (C3).
             if (result.diskFull) {
-              emit('chunkSaveFailure', {
-                consecutiveErrors: recordingStore.chunkSaveErrors,
-                error: 'Disk full — recording stopped to preserve saved data',
-                diskFull: true
-              });
+              if (!diskFullWarned) {
+                diskFullWarned = true;
+                emit('chunkSaveFailure', {
+                  consecutiveErrors: recordingStore.chunkSaveErrors,
+                  error: 'Disk full — recording stopped to preserve saved data',
+                  diskFull: true
+                });
+              }
             } else if (!recordingStore.chunkSaveErrorWarning) {
               // Emit warning on first failure so user knows immediately
               recordingStore.chunkSaveErrorWarning = true;
@@ -1401,6 +1409,7 @@ export async function startRecording(options = {}) {
             // Reset consecutive error counter on success
             if (recordingStore.chunkSaveErrors > 0) {
               recordingStore.chunkSaveErrors = 0;
+              diskFullWarned = false;
               if (recordingStore.chunkSaveErrorWarning) {
                 recordingStore.chunkSaveErrorWarning = false;
                 emit('chunkSaveFailure', null); // Clear warning

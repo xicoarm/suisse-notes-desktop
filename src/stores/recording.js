@@ -331,8 +331,13 @@ export const useRecordingStore = defineStore('recording', {
             throw new Error(result.error || 'Failed to combine recording chunks');
           }
         } else if (isCapacitor()) {
-          // Capacitor: combine chunks using native method or concatenation
-          const result = await this.combineChunksNative();
+          // Capacitor: combine chunks using native method or concatenation.
+          // A2: if any chunk-save failures occurred this recording (e.g. the
+          // disk-full emergency stop, or exhausted retries), the chunk sequence
+          // almost certainly has gaps. Combine in recovery mode so it preserves
+          // the available audio instead of hard-failing on the gap and saving
+          // NOTHING — which is exactly the state an emergency stop is in.
+          const result = await this.combineChunksNative(null, { isRecovery: this.chunkSaveErrors > 0 });
           if (result.success) {
             this.audioFilePath = result.outputPath;
             // Always prefer native-reported duration over JS timer
