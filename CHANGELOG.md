@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.2.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.2.1...v4.2.2) (2026-05-30)
+
+
+### Bug Fixes
+
+* **recording:** edge-case batch 2 — wall-clock offset, foreground stall, banner ([1dd110f](https://github.com/xicoarm/suisse-notes-desktop/commit/1dd110ff6730f422f1628a7f0b3550ae40bf6112))
+* **recording:** edge-case batch 3 — emergency-stop saves on mobile + no thrash ([3a7415b](https://github.com/xicoarm/suisse-notes-desktop/commit/3a7415bb8a68d9fd0ada27bf08875782af708e88))
+* **recording:** edge-case patch batch 1 — pause/split/watchdog state (A4,B1,C1) ([3c59e37](https://github.com/xicoarm/suisse-notes-desktop/commit/3c59e37f4fc8a8500b3bbff532612654666ad223))
+
 ### [4.2.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.2.0...v4.2.1) (2026-05-30)
 
 
