@@ -528,6 +528,12 @@ export const useRecordingStore = defineStore('recording', {
             }
           }
 
+          // DMOB-3: reclaim disk from recordings already combined into a final
+          // file but whose chunks were never cleaned (chunks are only deleted
+          // after a *successful* upload, so repeated upload failures otherwise
+          // accumulate GBs of redundant chunk data).
+          await this._gcRedundantChunks(listResult.files);
+
           return {
             success: true,
             recovered: recoveredRecordings.length > 0,
@@ -758,6 +764,34 @@ export const useRecordingStore = defineStore('recording', {
       } catch (error) {
         console.error('Error combining chunks on mobile:', error);
         return { success: false, error: error.message };
+      }
+    },
+
+    // DMOB-3: delete chunks for recordings that already have a combined output
+    // file. The combined file is authoritative, so its source chunks are pure
+    // redundancy — safe to reclaim even though the upload may not have succeeded
+    // yet (the upload sends the combined file, not the chunks). Never touches
+    // the active recording.
+    async _gcRedundantChunks(recordIds) {
+      if (!isCapacitor() || !Array.isArray(recordIds)) return;
+      for (const recordId of recordIds) {
+        if (recordId === this.recordId) continue;
+        try {
+          const hasCombined =
+            (await storage.exists(`recordings/${recordId}/combined.m4a`)) ||
+            (await storage.exists(`recordings/${recordId}/combined.webm`));
+          if (!hasCombined) continue;
+          const chunksDir = `recordings/${recordId}/chunks`;
+          const chunksRes = await storage.listFiles(chunksDir);
+          if (chunksRes.success && chunksRes.files && chunksRes.files.length > 0) {
+            for (const f of chunksRes.files) {
+              try { await storage.deleteFile(`${chunksDir}/${f}`); } catch (_) { /* best-effort */ }
+            }
+            console.log(`GC: removed ${chunksRes.files.length} redundant chunk(s) for ${recordId} (combined file exists)`);
+          }
+        } catch (e) {
+          console.warn('Redundant-chunk GC failed for', recordId, e);
+        }
       }
     },
 

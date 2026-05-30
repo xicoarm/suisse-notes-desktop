@@ -53,9 +53,18 @@ function _safeWriteQueue(queue) {
 export async function recoverQueueFromPreferences() {
   if (!isCapacitor()) return;
 
-  // Only recover if localStorage is empty (purged) — don't overwrite existing data
+  // DMOB-5: recover from the durable Preferences backup if localStorage is
+  // either empty (iOS purge) OR present-but-corrupt (a truncated write). The
+  // old check bailed whenever the key merely existed, so a corrupt main key
+  // blocked recovery and the queued uploads were silently lost.
   const existing = localStorage.getItem(MOBILE_UPLOAD_QUEUE_KEY);
-  if (existing) return;
+  if (existing) {
+    try {
+      if (Array.isArray(JSON.parse(existing))) return; // valid existing queue — keep it
+    } catch {
+      console.warn('Upload queue localStorage is corrupt — attempting Preferences recovery');
+    }
+  }
 
   try {
     const { Preferences } = await import('@capacitor/preferences');
@@ -99,6 +108,7 @@ function _gcStaleItems(items, persistBackKey = null) {
 }
 
 export function getMobileUploadQueue() {
+  let mainCorrupt = false;
   try {
     const raw = localStorage.getItem(MOBILE_UPLOAD_QUEUE_KEY);
     if (raw) {
@@ -113,6 +123,7 @@ export function getMobileUploadQueue() {
     }
   } catch {
     // Main key corrupted - try recovery from _tmp
+    mainCorrupt = true;
     console.warn('Upload queue corrupted, attempting recovery from _tmp key');
   }
 
@@ -139,6 +150,14 @@ export function getMobileUploadQueue() {
     console.warn('Upload queue _tmp recovery also failed');
   }
 
+  // DMOB-5: if the main key existed but was unreadable and the _tmp fallback
+  // also failed, surface it instead of silently returning [] (which reads as
+  // "no pending uploads" and would drop the user's recordings). The durable
+  // Preferences backup is restored asynchronously by recoverQueueFromPreferences
+  // at startup.
+  if (mainCorrupt) {
+    try { captureMessage('upload queue: main+tmp keys unreadable — relying on Preferences backup', 'error'); } catch { /* sentry optional */ }
+  }
   return [];
 }
 
@@ -732,6 +751,16 @@ export const uploadWithVerification = async (options) => {
 
   sentryUploadStart(recordId);
 
+  // DMOB-6: enqueue the upload BEFORE any network work so an in-flight upload
+  // the OS kills — iOS suspends the network when backgrounded mid-upload, then
+  // may terminate the app — is not lost. processMobileUploadQueue resumes it on
+  // next launch / network-online / foreground. Idempotent (dedupes by
+  // recordId) and removed on confirmed success below. Only for Capacitor
+  // file-path uploads; a picked File object has no resumable path.
+  if (isCapacitor() && filePath && recordId) {
+    addToMobileUploadQueue(recordId, filePath, metadata);
+  }
+
   try {
     // Phase 1a: Calculate local checksum before upload
     // Skip on mobile — reading the file for checksumming is expensive (base64 decode)
@@ -873,6 +902,7 @@ export const uploadWithVerification = async (options) => {
         }
         // Direct flow already verified server-side; skip extra status poll.
         if (uploadResult.verified) {
+          if (isCapacitor() && recordId) removeFromMobileUploadQueue(recordId); // DMOB-6
           onStatusChange('complete');
           sentryUploadSuccess(recordId, audioFileId);
           return {
@@ -917,6 +947,7 @@ export const uploadWithVerification = async (options) => {
     }
 
     // Upload successful and verified (or trust-based)
+    if (isCapacitor() && recordId) removeFromMobileUploadQueue(recordId); // DMOB-6
     onStatusChange('complete');
     sentryUploadSuccess(recordId, audioFileId);
     return {

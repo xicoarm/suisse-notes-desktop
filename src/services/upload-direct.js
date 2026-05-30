@@ -468,9 +468,25 @@ export async function uploadViaPresignedSas(opts) {
             signal: abortSignal,
           });
           const reinitData = await reinit.json().catch(() => ({}));
-          if (reinit.ok && reinitData.mode === "azure" && reinitData.sasUrl) {
+          if (reinit.ok && reinitData.mode === "azure" && reinitData.sasUrl && reinitData.audioFileId) {
+            if (reinitData.audioFileId === audioFileId) {
+              // Same session — fresh SAS, staged blocks still valid.
+              sasUrl = reinitData.sasUrl;
+              i--; // retry this same block with the new SAS
+              continue;
+            }
+            // DUREC-3: the server returned a DIFFERENT audioFileId. The blocks
+            // staged so far belong to the old blob and can never be committed
+            // into the new one (committing a mixed/partial block list would
+            // silently truncate the recording). Restart cleanly from block 0
+            // onto the new session — keep the original blockSize so totalBlocks
+            // stays consistent.
+            audioFileId = reinitData.audioFileId;
             sasUrl = reinitData.sasUrl;
-            i--; // retry this same block with the new SAS
+            blobName = reinitData.blobName || blobName;
+            blockIds.length = 0;
+            bytesUploaded = 0;
+            i = -1; // for-loop ++ resumes at block 0
             continue;
           }
         } catch {
