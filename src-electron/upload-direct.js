@@ -464,11 +464,36 @@ async function uploadViaPresignedSas(opts) {
             }
           );
           const reinit = reinitResp.data || {};
-          if (reinit.mode === 'azure' && reinit.sasUrl) {
+          if (reinit.mode === 'azure' && reinit.sasUrl && reinit.audioFileId) {
+            if (reinit.audioFileId === audioFileId) {
+              // Same session — fresh SAS, previously staged blocks remain valid.
+              // Retry this same block.
+              sasUrl = reinit.sasUrl;
+              i--;
+              continue;
+            }
+            // DUREC-3: the server handed us a DIFFERENT audioFileId. The blocks
+            // staged so far belong to the OLD blob and can never be committed
+            // into the new one — committing a partial/mixed block list would
+            // silently truncate the recording. Best-effort abort the old
+            // session, then restart cleanly from block 0 onto the new session.
+            // NB: keep the original blockSize so totalBlocks stays consistent.
+            log.warn(
+              `[uploadDirect] Re-init returned a new audioFileId ` +
+                `(${audioFileId} -> ${reinit.audioFileId}); restarting upload from block 0`
+            );
+            try {
+              await abortDirectUpload({ apiBaseUrl, authToken, recordId, audioFileId });
+            } catch (e) {
+              log.warn('[uploadDirect] Abort of stale session failed (non-fatal):', e?.message);
+            }
+            audioFileId = reinit.audioFileId;
             sasUrl = reinit.sasUrl;
-            // Server keeps the same audioFileId on retry, so previously
-            // staged blocks remain valid. Retry this same block.
-            i--;
+            blobName = reinit.blobName || blobName;
+            blockIds.length = 0;
+            bytesUploaded = 0;
+            try { onSession({ audioFileId, blobName }); } catch (_) { /* best-effort */ }
+            i = -1; // for-loop ++ resumes at block 0
             continue;
           }
         } catch (e) {

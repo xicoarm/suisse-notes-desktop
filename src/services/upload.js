@@ -632,7 +632,7 @@ const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts 
       // case any older endpoints still echo them.
       const s = status.status;
       const PERSISTED_STATES = new Set([
-        'persisted', 'complete',                       // legacy
+        'persisted', 'complete', 'processing',         // legacy (kept in lockstep with electron-main)
         'UPLOADING', 'PROCESSING', 'COMPLETED',        // contract
       ]);
       const FAILED_STATES = new Set([
@@ -660,8 +660,18 @@ const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts 
         return { persisted: false, verified: false, error: status.errorMessage || status.error || `Server reported status=${s}` };
       }
 
-      // RECORDING or unknown — server hasn't confirmed persistence yet.
-      // Keep polling.
+      // DUREC-1: RECORDING means the server is still ingesting — keep polling.
+      // Any OTHER unrecognized status means the backend added a
+      // post-persistence state the client doesn't know yet; the bytes already
+      // landed via the authenticated upload, so treat as persisted
+      // (trust-based) rather than polling to a false "confirmation timeout"
+      // that triggers a duplicate re-upload and burns the user's minutes.
+      if (s !== 'RECORDING' && s !== 'recording') {
+        console.warn(`Upload status unrecognized "${s}" — treating as persisted (fail-safe)`);
+        try { captureMessage(`upload: unknown status enum=${s}`, 'warning'); } catch { /* sentry optional */ }
+        return { persisted: true, verified: false, fallback: true, unknownStatus: s };
+      }
+      // RECORDING — server hasn't confirmed persistence yet. Keep polling.
       await sleep(pollInterval);
     } catch (error) {
       console.warn(`Status poll attempt ${attempt + 1} failed:`, error.message);

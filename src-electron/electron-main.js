@@ -867,6 +867,10 @@ const activeDirectAudioFileIds = new Map();
 // Track if upload is in progress to prevent window close
 let isUploadInProgress = false;
 let pendingUploadsCount = 0;
+// DRD-2: set while before-quit aborts in-flight uploads, so upload:start keeps
+// the aborted recording in the persistent queue (for next-launch resume) rather
+// than treating the quit-abort like a user cancel and dropping it.
+let isQuittingWithUploads = false;
 
 // Track recording status for close prevention
 let isRecordingInProgress = false;
@@ -1333,12 +1337,36 @@ app.whenReady().then(() => {
   };
 
   app.on('before-quit', async (e) => {
-    if (isRecordingInProgress && !app._quitFlushed) {
-      e.preventDefault();
+    if (app._quitFlushed) return;
+    const hasUpload = isUploadInProgress || pendingUploadsCount > 0;
+    if (!isRecordingInProgress && !hasUpload) return;
+
+    e.preventDefault();
+
+    if (isRecordingInProgress) {
       await flushBeforeQuit('before_quit');
-      app._quitFlushed = true;
-      app.quit();
     }
+
+    // DRD-2: the previous handler ignored in-flight uploads, so quitting
+    // mid-upload severed the socket with no clean cancellation. Abort the
+    // active upload controllers instead: SAS block commits are atomic (an
+    // uncommitted blob is invisible to the server) and a truncated legacy POST
+    // is rejected on Content-Length mismatch, so no partial recording can
+    // persist server-side. The recording stays in the persistent upload queue
+    // (added in upload:start) and resumes on next launch via
+    // processPendingUploads.
+    if (hasUpload && activeAbortControllers.size > 0) {
+      isQuittingWithUploads = true; // keep aborted uploads queued for resume
+      log.info(`Aborting ${activeAbortControllers.size} in-flight upload(s) before quit`);
+      for (const controller of activeAbortControllers.values()) {
+        try { controller.abort(); } catch (_) { /* ignore */ }
+      }
+      // Brief grace so the abort can unwind the upload promises before exit.
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    app._quitFlushed = true;
+    app.quit();
   });
 
   // Windows-specific: fires when OS is shutting down / restarting
@@ -3494,8 +3522,26 @@ async function pollServerStatus(audioFileId, maxAttempts = 15) {
           return { persisted: false, verified: false, error: errMsg };
         }
 
-        // RECORDING or unknown — server hasn't confirmed persistence yet.
-        log.info(`Upload status for ${audioFileId}: ${status}, waiting...`);
+        // RECORDING means the server is still ingesting — keep polling.
+        if (status === 'RECORDING' || status === 'recording') {
+          log.info(`Upload status for ${audioFileId}: ${status}, waiting...`);
+        } else {
+          // DUREC-1: an UNRECOGNIZED status (neither persisted, failed, nor
+          // recording) almost certainly means the backend added a new
+          // post-persistence state the client doesn't know yet (e.g. QUEUED).
+          // The authenticated upload already returned an audioFileId, so the
+          // bytes are on the server — treat as persisted (trust-based) rather
+          // than polling to a false "confirmation timeout" that makes the user
+          // re-upload and burns duplicate minutes. Log so backend enum drift is
+          // visible.
+          log.warn(`Upload status for ${audioFileId}: unrecognized status "${status}" — treating as persisted (fail-safe)`);
+          Sentry.captureMessage(`Upload status unknown enum: ${status}`, {
+            level: 'warning',
+            tags: { operation: 'upload_verification' },
+            extra: { audioFileId, status },
+          });
+          return { persisted: true, verified: false, fallback: true, unknownStatus: status };
+        }
       }
 
       await sleep(pollInterval);
@@ -4113,7 +4159,12 @@ ipcMain.handle('upload:start', async (event, params) => {
     // Remove from queue on success OR on terminal failure (canRetry === false).
     // The old behavior left non-retryable failures in the queue, where they
     // would be re-attempted on every app launch and 413/402/etc forever.
-    if (result.success || result.canRetry === false) {
+    // DRD-2: a quit-time abort returns { cancelled: true, canRetry: false }.
+    // Unlike a user cancel (routed through upload:cancel, which registers the
+    // recordId in cancelledUploads), it must NOT be removed from the queue — we
+    // want it to resume on next launch.
+    const abortedByQuit = result.cancelled && isQuittingWithUploads && !cancelledUploads.has(recordId);
+    if ((result.success || result.canRetry === false) && !abortedByQuit) {
       removeFromUploadQueue(recordId);
       if (!result.success) {
         log.warn(`[upload] Removing terminal-failure ${recordId} from queue (status=${result.status}, error=${result.error})`);
