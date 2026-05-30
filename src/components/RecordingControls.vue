@@ -289,6 +289,13 @@ const handleConfirmCancel = () => {
 .stop-dialog-card {
   border-radius: 16px 16px 0 0;
   padding: 8px 0 16px;
+  // Clear the Android nav bar / iOS home indicator so the last action
+  // ("Cancel & Delete") isn't hidden behind the system bar. This bottom-sheet's
+  // inner padding-bottom is locked to 0 by Quasar, and this scoped rule
+  // out-specifies the generic app.scss fallback, so add the inset to the card's
+  // own 16px here. --app-safe-area-bottom (app.scss :root) = env() on iOS,
+  // --android-nav-bar-height on Android, 0 on desktop → no desktop change.
+  padding-bottom: calc(16px + var(--app-safe-area-bottom, 0px));
   width: 100%;
   max-width: 480px;
 }

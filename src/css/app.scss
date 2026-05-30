@@ -518,8 +518,13 @@ h4 {
   --app-safe-area-bottom: max(env(safe-area-inset-bottom, 0px), var(--android-nav-bar-height, 0px));
 }
 
-// Bottom-sheet dialogs (position="bottom") — lift the whole card above the bar.
-.q-dialog__inner--bottom {
+// Bottom-sheet dialogs (position="bottom"): Quasar forces
+// `padding-bottom: 0 !important` on the inner to keep the sheet flush to the
+// screen edge, so padding the inner is futile. Pad the CARD content (> div)
+// instead — the sheet stays flush but its content clears the bar. (A card that
+// sets its own higher-specificity bottom padding, e.g. the stop-recording sheet
+// in RecordingControls.vue, adds the inset in its own component style.)
+.q-dialog__inner--bottom > div {
   padding-bottom: var(--app-safe-area-bottom);
 }
 // Centered/standard dialogs — keep Quasar's 24px default and add the inset so a
