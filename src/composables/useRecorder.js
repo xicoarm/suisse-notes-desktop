@@ -46,6 +46,10 @@ export function useRecorder() {
   const isAutoSplitting = ref(false);
   const isMicMuted = ref(false);
   const recordingHealth = ref(recordingService.getMicHealthState());
+  // Capture-reliability surfacing (data-loss work): a stalled recorder and
+  // chunk-save failures must be visible to the user, not silently swallowed.
+  const captureStalled = ref(null); // null | { secondsSinceLastChunk, savedChunks }
+  const chunkSaveError = ref(null); // null | { consecutiveErrors, error, diskFull }
   const isMicHealthy = computed(() => recordingHealth.value?.status === 'ok');
   const recordingHealthMessage = computed(() => recordingHealth.value?.message || null);
 
@@ -127,6 +131,34 @@ export function useRecorder() {
     console.warn('Recording dead event from service:', data);
     // The store is already updated by recordingService.verifyRecordingState()
     // The UI will react to recordingStore.isRecordingDead
+  };
+
+  // Chunk-save failure (incl. disk-full / retries-exhausted). data===null clears.
+  // Previously this event had NO listener, so disk-full and permanently-failed
+  // chunk saves were 100% invisible and the recording kept accumulating holes.
+  const handleChunkSaveFailure = async (data) => {
+    if (!data) { chunkSaveError.value = null; return; }
+    console.error('Chunk save failure from service:', data);
+    chunkSaveError.value = data;
+    // Disk full, or repeated permanent failures → stop now and preserve what is
+    // already on disk rather than continuing to "record" into a gapped session.
+    if (data.diskFull || (data.consecutiveErrors && data.consecutiveErrors >= 3)) {
+      console.error('Emergency stop-with-save triggered by chunk-save failure');
+      try {
+        await recordingService.stopRecording(recordingStore, stopSystemAudio);
+      } catch (e) {
+        console.error('Emergency stop-with-save failed:', e);
+      }
+    }
+  };
+
+  // Chunk-progress watchdog: capture appears stalled while still 'recording'.
+  const handleCaptureStalled = (data) => {
+    console.warn('Capture stalled (watchdog):', data);
+    captureStalled.value = data;
+  };
+  const handleCaptureRecovered = () => {
+    captureStalled.value = null;
   };
 
   // Minutes limit event handlers
@@ -326,6 +358,9 @@ export function useRecorder() {
     recordingService.addEventListener('healthChange', handleHealthChange);
     recordingService.addEventListener('criticalWarning', handleHealthChange);
     recordingService.addEventListener('healthRecovered', handleHealthChange);
+    recordingService.addEventListener('chunkSaveFailure', handleChunkSaveFailure);
+    recordingService.addEventListener('captureStalled', handleCaptureStalled);
+    recordingService.addEventListener('captureRecovered', handleCaptureRecovered);
 
     // Set up visibility and beforeunload handlers
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -396,6 +431,9 @@ export function useRecorder() {
     recordingService.removeEventListener('healthChange', handleHealthChange);
     recordingService.removeEventListener('criticalWarning', handleHealthChange);
     recordingService.removeEventListener('healthRecovered', handleHealthChange);
+    recordingService.removeEventListener('chunkSaveFailure', handleChunkSaveFailure);
+    recordingService.removeEventListener('captureStalled', handleCaptureStalled);
+    recordingService.removeEventListener('captureRecovered', handleCaptureRecovered);
 
     // Remove visibility and beforeunload handlers
     document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -429,6 +467,8 @@ export function useRecorder() {
     recordingHealth,
     isMicHealthy,
     recordingHealthMessage,
+    captureStalled,
+    chunkSaveError,
     minutesLimitWarning,
     minutesLimitReached,
     minutesStore,
