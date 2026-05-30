@@ -984,6 +984,19 @@ export function getWallClockSeconds() {
 }
 
 /**
+ * Call when the app/tab returns to the foreground, or the OS resumes from sleep.
+ * Refreshes the chunk-progress watchdog baseline so the JS-timer gap that
+ * accrued while suspended is NOT misread as a capture stall (B2). No-op unless a
+ * recording interval is active (durationInterval is null while paused/stopped).
+ */
+export function notifyForegrounded() {
+  if (durationInterval) {
+    lastSuccessfulChunkAt = Date.now();
+    stallWarned = false;
+  }
+}
+
+/**
  * Perform auto-split
  */
 async function performAutoSplit(recordingStore, isAutoSplitting) {

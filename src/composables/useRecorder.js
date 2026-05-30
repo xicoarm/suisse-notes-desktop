@@ -104,6 +104,12 @@ export function useRecorder() {
   const handleStateChange = (state) => {
     // State changes are handled by the store, just log for debugging
     console.log('Recording state changed:', state);
+    // B3: clear the transient capture-stall banner once recording is no longer
+    // active, so a terminal stall doesn't keep the warning up through stop /
+    // processing and into the next session.
+    if (state && !state.isRecording) {
+      captureStalled.value = null;
+    }
   };
 
   const handleMicMuteChange = (muted) => {
@@ -180,6 +186,12 @@ export function useRecorder() {
 
     if (isHidden && recordingStore.isRecording) {
       await recordingService.flushRecordingData();
+    } else if (!isHidden) {
+      // B2: returning to the foreground (desktop tab visible OR mobile app
+      // resumed). JS timers were frozen while hidden, so refresh the watchdog
+      // baseline — otherwise the first post-resume tick reads the whole hidden
+      // gap as a capture stall and fires a false warning.
+      recordingService.notifyForegrounded();
     }
   };
 
@@ -202,6 +214,8 @@ export function useRecorder() {
     minutesLimitReached.value = false;
     systemAudioCaptureError.value = null;
     micCaptureError.value = null;
+    captureStalled.value = null;
+    chunkSaveError.value = null;
 
     // Use user's remaining minutes as max duration if not specified
     const maxSeconds = maxRecordingSeconds ?? minutesStore.remainingSeconds;
@@ -285,7 +299,11 @@ export function useRecorder() {
 
       // Pass current recording offset so macOS AudioTee can pad with silence
       // and align the captured PCM with the mic timeline at merge time.
-      const offsetMs = Math.max(0, Math.round((recordingStore.duration || 0) * 1000));
+      // A5: align system audio to the TRUE elapsed time, not the clamped
+      // captured-duration in recordingStore.duration (which under-counts after a
+      // stall or at start-latency) — using the clamp would mis-pad the
+      // system-audio PCM against the mic timeline.
+      const offsetMs = Math.max(0, Math.round((recordingService.getWallClockSeconds() || 0) * 1000));
       const result = await captureSystemAudio(recordingStore.recordId, offsetMs);
       if (!result) {
         return { success: false, error: 'Failed to start system audio capture' };
@@ -395,6 +413,9 @@ export function useRecorder() {
 
       window.electronAPI.system.onResume(async (data) => {
         if (data.needsRecovery && recordingStore.isRecording) {
+          // B2: OS resumed from sleep — refresh the watchdog baseline so the
+          // frozen-timer gap during sleep is not read as a capture stall.
+          recordingService.notifyForegrounded();
           // Explicitly resume AudioContext — it may be suspended after system sleep
           await recordingService.resumeAudioContexts();
 
