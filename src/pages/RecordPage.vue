@@ -399,6 +399,25 @@
             </q-banner>
           </div>
 
+          <!-- Capture-stall watchdog: no audio saved for a while while still "recording" -->
+          <div
+            v-if="captureStalled"
+            class="warning-section"
+          >
+            <q-banner
+              class="warning-banner"
+              rounded
+            >
+              <template #avatar>
+                <q-icon
+                  name="warning"
+                  color="negative"
+                />
+              </template>
+              {{ $t('captureStalledWarning', 'Recording may have stalled — no audio has been saved for a while. Please verify; stop and save if it does not recover.') }}
+            </q-banner>
+          </div>
+
           <!-- Error Display -->
           <div
             v-if="recordingStore.error && !isAutoUploading"
@@ -795,6 +814,8 @@ const {
   recordingHealth,
   isMicHealthy,
   recordingHealthMessage,
+  // Capture-stall watchdog (data-loss prevention)
+  captureStalled,
   // Minutes limit tracking
   minutesLimitWarning,
   minutesLimitReached,

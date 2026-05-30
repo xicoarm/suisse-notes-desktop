@@ -703,13 +703,12 @@ export const useRecordingStore = defineStore('recording', {
             return { success: false, error: `Chunk integrity failure: ${gapMsg}`, gapDetected: true, gaps: validation.gaps };
           }
 
-          // Recovery path: proceed with available chunks — partial audio is better than none
-          // But only if we have a reasonable portion (>50% of expected chunks)
-          if (validation.chunkCount < validation.expectedCount * 0.5) {
-            console.error('Recovery: too many missing chunks, cannot produce usable audio:', gapMsg);
-            return { success: false, error: `Too many missing chunks (${validation.chunkCount}/${validation.expectedCount})`, gapDetected: true };
-          }
-          console.warn('Chunk gap detected (recovery mode, proceeding with partial):', gapMsg);
+          // Recovery path: ALWAYS proceed with whatever chunks exist. For a
+          // crashed/orphaned recording, partial audio is strictly better than
+          // discarding the user's recording — previously a <50% recovery was
+          // refused, throwing away e.g. an hour of a gappy 3h meeting. The gap
+          // is reported below so the loss is quantified, never hidden.
+          console.warn(`Chunk gap detected (recovery mode, proceeding with ${validation.chunkCount}/${validation.expectedCount} chunks): ${gapMsg}`);
         }
 
         // Use native plugin for proper M4A/AAC combining via platform APIs
