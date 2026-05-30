@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.2.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.2.0...v4.2.1) (2026-05-30)
+
+
+### Bug Fixes
+
+* **export:** instrument + harden audio export so failures are diagnosable ([7884907](https://github.com/xicoarm/suisse-notes-desktop/commit/788490746f573468f2c03e98b2ea47e5f905c9a8))
+* **export:** make Android share robust — full FileProvider paths + fallback ([4481e90](https://github.com/xicoarm/suisse-notes-desktop/commit/4481e904f57db5531460d8481efa559ee6c77fc3))
+* **mobile:** register @capacitor/share natively + bump to 3.9.23 ([33a1f6d](https://github.com/xicoarm/suisse-notes-desktop/commit/33a1f6df32e25eeb5235f430475f6b21a917a967))
+* **recording:** Bug D — edge-trigger auto-split so it can't re-fire every tick ([8e67fec](https://github.com/xicoarm/suisse-notes-desktop/commit/8e67fec4cd608c52cb37939ca89a12703570b3b4))
+* **recording:** honest duration + chunk-progress stall watchdog (warn-only) ([95ce0e2](https://github.com/xicoarm/suisse-notes-desktop/commit/95ce0e2718d18c43def9d20f056d5d439ffcc560))
+* **recording:** recover any partial recording + surface capture stall in UI ([7001f45](https://github.com/xicoarm/suisse-notes-desktop/commit/7001f45ce5d5cd88903343c1e28683ac2963eb40))
+* **recording:** surface chunk-save failures + stall, auto stop-with-save ([a345822](https://github.com/xicoarm/suisse-notes-desktop/commit/a3458225e73527e0d894582c39494552c0b481ff))
+
 ## [4.2.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.1.5...v4.2.0) (2026-05-29)
 
 
