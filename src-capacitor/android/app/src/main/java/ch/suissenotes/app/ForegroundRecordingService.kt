@@ -102,10 +102,18 @@ class ForegroundRecordingService : Service() {
         val action = intent?.action
 
         if (action == ACTION_NOTIFICATION_ONLY) {
-            // Just show notification and start foreground — no native recording
-            // Used when WebView MediaRecorder handles audio but we need foreground service protection
+            // Just show notification and start foreground — no native recording.
+            // Used when the WebView MediaRecorder handles audio but we need
+            // foreground-service protection to keep the process alive.
             createNotificationChannel()
             startForeground(NOTIFICATION_ID, createNotification("Recording in progress..."))
+            // MOBR-2/MOBR-6: this production path previously acquired NO wake
+            // lock (the lock lived only in the unused native-recording path), so
+            // with the screen off Doze could throttle/suspend the WebView's JS
+            // timers and silently stall chunk persistence on a long recording.
+            // Hold a PARTIAL_WAKE_LOCK so the CPU stays awake for the WebView
+            // recorder; it is released in stopForegroundService -> onDestroy.
+            acquireWakeLock()
             return START_STICKY
         }
 
@@ -547,14 +555,22 @@ class ForegroundRecordingService : Service() {
     // MARK: - Wake Lock (FIX 6)
 
     private fun acquireWakeLock() {
+        // Avoid stacking duplicate locks if called more than once.
+        if (wakeLock?.isHeld == true) return
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
             "SuisseNotes::RecordingWakeLock"
         ).apply {
-            acquire(5 * 60 * 60 * 1000L) // 5-hour timeout
+            // MOBR-6: acquire WITHOUT a timeout. The previous 5-hour timeout
+            // auto-released the lock mid-session on recordings longer than 5h
+            // (the CPU could then sleep and silently stall chunk persistence).
+            // The lock is deterministically released in stopRecording()/
+            // stopForegroundService()/onDestroy(), and if the service is killed
+            // the OS releases it automatically — so there is no leak risk.
+            acquire()
         }
-        Log.d(TAG, "Wake lock acquired")
+        Log.d(TAG, "Wake lock acquired (no timeout)")
     }
 
     private fun releaseWakeLock() {

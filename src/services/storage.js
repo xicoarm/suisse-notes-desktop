@@ -97,17 +97,35 @@ export const saveChunk = async (recordId, data, chunkIndex, extension = '.webm')
     try {
       const fileName = `chunk_${String(chunkIndex).padStart(6, '0')}${extension}`;
       const path = `recordings/${recordId}/chunks/${fileName}`;
+      // MOBR-7: Capacitor's writeFile is NOT atomic and has no fsync, so a
+      // process kill (OS OOM, force-quit, battery death) mid-write would leave
+      // a truncated chunk_N file that the native combiner reads as corrupt
+      // audio. Write to a temp name the combiner + sequence validator never
+      // scan (they require a leading "chunk_"), verify its size, then
+      // atomically rename into place — so the final chunk_N is either absent or
+      // complete. Mirrors the durable tmp+rename pattern used by saveMetadata.
+      const tmpName = `.tmp_${String(chunkIndex).padStart(6, '0')}${extension}`;
+      const tmpPath = `recordings/${recordId}/chunks/${tmpName}`;
 
       const base64Data = dataToBase64(data);
       await Filesystem.writeFile({
-        path,
+        path: tmpPath,
         data: base64Data,
         directory: Directory.Documents,
         recursive: true
       });
 
-      // Verify write reached disk — fsync substitute
-      await verifyWrite(path, data.length || 1);
+      // Verify the temp write reached disk before promoting it — fsync substitute.
+      await verifyWrite(tmpPath, data.length || 1);
+
+      // Atomic promote: rename is atomic within the same filesystem on both
+      // Android (File.renameTo) and iOS (FileManager.moveItem).
+      await Filesystem.rename({
+        from: tmpPath,
+        to: path,
+        directory: Directory.Documents,
+        toDirectory: Directory.Documents
+      });
 
       return { success: true, path };
     } catch (error) {

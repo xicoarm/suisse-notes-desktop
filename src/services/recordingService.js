@@ -1080,6 +1080,17 @@ export function getWallClockSeconds() {
 }
 
 /**
+ * MOBR-1/INT-1: cumulative count of chunks actually persisted to disk this
+ * recording (across auto-split segments). Used by the visibility handler to
+ * detect a background capture gap on mobile — if the wall clock advanced while
+ * backgrounded but this counter barely moved, the WebView recorder was
+ * suspended and audio was silently lost for that window.
+ */
+export function getSavedChunkCount() {
+  return savedChunkCount;
+}
+
+/**
  * Call when the app/tab returns to the foreground, or the OS resumes from sleep.
  * Refreshes the chunk-progress watchdog baseline so the JS-timer gap that
  * accrued while suspended is NOT misread as a capture stall (B2). No-op unless a

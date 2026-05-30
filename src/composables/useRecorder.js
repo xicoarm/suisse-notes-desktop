@@ -50,6 +50,10 @@ export function useRecorder() {
   // chunk-save failures must be visible to the user, not silently swallowed.
   const captureStalled = ref(null); // null | { secondsSinceLastChunk, savedChunks }
   const chunkSaveError = ref(null); // null | { consecutiveErrors, error, diskFull }
+  // MOBR-1/INT-1: snapshot of persisted-chunk count + timestamp taken when the
+  // app/tab is hidden during a mobile recording, so we can detect on return
+  // whether the WebView was suspended (capture gap) while backgrounded.
+  let hiddenSnapshot = null;
 
   // Screen Wake Lock — keep the screen on during a mobile recording so it does
   // not auto-lock (which suspends the WebView recorder). Pure JS, best-effort
@@ -207,6 +211,11 @@ export function useRecorder() {
     const isHidden = document.hidden || document.visibilityState === 'hidden';
 
     if (isHidden && recordingStore.isRecording) {
+      // MOBR-1/INT-1: snapshot persisted-chunk progress so we can tell on
+      // return whether capture actually continued while backgrounded.
+      if (isCapacitor()) {
+        hiddenSnapshot = { savedChunks: recordingService.getSavedChunkCount(), atMs: Date.now() };
+      }
       await recordingService.flushRecordingData();
     } else if (!isHidden) {
       // B2: returning to the foreground (desktop tab visible OR mobile app
@@ -216,6 +225,28 @@ export function useRecorder() {
       recordingService.notifyForegrounded();
       // The screen wake lock auto-releases when hidden — re-acquire it.
       if (recordingStore.isRecording) requestWakeLock();
+
+      // MOBR-1/INT-1: on mobile the OS can suspend the WebView (and its
+      // MediaRecorder) in the background — screen lock, app switch, or an
+      // incoming call — so capture silently stops while the wall clock keeps
+      // climbing. If the wall clock advanced meaningfully while hidden but
+      // barely any chunks were persisted, surface a capture-gap warning instead
+      // of letting the timer imply the whole meeting was captured. (This is the
+      // visible half of the safety net; true background capture is the planned
+      // native follow-up.)
+      if (isCapacitor() && hiddenSnapshot && recordingStore.isRecording) {
+        const hiddenSec = Math.round((Date.now() - hiddenSnapshot.atMs) / 1000);
+        const savedDuring = recordingService.getSavedChunkCount() - hiddenSnapshot.savedChunks;
+        const expectedChunks = hiddenSec / 3; // ~3s MediaRecorder timeslice
+        if (hiddenSec >= 15 && savedDuring < Math.max(1, expectedChunks * 0.5)) {
+          captureStalled.value = {
+            secondsSinceLastChunk: hiddenSec,
+            savedChunks: recordingService.getSavedChunkCount(),
+            backgroundGap: true,
+          };
+        }
+      }
+      hiddenSnapshot = null;
     }
   };
 

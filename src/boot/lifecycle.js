@@ -138,17 +138,26 @@ export const initializeLifecycle = async () => {
         console.log('Lifecycle: App went to background');
         sentryAppBackground();
         if (onAppBackground) {
-          // P0 Fix: Track flush completion — iOS may kill us mid-await
+          // P0 Fix: Track flush completion — iOS may kill us mid-await.
           backgroundFlushCompleted = false;
           try {
-            // Race the flush against a 4-second timeout (iOS gives ~5s minimum)
-            await Promise.race([
-              onAppBackground(),
-              new Promise(resolve => setTimeout(resolve, 4000))
-            ]);
-            backgroundFlushCompleted = true;
+            // INT-7: race the flush against a 4s timeout (iOS gives ~5s before
+            // suspension) but record WHICH branch won. The previous code set
+            // backgroundFlushCompleted=true unconditionally after the race, so a
+            // flush still writing when the timeout fired was wrongly treated as
+            // done and never retried. Now a timeout leaves the flag false so
+            // onForeground re-runs the flush; cold-start recovery also still
+            // re-combines because flushCurrentState persists the session with
+            // status='recording'.
+            const flushDone = Promise.resolve(onAppBackground()).then(() => true);
+            const timedOut = new Promise(resolve => setTimeout(() => resolve(false), 4000));
+            backgroundFlushCompleted = (await Promise.race([flushDone, timedOut])) === true;
+            if (!backgroundFlushCompleted) {
+              console.warn('Lifecycle: background flush did not confirm within 4s — will retry on foreground');
+            }
           } catch (e) {
             console.error('Lifecycle: onAppBackground error:', e);
+            backgroundFlushCompleted = false;
           }
         }
       }
