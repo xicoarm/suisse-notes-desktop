@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [4.3.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.2.2...v4.3.0) (2026-05-30)
+
+
+### Features
+
+* **recording:** keep screen awake + discreet "keep app foreground" hint (mobile) ([22faf26](https://github.com/xicoarm/suisse-notes-desktop/commit/22faf263d2a8f84524a0857e3dba7209ff87b647))
+* **recording:** log mobile background capture-gap to Sentry for incidence data ([505dad4](https://github.com/xicoarm/suisse-notes-desktop/commit/505dad45a989f169033a5181e1c0547fff2d11c9))
+
+
+### Bug Fixes
+
+* **ble:** abort in-flight transfer on disconnect + bound connect (BT-2/4/5) ([c049a55](https://github.com/xicoarm/suisse-notes-desktop/commit/c049a5576b112670d8f17014a36cf79d1f31edff))
+* **recording:** harden desktop engine (onerror-stop, flush, mic recovery, split anchor) ([c919680](https://github.com/xicoarm/suisse-notes-desktop/commit/c919680c28b8d1ce2d384403db43c35905a27a00))
+* **recording:** mobile safety-net — atomic chunks, bg gap warning, Android wake lock ([5753587](https://github.com/xicoarm/suisse-notes-desktop/commit/5753587913cc47c9f34f90d2d42b03dc282fa3f6))
+* **upload:** desktop resilience — quit-abort resume, SAS re-init safety, status fail-safe ([211a0a2](https://github.com/xicoarm/suisse-notes-desktop/commit/211a0a2ed2c3426a03a18b5db4d9ef5fdfa166d6))
+* **upload:** mobile resilience — crash-resumable uploads, queue + chunk integrity ([6d4ebbe](https://github.com/xicoarm/suisse-notes-desktop/commit/6d4ebbe41712a69c67604f6babbd6c17c8fd129a))
+* **upload:** treat 413 over-size as terminal on mobile legacy path (DUREC-5) ([d7ac886](https://github.com/xicoarm/suisse-notes-desktop/commit/d7ac8869525928fb0226945ddd852e82b4f20c79))
+
 ### [4.2.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.2.1...v4.2.2) (2026-05-30)
 
 
