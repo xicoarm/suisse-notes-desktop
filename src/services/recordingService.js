@@ -4,6 +4,7 @@
  */
 
 import { isAndroid } from '../utils/platform';
+import { captureMessage } from '../boot/sentry';
 
 let BackgroundRecording = null;
 
@@ -834,6 +835,52 @@ let nextAutoSplitAtSeconds = MAX_DURATION_SECONDS;
 // give up forever — back off and retry after this many seconds.
 const AUTOSPLIT_RETRY_SECONDS = 300;
 
+// Chunk-progress watchdog + honest-duration state.
+// - lastSuccessfulChunkAt: ms timestamp of the last chunk persisted to disk.
+// - savedChunkCount: cumulative persisted chunks across auto-split segments —
+//   drives the displayed/stored "captured" duration so a capture stall shows
+//   up as a frozen timer instead of a wall-clock number that keeps climbing.
+// - lastWallClockSec: monotonic wall-clock total; drives the minutes-limit and
+//   auto-split predicates (must NOT be derived from the clamped display value).
+// - stallWarned: latch so a stall warns once per episode, not every 5s tick.
+let lastSuccessfulChunkAt = 0;
+let savedChunkCount = 0;
+let lastWallClockSec = 0;
+let stallWarned = false;
+const STALL_WARN_MS = 30000; // ~10 timeslices with no persisted chunk while 'recording'
+
+/**
+ * Displayed/stored duration that reflects audio actually captured to disk, not
+ * the wall clock. Clamped to (captured chunks + one in-flight timeslice) so a
+ * healthy recording reads ~wall-clock while a stalled one freezes — making the
+ * stall visible instead of silently masked.
+ */
+function capturedDisplaySeconds(wallClockSec) {
+  const tsSec = MEDIA_RECORDER_TIMESLICE_MS / 1000;
+  return Math.min(wallClockSec, savedChunkCount * tsSec + tsSec);
+}
+
+/**
+ * Chunk-progress watchdog. WARN-ONLY (no auto-stop): if the recorder is
+ * 'recording' but no chunk has persisted for STALL_WARN_MS, surface it once.
+ * Gated against the legitimate auto-split pause (the merge can hold the
+ * recorder paused for minutes) and against pause/interrupt so it cannot
+ * false-positive and itself harm a healthy recording.
+ */
+function checkChunkProgress(recordingStore, isAutoSplitting) {
+  if (!recordingStore.isRecording || recordingStore.isPaused || recordingStore.recordingInterrupted) return;
+  if (isAutoSplitting?.value) return;
+  if (!mediaRecorder || mediaRecorder.state !== 'recording') return; // 'inactive' is handled by verifyRecordingState
+  if (!lastSuccessfulChunkAt) return;
+  const gapMs = Date.now() - lastSuccessfulChunkAt;
+  if (gapMs > STALL_WARN_MS && !stallWarned) {
+    stallWarned = true;
+    const secs = Math.round(gapMs / 1000);
+    captureMessage(`recording: capture STALLED — no chunk persisted for ${secs}s (savedChunks=${savedChunkCount}, mediaState=${mediaRecorder.state})`, 'error');
+    emit('captureStalled', { secondsSinceLastChunk: secs, savedChunks: savedChunkCount });
+  }
+}
+
 /**
  * Start duration tracking with optional minutes limit
  * @param {Object} recordingStore - Recording store instance
@@ -851,12 +898,22 @@ function startDurationTracking(recordingStore, isAutoSplitting, maxSeconds = nul
   minutesLimitSeconds = maxSeconds;
   limitWarningShown = false;
   nextAutoSplitAtSeconds = MAX_DURATION_SECONDS; // fresh recording → first split at MAX_DURATION
+  // Reset chunk-progress / honest-duration counters for the fresh recording.
+  lastSuccessfulChunkAt = Date.now();
+  savedChunkCount = 0;
+  stallWarned = false;
+  lastWallClockSec = 0;
 
   durationInterval = setInterval(async () => {
     if (recordingStore.isRecording) {
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
-      recordingStore.updateDuration(elapsed);
-      emit('durationChange', elapsed);
+      lastWallClockSec = elapsed;
+      // Honest duration: persist/show captured-audio seconds, not wall-clock,
+      // so a capture stall is visible. Limit + auto-split below intentionally
+      // keep using wall-clock `elapsed`.
+      const shown = capturedDisplaySeconds(elapsed);
+      recordingStore.updateDuration(shown);
+      emit('durationChange', shown);
 
       // Check minutes limit (if set)
       if (minutesLimitSeconds !== null && minutesLimitSeconds > 0) {
@@ -1288,6 +1345,13 @@ export async function startRecording(options = {}) {
             }
             return;
           } else {
+            // Chunk persisted — advance the watchdog + captured-duration counters.
+            lastSuccessfulChunkAt = Date.now();
+            savedChunkCount++;
+            if (stallWarned) {
+              stallWarned = false;
+              emit('captureRecovered', { savedChunks: savedChunkCount });
+            }
             // Reset consecutive error counter on success
             if (recordingStore.chunkSaveErrors > 0) {
               recordingStore.chunkSaveErrors = 0;
@@ -1397,6 +1461,7 @@ export async function startRecording(options = {}) {
     // Start state verification (every 5s)
     stateVerificationInterval = setInterval(() => {
       verifyRecordingState(recordingStore);
+      checkChunkProgress(recordingStore, isAutoSplitting);
     }, 5000);
 
     // Start auth keep-alive to prevent session expiry during long recordings
@@ -1482,8 +1547,15 @@ export function resumeRecording(recordingStore, isAutoSplitting, maxRecordingSec
     mediaRecorder.resume();
     recordingStore.resumeRecording();
 
-    const currentDuration = recordingStore.duration;
+    // Resume from the wall-clock accumulator, NOT recordingStore.duration — the
+    // latter now holds the clamped captured-audio value, which would make the
+    // minutes-limit / auto-split predicates under-count after a stall.
+    const currentDuration = lastWallClockSec;
     const resumeTime = Date.now();
+    // A fresh chunk hasn't arrived yet; don't let the pause gap read as a stall
+    // on the first post-resume watchdog tick.
+    lastSuccessfulChunkAt = Date.now();
+    stallWarned = false;
 
     // Update limit if provided, otherwise keep existing
     if (maxRecordingSeconds !== null) {
@@ -1502,8 +1574,10 @@ export function resumeRecording(recordingStore, isAutoSplitting, maxRecordingSec
       if (recordingStore.isRecording) {
         const elapsed = Math.floor((Date.now() - resumeTime) / 1000);
         const newDuration = currentDuration + elapsed;
-        recordingStore.updateDuration(newDuration);
-        emit('durationChange', newDuration);
+        lastWallClockSec = newDuration;
+        const shown = capturedDisplaySeconds(newDuration);
+        recordingStore.updateDuration(shown);
+        emit('durationChange', shown);
 
         // Check minutes limit (if set)
         if (minutesLimitSeconds !== null && minutesLimitSeconds > 0) {
