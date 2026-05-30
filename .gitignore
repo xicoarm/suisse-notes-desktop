@@ -47,7 +47,12 @@ node_modules/
 Gemfile.lock
 .bundle
 
-# Local env files
+# Local env files — the repo is PUBLIC, so never commit real env files.
+# Ignore all .env variants (bare .env, .env.local, .env.production, etc.) but
+# keep the committed .env.example template as the documented placeholder.
+.env
+.env.*
+!.env.example
 .env.local
 .env.*.local
 
