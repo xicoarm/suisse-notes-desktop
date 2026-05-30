@@ -81,3 +81,6 @@ CLAUDE_CONTEXT.md
 # Android keystore
 *.keystore
 keystore.properties
+
+# Local-only build artifacts (AABs/APKs/DMGs) and internal planning docs
+artifacts/
