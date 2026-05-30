@@ -127,4 +127,5 @@ The native **upload** rewrite ([`BACKGROUND_UPLOAD_NATIVE_DEFERRED.md`](./BACKGR
 
 **Decision log (append here):**
 - _2026‑05‑31:_ Shipped the safety net; native capture deferred pending §2 telemetry. Revisit ~2026‑06‑14.
+- _2026‑05‑31:_ **Released.** Desktop **`v4.3.0`** — Release workflow green (Win+macOS), published with auto-update feeds (`latest.yml`/`latest-mac.yml`) → auto-updating users. Mobile **`3.9.27`** (versionCode 29 / iOS build 7) — Mobile Release workflow green → iOS to TestFlight. **PENDING: download the Android AAB from run `26694520978` and upload to Play** (internal/closed track recommended first). Measurement window starts once builds land on devices.
 - _(next):_ … background‑gap incidence = ___ iOS / ___ Android → decision = ___
