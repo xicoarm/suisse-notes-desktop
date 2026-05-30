@@ -63,6 +63,18 @@ let micMuted = false;
 // Recording store reference (set during startRecording, used by switchMicrophoneStream)
 let recordingStoreRef = null;
 
+// DREC-3: mic device-disconnect auto-recovery. When a mic track ends mid-
+// recording (USB unplug, Bluetooth drop/codec switch, battery death) we schedule
+// a grace timeout that escalates the health state to CRITICAL. We track those
+// timeouts so a reconnect can cancel the pending escalation, remember the
+// originally-requested deviceId so we can re-acquire it, and listen for
+// devicechange to auto-switch back onto a live input instead of stranding the
+// recording on a dead device showing a permanent "microphone disconnected".
+const micGraceTimeouts = new Set();
+let lastRequestedDeviceId = null;
+let micDeviceChangeHandler = null;
+let micAutoRecovering = false;
+
 // Flush synchronization: resolved when ondataavailable saves the chunk after a flush request
 let flushResolvers = [];
 
@@ -481,6 +493,9 @@ export async function switchMicrophoneStream(newDeviceId) {
   }
 
   try {
+    // DREC-3: remember the active device so auto-recovery can prefer it if it
+    // drops and later reappears.
+    lastRequestedDeviceId = newDeviceId;
     // Step 1: Acquire new mic stream with fallback constraints
     let newStream = null;
     const constraintLadder = [
@@ -543,7 +558,7 @@ export async function switchMicrophoneStream(newDeviceId) {
         updateMicHealthState(MIC_HEALTH_STATUS.DEGRADED, MIC_HEALTH_REASON.TRACK_ENDED, null, {
           micActive: false, systemAudioActive
         });
-        setTimeout(() => {
+        registerMicGraceTimeout(() => {
           if (!recordingStoreRef?.isRecording) return;
           if (micHealthState.status === MIC_HEALTH_STATUS.OK) return;
           updateMicHealthState(MIC_HEALTH_STATUS.CRITICAL, MIC_HEALTH_REASON.TRACK_ENDED, null, {
@@ -574,6 +589,82 @@ export async function switchMicrophoneStream(newDeviceId) {
     console.error('Error switching microphone:', e);
     return { success: false, error: e.message };
   }
+}
+
+/**
+ * DREC-3: clear any pending mic-disconnect grace timeouts. Called when the mic
+ * recovers, when a fresh recording starts, and on teardown. The grace callbacks
+ * also self-guard on isRecording, so a missed clear is harmless — this just
+ * prevents a stale CRITICAL escalation from firing after the device came back.
+ */
+function clearMicGraceTimeouts() {
+  for (const id of micGraceTimeouts) clearTimeout(id);
+  micGraceTimeouts.clear();
+}
+
+/**
+ * DREC-3: schedule a mic-disconnect grace timeout that is tracked so it can be
+ * cancelled on reconnect. Mirrors a plain setTimeout but auto-deregisters.
+ */
+function registerMicGraceTimeout(fn, delayMs) {
+  const id = setTimeout(() => {
+    micGraceTimeouts.delete(id);
+    fn();
+  }, delayMs);
+  micGraceTimeouts.add(id);
+  return id;
+}
+
+/**
+ * DREC-3: on an OS device-list change while recording with a dropped mic, try to
+ * re-acquire a live input (preferring the originally-requested device) and
+ * seamlessly switch the recording onto it, cancelling the pending CRITICAL
+ * escalation. Reentrancy-locked and guarded so it cannot disturb a healthy
+ * recording — it only acts when the mic health reason is TRACK_ENDED.
+ */
+async function handleMicDeviceChange() {
+  if (!recordingStoreRef?.isRecording) return;
+  if (micHealthState.reasonCode !== MIC_HEALTH_REASON.TRACK_ENDED) return;
+  if (micAutoRecovering) return;
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  micAutoRecovering = true;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter(d => d.kind === 'audioinput' && d.deviceId);
+    if (inputs.length === 0) return;
+    // Prefer the originally-requested device if it reappeared; otherwise the
+    // first available input so the recording keeps capturing *something*.
+    const target = inputs.find(d => d.deviceId === lastRequestedDeviceId) || inputs[0];
+    const result = await switchMicrophoneStream(target.deviceId);
+    if (result.success) {
+      clearMicGraceTimeouts(); // device is live again — do not escalate to CRITICAL
+      emit('micRecovered', { deviceId: target.deviceId });
+      console.log('Mic auto-recovered onto device', target.deviceId);
+    }
+  } catch (e) {
+    console.warn('Mic auto-recovery on devicechange failed:', e);
+  } finally {
+    micAutoRecovering = false;
+  }
+}
+
+/** DREC-3: start the recovery devicechange listener (single instance). */
+function startMicRecoveryListener() {
+  if (!navigator.mediaDevices?.addEventListener) return;
+  if (micDeviceChangeHandler) {
+    navigator.mediaDevices.removeEventListener('devicechange', micDeviceChangeHandler);
+  }
+  micDeviceChangeHandler = handleMicDeviceChange;
+  navigator.mediaDevices.addEventListener('devicechange', micDeviceChangeHandler);
+}
+
+/** DREC-3: stop the recovery devicechange listener and clear pending grace timers. */
+function stopMicRecoveryListener() {
+  if (micDeviceChangeHandler && navigator.mediaDevices?.removeEventListener) {
+    navigator.mediaDevices.removeEventListener('devicechange', micDeviceChangeHandler);
+  }
+  micDeviceChangeHandler = null;
+  clearMicGraceTimeouts();
 }
 
 /**
@@ -1049,8 +1140,11 @@ async function performAutoSplit(recordingStore, isAutoSplitting) {
     if (result.success) {
       // Schedule the NEXT split a full cycle later — this advancing threshold
       // is the Bug D fix: it makes the predicate edge-triggered so it cannot
-      // re-fire every tick once elapsed has crossed it.
-      nextAutoSplitAtSeconds += MAX_DURATION_SECONDS;
+      // re-fire every tick once elapsed has crossed it. DREC-5: anchor to the
+      // current wall-clock instead of `+=` so the threshold can't drift after a
+      // prior failed split already bumped it by the retry back-off (which would
+      // otherwise push the next split minutes late or fire it early on resume).
+      nextAutoSplitAtSeconds = lastWallClockSec + MAX_DURATION_SECONDS;
 
       // 7. Reset chunkIndex AFTER the session was finalized. Resetting earlier
       //    would allow a late saveChunk to overwrite chunk_0 with pre-split audio.
@@ -1069,7 +1163,7 @@ async function performAutoSplit(recordingStore, isAutoSplitting) {
       // overwrites chunk_0). Back off so we retry in a few minutes rather than
       // hammering createSessionFile every 1s tick (the Bug D runaway).
       console.error('Auto-split: Failed to create session file:', result.error);
-      nextAutoSplitAtSeconds += AUTOSPLIT_RETRY_SECONDS;
+      nextAutoSplitAtSeconds = lastWallClockSec + AUTOSPLIT_RETRY_SECONDS; // DREC-5: anchor, don't drift
     }
 
     // 8. Resume.
@@ -1080,7 +1174,7 @@ async function performAutoSplit(recordingStore, isAutoSplitting) {
     console.error('Error during auto-split:', error);
     // Back off so an exception mid-split doesn't re-trigger the predicate every
     // 1s tick (Bug D runaway). The chunks are left intact for recovery.
-    nextAutoSplitAtSeconds += AUTOSPLIT_RETRY_SECONDS;
+    nextAutoSplitAtSeconds = lastWallClockSec + AUTOSPLIT_RETRY_SECONDS; // DREC-5: anchor, don't drift
     // Ensure recording resumes even on error
     if (mediaRecorder && mediaRecorder.state === 'paused') {
       mediaRecorder.resume();
@@ -1208,6 +1302,9 @@ export async function startRecording(options = {}) {
 
   // Store reference for mid-recording operations (mic switching, etc.)
   recordingStoreRef = recordingStore;
+  // DREC-3: remember the requested device and start fresh recovery state.
+  lastRequestedDeviceId = deviceId || null;
+  clearMicGraceTimeouts();
 
   let sysStream = null;
   try {
@@ -1449,7 +1546,27 @@ export async function startRecording(options = {}) {
 
     mediaRecorder.onerror = (event) => {
       console.error('MediaRecorder error:', event.error);
-      recordingStore.setError(event.error?.message || 'Recording error');
+      const message = event.error?.message || 'Recording error';
+      recordingStore.setError(message);
+      // DREC-10: a MediaRecorder error leaves the recorder in an undefined
+      // state. If we don't stop it, ondataavailable keeps firing and persists
+      // increasingly-corrupt chunks, AND the next startRecording() is blocked
+      // by the `state !== 'inactive'` guard above — trapping the user in a dead
+      // session with no way to start a new recording short of restarting the
+      // app. Best-effort flush the in-buffer chunk (the normal ondataavailable
+      // handler persists it), then stop so the recorder goes 'inactive': the
+      // already-fsynced chunks remain recoverable and a fresh recording can
+      // start. Emit a distinct event so the UI can show an error-specific
+      // message rather than a generic stop.
+      emit('recordingError', { message });
+      try {
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+          try { mediaRecorder.requestData(); } catch (e) { /* buffer may be unusable after an error */ }
+          mediaRecorder.stop();
+        }
+      } catch (e) {
+        console.error('Failed to stop MediaRecorder after error:', e);
+      }
     };
 
     // P0 Data Loss Fix: Reduced from 5s to 3s to minimize crash data loss (V8).
@@ -1490,7 +1607,7 @@ export async function startRecording(options = {}) {
             }
           );
           // Grace period: check after 3s if a replacement device appeared
-          setTimeout(() => {
+          registerMicGraceTimeout(() => {
             // If recording was stopped during the grace period, skip
             if (!recordingStore.isRecording) return;
             // If health recovered (e.g., statechange listener resumed context), skip
@@ -1523,6 +1640,10 @@ export async function startRecording(options = {}) {
     if (authStore) {
       startAuthKeepAlive(authStore);
     }
+
+    // DREC-3: listen for device-list changes so a dropped mic that reconnects
+    // is auto-switched back onto the live recording instead of stranding it.
+    startMicRecoveryListener();
 
     emit('stateChange', { isRecording: true, isPaused: false });
 
@@ -1805,6 +1926,7 @@ export async function stopRecording(recordingStore, stopSystemAudio) {
       resetMicHealthState();
       clearSilenceWarning();
       if (stopSystemAudio) stopSystemAudio();
+      stopMicRecoveryListener(); // DREC-3
 
       mediaRecorder = null;
       resetMicHealthState();
@@ -1870,6 +1992,7 @@ export async function cancelRecording(recordingStore, stopSystemAudio) {
   stopLevelMonitoring();
   stopDurationTracking();
   stopAuthKeepAlive();
+  stopMicRecoveryListener(); // DREC-3
 
   if (stateVerificationInterval) {
     clearInterval(stateVerificationInterval);
@@ -1935,7 +2058,7 @@ export async function cancelRecording(recordingStore, stopSystemAudio) {
 /**
  * Flush recording data (for visibility changes / suspend)
  * Returns a Promise that resolves when the flushed chunk has been saved,
- * with a 2-second timeout fallback.
+ * with a 6-second timeout fallback.
  * @returns {Promise<{flushed: boolean, timedOut: boolean}>}
  */
 export async function flushRecordingData() {
@@ -1944,7 +2067,12 @@ export async function flushRecordingData() {
       let didTimeout = false;
       const chunkSaved = new Promise((resolve) => {
         flushResolvers.push(resolve);
-        // Timeout fallback: resolve after 2s even if ondataavailable hasn't fired
+        // DREC-2: resolve after 6s (was 2s) even if ondataavailable hasn't
+        // fired. The previous 2s budget could expire before the requested blob
+        // arrived and its async saveChunk() completed (worst case ~timeslice +
+        // IPC + disk I/O), so callers that await this — the visibility/suspend/
+        // beforeunload flush paths — believed the final chunk was persisted
+        // when it was still in flight, dropping it if the process then died.
         setTimeout(() => {
           const idx = flushResolvers.indexOf(resolve);
           if (idx !== -1) {
@@ -1952,13 +2080,13 @@ export async function flushRecordingData() {
             didTimeout = true;
             resolve();
           }
-        }, 2000);
+        }, 6000);
       });
       mediaRecorder.requestData();
       await chunkSaved;
       // P2 Fix: Report whether flush actually produced data or timed out
       if (didTimeout) {
-        console.warn('Flush timed out after 2s without ondataavailable');
+        console.warn('Flush timed out after 6s without ondataavailable');
       }
       return { flushed: !didTimeout, timedOut: didTimeout };
     } catch (e) {
@@ -1983,6 +2111,7 @@ export function cleanup(stopSystemAudio) {
   stopLevelMonitoring();
   stopDurationTracking();
   stopAuthKeepAlive();
+  stopMicRecoveryListener(); // DREC-3
 
   if (stateVerificationInterval) {
     clearInterval(stateVerificationInterval);

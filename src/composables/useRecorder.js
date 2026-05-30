@@ -222,9 +222,15 @@ export function useRecorder() {
   // Beforeunload handler
   const handleBeforeUnload = (event) => {
     if (recordingStore.isRecording || recordingStore.isPaused) {
-      recordingService.flushRecordingData();
+      // DREC-2: set preventDefault/returnValue FIRST so the page is kept alive
+      // (the browser shows the "leave?" prompt; in packaged Electron the main
+      // process also guards window-close + before-quit while recording). Only
+      // then fire the flush, so the requested final chunk has a live event loop
+      // in which to arrive and persist (with the widened 6s flush budget)
+      // instead of racing renderer teardown and being dropped.
       event.preventDefault();
       event.returnValue = 'You have an active recording. Are you sure you want to leave?';
+      recordingService.flushRecordingData();
       return event.returnValue;
     }
   };
