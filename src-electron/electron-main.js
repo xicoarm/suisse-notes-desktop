@@ -12,6 +12,11 @@ const Sentry = require('@sentry/electron/main');
 const { machineIdSync } = require('node-machine-id');
 const { uploadViaPresignedSas, abortDirectUpload } = require('./upload-direct');
 
+// Trust the OS certificate store from the main process. Must run before any
+// outbound HTTPS (auto-update, uploads, Sentry) so corporate / TLS-inspection
+// roots are honoured. See os-ca.js for the full rationale.
+require('./os-ca').installOsTrustStore();
+
 // === Log Rotation Configuration ===
 // Prevent infinite log file growth
 log.transports.file.maxSize = 5 * 1024 * 1024; // 5MB max per log file

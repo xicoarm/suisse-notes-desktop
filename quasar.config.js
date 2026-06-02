@@ -204,7 +204,11 @@ export default function (ctx) {
         ],
         // Extract icons from asar so they can be loaded natively for taskbar/tray
         asarUnpack: [
-          '**/icons/**'
+          '**/icons/**',
+          // win-ca shells out to this bundled exe to read the Windows trust
+          // store; child_process cannot execute it from inside app.asar.
+          // (macOS mac-ca uses the system `security` CLI — no unpacking needed.)
+          '**/win-ca/lib/roots.exe'
         ]
       }
     },
