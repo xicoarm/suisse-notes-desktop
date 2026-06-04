@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.3.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.3.0...v4.3.1) (2026-06-04)
+
+
+### Bug Fixes
+
+* **ble:** remove unsolicited new-device connect popup (pair from Settings only) ([75b5676](https://github.com/xicoarm/suisse-notes-desktop/commit/75b5676e512f9d559988a205ac43c4ca675e87ae))
+* **mobile:** keep dialogs + toasts clear of the Android nav bar (safe-area) ([39c946b](https://github.com/xicoarm/suisse-notes-desktop/commit/39c946be79b8368105423b5fd29b9edbd8fce79d))
+* **mobile:** stop-recording bottom sheet clears the Android nav bar ([ceb421b](https://github.com/xicoarm/suisse-notes-desktop/commit/ceb421b5b8c163a334eb4857a908cec31d9afa5f))
+* **sentry:** stop reporting 'out of minutes' history uploads as errors ([998fc88](https://github.com/xicoarm/suisse-notes-desktop/commit/998fc8888ce63a56f6090d38547d07d4be60ec83))
+* **sentry:** stop reporting out-of-minutes history uploads as errors (merge) ([5d55bb7](https://github.com/xicoarm/suisse-notes-desktop/commit/5d55bb78128390f49712b4f550c59ecd96f1697e))
+* **tls:** trust OS certificate store in Electron main process (merge) ([ce226ef](https://github.com/xicoarm/suisse-notes-desktop/commit/ce226efaa3846e7f645770589e596fb3f889dd13))
+* **tls:** trust OS certificate store in the Electron main process ([b99cdb8](https://github.com/xicoarm/suisse-notes-desktop/commit/b99cdb8ac64391240f01a0516180e6cde0d8ddd7))
+
 ## [4.3.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.2.2...v4.3.0) (2026-05-30)
 
 
