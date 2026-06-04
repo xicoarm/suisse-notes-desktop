@@ -242,8 +242,25 @@ import { isElectron, isCapacitor, isMobile as isMobilePlatform } from '../utils/
 import { uploadWithVerification } from '../services/upload';
 import { getApiUrlSync } from '../services/api';
 import { pickAudioFile } from '../services/filePicker';
-import { captureException } from '../boot/sentry';
+import { captureException, captureMessage } from '../boot/sentry';
 import RecordingHistoryCard from '../components/RecordingHistoryCard.vue';
+
+// An upload can "fail" for reasons that are normal product states rather than
+// defects — most commonly the user is out of transcription minutes. The backend
+// returns HTTP 402 with code INSUFFICIENT_MINUTES (src/app/api/desktop/upload),
+// and the Electron upload path also sets result.insufficientMinutes. These must
+// NOT be reported to Sentry at error level: they are expected, the user already
+// gets a clear toast, and error-level capture fires high-priority alerts (pure
+// noise). We still log them at 'info' so aggregate trends stay visible. Mirrors
+// the transient-network downgrade in src-electron/electron-main.js.
+const isExpectedUploadFailure = (info) => {
+  if (!info) return false;
+  if (info.insufficientMinutes === true) return true;
+  if (info.status === 402) return true;
+  if (info.code === 'INSUFFICIENT_MINUTES') return true;
+  const text = info.error || info.message || '';
+  return /insufficient minutes|min remaining|purchase more minutes|upgrade your plan|out of minutes/i.test(text);
+};
 
 export default {
   name: 'HistoryPage',
@@ -393,10 +410,16 @@ export default {
             uploadError: result.error
           });
 
-          captureException(new Error(`History upload failed: ${result.error || 'unknown'}`), {
-            tags: { action: 'history_upload', upload_path: 'history_card' },
-            extra: { recordingId: recording.id, status: result.status, source: recording.source }
-          });
+          if (isExpectedUploadFailure(result)) {
+            // Out of minutes / payment required — expected product state, not a
+            // defect. Log at info for trend visibility; no error-level alert.
+            captureMessage(`History upload declined (expected): ${result.error || 'quota'}`, 'info');
+          } else {
+            captureException(new Error(`History upload failed: ${result.error || 'unknown'}`), {
+              tags: { action: 'history_upload', upload_path: 'history_card' },
+              extra: { recordingId: recording.id, status: result.status, source: recording.source }
+            });
+          }
 
           $q.notify({
             type: 'negative',
@@ -410,10 +433,14 @@ export default {
           uploadError: error.message
         });
 
-        captureException(error, {
-          tags: { action: 'history_upload', upload_path: 'history_card' },
-          extra: { recordingId: recording.id, source: recording.source }
-        });
+        if (isExpectedUploadFailure(error)) {
+          captureMessage(`History upload declined (expected): ${error.message || 'quota'}`, 'info');
+        } else {
+          captureException(error, {
+            tags: { action: 'history_upload', upload_path: 'history_card' },
+            extra: { recordingId: recording.id, source: recording.source }
+          });
+        }
 
         $q.notify({
           type: 'negative',
