@@ -30,6 +30,20 @@ export const sentryRecordingDuplicateChunk = (recordId, info) => {
   });
 };
 
+// Reported at stop when the combined file's media duration materially exceeds the
+// recording's wall-clock — the Windows capture-stack audio-doubling fault (each ~2s
+// of PCM re-delivered with ~50% overlap → every sentence recorded twice, 2x file).
+// Queryable EVENT incl. device telemetry so the offending driver/device family can
+// finally be identified (prior incidents produced zero Sentry events).
+export const sentryRecordingClockAnomaly = (recordId, info) => {
+  addBreadcrumb({ category: 'recording', message: 'Clock anomaly: media duration >> wall clock', data: { recordId, ...info }, level: 'error' });
+  captureException(new Error('Recorder: media duration exceeds wall clock (audio-doubling capture fault)'), {
+    level: 'error',
+    tags: { operation: 'recording-clock-anomaly' },
+    extra: { recordId, ...info },
+  });
+};
+
 export const sentryRecordingPause = (recordId) => {
   addBreadcrumb({ category: 'recording', message: 'Recording paused', data: { recordId }, level: 'info' });
 };

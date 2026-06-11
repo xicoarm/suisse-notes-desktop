@@ -4,7 +4,7 @@
  */
 
 import { isAndroid, isElectron } from '../utils/platform';
-import { captureMessage } from '../boot/sentry';
+import { captureMessage, addBreadcrumb, setContext } from '../boot/sentry';
 
 let BackgroundRecording = null;
 
@@ -1594,6 +1594,27 @@ export async function startRecording(options = {}) {
       startLevelMonitoring(recordingStream, stream, recordingStore);
     }
     startDurationTracking(recordingStore, isAutoSplitting, maxRecordingSeconds);
+
+    // Audio-device telemetry: attach the capture device's settings to Sentry so a
+    // clock-anomaly / doubling incident can finally be correlated to a device or
+    // driver family (the prior incidents carried zero device information).
+    try {
+      const micSettings = stream?.getAudioTracks?.()[0]?.getSettings?.() || {};
+      const micLabel = stream?.getAudioTracks?.()[0]?.label || 'unknown';
+      const deviceInfo = {
+        label: micLabel,
+        deviceId: micSettings.deviceId,
+        sampleRate: micSettings.sampleRate,
+        channelCount: micSettings.channelCount,
+        echoCancellation: micSettings.echoCancellation,
+        noiseSuppression: micSettings.noiseSuppression,
+        autoGainControl: micSettings.autoGainControl,
+        contextSampleRate: mixingContext?.sampleRate,
+        contextBaseLatency: mixingContext?.baseLatency,
+      };
+      setContext('audioDevice', deviceInfo);
+      addBreadcrumb({ category: 'recording', message: 'Audio device', data: deviceInfo, level: 'info' });
+    } catch (e) { /* telemetry must never affect recording start */ }
 
     // Show notification on Android
     await showRecordingNotification();

@@ -5,7 +5,7 @@ import * as storage from '../services/storage';
 import { createChunkIntegrity, createRecordingIntegrity, addChunkToRecordingIntegrity } from '../services/integrity';
 import { startStorageMonitor, stopStorageMonitor, checkStorageBeforeRecording } from '../services/storageMonitor';
 import { setLifecycleCallbacks, clearLifecycleCallbacks, setRecordingActive } from '../boot/lifecycle';
-import { sentryRecordingStart, sentryRecordingStop, sentryRecordingPause, sentryRecordingResume, sentryRecordingError, sentryRecordingDuplicateChunk } from '../services/sentryHelpers';
+import { sentryRecordingStart, sentryRecordingStop, sentryRecordingPause, sentryRecordingResume, sentryRecordingError, sentryRecordingDuplicateChunk, sentryRecordingClockAnomaly } from '../services/sentryHelpers';
 import { humanizeStorageError } from '../utils/storageErrors';
 import { i18n } from '../boot/i18n';
 
@@ -335,6 +335,23 @@ export const useRecordingStore = defineStore('recording', {
           if (result.success) {
             this.audioFilePath = result.outputPath;
             sentryRecordingStop(this.recordId, this.duration);
+            // Clock-anomaly tripwire (audio-doubling bug class): when the combined
+            // file's media duration materially exceeds the wall-clock the recording
+            // ran, the capture stack delivered duplicated audio (Windows WASAPI
+            // ~2s-window 50%-overlap re-delivery fault — every sentence twice).
+            // Report as a queryable Sentry EVENT; the original incidents were a
+            // telemetry black hole. Wall clock includes pauses, so this only
+            // under-fires (never false-positives) on heavily paused recordings.
+            try {
+              const wallClockSec = this.startTime ? (Date.now() - this.startTime) / 1000 : 0;
+              if (result.duration && wallClockSec > 60 && result.duration > wallClockSec * 1.25) {
+                sentryRecordingClockAnomaly(this.recordId, {
+                  mediaDurationSec: Math.round(result.duration),
+                  wallClockSec: Math.round(wallClockSec),
+                  ratio: (result.duration / wallClockSec).toFixed(2),
+                });
+              }
+            } catch (e) { /* telemetry must never affect stop */ }
             return { success: true, filePath: result.outputPath, duration: result.duration || null, warning: result.warning };
           } else {
             throw new Error(result.error || 'Failed to combine recording chunks');
