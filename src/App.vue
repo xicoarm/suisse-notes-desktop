@@ -1,12 +1,16 @@
 <template>
   <router-view />
+  <UpdateReadyDialog v-if="isElectronPlatform" />
 </template>
 
 <script setup>
 import { onMounted, onUnmounted, watch, ref } from 'vue';
 import { useConfigStore } from './stores/config';
 import { useRecordingStore } from './stores/recording';
-import { isMobile } from './utils/platform';
+import { isMobile, isElectron } from './utils/platform';
+import UpdateReadyDialog from './components/UpdateReadyDialog.vue';
+
+const isElectronPlatform = isElectron();
 
 const configStore = useConfigStore();
 const recordingStore = useRecordingStore();

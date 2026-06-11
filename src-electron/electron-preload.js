@@ -205,6 +205,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getUserDataPath: () => ipcRenderer.invoke('app:getUserDataPath')
   },
 
+  // Auto-update prompt (update-ready dialog)
+  updater: {
+    getStatus: () => ipcRenderer.invoke('updater:getStatus'),
+    quitAndInstall: () => ipcRenderer.invoke('updater:quitAndInstall'),
+    onUpdateDownloaded: (callback) => {
+      const handler = (event, info) => callback(info);
+      ipcRenderer.on('update:downloaded', handler);
+      return () => ipcRenderer.removeListener('update:downloaded', handler);
+    }
+  },
+
   // Shell (for opening external URLs and file locations)
   shell: {
     openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),

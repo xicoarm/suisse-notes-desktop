@@ -1541,12 +1541,47 @@ autoUpdater.on('download-progress', (progressObj) => {
   }
 });
 
+// Update-ready prompt: the downloaded update is remembered here so the
+// renderer can ask for it at any time (the update-downloaded event usually
+// fires before login / before the Vue app is listening). The renderer shows a
+// translated "update now?" dialog; "update now" calls updater:quitAndInstall.
+let pendingUpdateInfo = null;
+
 autoUpdater.on('update-downloaded', (info) => {
   log.info('Update downloaded:', info.version);
+  pendingUpdateInfo = info;
   // Will auto-install on app quit due to autoInstallOnAppQuit = true
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update:downloaded', info);
+    mainWindow.webContents.send('update:downloaded', { version: info.version });
   }
+});
+
+ipcMain.handle('updater:getStatus', () => ({
+  updateDownloaded: Boolean(pendingUpdateInfo),
+  version: pendingUpdateInfo?.version || null,
+  currentVersion: app.getVersion()
+}));
+
+ipcMain.handle('updater:quitAndInstall', () => {
+  if (!pendingUpdateInfo) {
+    return { success: false, error: 'No update downloaded' };
+  }
+  // Never restart out from under an active capture or upload — the renderer
+  // gates the dialog on idle, but guard here too (defense in depth).
+  if (isRecordingInProgress || isUploadInProgress || pendingUploadsCount > 0) {
+    log.warn('updater:quitAndInstall refused — recording or upload in progress');
+    return { success: false, error: 'Recording or upload in progress' };
+  }
+  log.info(`Installing update ${pendingUpdateInfo.version} on user request`);
+  // Defer so the IPC response reaches the renderer before teardown begins.
+  setImmediate(() => {
+    try {
+      autoUpdater.quitAndInstall(true, true); // silent install, relaunch app
+    } catch (err) {
+      log.error('quitAndInstall failed:', err);
+    }
+  });
+  return { success: true };
 });
 
 autoUpdater.on('error', (err) => {

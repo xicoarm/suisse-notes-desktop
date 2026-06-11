@@ -414,7 +414,14 @@ const messages = {
     bleTransferDetecting: 'Found {count} new recording(s)...',
     bleTransferUploading: 'Uploading to cloud...',
     bleSyncCompleteBody: '{count} recording(s) transferred successfully',
-    bleNotAvailable: 'Bluetooth is not available on this device'
+    bleNotAvailable: 'Bluetooth is not available on this device',
+
+    // Update-ready dialog
+    updateReadyTitle: 'Update ready to install',
+    updateReadyMessage: 'Version {version} of Suisse Notes is ready. It contains stability and reliability improvements — we strongly recommend updating now. The app will restart briefly to apply it.',
+    updateReadyLaterHint: 'If you choose Later, the update installs automatically the next time you quit the app.',
+    updateReadyNow: 'Update now',
+    updateReadyLater: 'Later'
   },
   de: {
     // Record Page
@@ -829,7 +836,14 @@ const messages = {
     bleTransferDetecting: '{count} neue Aufnahme(n) gefunden...',
     bleTransferUploading: 'Wird in die Cloud hochgeladen...',
     bleSyncCompleteBody: '{count} Aufnahme(n) erfolgreich übertragen',
-    bleNotAvailable: 'Bluetooth ist auf diesem Gerät nicht verfügbar'
+    bleNotAvailable: 'Bluetooth ist auf diesem Gerät nicht verfügbar',
+
+    // Update-ready dialog
+    updateReadyTitle: 'Update bereit zur Installation',
+    updateReadyMessage: 'Version {version} von Suisse Notes ist bereit. Sie enthält Stabilitäts- und Zuverlässigkeitsverbesserungen – wir empfehlen dringend, jetzt zu aktualisieren. Die App wird kurz neu gestartet.',
+    updateReadyLaterHint: 'Bei „Später“ wird das Update automatisch beim nächsten Beenden der App installiert.',
+    updateReadyNow: 'Jetzt aktualisieren',
+    updateReadyLater: 'Später'
   },
   fr: {
     // Record Page
@@ -1244,7 +1258,14 @@ const messages = {
     bleTransferDetecting: '{count} nouvel(les) enregistrement(s) trouvé(s)...',
     bleTransferUploading: 'Envoi vers le cloud...',
     bleSyncCompleteBody: '{count} enregistrement(s) transféré(s) avec succès',
-    bleNotAvailable: 'Bluetooth n\'est pas disponible sur cet appareil'
+    bleNotAvailable: 'Bluetooth n\'est pas disponible sur cet appareil',
+
+    // Update-ready dialog
+    updateReadyTitle: 'Mise à jour prête à installer',
+    updateReadyMessage: 'La version {version} de Suisse Notes est prête. Elle contient des améliorations de stabilité et de fiabilité – nous vous recommandons vivement de mettre à jour maintenant. L\'application redémarrera brièvement.',
+    updateReadyLaterHint: 'Si vous choisissez « Plus tard », la mise à jour s\'installera automatiquement à la prochaine fermeture de l\'application.',
+    updateReadyNow: 'Mettre à jour',
+    updateReadyLater: 'Plus tard'
   },
   it: {
     // Record Page
@@ -1659,7 +1680,14 @@ const messages = {
     bleTransferDetecting: 'Trovate {count} nuove registrazioni...',
     bleTransferUploading: 'Caricamento nel cloud...',
     bleSyncCompleteBody: '{count} registrazione(i) trasferita(e) con successo',
-    bleNotAvailable: 'Bluetooth non disponibile su questo dispositivo'
+    bleNotAvailable: 'Bluetooth non disponibile su questo dispositivo',
+
+    // Update-ready dialog
+    updateReadyTitle: 'Aggiornamento pronto per l\'installazione',
+    updateReadyMessage: 'La versione {version} di Suisse Notes è pronta. Contiene miglioramenti di stabilità e affidabilità: consigliamo vivamente di aggiornare ora. L\'app si riavvierà brevemente.',
+    updateReadyLaterHint: 'Se scegli "Più tardi", l\'aggiornamento verrà installato automaticamente alla prossima chiusura dell\'app.',
+    updateReadyNow: 'Aggiorna ora',
+    updateReadyLater: 'Più tardi'
   }
 };
 
