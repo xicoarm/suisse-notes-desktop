@@ -5,7 +5,7 @@ import * as storage from '../services/storage';
 import { createChunkIntegrity, createRecordingIntegrity, addChunkToRecordingIntegrity } from '../services/integrity';
 import { startStorageMonitor, stopStorageMonitor, checkStorageBeforeRecording } from '../services/storageMonitor';
 import { setLifecycleCallbacks, clearLifecycleCallbacks, setRecordingActive } from '../boot/lifecycle';
-import { sentryRecordingStart, sentryRecordingStop, sentryRecordingPause, sentryRecordingResume, sentryRecordingError } from '../services/sentryHelpers';
+import { sentryRecordingStart, sentryRecordingStop, sentryRecordingPause, sentryRecordingResume, sentryRecordingError, sentryRecordingDuplicateChunk } from '../services/sentryHelpers';
 import { humanizeStorageError } from '../utils/storageErrors';
 import { i18n } from '../boot/i18n';
 
@@ -24,6 +24,12 @@ export const useRecordingStore = defineStore('recording', {
     startTime: null,
     duration: 0, // in seconds
     chunkIndex: 0,
+    // Consecutive-duplicate-chunk guard (recording-doubling fix). Tracks the
+    // CRC32 + size of the last chunk actually saved so a byte-identical repeat
+    // (MediaRecorder double-emit) can be dropped instead of doubling the audio.
+    lastChunkCrc32: null,
+    lastChunkSize: 0,
+    duplicateChunksDropped: 0,
     audioFilePath: null,
     uploadProgress: 0,
     bytesUploaded: 0,
@@ -232,6 +238,9 @@ export const useRecordingStore = defineStore('recording', {
         this.startTime = Date.now();
         this.duration = 0;
         this.chunkIndex = 0;
+        this.lastChunkCrc32 = null;
+        this.lastChunkSize = 0;
+        this.duplicateChunksDropped = 0;
         this.error = null;
         this.integrity = createRecordingIntegrity(this.recordId);
 
@@ -560,6 +569,38 @@ export const useRecordingStore = defineStore('recording', {
         // Create chunk integrity before saving (V7 fix)
         const chunkIntegrity = createChunkIntegrity(this.chunkIndex, chunkData);
 
+        // Recording-doubling guard: some Windows/Chromium builds deliver the SAME
+        // timeslice blob in two consecutive `ondataavailable` events, which were then
+        // saved as two back-to-back bit-identical chunks and doubled the whole
+        // recording (every sentence repeated). Drop a chunk that is byte-identical
+        // (same CRC32 AND size) to the immediately-preceding SAVED chunk. Genuine
+        // speech never produces two identical consecutive ~3s blobs; the only thing
+        // this can drop is a redundant pure-silence repeat, which is harmless.
+        if (
+          chunkIntegrity.size > 0 &&
+          this.lastChunkCrc32 !== null &&
+          chunkIntegrity.crc32 === this.lastChunkCrc32 &&
+          chunkIntegrity.size === this.lastChunkSize
+        ) {
+          this.duplicateChunksDropped++;
+          console.warn(
+            `[saveChunk] Dropped duplicate chunk #${this.duplicateChunksDropped} ` +
+            `(crc32=${chunkIntegrity.crc32}, size=${chunkIntegrity.size}) — likely MediaRecorder double-emit`
+          );
+          // Report the first drop per recording as a Sentry EVENT so the bug is
+          // finally observable in telemetry (never break recording on a failure).
+          if (this.duplicateChunksDropped === 1) {
+            try {
+              sentryRecordingDuplicateChunk(this.recordId, {
+                chunkIndex: this.chunkIndex,
+                size: chunkIntegrity.size,
+                crc32: chunkIntegrity.crc32,
+              });
+            } catch (e) { /* telemetry must never interrupt recording */ }
+          }
+          return { success: true, deduped: true };
+        }
+
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
           try {
             let result;
@@ -589,6 +630,10 @@ export const useRecordingStore = defineStore('recording', {
               if (this.integrity) {
                 this.integrity = addChunkToRecordingIntegrity(this.integrity, chunkIntegrity);
               }
+              // Remember this chunk's fingerprint so the next call can detect a
+              // byte-identical duplicate delivery (recording-doubling guard above).
+              this.lastChunkCrc32 = chunkIntegrity.crc32;
+              this.lastChunkSize = chunkIntegrity.size;
               this.chunkIndex++;
               return { success: true };
             } else {

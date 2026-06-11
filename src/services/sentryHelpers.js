@@ -17,6 +17,19 @@ export const sentryRecordingStop = (recordId, durationSeconds) => {
   setContext('recording', null);
 };
 
+// Reported when the recorder drops a duplicate chunk (MediaRecorder delivering the
+// same timeslice blob twice → recording-doubling bug). Captured as an EVENT, not a
+// breadcrumb, so it is actually queryable in Sentry — the original incident produced
+// no events and was a telemetry black hole.
+export const sentryRecordingDuplicateChunk = (recordId, info) => {
+  addBreadcrumb({ category: 'recording', message: 'Duplicate chunk dropped', data: { recordId, ...info }, level: 'warning' });
+  captureException(new Error('Recorder: duplicate chunk dropped (MediaRecorder double-emit)'), {
+    level: 'warning',
+    tags: { operation: 'saveChunk-dedup' },
+    extra: { recordId, ...info },
+  });
+};
+
 export const sentryRecordingPause = (recordId) => {
   addBreadcrumb({ category: 'recording', message: 'Recording paused', data: { recordId }, level: 'info' });
 };

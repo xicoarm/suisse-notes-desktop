@@ -1508,8 +1508,13 @@ export async function startRecording(options = {}) {
             return;
           } else {
             // Chunk persisted — advance the watchdog + captured-duration counters.
+            // A deduped result means the store dropped a byte-identical duplicate
+            // delivery (recording-doubling guard): the recorder is alive, but no new
+            // audio was written, so it must NOT count toward the captured duration.
             lastSuccessfulChunkAt = Date.now();
-            savedChunkCount++;
+            if (!result.deduped) {
+              savedChunkCount++;
+            }
             if (stallWarned) {
               stallWarned = false;
               emit('captureRecovered', { savedChunks: savedChunkCount });
