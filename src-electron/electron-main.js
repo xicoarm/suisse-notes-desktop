@@ -409,6 +409,7 @@ async function recoverOrphanedRecordings() {
     let recoveredCount = 0;
     let totalAttempted = 0;
     let skippedLive = false;
+    let skippedFresh = false;
 
     for (const dir of dirs) {
       try {
@@ -457,6 +458,7 @@ async function recoverOrphanedRecordings() {
               if (ageMs < 60000) {
                 log.info(`Recovery: skipping ${dir} — chunks still being written (${Math.round(ageMs / 1000)}s old)`);
                 skippedLive = true;
+                skippedFresh = true;
                 continue;
               }
             }
@@ -550,6 +552,20 @@ async function recoverOrphanedRecordings() {
 
     if (recoveredCount > 0) {
       log.info(`Recovery complete: ${recoveredCount} recording(s) recovered`);
+    }
+
+    // A dir was skipped because its chunks were written <60s ago but no
+    // recording is in progress — that is the crash-then-quick-reopen case.
+    // Recovery only runs at startup, so without a re-scan the recording would
+    // stay unrecovered until the NEXT launch. Re-scan once the freshness
+    // window has safely passed.
+    if (skippedFresh && !isRecordingInProgress) {
+      log.info('Recovery: scheduling re-scan in 2 minutes for freshly-written chunk dirs');
+      setTimeout(() => {
+        recoverOrphanedRecordings().catch(err => {
+          log.error('Error in recovery re-scan:', err);
+        });
+      }, 120000);
     }
   } catch (error) {
     log.error('Error during orphaned recording recovery:', error);
@@ -2211,6 +2227,103 @@ async function combineChunksStreaming(chunksPath, sortedChunks, outputPath) {
   });
 }
 
+// WebM element magics used for init-segment handling
+const EBML_HEADER_MAGIC = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
+const WEBM_CLUSTER_MAGIC = Buffer.from([0x1f, 0x43, 0xb6, 0x75]);
+
+// Path of the persisted init segment for a recording (written by saveChunk
+// from the very first blob — the only blob that carries the WebM header).
+function getInitSegmentPath(recordId) {
+  return path.join(getRecordingPath(recordId), 'init_segment.bin');
+}
+
+/**
+ * Make a raw chunk concatenation parseable when it starts mid-stream.
+ *
+ * Only the very first MediaRecorder blob of a recording contains the WebM init
+ * segment (EBML header + Segment info + Tracks). At the 4h55m auto-split the
+ * chunk index is reset while the SAME recorder keeps running, so every
+ * post-split chunk set begins with a header-less continuation cluster. A raw
+ * concat of such a set is unreadable by ffprobe/ffmpeg — before this fix the
+ * session roll failed at the next split/stop, and combineChunks then deleted
+ * the chunks after consuming only the valid sessions: every recording longer
+ * than 4h55m silently lost ALL audio after the split point.
+ *
+ * If the raw file lacks the EBML magic and an init segment was persisted at
+ * recording start, prepend it (streamed, replaced in place via temp+rename).
+ * Returns the ffprobe-reported start time in seconds — post-split clusters
+ * keep their absolute timecodes (~17700s+), so the caller rebases timestamps
+ * to 0 during the remux and the final multi-session concat stays gapless.
+ */
+async function prepareRawSessionFile(recordId, rawPath) {
+  let headerless = false;
+  try {
+    const fd = fs.openSync(rawPath, 'r');
+    try {
+      const head = Buffer.alloc(4);
+      fs.readSync(fd, head, 0, 4, 0);
+      headerless = !head.equals(EBML_HEADER_MAGIC);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (e) {
+    log.warn('Could not inspect raw session head:', e.message);
+    return { rebaseSec: 0 };
+  }
+
+  if (!headerless) return { rebaseSec: 0 };
+
+  const initSegPath = getInitSegmentPath(recordId);
+  if (!fs.existsSync(initSegPath)) {
+    log.warn('Raw session is header-less and no init_segment.bin exists — ffprobe will likely reject it');
+    Sentry.captureMessage('recording: header-less session roll without persisted init segment', {
+      level: 'warning',
+      tags: { operation: 'prepareRawSessionFile' },
+      extra: { recordId, rawPath }
+    });
+    return { rebaseSec: 0 };
+  }
+
+  const tmpPath = `${rawPath}.hdr.tmp`;
+  await new Promise((resolve, reject) => {
+    const out = fs.createWriteStream(tmpPath);
+    const fail = (err) => {
+      try { out.destroy(); } catch (e) { /* ignore */ }
+      try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore */ }
+      reject(err);
+    };
+    out.on('error', fail);
+    out.on('finish', resolve);
+    out.write(fs.readFileSync(initSegPath));
+    const src = fs.createReadStream(rawPath);
+    src.on('error', fail);
+    src.pipe(out);
+  });
+  fs.renameSync(tmpPath, rawPath);
+  log.info(`Prepended persisted init segment to header-less session roll (${recordId})`);
+
+  let rebaseSec = 0;
+  try {
+    const meta = await getAudioMetadata(rawPath);
+    const start = parseFloat(meta?.format?.start_time);
+    if (Number.isFinite(start) && start > 1) rebaseSec = start;
+  } catch (e) {
+    log.warn('Could not probe prepended session start time:', e.message);
+  }
+  return { rebaseSec };
+}
+
+// Build the session remux command, optionally rebasing input timestamps to 0
+// (rebaseSec > 0 means the input is a post-split continuation whose clusters
+// carry absolute timecodes from the original timeline).
+function buildSessionRemux(rawPath, finalPath, rebaseSec, reencode) {
+  const cmd = ffmpeg(rawPath);
+  if (rebaseSec > 0) cmd.inputOptions(['-itsoffset', `-${rebaseSec}`]);
+  if (!reencode) cmd.audioCodec('copy');
+  cmd.outputOptions(['-avoid_negative_ts', 'make_zero']).output(finalPath);
+  return cmd;
+}
+
 // Dev/test-only env-var override helper. Honored ONLY when the app is not
 // packaged (i.e. `quasar dev` or `electron .`). Packaged installers always use
 // the hard-coded fallback regardless of process.env — this prevents a stray
@@ -2798,6 +2911,23 @@ ipcMain.handle('recording:saveChunk', async (event, recordId, chunkData, chunkIn
         await fh.close();
       }
 
+      // Persist the WebM init segment (everything before the first Cluster)
+      // from the very first blob of the recording. Post-auto-split chunk sets
+      // start mid-stream (chunk index resets while the same recorder keeps
+      // running), so rolling them into a session file needs this prefix to be
+      // parseable — see prepareRawSessionFile. Only the true first blob
+      // carries the EBML magic, so post-split chunk_0 writes are skipped.
+      if (validChunkIndex === 0 && buffer.length > 4 && buffer.subarray(0, 4).equals(EBML_HEADER_MAGIC)) {
+        try {
+          const clusterIdx = buffer.indexOf(WEBM_CLUSTER_MAGIC);
+          if (clusterIdx > 0 && clusterIdx <= 1048576) {
+            writeFileWithSync(getInitSegmentPath(validRecordId), buffer.subarray(0, clusterIdx));
+          }
+        } catch (e) {
+          log.warn('Could not persist init segment:', e.message);
+        }
+      }
+
       // Update active recording state for crash recovery (with userId)
       updateActiveRecording(validRecordId, validChunkIndex + 1, validUserId);
 
@@ -2883,6 +3013,10 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
 
       console.log(`Combined ${sortedChunks.length} chunks into raw session (${rawStats.size} bytes)`);
 
+      // Post-split chunk sets are header-less — prepend the persisted init
+      // segment and learn the timestamp rebase offset (see prepareRawSessionFile).
+      const { rebaseSec } = await prepareRawSessionFile(validRecordId, rawPath);
+
       // Validate raw file is a readable audio container before FFmpeg processing
       let ffmpegAvailable = true;
       try {
@@ -2913,9 +3047,7 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
       } else {
       try {
         await ffmpegWithTimeout(
-          ffmpeg(rawPath)
-            .audioCodec('copy')
-            .output(finalPath),
+          buildSessionRemux(rawPath, finalPath, rebaseSec, false),
           FFMPEG_TIMEOUT_MS,
           'Session file (codec copy)',
           { reportToSentry: false } // Codec copy failure is an expected fallback, not an error
@@ -2925,8 +3057,7 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
         console.warn('Codec copy failed, trying re-encode:', err.message);
         // Fallback: re-encode if codec copy fails
         await ffmpegWithTimeout(
-          ffmpeg(rawPath)
-            .output(finalPath),
+          buildSessionRemux(rawPath, finalPath, rebaseSec, true),
           FFMPEG_TIMEOUT_MS,
           'Session file (re-encode)'
         );
@@ -3340,6 +3471,10 @@ async function createSessionFileInternal(recordId, ext) {
     return { success: false, error: 'Recording too short or empty' };
   }
 
+  // Post-split chunk sets are header-less — prepend the persisted init
+  // segment and learn the timestamp rebase offset (see prepareRawSessionFile).
+  const { rebaseSec } = await prepareRawSessionFile(recordId, rawPath);
+
   // Validate raw file is a readable audio container before FFmpeg processing.
   // Skip if either binary is known-broken — raw concatenation is a valid WebM,
   // we just lose the codec-copy/remux pass.
@@ -3370,9 +3505,7 @@ async function createSessionFileInternal(recordId, ext) {
   } else {
   try {
     await ffmpegWithTimeout(
-      ffmpeg(rawPath)
-        .audioCodec('copy')
-        .output(finalPath),
+      buildSessionRemux(rawPath, finalPath, rebaseSec, false),
       FFMPEG_TIMEOUT_MS,
       'Create session file (codec copy)',
       { reportToSentry: false } // Codec copy failure is an expected fallback, not an error
@@ -3382,8 +3515,7 @@ async function createSessionFileInternal(recordId, ext) {
     // Fallback: re-encode
     try {
       await ffmpegWithTimeout(
-        ffmpeg(rawPath)
-          .output(finalPath),
+        buildSessionRemux(rawPath, finalPath, rebaseSec, true),
         FFMPEG_TIMEOUT_MS,
         'Create session file (re-encode)'
       );
