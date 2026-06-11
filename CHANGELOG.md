@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [4.4.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.3.1...v4.4.0) (2026-06-11)
+
+
+### Features
+
+* **updater:** prompt users to install downloaded updates immediately ([5744715](https://github.com/xicoarm/suisse-notes-desktop/commit/5744715fd6ce73ad6040a0384ae361b0fbbe40ff))
+
+
+### Bug Fixes
+
+* **recording:** make double-start of the recorder pipeline impossible ([8e16ee1](https://github.com/xicoarm/suisse-notes-desktop/commit/8e16ee174dfa5dfbdac770b52427467faede8e02))
+* **recording:** preserve audio after the 4h55m auto-split; harden startup recovery ([7c479ac](https://github.com/xicoarm/suisse-notes-desktop/commit/7c479ac09ee5fa50fb5582cfd606a645b03d9375))
+
 ### [4.3.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.3.0...v4.3.1) (2026-06-04)
 
 
