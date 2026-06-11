@@ -408,6 +408,7 @@ async function recoverOrphanedRecordings() {
     const dirs = fs.readdirSync(recordingsPath);
     let recoveredCount = 0;
     let totalAttempted = 0;
+    let skippedLive = false;
 
     for (const dir of dirs) {
       try {
@@ -424,12 +425,45 @@ async function recoverOrphanedRecordings() {
         if (fs.existsSync(audioPath)) continue;
 
         // Check if there are chunks or sessions to recover
-        const hasChunks = fs.existsSync(chunksPath) &&
-          fs.readdirSync(chunksPath).filter(f => f.startsWith('chunk_')).length > 0;
+        const chunkFiles = fs.existsSync(chunksPath)
+          ? fs.readdirSync(chunksPath).filter(f => f.startsWith('chunk_'))
+          : [];
+        const hasChunks = chunkFiles.length > 0;
         const hasSessions = fs.existsSync(sessionsPath) &&
           fs.readdirSync(sessionsPath).filter(f => f.endsWith('.webm') && !f.includes('_raw')).length > 0;
 
         if (!hasChunks && !hasSessions) continue;
+
+        // Never touch a recording that is being written RIGHT NOW. This scan
+        // runs ~5s after launch — a recording started inside that window
+        // matches the "chunks but no audio.webm" predicate, and recovering it
+        // would combine and DELETE its live chunks mid-recording.
+        if (isRecordingInProgress && getActiveRecording()?.recordId === dir) {
+          log.info(`Recovery: skipping ${dir} — recording is live`);
+          skippedLive = true;
+          continue;
+        }
+        // Freshness backstop in case active-session tracking is stale: a chunk
+        // written within the last 60s means a recorder is (or was just)
+        // writing here — leave it for the next launch.
+        if (hasChunks) {
+          try {
+            const newestChunk = chunkFiles.reduce((best, f) => {
+              const n = parseInt(f.replace('chunk_', ''), 10);
+              return Number.isFinite(n) && n > best.n ? { n, f } : best;
+            }, { n: -1, f: null });
+            if (newestChunk.f) {
+              const ageMs = Date.now() - fs.statSync(path.join(chunksPath, newestChunk.f)).mtimeMs;
+              if (ageMs < 60000) {
+                log.info(`Recovery: skipping ${dir} — chunks still being written (${Math.round(ageMs / 1000)}s old)`);
+                skippedLive = true;
+                continue;
+              }
+            }
+          } catch (e) {
+            log.warn(`Recovery: freshness check failed for ${dir}:`, e.message);
+          }
+        }
 
         totalAttempted++;
         log.info(`Attempting to recover orphaned recording: ${dir}`);
@@ -496,7 +530,10 @@ async function recoverOrphanedRecordings() {
 
     // Only clear active recording state if recovery succeeded or there was nothing to recover.
     // If all attempts failed, preserve state so next startup retries.
-    if (totalAttempted === 0 || recoveredCount > 0) {
+    if (skippedLive) {
+      // The active session belongs to a recording that is live (or freshly
+      // written) right now — leave its crash-recovery state untouched.
+    } else if (totalAttempted === 0 || recoveredCount > 0) {
       clearActiveRecording();
     } else {
       // Track failed recovery attempts to avoid infinite retries

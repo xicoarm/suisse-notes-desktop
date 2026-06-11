@@ -193,6 +193,15 @@ export const useRecordingStore = defineStore('recording', {
     },
 
     async startRecording(userId = null) {
+      // Re-entrancy guard (double-start incident): a new session must not start
+      // while a capture lifecycle is live — the body below regenerates recordId
+      // and resets chunkIndex, which would corrupt the active chunk sequence.
+      // The service-level latch blocks renderer double-starts; this protects
+      // the store against any other caller.
+      if (['recording', 'paused', 'stopping', 'processing'].includes(this.phase)) {
+        console.warn(`startRecording rejected: phase is '${this.phase}'`);
+        return { success: false, error: `Cannot start a recording while phase is '${this.phase}'` };
+      }
       try {
         // P1 Fix: Wait for cold-start recovery to complete before starting a new recording
         // Prevents race where recovery and new recording both modify store state

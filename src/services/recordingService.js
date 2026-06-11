@@ -78,6 +78,32 @@ let micAutoRecovering = false;
 // Flush synchronization: resolved when ondataavailable saves the chunk after a flush request
 let flushResolvers = [];
 
+// Double-start protection (doubled-audio incident, 2026-06-11): startRecording
+// has a multi-second async window (system-audio probe, getUserMedia ladder,
+// session-creation IPC) before `mediaRecorder` is assigned, so the
+// `state !== 'inactive'` guard alone cannot stop a second overlapping
+// invocation. Two concurrent MediaRecorders then interleave their timeslice
+// blobs into ONE chunk sequence and every block of the meeting ends up in the
+// final file twice. Three independent layers now prevent that:
+//   1. startInProgress — synchronous re-entrancy latch on startRecording().
+//   2. recorderGeneration — every pipeline gets a generation id; blobs from any
+//      recorder that is not the current generation are dropped at the save gate
+//      and the orphan is stopped (self-healing even if a rogue pipeline appears
+//      through a path nobody anticipated).
+//   3. teardownLeakedPipeline() — a new start defensively destroys any leftover
+//      pipeline objects before building new ones, and reports to Sentry.
+let startInProgress = false;
+let recorderGeneration = 0;
+let orphanRecorderWarned = false;
+// Stop-side re-entrancy: concurrent stop callers (manual stop + emergency stop
+// on chunk-save failure) share one in-flight promise instead of running the
+// teardown/combine sequence twice (the stop-side twin of the start race; the
+// full guard was deferred in 3a7415b).
+let stopInFlightPromise = null;
+// Auto-split ref captured at start so verifyRecordingState can tell an
+// intentional split-pause from a stuck recorder (see verifyRecordingState).
+let isAutoSplittingRef = null;
+
 let silenceError = null;
 
 const VOICE_FREQ_LOW_BIN = 3;    // ~563Hz (bin * 48000/256) — above mains hum harmonics
@@ -1242,6 +1268,11 @@ function verifyRecordingState(recordingStore) {
       chunkCount: recordingStore.chunkIndex
     });
   } else if (storeIsRecording && mediaState === 'paused') {
+    // performAutoSplit intentionally holds the recorder paused (store phase
+    // stays 'recording') while the finished segment is rolled into a session
+    // file — resuming it here would emit a chunk that races createSessionFile /
+    // resetChunkIndex. The split's own final step resumes when it is safe.
+    if (isAutoSplittingRef?.value) return;
     try {
       mediaRecorder.resume();
     } catch (e) {
@@ -1285,6 +1316,88 @@ function stopAuthKeepAlive() {
 }
 
 /**
+ * Tear down any pipeline objects left over from a previous session before a
+ * new one is built. In healthy flows every reference is already null when
+ * startRecording runs — anything found here is a leak. A recorder that is
+ * still LIVE is the double-audio bug in progress (it would interleave its
+ * blobs into the new session's chunk sequence), so it is reported at error
+ * level; inactive leftovers (e.g. after a MediaRecorder onerror stop, whose
+ * teardown path does not close the mixing context) are reported as warnings.
+ */
+function teardownLeakedPipeline(reason) {
+  const recorderState = mediaRecorder?.state || 'none';
+  const liveRecorder = recorderState === 'recording' || recorderState === 'paused';
+  captureMessage(
+    `recording: ${liveRecorder ? 'LIVE leaked pipeline' : 'stale pipeline objects'} torn down before start (${reason}; recorder=${recorderState})`,
+    liveRecorder ? 'error' : 'warning'
+  );
+
+  if (mediaRecorder) {
+    mediaRecorder.ondataavailable = null;
+    mediaRecorder.onstop = null;
+    mediaRecorder.onerror = null;
+    try {
+      if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    } catch (e) { /* already stopped */ }
+    mediaRecorder = null;
+  }
+
+  stopLevelMonitoring();
+  stopDurationTracking();
+  stopAuthKeepAlive();
+  if (stateVerificationInterval) {
+    clearInterval(stateVerificationInterval);
+    stateVerificationInterval = null;
+  }
+
+  if (stream) {
+    try { stream.getTracks().forEach(track => track.stop()); } catch (e) { /* ignore */ }
+    stream = null;
+  }
+  if (mixedStream) {
+    try { mixedStream.getTracks().forEach(track => track.stop()); } catch (e) { /* ignore */ }
+    mixedStream = null;
+  }
+  if (systemStream) {
+    try { systemStream.getTracks().forEach(track => track.stop()); } catch (e) { /* ignore */ }
+    systemStream = null;
+  }
+  if (mixingContext) {
+    mixingContext.close().catch(() => {});
+    mixingContext = null;
+  }
+  mixingDest = null;
+  micSourceNode = null;
+  systemSourceNode = null;
+  systemAudioActive = false;
+}
+
+/**
+ * A blob arrived from a recorder that is not the current pipeline generation.
+ * This must never happen — it is the exact mechanism that doubled every
+ * sentence of a recording (two live recorders interleaving into one chunk
+ * sequence). Drop the blob, kill the orphan, release its tracks, report once.
+ */
+function handleOrphanRecorderBlob(event) {
+  if (!orphanRecorderWarned) {
+    orphanRecorderWarned = true;
+    captureMessage('recording: orphaned MediaRecorder emitted data — blob dropped, orphan stopped (double-start protection)', 'error');
+  }
+  try {
+    const orphan = event?.target;
+    if (orphan && orphan !== mediaRecorder) {
+      orphan.ondataavailable = null;
+      orphan.onstop = null;
+      orphan.onerror = null;
+      if (orphan.state !== 'inactive') orphan.stop();
+      orphan.stream?.getTracks?.().forEach(track => track.stop());
+    }
+  } catch (e) {
+    console.warn('Error stopping orphaned recorder:', e);
+  }
+}
+
+/**
  * Start recording
  * @param {Object} options - Recording options
  * @param {Object} options.recordingStore - Recording store instance
@@ -1296,9 +1409,37 @@ function stopAuthKeepAlive() {
  * @param {number|null} options.maxRecordingSeconds - Maximum recording duration in seconds (minutes limit)
  */
 export async function startRecording(options = {}) {
+  // Layer 1 — synchronous re-entrancy latch, set before the FIRST await. The
+  // `state !== 'inactive'` guard below cannot stop overlapping invocations on
+  // its own because mediaRecorder is only assigned at the end of the async
+  // start sequence.
+  if (startInProgress) {
+    captureMessage('recording: double-start blocked by in-flight latch', 'warning');
+    return { success: false, error: 'Recording start already in progress' };
+  }
   // Guard: prevent starting a new recording while one is already active
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     return { success: false, error: 'Recording already in progress' };
+  }
+  startInProgress = true;
+  try {
+    return await startRecordingInternal(options);
+  } finally {
+    startInProgress = false;
+  }
+}
+
+async function startRecordingInternal(options) {
+  // Layer 2 — invalidate every previous pipeline generation BEFORE touching
+  // hardware: blobs from older generations are dropped at the save gate even
+  // if an orphaned recorder is somehow still running.
+  const myGeneration = ++recorderGeneration;
+  orphanRecorderWarned = false;
+
+  // Layer 3 — belt-and-braces: nothing from a previous pipeline may survive
+  // into a new session.
+  if (mediaRecorder || stream || mixedStream || mixingContext) {
+    teardownLeakedPipeline('stale objects at start');
   }
 
   const {
@@ -1311,8 +1452,10 @@ export async function startRecording(options = {}) {
     maxRecordingSeconds = null
   } = options;
 
-  // Store reference for mid-recording operations (mic switching, etc.)
+  // Store references for mid-recording operations (mic switching, state
+  // verification during auto-split, etc.)
   recordingStoreRef = recordingStore;
+  isAutoSplittingRef = isAutoSplitting || null;
   // DREC-3: remember the requested device and start fresh recovery state.
   lastRequestedDeviceId = deviceId || null;
   clearMicGraceTimeouts();
@@ -1469,6 +1612,14 @@ export async function startRecording(options = {}) {
 
     // Handle data available
     mediaRecorder.ondataavailable = async (event) => {
+      // Layer 2 of the double-start protection: only the CURRENT pipeline
+      // generation may persist chunks. A stale recorder firing here (any
+      // re-entrancy/restart bug, present or future) is dropped and destroyed
+      // instead of interleaving duplicate audio into the chunk sequence.
+      if (myGeneration !== recorderGeneration || event.target !== mediaRecorder) {
+        handleOrphanRecorderBlob(event);
+        return;
+      }
       if (event.data.size > 0) {
         try {
           const arrayBuffer = await event.data.arrayBuffer();
@@ -1800,6 +1951,18 @@ export function resumeRecording(recordingStore, isAutoSplitting, maxRecordingSec
  * Stop recording
  */
 export async function stopRecording(recordingStore, stopSystemAudio) {
+  // Concurrent stop callers (manual stop click + emergency stop on chunk-save
+  // failure + minutes-limit auto-stop) share ONE in-flight promise: running
+  // the teardown/combine sequence twice caused double-combine / phase-thrash
+  // (observed in production; full guard deferred in 3a7415b).
+  if (stopInFlightPromise) return stopInFlightPromise;
+  stopInFlightPromise = stopRecordingInternal(recordingStore, stopSystemAudio).finally(() => {
+    stopInFlightPromise = null;
+  });
+  return stopInFlightPromise;
+}
+
+async function stopRecordingInternal(recordingStore, stopSystemAudio) {
   // eslint-disable-next-line no-async-promise-executor
   return new Promise(async (resolve) => {
     // Handle case where MediaRecorder was lost

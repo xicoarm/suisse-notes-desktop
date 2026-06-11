@@ -7,6 +7,8 @@
       size="lg"
       color="negative"
       icon="mic"
+      :loading="props.startBusy"
+      :disable="props.startBusy"
       @click="$emit('start')"
     >
       <q-tooltip>{{ t('aboutStartRecording') }}</q-tooltip>
@@ -240,7 +242,10 @@ const showCancelConfirm = ref(false);
 
 const props = defineProps({
   audioLevel: { type: Number, default: 0 },
-  isMicMuted: { type: Boolean, default: false }
+  isMicMuted: { type: Boolean, default: false },
+  // True while a start is in flight — the multi-second async window during
+  // which a second click used to spawn a second recorder (double-audio bug).
+  startBusy: { type: Boolean, default: false }
 });
 
 const emit = defineEmits(['start', 'pause', 'resume', 'stop', 'cancel', 'toggleMute']);

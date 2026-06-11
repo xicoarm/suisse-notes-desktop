@@ -24,6 +24,7 @@
           <div class="record-button-section">
             <RecordingControls
               :audio-level="audioLevel"
+              :start-busy="startBusy"
               @start="handleStartClick"
               @pause="handlePause"
               @resume="handleResume"
@@ -320,6 +321,7 @@
             <RecordingControls
               :audio-level="audioLevel"
               :is-mic-muted="isMicMuted"
+              :start-busy="startBusy"
               @start="handleStartClick"
               @pause="handlePause"
               @resume="handleResume"
@@ -1239,7 +1241,28 @@ onUnmounted(() => {
   }
 });
 
+// Double-start protection (UI layer): the start flow spends multiple seconds
+// in awaits (minutes sync, mic acquisition, session IPC) during which the
+// Start button used to stay clickable — a second click spawned a SECOND
+// MediaRecorder pipeline whose chunks interleaved with the first, doubling
+// every sentence of the recording. The service has its own synchronous latch;
+// these refs additionally cover the pre-start work and drive the button's
+// loading/disabled state.
+const startClickBusy = ref(false); // guards handleStartClick pre-work
+const startInFlight = ref(false);  // guards doStartRecording (the actual start)
+const startBusy = computed(() => startClickBusy.value || startInFlight.value);
+
 const handleStartClick = async () => {
+  if (startBusy.value) return;
+  startClickBusy.value = true;
+  try {
+    await handleStartClickInternal();
+  } finally {
+    startClickBusy.value = false;
+  }
+};
+
+const handleStartClickInternal = async () => {
   // Reset error state
   recordingStore.uploadError =null;
   recordingStore.uploadRetryAttempt = 0;
@@ -1335,6 +1358,19 @@ const onStorageOptionCancel = () => {
 };
 
 const doStartRecording = async () => {
+  // Double-start protection: also reachable via the storage-preference dialog
+  // confirm, so it carries its own latch (a double-confirm or a confirm racing
+  // a direct start must not run two starts).
+  if (startInFlight.value) return;
+  startInFlight.value = true;
+  try {
+    await doStartRecordingInternal();
+  } finally {
+    startInFlight.value = false;
+  }
+};
+
+const doStartRecordingInternal = async () => {
   // Block start if recovery is in progress (FIX H)
   if (recordingStore.recoveryInProgress) {
     $q.notify({
@@ -1374,7 +1410,22 @@ const handleResume = () => {
   resumeRecording();
 };
 
+// Stop latch: the minutes-limit watcher and a user stop click can fire
+// handleStop concurrently. The service dedups the underlying stop, but the
+// post-stop flow here (history update + auto-upload) must also run only once.
+const stopBusy = ref(false);
+
 const handleStop = async () => {
+  if (stopBusy.value) return;
+  stopBusy.value = true;
+  try {
+    await handleStopInternal();
+  } finally {
+    stopBusy.value = false;
+  }
+};
+
+const handleStopInternal = async () => {
   // Save duration before stopping
   recordingStore.setFinalDuration(recordingStore.duration);
 
