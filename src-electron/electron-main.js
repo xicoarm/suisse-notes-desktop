@@ -275,7 +275,7 @@ const API_BASE_URL = getApiUrl();
 log.info('Environment:', getEnvironmentInfo());
 
 // Disk space utilities for recording safety
-const { canStartRecording, shouldForceStopRecording, formatBytes } = require('./disk-utils');
+const { canStartRecording, shouldForceStopRecording, canFinalizeRecording, formatBytes } = require('./disk-utils');
 
 // Configuration store for persistent settings
 const configStore = new Store({
@@ -2827,8 +2827,8 @@ ipcMain.handle('recording:createSession', async (event, recordId, ext, userId) =
     const validUserId = userId ? validateUserId(userId) : null;
     step('validated', tValidate, { recordId: validRecordId });
 
-    // Check disk space before creating session (wmic can be slow on Windows;
-    // canStartRecording now bounds the shell-out to 3s and falls back safely).
+    // Check disk space before creating session (statfs syscall, bounded to 3s
+    // with a fail-open fallback in case userData sits on a stalled network share).
     const tDisk = Date.now();
     const recordingsPath = getRecordingsPath();
     const diskCheck = await canStartRecording(recordingsPath);
@@ -3198,6 +3198,28 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
 
       console.log('Combining chunks for recording:', validRecordId);
 
+      // Fail fast — and recoverably — when the disk can't hold the combined
+      // output. Chunks stay on disk: the renderer offers Retry, and launch
+      // recovery picks them up once space is freed. Without this, ENOSPC fires
+      // mid-write and surfaces as a generic error that reads like data loss.
+      const spaceCheck = await canFinalizeRecording(recordPath);
+      if (!spaceCheck.canFinalize) {
+        log.warn(`combineChunks: insufficient disk space (free ${spaceCheck.freeMB}MB, need ${spaceCheck.neededMB}MB) — keeping chunks for retry`);
+        Sentry.captureMessage('combineChunks blocked: disk full', {
+          level: 'warning',
+          tags: { operation: 'combineChunks' },
+          extra: { recordId: validRecordId, freeMB: spaceCheck.freeMB, neededMB: spaceCheck.neededMB, sourceBytes: spaceCheck.sourceBytes },
+        });
+        return {
+          success: false,
+          diskFull: true,
+          freeMB: spaceCheck.freeMB,
+          neededMB: spaceCheck.neededMB,
+          shortfallMB: spaceCheck.shortfallMB,
+          error: `Insufficient disk space to finalize recording (need ~${spaceCheck.neededMB}MB free, have ${spaceCheck.freeMB}MB)`
+        };
+      }
+
       // Step 1: If there are current chunks, create a session from them first
       if (fs.existsSync(chunksPath)) {
         const chunkFiles = fs.readdirSync(chunksPath)
@@ -3453,6 +3475,23 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
       return { success: false, error: 'No sessions or chunks found to combine' };
     } catch (error) {
       console.error('Error combining chunks:', error);
+      const diskFull = error.code === 'ENOSPC' || /no space left|not enough space|disk full/i.test(error.message || '');
+      if (diskFull) {
+        // ENOSPC mid-write: delete the partial output so the retry has room.
+        // Source chunks/sessions are untouched (cleanup only runs after
+        // output validation), so the audio survives for retry or recovery.
+        const recordPath = getRecordingPath(validRecordId);
+        const partialOutput = path.join(recordPath, `audio${validExt}`);
+        try { if (fs.existsSync(partialOutput)) fs.unlinkSync(partialOutput); } catch (e) { /* ignore */ }
+        try { if (fs.existsSync(partialOutput + '.raw')) fs.unlinkSync(partialOutput + '.raw'); } catch (e) { /* ignore */ }
+        let neededMB = 0, freeMB = 0, shortfallMB = 0;
+        try {
+          const check = await canFinalizeRecording(recordPath);
+          neededMB = check.neededMB; freeMB = check.freeMB; shortfallMB = check.shortfallMB;
+        } catch (e) { /* best effort */ }
+        log.warn(`combineChunks: ENOSPC during combine — partial output removed, chunks kept (free ${freeMB}MB, need ${neededMB}MB)`);
+        return { success: false, diskFull: true, neededMB, freeMB, shortfallMB, error: error.message };
+      }
       return { success: false, error: error.message };
     }
   });

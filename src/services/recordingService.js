@@ -2022,7 +2022,11 @@ async function stopRecordingInternal(recordingStore, stopSystemAudio) {
           resolve({
             success: false,
             error: 'Recording interrupted. ' + (result.error || ''),
-            partialRecovery: recordingStore.chunkIndex > 0
+            partialRecovery: recordingStore.chunkIndex > 0,
+            // Disk-full passthrough so a failed Retry re-offers the dialog
+            diskFull: result.diskFull,
+            shortfallMB: result.shortfallMB,
+            neededMB: result.neededMB
           });
         }
         return;

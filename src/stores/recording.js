@@ -336,6 +336,25 @@ export const useRecordingStore = defineStore('recording', {
             this.audioFilePath = result.outputPath;
             sentryRecordingStop(this.recordId, this.duration);
             return { success: true, filePath: result.outputPath, duration: result.duration || null, warning: result.warning };
+          } else if (result.diskFull) {
+            // Disk full at finalize: the chunks are intact on disk. Surface a
+            // reassuring, actionable message instead of a raw ENOSPC error —
+            // RecordPage offers Retry, and launch recovery combines the chunks
+            // once space is freed even if the user walks away.
+            const mb = result.shortfallMB || result.neededMB || 200;
+            this.error = i18n.global.t('diskFullFinalizeMessage', { mb });
+            this.phase = 'error';
+            sentryRecordingError(this.recordId, new Error(`combine blocked: disk full (need ${result.neededMB}MB, free ${result.freeMB}MB)`));
+            return {
+              success: false,
+              diskFull: true,
+              shortfallMB: result.shortfallMB,
+              neededMB: result.neededMB,
+              error: this.error,
+              partialRecovery: this.chunkIndex > 0,
+              chunkCount: this.chunkIndex,
+              recordId: this.recordId
+            };
           } else {
             throw new Error(result.error || 'Failed to combine recording chunks');
           }
@@ -370,7 +389,14 @@ export const useRecordingStore = defineStore('recording', {
           await window.electronAPI.recording.setInProgress(false);
           await window.electronAPI.recording.setProcessing(false);
         }
-        return { success: false, error: error.message, partialRecovery: this.chunkIndex > 0, chunkCount: this.chunkIndex, recordId: this.recordId };
+        return {
+          success: false,
+          error: error.message,
+          diskFull: /ENOSPC|no space left/i.test(error.message || ''),
+          partialRecovery: this.chunkIndex > 0,
+          chunkCount: this.chunkIndex,
+          recordId: this.recordId
+        };
       }
     },
 

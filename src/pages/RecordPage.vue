@@ -1516,8 +1516,21 @@ const handleStopInternal = async () => {
         chunkCount: result.chunkCount || 0
       });
 
-      // Show more detailed error for partial recovery
-      if (result.partialRecovery) {
+      // Disk full at finalize: the audio is intact on disk as chunks. Offer an
+      // in-place retry (re-runs the combine via the recovery path) instead of
+      // a dead-end error toast. If the user dismisses, launch recovery
+      // combines the chunks automatically once space is freed.
+      if (result.diskFull) {
+        const mb = result.shortfallMB || result.neededMB || 200;
+        $q.dialog({
+          title: t('diskFullFinalizeTitle'),
+          message: t('diskFullFinalizeMessage', { mb }),
+          cancel: { flat: true, label: t('cancel') },
+          ok: { color: 'primary', label: t('retry') },
+          persistent: true
+        }).onOk(() => handleStop());
+      } else if (result.partialRecovery) {
+        // Show more detailed error for partial recovery
         $q.notify({
           type: 'warning',
           message: 'Recording was interrupted. Your audio chunks are saved locally but could not be combined. Please try again from History.',

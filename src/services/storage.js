@@ -369,29 +369,25 @@ export const getFreeDiskSpace = async () => {
   if (isElectron()) {
     try {
       const result = await window.electronAPI.recording.checkDiskSpace();
-      // The handler returns { canStart, freeSpace, freeSpaceMB, message }
-      // Convert to the expected format
-      if (result && (result.canStart !== undefined || result.freeSpaceMB !== undefined)) {
+      // The handler returns { canStart, freeSpace, freeSpaceMB, message, fallback }
+      // Convert to the expected format. A fallback reading is a made-up number
+      // ("assume enough"), not a measurement — report it as unknown instead of
+      // letting the storage monitor believe it.
+      if (result && !result.fallback && (result.canStart !== undefined || result.freeSpaceMB !== undefined)) {
         return {
           success: true,
           freeBytes: result.freeSpace || (result.freeSpaceMB * 1024 * 1024),
           freeMB: result.freeSpaceMB || Math.floor((result.freeSpace || 0) / (1024 * 1024))
         };
       }
-      // Fallback for unexpected response format
-      return {
-        success: true,
-        freeBytes: 10 * 1024 * 1024 * 1024, // 10 GB default
-        freeMB: 10 * 1024
-      };
+      return { success: false, error: result?.checkError || 'Disk space unknown' };
     } catch (error) {
       console.error('Error checking disk space on Electron:', error);
-      // Return safe fallback on error
-      return {
-        success: true,
-        freeBytes: 10 * 1024 * 1024 * 1024,
-        freeMB: 10 * 1024
-      };
+      // Report the failure honestly: pretending 10GB free here kept the
+      // storage monitor permanently "ok" on machines where the check broke,
+      // until the disk actually filled mid-recording. Callers treat
+      // success:false as "unknown" (warn-only, never block or force-stop).
+      return { success: false, error: error.message };
     }
   }
 
