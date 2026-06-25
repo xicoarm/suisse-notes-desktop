@@ -875,6 +875,15 @@ export const useDeviceStore = defineStore('device', {
           getAuthStore: () => authStore
         });
 
+        if (result.inProgress) {
+          addBreadcrumb({
+            category: 'ble',
+            message: `Device file upload skipped because upload is already in progress: ${file.file}`,
+            level: 'info'
+          });
+          return;
+        }
+
         if (result.success) {
           await historyStore.updateRecording(recordId, {
             uploadStatus: result.verified === false ? 'pending_verification' : 'uploaded',
@@ -994,6 +1003,10 @@ export const useDeviceStore = defineStore('device', {
           onProgress: () => {},
           getAuthStore: () => authStore
         });
+
+        if (result.inProgress) {
+          return;
+        }
 
         if (result.success) {
           await historyStore.updateRecording(rec.id, {

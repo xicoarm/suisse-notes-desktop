@@ -373,7 +373,17 @@ export default {
           result = { success: false, error: 'Unsupported platform' };
         }
 
-        if (result.success) {
+        if (result.inProgress) {
+          await historyStore.updateRecording(recording.id, {
+            uploadStatus: 'uploading',
+            uploadError: null
+          });
+          $q.notify({
+            type: 'info',
+            message: 'Upload already in progress',
+            timeout: 2500
+          });
+        } else if (result.success) {
           // Update history entry
           await historyStore.updateRecording(recording.id, {
             uploadStatus: 'uploaded',

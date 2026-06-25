@@ -964,7 +964,13 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
     isFileLoading.value = false;
     retryAttempt.value = 0;
 
-    if (uploadResult.success) {
+    if (uploadResult.inProgress) {
+      $q.notify({
+        type: 'info',
+        message: 'Upload already in progress',
+        timeout: 2500
+      });
+    } else if (uploadResult.success) {
       isUploaded.value = true;
       recordingStore.setUploaded(uploadResult.audioFileId);
 

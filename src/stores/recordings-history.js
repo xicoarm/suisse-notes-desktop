@@ -41,6 +41,55 @@ function _toUpdateRequest(updates) {
   return out;
 }
 
+function _toClientUploadStatus(status) {
+  if (typeof status !== 'string') return null;
+  switch (status.toUpperCase()) {
+    case 'PENDING':
+      return 'pending';
+    case 'UPLOADING':
+      return 'uploading';
+    case 'UPLOADED':
+    case 'COMPLETED':
+      return 'uploaded';
+    case 'PROCESSING':
+    case 'PENDING_VERIFICATION':
+      return 'pending_verification';
+    case 'FAILED':
+    case 'TRANSCRIPTION_FAILED':
+      return 'failed';
+    case 'RECORDING':
+      return 'recording';
+    case 'CANCELLED':
+      return 'cancelled';
+    case 'SKIPPED':
+      return 'skipped';
+    case 'TRANSFERRING':
+      return 'transferring';
+    default:
+      return null;
+  }
+}
+
+function _normalizeServerRecording(serverRec) {
+  const id = serverRec?.id || serverRec?.recordId || serverRec?.meetingId || serverRec?.audioFileId;
+  const duration =
+    typeof serverRec?.duration === 'number'
+      ? serverRec.duration
+      : (typeof serverRec?.durationSeconds === 'number' ? serverRec.durationSeconds : 0);
+
+  return {
+    ...serverRec,
+    id,
+    uploadStatus: _toClientUploadStatus(serverRec?.uploadStatus) ||
+      _toClientUploadStatus(serverRec?.status) ||
+      'pending',
+    duration,
+    audioFileId: serverRec?.audioFileId || serverRec?.transcriptionId || null,
+    createdAt: serverRec?.createdAt || serverRec?.startedAt || new Date().toISOString(),
+    title: serverRec?.title || serverRec?.filename || 'Recording'
+  };
+}
+
 // Auto-retry constants
 const RETRY_INITIAL_DELAY_MS = 60_000;   // 1 minute
 const RETRY_MAX_DELAY_MS = 1_800_000;    // 30 minutes
@@ -260,7 +309,10 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
 
           // Then fetch from server and merge with local cache
           const data = await _serverFetch('/api/desktop/history');
-          const serverRecordings = data.recordings || (Array.isArray(data) ? data : null);
+          const rawServerRecordings = data.recordings || (Array.isArray(data) ? data : null);
+          const serverRecordings = rawServerRecordings
+            ? rawServerRecordings.map(_normalizeServerRecording).filter(r => r.id)
+            : null;
           if (serverRecordings) {
             // Merge: preserve local non-zero duration/fileSize when server has 0
             const cached = _getCachedRecordings(userId);
@@ -620,7 +672,9 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
             });
           }
 
-          if (result?.success) {
+          if (result?.inProgress) {
+            console.log(`Auto-retry skipped for recording ${recording.id}: upload already in progress`);
+          } else if (result?.success) {
             await this.updateRecording(recording.id, {
               uploadStatus: 'uploaded',
               transcriptionId: result.transcriptionId,

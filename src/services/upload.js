@@ -26,6 +26,28 @@ const MOBILE_UPLOAD_QUEUE_TMP_KEY = MOBILE_UPLOAD_QUEUE_KEY + '_tmp';
 // Re-entry guard for processMobileUploadQueue
 let isProcessingMobileQueue = false;
 
+// Per-record in-flight guard for Capacitor uploads. This is deliberately
+// in-memory only: if iOS kills the app mid-upload, the guard disappears while
+// the persisted queue item remains and can retry on next launch.
+const activeMobileUploadRecordIds = new Set();
+
+function _isMobileUploadActive(recordId) {
+  return !!recordId && activeMobileUploadRecordIds.has(recordId);
+}
+
+function _beginMobileUpload(recordId) {
+  if (!isCapacitor() || !recordId) return true;
+  if (activeMobileUploadRecordIds.has(recordId)) return false;
+  activeMobileUploadRecordIds.add(recordId);
+  return true;
+}
+
+function _endMobileUpload(recordId) {
+  if (isCapacitor() && recordId) {
+    activeMobileUploadRecordIds.delete(recordId);
+  }
+}
+
 // Staleness threshold: 7 days
 const QUEUE_ITEM_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -324,6 +346,11 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
     // UI surfaces them as 'failed' so the user can manually retry via the
     // history card if they want to.
     if (item.unrecoverable) {
+      i++;
+      continue;
+    }
+
+    if (_isMobileUploadActive(item.recordId)) {
       i++;
       continue;
     }
@@ -761,6 +788,16 @@ export const uploadWithVerification = async (options) => {
     addToMobileUploadQueue(recordId, filePath, metadata);
   }
 
+  if (!_beginMobileUpload(recordId)) {
+    captureMessage(`upload: skipped duplicate in-flight mobile upload recordId=${recordId}`, 'warning');
+    return {
+      success: false,
+      canDelete: false,
+      inProgress: true,
+      error: 'Upload already in progress'
+    };
+  }
+
   try {
     // Phase 1a: Calculate local checksum before upload
     // Skip on mobile — reading the file for checksumming is expensive (base64 decode)
@@ -967,6 +1004,8 @@ export const uploadWithVerification = async (options) => {
       canDelete: false,
       error: error.message
     };
+  } finally {
+    _endMobileUpload(recordId);
   }
 };
 
@@ -1286,6 +1325,10 @@ export const uploadWithRetry = async (options) => {
       return result;
     }
 
+    if (result.inProgress) {
+      return result;
+    }
+
     // Check if error is retryable
     const retryable = isRetryableError(result.error);
     if (!retryable || attempt >= maxRetries) {
@@ -1405,6 +1448,12 @@ const processUploadQueue = async () => {
     upload.attempts++;
 
     const result = await uploadWithVerification(upload);
+
+    if (result.inProgress) {
+      upload.status = 'pending';
+      upload.attempts = Math.max(0, upload.attempts - 1);
+      break;
+    }
 
     if (result.success) {
       upload.status = 'complete';

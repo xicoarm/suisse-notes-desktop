@@ -1681,6 +1681,10 @@ const startAutoUpload = async () => {
     // phase reset handled by store actions
     recordingStore.uploadRetryAttempt = 0;
 
+    if (result.inProgress) {
+      return;
+    }
+
     if (result.success) {
       recordingStore.setUploaded(result.audioFileId);
 
