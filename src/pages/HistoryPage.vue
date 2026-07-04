@@ -374,13 +374,15 @@ export default {
         }
 
         if (result.inProgress) {
-          await historyStore.updateRecording(recording.id, {
-            uploadStatus: 'uploading',
-            uploadError: null
-          });
+          // Another driver (persistent queue / auto-retry) is uploading this
+          // recording right now. Leave the status untouched: writing
+          // 'uploading' here would strand the record — it is excluded from
+          // both auto-retry and the manual retry button, and no one owns
+          // flipping it back if the in-flight upload fails. The guard holder
+          // updates history on success; auto-retry picks it up on failure.
           $q.notify({
             type: 'info',
-            message: 'Upload already in progress',
+            message: t('uploadAlreadyInProgress'),
             timeout: 2500
           });
         } else if (result.success) {

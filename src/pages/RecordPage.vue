@@ -1239,7 +1239,52 @@ onUnmounted(() => {
     clearInterval(autoSaveTimer.value);
     autoSaveTimer.value = null;
   }
+  stopBackgroundUploadWatch();
 });
+
+// When startAutoUpload finds an upload for this recordId already in flight
+// (persistent queue got there first), the queue holder owns completion. Poll
+// the history entry it updates and converge the page's phase, so the record
+// screen doesn't sit in 'uploading' forever with a locked file.
+let backgroundUploadWatchTimer = null;
+
+const stopBackgroundUploadWatch = () => {
+  if (backgroundUploadWatchTimer) {
+    clearInterval(backgroundUploadWatchTimer);
+    backgroundUploadWatchTimer = null;
+  }
+};
+
+const watchBackgroundUpload = (recordId) => {
+  stopBackgroundUploadWatch();
+  const startedAt = Date.now();
+  const WATCH_TIMEOUT_MS = 30 * 60 * 1000; // give up after 30 min; queue keeps retrying on its own
+
+  backgroundUploadWatchTimer = setInterval(async () => {
+    // Session moved on (new recording started / page reset) — stop watching
+    if (recordingStore.recordId !== recordId || !recordingStore.isUploading) {
+      stopBackgroundUploadWatch();
+      return;
+    }
+
+    const rec = historyStore.recordings.find(r => r.id === recordId);
+    if (rec?.uploadStatus === 'uploaded') {
+      stopBackgroundUploadWatch();
+      recordingStore.setUploaded(rec.audioFileId || null);
+      recordingStore.unlockFile(recordId);
+      transcriptionStore.resetSession();
+      $q.notify({ type: 'positive', message: t('uploadSuccessful') });
+    } else if (rec?.uploadStatus === 'failed') {
+      stopBackgroundUploadWatch();
+      await handleUploadError(rec.uploadError || 'Upload failed');
+    } else if (Date.now() - startedAt > WATCH_TIMEOUT_MS) {
+      // Queue is still retrying in the background; free the page so the
+      // user can keep working. The file stays locked (protects the retry).
+      stopBackgroundUploadWatch();
+      await handleUploadError(rec?.uploadError || 'Upload still pending — it will retry in the background');
+    }
+  }, 5000);
+};
 
 // Double-start protection (UI layer): the start flow spends multiple seconds
 // in awaits (minutes sync, mic acquisition, session IPC) during which the
@@ -1682,6 +1727,17 @@ const startAutoUpload = async () => {
     recordingStore.uploadRetryAttempt = 0;
 
     if (result.inProgress) {
+      // Another driver (the persistent mobile queue) is uploading this exact
+      // recording. A bare return would strand the page in phase 'uploading'
+      // forever (blocking new recordings) and leave the file locked with no
+      // completion owner. Hand off: watch the history entry — the queue
+      // holder writes 'uploaded' on success — and converge the page state.
+      $q.notify({
+        type: 'info',
+        message: t('uploadAlreadyInProgress'),
+        timeout: 2500
+      });
+      watchBackgroundUpload(recordingStore.recordId);
       return;
     }
 

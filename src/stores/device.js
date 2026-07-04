@@ -876,6 +876,11 @@ export const useDeviceStore = defineStore('device', {
         });
 
         if (result.inProgress) {
+          // Revert the optimistic 'uploading' write: stranded 'uploading' is
+          // excluded from auto-retry and manual retry, and the guard holder
+          // never flips it back on failure. 'pending' stays retry-eligible;
+          // the holder writes 'uploaded' itself on success.
+          await historyStore.updateRecording(recordId, { uploadStatus: 'pending' });
           addBreadcrumb({
             category: 'ble',
             message: `Device file upload skipped because upload is already in progress: ${file.file}`,
@@ -1005,6 +1010,9 @@ export const useDeviceStore = defineStore('device', {
         });
 
         if (result.inProgress) {
+          // Revert the optimistic 'uploading' write (see syncAllNew) — the
+          // guard holder owns completion; keep this record retry-eligible.
+          await historyStore.updateRecording(rec.id, { uploadStatus: 'pending' });
           return;
         }
 

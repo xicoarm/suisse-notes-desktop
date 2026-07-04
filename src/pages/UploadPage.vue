@@ -967,7 +967,7 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
     if (uploadResult.inProgress) {
       $q.notify({
         type: 'info',
-        message: 'Upload already in progress',
+        message: t('uploadAlreadyInProgress'),
         timeout: 2500
       });
     } else if (uploadResult.success) {
@@ -1090,7 +1090,16 @@ const startMobileUpload = async (file, fileSize, filename) => {
     isFileLoading.value = false;
     retryAttempt.value = 0;
 
-    if (uploadResult.success) {
+    if (uploadResult.inProgress) {
+      // A concurrent call for the same recordId holds the in-flight guard
+      // (e.g. double-tapped upload). Not a failure — the other upload is
+      // still running; don't set uploadError or a red toast.
+      $q.notify({
+        type: 'info',
+        message: t('uploadAlreadyInProgress'),
+        timeout: 2500
+      });
+    } else if (uploadResult.success) {
       isUploaded.value = true;
       recordingStore.setUploaded(uploadResult.audioFileId);
 
