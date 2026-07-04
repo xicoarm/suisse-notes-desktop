@@ -639,6 +639,14 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
       const retryable = this.recordings.filter(r =>
         (r.uploadStatus === 'failed' || r.uploadStatus === 'pending') &&
         r.filePath &&
+        // 'failed' WITH audioFileId means the server already holds the audio
+        // (transcription failed after a successful upload). Re-uploading is
+        // permanently futile: the backend dedupes by recordId — including
+        // FAILED meetings — and silently discards the bytes. Auto-retrying
+        // here just re-reads and re-sends the entire file forever (observed
+        // in production: the same 93MB blob re-uploaded for weeks). Recovery
+        // for these needs a server-side re-transcribe, not a re-upload.
+        !(r.uploadStatus === 'failed' && r.audioFileId) &&
         !_retryingIds.has(r.id)
       );
 

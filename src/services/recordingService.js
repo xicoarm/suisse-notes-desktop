@@ -75,6 +75,21 @@ let lastRequestedDeviceId = null;
 let micDeviceChangeHandler = null;
 let micAutoRecovering = false;
 
+// INT-2: audio-session interruption auto-recovery (Nyberg incident 2026-06-25).
+// On iOS an incoming call interrupts the audio session even with the app in
+// the FOREGROUND: the WKWebView AudioContext freezes ('interrupted'), the mic
+// track mutes, and the MediaRecorder — which records the mixing-pipeline
+// output — stops emitting chunks while still reporting state 'recording'.
+// A single immediate ctx.resume() (the old behavior) always fails because the
+// call still owns the audio device. This loop retries until the session is
+// free again: resume contexts → re-acquire mic → verify chunks flow.
+const CAPTURE_RECOVERY_RETRY_MS = 5000;
+const CAPTURE_RECOVERY_GIVE_UP_MS = 30 * 60 * 1000; // keep trying for 30 min (long calls)
+let captureRecoveryTimer = null;
+let captureRecoveryStartedAt = null;
+let captureRecoveryReason = null;
+let captureRecoveryBusy = false;
+
 // Flush synchronization: resolved when ondataavailable saves the chunk after a flush request
 let flushResolvers = [];
 
@@ -390,11 +405,16 @@ function createMixingPipeline(micStream, sysStream) {
   }
 
   // Auto-resume AudioContext if it gets suspended (macOS audio session interruption,
-  // system resume from sleep, another app claiming audio focus)
+  // system resume from sleep, another app claiming audio focus).
+  // INT-2: the immediate resume() below ALWAYS fails while an iOS call
+  // interruption is active (the call owns the audio device) — so additionally
+  // start the recovery loop, which keeps retrying until the session is free
+  // and also re-acquires the (by then muted/dead) mic track.
   ctx.addEventListener('statechange', () => {
     if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
       console.warn(`AudioContext state changed to "${ctx.state}" — attempting resume`);
       ctx.resume().catch(e => console.warn('AudioContext auto-resume failed:', e));
+      scheduleCaptureRecovery(`audiocontext-${ctx.state}`);
     }
   });
 
@@ -594,6 +614,16 @@ export async function switchMicrophoneStream(newDeviceId) {
           if (recordingStoreRef) verifyRecordingState(recordingStoreRef);
         }, 3000);
       };
+      // INT-2: keep interruption detection armed on the replacement track —
+      // a second incoming call must be caught exactly like the first.
+      track.onmute = () => {
+        console.warn('Switched mic track muted (audio-session interruption?) — starting capture recovery');
+        scheduleCaptureRecovery('mic-track-muted');
+      };
+      track.onunmute = () => {
+        console.warn('Switched mic track unmuted — verifying capture recovery');
+        scheduleCaptureRecovery('mic-track-unmuted');
+      };
     }
 
     // Step 6: Restart health monitoring with new stream
@@ -691,6 +721,115 @@ function stopMicRecoveryListener() {
   }
   micDeviceChangeHandler = null;
   clearMicGraceTimeouts();
+  stopCaptureRecovery();
+}
+
+/**
+ * INT-2: start the interruption-recovery loop (idempotent — one loop per
+ * episode). Triggered by: AudioContext 'interrupted'/'suspended', mic track
+ * onmute/onunmute, the chunk-progress watchdog, and the post-resume check.
+ * The loop self-terminates on success, stop, pause, or after the give-up
+ * window. Everything captured before the interruption is already persisted
+ * (3s chunk fsync) — this loop's job is to stop the bleeding AFTER it.
+ */
+function scheduleCaptureRecovery(reason) {
+  if (!recordingStoreRef?.isRecording || recordingStoreRef.isPaused) return;
+  if (captureRecoveryTimer) return; // episode already running
+  captureRecoveryStartedAt = Date.now();
+  captureRecoveryReason = reason;
+  captureMessage(`recording: capture recovery started (reason=${reason}, savedChunks=${savedChunkCount})`, 'warning');
+  captureRecoveryTimer = setInterval(() => {
+    attemptCaptureRecovery().catch(e => console.warn('Capture recovery attempt failed:', e));
+  }, CAPTURE_RECOVERY_RETRY_MS);
+  // Kick immediately — a declined call frees the session within seconds.
+  attemptCaptureRecovery().catch(e => console.warn('Capture recovery attempt failed:', e));
+}
+
+/** INT-2: stop the recovery loop (success, give-up, or recording teardown). */
+function stopCaptureRecovery() {
+  if (captureRecoveryTimer) {
+    clearInterval(captureRecoveryTimer);
+    captureRecoveryTimer = null;
+  }
+  captureRecoveryBusy = false;
+}
+
+/**
+ * INT-2: one recovery attempt. Ordered so each tick is safe to repeat:
+ * 1. Success check — a chunk persisted AFTER the episode began means capture
+ *    is flowing again; clear the stall state and stop.
+ * 2. Resume the audio contexts (fails while a call holds the session; succeeds
+ *    the moment it is released — THE fix for the one-shot resume that failed
+ *    44ms into the Nyberg interruption).
+ * 3. If the mic track is dead/muted, re-acquire and swap it into the mixing
+ *    graph via the existing switchMicrophoneStream machinery (the recorder
+ *    records the graph output, so it keeps running across the swap).
+ * 4. Nudge the recorder (requestData) so the next tick can observe flow.
+ */
+async function attemptCaptureRecovery() {
+  if (captureRecoveryBusy) return;
+  captureRecoveryBusy = true;
+  try {
+    // Self-terminate: session over or paused (post-resume check re-arms us).
+    if (!recordingStoreRef?.isRecording || recordingStoreRef.isPaused) {
+      stopCaptureRecovery();
+      return;
+    }
+
+    // 1. Success: a chunk landed after the episode started → capture is back.
+    if (lastSuccessfulChunkAt && captureRecoveryStartedAt && lastSuccessfulChunkAt >= captureRecoveryStartedAt) {
+      const gapSec = Math.round((Date.now() - captureRecoveryStartedAt) / 1000);
+      captureMessage(`recording: capture RECOVERED after ${gapSec}s (reason=${captureRecoveryReason}, savedChunks=${savedChunkCount})`, 'warning');
+      stallWarned = false; // re-arm the watchdog for a possible next episode
+      clearSilenceWarning();
+      emit('captureRecovered', { gapSeconds: gapSec, reason: captureRecoveryReason });
+      stopCaptureRecovery();
+      return;
+    }
+
+    // Give up quietly after the window — the stall banner stays up and every
+    // chunk before the interruption is safely persisted either way.
+    if (Date.now() - captureRecoveryStartedAt > CAPTURE_RECOVERY_GIVE_UP_MS) {
+      captureMessage(`recording: capture recovery GAVE UP after ${Math.round(CAPTURE_RECOVERY_GIVE_UP_MS / 60000)}min (reason=${captureRecoveryReason})`, 'error');
+      stopCaptureRecovery();
+      return;
+    }
+
+    // 2. Resume frozen audio contexts. While the interruption is active
+    //    (ongoing call) resume() rejects/stays non-running — retry next tick.
+    for (const ctx of [mixingContext, mixedAudioContext, micHealthAudioContext]) {
+      if (ctx && ctx.state !== 'running' && ctx.state !== 'closed') {
+        try { await ctx.resume(); } catch (e) { /* session still held */ }
+      }
+    }
+    if (mixingContext && mixingContext.state !== 'running') return;
+
+    // 3. Mic track dead or muted (iOS mutes it for the interruption's
+    //    lifetime and often does NOT unmute it afterwards) → full re-acquire.
+    const micTrack = stream?.getAudioTracks?.()[0];
+    const micDead = !micTrack || micTrack.readyState !== 'live' || micTrack.muted;
+    if (micDead) {
+      let targetDeviceId = lastRequestedDeviceId;
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const inputs = devices.filter(d => d.kind === 'audioinput' && d.deviceId);
+        if (inputs.length > 0) {
+          targetDeviceId = (inputs.find(d => d.deviceId === lastRequestedDeviceId) || inputs[0]).deviceId;
+        }
+      } catch (e) { /* fall through with lastRequestedDeviceId */ }
+      const result = await switchMicrophoneStream(targetDeviceId || 'default');
+      if (!result.success) return; // mic still unavailable — next tick
+      clearMicGraceTimeouts();
+    }
+
+    // 4. Ask for a data flush so the success check above can observe flow on
+    //    the next tick instead of waiting a full timeslice.
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      try { mediaRecorder.requestData(); } catch (e) { /* buffer not ready */ }
+    }
+  } finally {
+    captureRecoveryBusy = false;
+  }
 }
 
 /**
@@ -999,6 +1138,11 @@ function checkChunkProgress(recordingStore, isAutoSplitting) {
     const secs = Math.round(gapMs / 1000);
     captureMessage(`recording: capture STALLED — no chunk persisted for ${secs}s (savedChunks=${savedChunkCount}, mediaState=${mediaRecorder.state})`, 'error');
     emit('captureStalled', { secondsSinceLastChunk: secs, savedChunks: savedChunkCount });
+    // INT-2: a stall is never acceptable while 'recording' — attempt automatic
+    // recovery regardless of what caused it (interruption, focus loss, or an
+    // undetected platform quirk). This is the trigger-agnostic safety net;
+    // the mute/statechange triggers above just get there faster.
+    scheduleCaptureRecovery('chunk-stall');
   }
 }
 
@@ -1789,6 +1933,20 @@ async function startRecordingInternal(options) {
             verifyRecordingState(recordingStore);
           }, 3000);
         };
+        // INT-2: iOS mutes (not ends) the mic track for an audio-session
+        // interruption — an incoming call, Siri, an alarm — even in the
+        // foreground. onended never fires, so without these the entire
+        // mic-health machinery is blind to the most common interruption.
+        track.onmute = () => {
+          console.warn('Mic track muted (audio-session interruption?) — starting capture recovery');
+          scheduleCaptureRecovery('mic-track-muted');
+        };
+        track.onunmute = () => {
+          // Interruption over — make sure a recovery loop is running to
+          // resume the frozen contexts and verify chunks flow again.
+          console.warn('Mic track unmuted — verifying capture recovery');
+          scheduleCaptureRecovery('mic-track-unmuted');
+        };
       }
     }
 
@@ -1894,6 +2052,21 @@ export function resumeRecording(recordingStore, isAutoSplitting, maxRecordingSec
     // on the first post-resume watchdog tick.
     lastSuccessfulChunkAt = Date.now();
     stallWarned = false;
+
+    // INT-2: mediaRecorder.resume() resumes a WEDGED recorder just as happily
+    // as a healthy one (the Nyberg incident: the user's pause→resume "worked"
+    // at the store level while capture stayed dead for another hour). Verify
+    // chunks actually flow within ~3 timeslices of resuming; if not, start
+    // the recovery loop (resume contexts, re-acquire mic). Identity compare:
+    // lastSuccessfulChunkAt was just reset above, so only a REAL chunk save
+    // (which stamps a fresh Date.now()) changes it.
+    const chunkMarkAtResume = lastSuccessfulChunkAt;
+    setTimeout(() => {
+      if (!recordingStoreRef?.isRecording) return;
+      if (lastSuccessfulChunkAt !== chunkMarkAtResume) return; // a chunk landed — healthy
+      console.warn('No chunk persisted within 10s of resume — starting capture recovery');
+      scheduleCaptureRecovery('post-resume-stall');
+    }, 10000);
 
     // Update limit if provided, otherwise keep existing
     if (maxRecordingSeconds !== null) {

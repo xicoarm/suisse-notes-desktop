@@ -51,6 +51,11 @@ export function useRecorder() {
   // chunk-save failures must be visible to the user, not silently swallowed.
   const captureStalled = ref(null); // null | { secondsSinceLastChunk, savedChunks }
   const chunkSaveError = ref(null); // null | { consecutiveErrors, error, diskFull }
+  // INT-2: set when the interruption-recovery loop restores capture after a
+  // stall (e.g. incoming-call audio-session interruption). The page shows a
+  // transient "recording resumed — gap of X" notice so the user knows there
+  // is a hole in the audio instead of discovering it after the meeting.
+  const captureRecoveredInfo = ref(null); // null | { gapSeconds, reason }
   // MOBR-1/INT-1: snapshot of persisted-chunk count + timestamp taken when the
   // app/tab is hidden during a mobile recording, so we can detect on return
   // whether the WebView was suspended (capture gap) while backgrounded.
@@ -190,8 +195,13 @@ export function useRecorder() {
     console.warn('Capture stalled (watchdog):', data);
     captureStalled.value = data;
   };
-  const handleCaptureRecovered = () => {
+  const handleCaptureRecovered = (data) => {
     captureStalled.value = null;
+    // Only surface real gaps — sub-15s recoveries (transient suspends) would
+    // just be noise.
+    if (data?.gapSeconds >= 15) {
+      captureRecoveredInfo.value = data;
+    }
   };
 
   // Minutes limit event handlers
@@ -286,6 +296,7 @@ export function useRecorder() {
     systemAudioCaptureError.value = null;
     micCaptureError.value = null;
     captureStalled.value = null;
+    captureRecoveredInfo.value = null;
     chunkSaveError.value = null;
 
     // Use user's remaining minutes as max duration if not specified
@@ -566,6 +577,7 @@ export function useRecorder() {
     isMicHealthy,
     recordingHealthMessage,
     captureStalled,
+    captureRecoveredInfo,
     chunkSaveError,
     minutesLimitWarning,
     minutesLimitReached,

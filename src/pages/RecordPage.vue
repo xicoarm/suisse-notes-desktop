@@ -829,6 +829,8 @@ const {
   recordingHealthMessage,
   // Capture-stall watchdog (data-loss prevention)
   captureStalled,
+  // INT-2: interruption auto-recovery succeeded — surface the gap
+  captureRecoveredInfo,
   // Minutes limit tracking
   minutesLimitWarning,
   minutesLimitReached,
@@ -974,6 +976,20 @@ watch(minutesLimitWarning, (minutesRemaining) => {
 });
 
 // Watch for minutes limit reached - auto-stop recording
+// INT-2: interruption auto-recovery restored capture — tell the user how big
+// the gap is, so they can repeat what was said instead of discovering the
+// hole after the meeting.
+watch(captureRecoveredInfo, (info) => {
+  if (!info) return;
+  const gapMin = Math.max(1, Math.round(info.gapSeconds / 60));
+  $q.notify({
+    type: 'warning',
+    message: t('captureRecoveredGap', { minutes: gapMin }),
+    icon: 'mic',
+    timeout: 8000
+  });
+});
+
 watch(minutesLimitReached, async (reached) => {
   if (reached && (recordingStore.isRecording || recordingStore.isPaused)) {
     // Show notification
