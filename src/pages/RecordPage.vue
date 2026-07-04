@@ -428,6 +428,19 @@
                 />
               </template>
               {{ $t('captureStalledWarning', 'Recording may have stalled — no audio has been saved for a while. Please verify; stop and save if it does not recover.') }}
+              <template #action>
+                <!-- INT-2: runs a recovery attempt inside a user gesture — iOS
+                     may refuse AudioContext.resume() from a timer but allows
+                     it here. -->
+                <q-btn
+                  flat
+                  dense
+                  color="negative"
+                  icon="refresh"
+                  :label="$t('captureRecoverNow', 'Recover now')"
+                  @click="handleRecoverNow"
+                />
+              </template>
             </q-banner>
           </div>
 
@@ -788,6 +801,7 @@ import { useRecorder } from '../composables/useRecorder';
 import { isElectron, isCapacitor, isAndroid } from '../utils/platform';
 import { humanizeStorageError } from '../utils/storageErrors';
 import { uploadWithVerification } from '../services/upload';
+import { forceCaptureRecovery } from '../services/recordingService';
 import { getApiUrlSync } from '../services/api';
 import { stopStorageMonitor } from '../services/storageMonitor';
 import { setRecordingActive } from '../boot/lifecycle';
@@ -831,6 +845,8 @@ const {
   captureStalled,
   // INT-2: interruption auto-recovery succeeded — surface the gap
   captureRecoveredInfo,
+  // INT-2: in-place recovery exhausted — emergency stop-with-save happened
+  captureRecoveryFailed,
   // Minutes limit tracking
   minutesLimitWarning,
   minutesLimitReached,
@@ -987,6 +1003,26 @@ watch(captureRecoveredInfo, (info) => {
     message: t('captureRecoveredGap', { minutes: gapMin }),
     icon: 'mic',
     timeout: 8000
+  });
+});
+
+// INT-2: the stall banner's "Recover now" button — a user gesture lets iOS
+// grant AudioContext.resume() where the background timer may be refused.
+const handleRecoverNow = () => {
+  forceCaptureRecovery().catch(e => console.warn('Manual capture recovery failed:', e));
+};
+
+// INT-2: in-place recovery exhausted — the service emergency-stopped with
+// save (useRecorder mirrors the disk-full path). Tell the user their audio up
+// to the interruption is safe and a fresh recording will work immediately.
+watch(captureRecoveryFailed, (info) => {
+  if (!info) return;
+  $q.notify({
+    type: 'negative',
+    message: t('captureRecoveryFailedMsg'),
+    icon: 'mic_off',
+    timeout: 0,
+    actions: [{ label: t('ok', 'OK'), color: 'white' }]
   });
 });
 

@@ -85,10 +85,15 @@ let micAutoRecovering = false;
 // free again: resume contexts → re-acquire mic → verify chunks flow.
 const CAPTURE_RECOVERY_RETRY_MS = 5000;
 const CAPTURE_RECOVERY_GIVE_UP_MS = 30 * 60 * 1000; // keep trying for 30 min (long calls)
+// Ticks with a fully healthy pipeline (context running + live mic) but still
+// no chunk → the MediaRecorder itself is wedged beyond in-place recovery
+// (documented WKWebView behavior after interruptions). 6 ticks ≈ 30s.
+const CAPTURE_RECOVERY_WEDGED_TICKS = 6;
 let captureRecoveryTimer = null;
 let captureRecoveryStartedAt = null;
 let captureRecoveryReason = null;
 let captureRecoveryBusy = false;
+let captureRecoveryHealthyTicks = 0;
 
 // Flush synchronization: resolved when ondataavailable saves the chunk after a flush request
 let flushResolvers = [];
@@ -737,6 +742,7 @@ function scheduleCaptureRecovery(reason) {
   if (captureRecoveryTimer) return; // episode already running
   captureRecoveryStartedAt = Date.now();
   captureRecoveryReason = reason;
+  captureRecoveryHealthyTicks = 0;
   captureMessage(`recording: capture recovery started (reason=${reason}, savedChunks=${savedChunkCount})`, 'warning');
   captureRecoveryTimer = setInterval(() => {
     attemptCaptureRecovery().catch(e => console.warn('Capture recovery attempt failed:', e));
@@ -776,6 +782,11 @@ async function attemptCaptureRecovery() {
       return;
     }
 
+    // Stand down while an auto-split holds the recorder paused — its own
+    // finally-block resets the watchdog baseline; interfering mid-split could
+    // swap the mic during the segment handoff.
+    if (isAutoSplittingRef?.value) return;
+
     // 1. Success: a chunk landed after the episode started → capture is back.
     if (lastSuccessfulChunkAt && captureRecoveryStartedAt && lastSuccessfulChunkAt >= captureRecoveryStartedAt) {
       const gapSec = Math.round((Date.now() - captureRecoveryStartedAt) / 1000);
@@ -802,7 +813,10 @@ async function attemptCaptureRecovery() {
         try { await ctx.resume(); } catch (e) { /* session still held */ }
       }
     }
-    if (mixingContext && mixingContext.state !== 'running') return;
+    if (mixingContext && mixingContext.state !== 'running') {
+      captureRecoveryHealthyTicks = 0;
+      return;
+    }
 
     // 3. Mic track dead or muted (iOS mutes it for the interruption's
     //    lifetime and often does NOT unmute it afterwards) → full re-acquire.
@@ -818,7 +832,10 @@ async function attemptCaptureRecovery() {
         }
       } catch (e) { /* fall through with lastRequestedDeviceId */ }
       const result = await switchMicrophoneStream(targetDeviceId || 'default');
-      if (!result.success) return; // mic still unavailable — next tick
+      if (!result.success) {
+        captureRecoveryHealthyTicks = 0;
+        return; // mic still unavailable — next tick
+      }
       clearMicGraceTimeouts();
     }
 
@@ -827,8 +844,42 @@ async function attemptCaptureRecovery() {
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       try { mediaRecorder.requestData(); } catch (e) { /* buffer not ready */ }
     }
+
+    // 5. Escalation: the pipeline is demonstrably healthy (context running,
+    //    live mic) yet chunks still don't flow — the MediaRecorder itself is
+    //    wedged, a documented WKWebView failure mode after interruptions that
+    //    no in-place fix reaches. Rebuilding the recorder inline would write a
+    //    second EBML header into the chunk sequence (under-probed combine →
+    //    silent partial transcription), so the safe path is the proven
+    //    emergency stop-with-save: everything captured so far is finalized,
+    //    and the user immediately gets a working fresh session.
+    captureRecoveryHealthyTicks++;
+    if (captureRecoveryHealthyTicks >= CAPTURE_RECOVERY_WEDGED_TICKS) {
+      captureMessage(`recording: capture recovery FAILED — recorder wedged with healthy pipeline for ${captureRecoveryHealthyTicks} ticks (reason=${captureRecoveryReason}, savedChunks=${savedChunkCount})`, 'error');
+      emit('captureRecoveryFailed', {
+        reason: captureRecoveryReason,
+        savedChunks: savedChunkCount,
+        stalledForSeconds: Math.round((Date.now() - captureRecoveryStartedAt) / 1000)
+      });
+      stopCaptureRecovery();
+    }
   } finally {
     captureRecoveryBusy = false;
+  }
+}
+
+/**
+ * INT-2: user-gesture recovery entry point (the stall banner's "recover now"
+ * button). iOS may refuse AudioContext.resume() from a timer but allow it
+ * inside a user gesture — so run one attempt synchronously in the gesture's
+ * call stack, and make sure the background loop is armed either way.
+ */
+export async function forceCaptureRecovery() {
+  scheduleCaptureRecovery('user-gesture');
+  try {
+    await attemptCaptureRecovery();
+  } catch (e) {
+    console.warn('User-gesture capture recovery attempt failed:', e);
   }
 }
 

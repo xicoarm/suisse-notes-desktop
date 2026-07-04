@@ -203,6 +203,21 @@ export function useRecorder() {
       captureRecoveredInfo.value = data;
     }
   };
+  // INT-2: pipeline is healthy but the MediaRecorder is wedged beyond
+  // in-place recovery (WKWebView post-interruption failure mode). Same
+  // response as disk-full: emergency stop-with-save — everything captured up
+  // to the interruption is finalized NOW instead of "recording" silence for
+  // another hour, and the user immediately gets a working fresh session.
+  const captureRecoveryFailed = ref(null); // null | { reason, savedChunks, stalledForSeconds }
+  const handleCaptureRecoveryFailed = async (data) => {
+    console.error('Capture recovery failed — recorder wedged; emergency stop-with-save', data);
+    captureRecoveryFailed.value = data || {};
+    try {
+      await recordingService.stopRecording(recordingStore, stopSystemAudio);
+    } catch (e) {
+      console.error('Emergency stop-with-save after failed recovery failed:', e);
+    }
+  };
 
   // Minutes limit event handlers
   const handleLimitWarning = (minutesRemaining) => {
@@ -297,6 +312,7 @@ export function useRecorder() {
     micCaptureError.value = null;
     captureStalled.value = null;
     captureRecoveredInfo.value = null;
+    captureRecoveryFailed.value = null;
     chunkSaveError.value = null;
 
     // Use user's remaining minutes as max duration if not specified
@@ -467,6 +483,7 @@ export function useRecorder() {
     recordingService.addEventListener('chunkSaveFailure', handleChunkSaveFailure);
     recordingService.addEventListener('captureStalled', handleCaptureStalled);
     recordingService.addEventListener('captureRecovered', handleCaptureRecovered);
+    recordingService.addEventListener('captureRecoveryFailed', handleCaptureRecoveryFailed);
 
     // Set up visibility and beforeunload handlers
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -543,6 +560,7 @@ export function useRecorder() {
     recordingService.removeEventListener('chunkSaveFailure', handleChunkSaveFailure);
     recordingService.removeEventListener('captureStalled', handleCaptureStalled);
     recordingService.removeEventListener('captureRecovered', handleCaptureRecovered);
+    recordingService.removeEventListener('captureRecoveryFailed', handleCaptureRecoveryFailed);
 
     // Remove visibility and beforeunload handlers
     document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -578,6 +596,7 @@ export function useRecorder() {
     recordingHealthMessage,
     captureStalled,
     captureRecoveredInfo,
+    captureRecoveryFailed,
     chunkSaveError,
     minutesLimitWarning,
     minutesLimitReached,
