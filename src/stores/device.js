@@ -663,6 +663,15 @@ export const useDeviceStore = defineStore('device', {
 
       sendLocalNotification(NOTIF_SYNC_PROGRESS, t('bleTransferBanner'), t('syncProgress', { current: 1, total: 1 }));
 
+      // Single-file sync is its own prep "run" - bracket it like syncAllNew so
+      // an "apply to all" answer can never leak beyond it.
+      let prepStoreForFile = null;
+      try {
+        const { useMeetingPrepStore } = await import('./meeting-prep');
+        prepStoreForFile = useMeetingPrepStore();
+        prepStoreForFile.beginDeviceSyncRun();
+      } catch { /* prep prompt unavailable */ }
+
       try {
         await this._downloadAndUpload(file);
         this.syncState = 'complete';
@@ -682,6 +691,7 @@ export const useDeviceStore = defineStore('device', {
       } finally {
         this.currentSyncFile = null;
         this.syncPhase = 'idle';
+        prepStoreForFile?.endDeviceSyncRun();
       }
     },
 
@@ -714,6 +724,7 @@ export const useDeviceStore = defineStore('device', {
       try {
         const { useMeetingPrepStore } = await import('./meeting-prep');
         prepStoreForRun = useMeetingPrepStore();
+        prepStoreForRun.beginDeviceSyncRun();
       } catch { /* prep prompt unavailable — sync continues without it */ }
 
       try {

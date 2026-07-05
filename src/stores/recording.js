@@ -987,7 +987,8 @@ export const useRecordingStore = defineStore('recording', {
                 duration: (rec.duration || 0).toString(),
                 title: '',
                 customVocabulary: [],
-                ...(rec.prep || {})
+                // Recovery recs never carry prep - the merged history record does.
+                ...(historyStore.recordings.find(r => r.id === rec.id)?.prep || rec.prep || {})
               });
             }
           }

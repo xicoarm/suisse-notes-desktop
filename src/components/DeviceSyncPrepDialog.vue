@@ -143,6 +143,7 @@
         </div>
 
         <q-checkbox
+          v-if="prepStore.deviceSyncRunActive"
           v-model="applyToAll"
           :label="$t('deviceSyncApplyAll')"
           dense
@@ -188,10 +189,20 @@ import {
   CONTEXT_FILE_EXTENSIONS
 } from '../stores/meeting-prep';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
+import { useRecordingStore } from '../stores/recording';
 
 const $q = useQuasar();
 const { t } = useI18n();
 const prepStore = useMeetingPrepStore();
+const recordingStore = useRecordingStore();
+
+// Prompts are held while the user records in-app - drain when it ends.
+watch(
+  () => recordingStore.isBlocking,
+  (blocking) => {
+    if (!blocking) prepStore._maybeShowNextPrompt();
+  }
+);
 
 // --- Stranded-record scanner -------------------------------------------------
 // If the app was killed while a prompt was waiting, device records stay at

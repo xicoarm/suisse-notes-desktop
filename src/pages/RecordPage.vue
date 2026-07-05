@@ -1331,6 +1331,7 @@ const watchBackgroundUpload = (recordId) => {
       recordingStore.setUploaded(rec.audioFileId || null);
       recordingStore.unlockFile(recordId);
       transcriptionStore.resetSession();
+      prepStore.resetSession();
       $q.notify({ type: 'positive', message: t('uploadSuccessful') });
     } else if (rec?.uploadStatus === 'failed') {
       stopBackgroundUploadWatch();
@@ -1728,6 +1729,12 @@ const startAutoUpload = async () => {
 
   // Get transcription options
   const options = transcriptionStore.transcriptionOptions;
+  // A context file might still be uploading/extracting - wait (bounded) so an
+  // attached document is never silently dropped from the meeting.
+  const uploadsSettled = await prepStore.waitForContextUploads();
+  if (!uploadsSettled) {
+    $q.notify({ type: 'warning', message: t('prepUploadFailed') });
+  }
   // Pre-meeting preparation fields (context/template/pre-fill) for the backend
   const prepFields = prepStore.metadataFields;
 

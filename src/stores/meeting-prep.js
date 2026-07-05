@@ -21,6 +21,10 @@ import { isElectron, isCapacitor } from '../utils/platform';
 import { getApiUrlSync } from '../services/api';
 import { useAuthStore } from './auth';
 
+// Lazy accessor - resolved on first use so store definition order can't bite.
+let useRecordingStoreRef = null;
+import('./recording').then((m) => { useRecordingStoreRef = m.useRecordingStore; }).catch(() => {});
+
 // Capacitor Preferences (lazy loaded)
 let Preferences = null;
 const initPreferences = async () => {
@@ -89,9 +93,16 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
     _deviceSyncInFlight: [],       // recordIds currently awaiting an answer
     // While a sync run is active and the user ticked "apply to all":
     // undefined = not set; null = skip all; object = fields for all.
+    // ONLY honored and only settable while deviceSyncRunActive - otherwise a
+    // stale answer would silently apply to unrelated future recordings.
     deviceSyncApplyToAll: undefined,
+    deviceSyncRunActive: false,
+    // fileName -> pending promise: a re-synced file that minted a NEW recordId
+    // reuses the already-open prompt instead of double-prompting.
+    _deviceSyncPromiseByFile: {},
 
     loaded: false,
+    _loadedForUserId: null,
     uploadingCount: 0
   }),
 
@@ -134,12 +145,34 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
       return authStore.token ? { Authorization: `Bearer ${authStore.token}` } : {};
     },
 
+    _cacheKey() {
+      return `${TEMPLATE_CACHE_KEY}_${this._loadedForUserId || 'anon'}`;
+    },
+
+    _settingsKey() {
+      return `${SETTINGS_KEY}_${this._loadedForUserId || 'anon'}`;
+    },
+
     async initialize() {
-      if (this.loaded) return;
+      const authStore = useAuthStore();
+      const userId = authStore.user?.id || 'anon';
+      if (this.loaded && this._loadedForUserId === userId) return;
+      // User changed (shared device) - never leak the previous user's
+      // templates, sections, defaults or session prep to the new account.
+      if (this.loaded && this._loadedForUserId !== userId) {
+        this.templates = [];
+        this.templatesFetchedAt = 0;
+        this.sectionsByTemplate = {};
+        this.askOnDeviceSync = true;
+        this.deviceSyncDefaultTemplateId = null;
+        this.deviceSyncDefaultContext = '';
+        this.resetSession();
+      }
       this.loaded = true;
+      this._loadedForUserId = userId;
       try {
         // Template/section cache: localStorage on all platforms (fast, non-critical)
-        const cached = localStorage.getItem(TEMPLATE_CACHE_KEY);
+        const cached = localStorage.getItem(this._cacheKey());
         if (cached) {
           const parsed = JSON.parse(cached);
           this.templates = Array.isArray(parsed.templates) ? parsed.templates : [];
@@ -156,11 +189,11 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
         } else if (isCapacitor()) {
           await initPreferences();
           if (Preferences) {
-            const { value } = await Preferences.get({ key: SETTINGS_KEY });
+            const { value } = await Preferences.get({ key: this._settingsKey() });
             if (value) this._applySettings(JSON.parse(value));
           }
         } else {
-          const raw = localStorage.getItem(SETTINGS_KEY);
+          const raw = localStorage.getItem(this._settingsKey());
           if (raw) this._applySettings(JSON.parse(raw));
         }
       } catch (e) {
@@ -188,10 +221,10 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
         } else if (isCapacitor()) {
           await initPreferences();
           if (Preferences) {
-            await Preferences.set({ key: SETTINGS_KEY, value: JSON.stringify(settings) });
+            await Preferences.set({ key: this._settingsKey(), value: JSON.stringify(settings) });
           }
         } else {
-          localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+          localStorage.setItem(this._settingsKey(), JSON.stringify(settings));
         }
       } catch (e) {
         console.error('[MeetingPrep] settings save failed:', e);
@@ -200,7 +233,7 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
 
     _persistCache() {
       try {
-        localStorage.setItem(TEMPLATE_CACHE_KEY, JSON.stringify({
+        localStorage.setItem(this._cacheKey(), JSON.stringify({
           templates: this.templates,
           fetchedAt: this.templatesFetchedAt,
           sectionsByTemplate: this.sectionsByTemplate
@@ -355,6 +388,18 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
       await this.deleteContextFileRaw(fileId);
     },
 
+    /**
+     * Wait until in-flight context-file uploads settle (bounded). Callers gate
+     * upload starts on this so an attached file is never silently dropped.
+     */
+    async waitForContextUploads(maxMs = 60000) {
+      const start = Date.now();
+      while (this.uploadingCount > 0 && Date.now() - start < maxMs) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      return this.uploadingCount === 0;
+    },
+
     /** Reset the per-session preparation (after a successful upload start). */
     resetSession() {
       this.contextText = '';
@@ -383,7 +428,13 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
     },
 
     /** Called by device.js around a sync run so "apply to all" scopes to it. */
+    beginDeviceSyncRun() {
+      this.deviceSyncRunActive = true;
+      this.deviceSyncApplyToAll = undefined;
+    },
+
     endDeviceSyncRun() {
+      this.deviceSyncRunActive = false;
       this.deviceSyncApplyToAll = undefined;
     },
 
@@ -398,18 +449,33 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
         const defaults = this.deviceSyncDefaultFields();
         return Promise.resolve(Object.keys(defaults).length > 0 ? defaults : null);
       }
-      if (this.deviceSyncApplyToAll !== undefined) {
+      if (this.deviceSyncRunActive && this.deviceSyncApplyToAll !== undefined) {
         return Promise.resolve(this.deviceSyncApplyToAll);
       }
       if (this._deviceSyncInFlight.includes(info.recordId)) {
         // Already queued/shown for this record (e.g. watcher + sync overlap).
         return Promise.resolve(null);
       }
+      // A re-sync of the SAME device file can mint a new recordId while a
+      // prompt for the old id is still open - share that prompt's answer
+      // instead of double-prompting (each caller writes prep to its own record).
+      if (info.fileName && this._deviceSyncPromiseByFile[info.fileName]) {
+        return this._deviceSyncPromiseByFile[info.fileName];
+      }
       this._deviceSyncInFlight.push(info.recordId);
-      return new Promise((resolve) => {
+      const promise = new Promise((resolve) => {
         this._deviceSyncQueue.push({ info, resolve });
         this._maybeShowNextPrompt();
       });
+      if (info.fileName) {
+        this._deviceSyncPromiseByFile[info.fileName] = promise;
+        promise.finally(() => {
+          if (this._deviceSyncPromiseByFile[info.fileName] === promise) {
+            delete this._deviceSyncPromiseByFile[info.fileName];
+          }
+        });
+      }
+      return promise;
     },
 
     /** True when this record is already queued or being answered. */
@@ -419,6 +485,12 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
 
     _maybeShowNextPrompt() {
       if (this.deviceSyncPrompt || this._deviceSyncQueue.length === 0) return;
+      // Never pop a blocking modal while the user is actively recording in-app;
+      // the queue drains when the recording ends (dialog watches isBlocking).
+      try {
+        const recordingStore = useRecordingStoreRef ? useRecordingStoreRef() : null;
+        if (recordingStore && recordingStore.isBlocking) return;
+      } catch { /* recording store unavailable - show the prompt */ }
       const next = this._deviceSyncQueue.shift();
       this.deviceSyncPrompt = next.info;
       this._deviceSyncResolve = next.resolve;
@@ -436,7 +508,7 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
       if (current) {
         this._deviceSyncInFlight = this._deviceSyncInFlight.filter((id) => id !== current.recordId);
       }
-      if (applyToAll) {
+      if (applyToAll && this.deviceSyncRunActive) {
         this.deviceSyncApplyToAll = fields;
         // Answer everything already queued with the same result.
         const queued = this._deviceSyncQueue.splice(0);

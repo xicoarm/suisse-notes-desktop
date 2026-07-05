@@ -858,6 +858,13 @@ const clearFileSelection = () => {
 const confirmAndStartUpload = async () => {
   if (!hasSelectedFile.value) return;
 
+  // A context document is still uploading/extracting - starting now would
+  // silently drop it from the meeting. Ask the user to wait a moment.
+  if (prepStore.uploadingCount > 0) {
+    $q.notify({ type: 'warning', message: t('prepFilesUploading') });
+    return;
+  }
+
   // Check if user has minutes remaining
   if (!minutesStore.hasMinutesRemaining) {
     if (isCapacitor()) {
