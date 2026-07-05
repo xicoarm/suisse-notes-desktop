@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [4.5.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.4.1...v4.5.0) (2026-07-05)
+
+
+### Features
+
+* pre-meeting context, template pre-selection and pre-fill + INT-2 capture recovery ([e62f86e](https://github.com/xicoarm/suisse-notes-desktop/commit/e62f86ef52b0f81fcfd71c5bc1a3e0f7b7755ea3))
+* **prep:** pre-meeting context, template choice and pre-fill on all native apps (E3+E4) ([ed562dc](https://github.com/xicoarm/suisse-notes-desktop/commit/ed562dc00e444f469e78bc281ccedaf70f9ba4fe))
+* **recording:** auto-recover capture after audio-session interruptions (INT-2) ([b720073](https://github.com/xicoarm/suisse-notes-desktop/commit/b72007346b42b156d8415e3bff323c2b1867cdb1))
+* **recording:** escalate wedged-recorder recovery + user-gesture recover button (INT-2b) ([c633dc3](https://github.com/xicoarm/suisse-notes-desktop/commit/c633dc31028366c61b4ed03258b14ffab85d4a78))
+
+
+### Bug Fixes
+
+* close review gaps in mobile upload dedupe and history merge ([d3fafce](https://github.com/xicoarm/suisse-notes-desktop/commit/d3fafce1ac3f6967e731ed3a57930a0ccdb33318))
+* dedupe mobile uploads and history ([0011534](https://github.com/xicoarm/suisse-notes-desktop/commit/00115342a1d51cc0f867f110ae77fad35ffbb458))
+* **prep:** harden native E3/E4 after adversarial review (11 confirmed findings) ([fa43fc1](https://github.com/xicoarm/suisse-notes-desktop/commit/fa43fc155a05bf8fbd6e59a4b079283c107b5cf7))
+
 ### [4.4.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.4.0...v4.4.1) (2026-06-12)
 
 
