@@ -663,6 +663,15 @@ export const useDeviceStore = defineStore('device', {
 
       sendLocalNotification(NOTIF_SYNC_PROGRESS, t('bleTransferBanner'), t('syncProgress', { current: 1, total: 1 }));
 
+      // Single-file sync is its own prep "run" - bracket it like syncAllNew so
+      // an "apply to all" answer can never leak beyond it.
+      let prepStoreForFile = null;
+      try {
+        const { useMeetingPrepStore } = await import('./meeting-prep');
+        prepStoreForFile = useMeetingPrepStore();
+        prepStoreForFile.beginDeviceSyncRun();
+      } catch { /* prep prompt unavailable */ }
+
       try {
         await this._downloadAndUpload(file);
         this.syncState = 'complete';
@@ -682,6 +691,7 @@ export const useDeviceStore = defineStore('device', {
       } finally {
         this.currentSyncFile = null;
         this.syncPhase = 'idle';
+        prepStoreForFile?.endDeviceSyncRun();
       }
     },
 
@@ -708,6 +718,14 @@ export const useDeviceStore = defineStore('device', {
       // Collect per-file failures across the batch so we can report an
       // accurate result at the end instead of silently completing.
       const failures = [];
+
+      // "Apply to all" in the prep prompt is scoped to THIS sync run.
+      let prepStoreForRun = null;
+      try {
+        const { useMeetingPrepStore } = await import('./meeting-prep');
+        prepStoreForRun = useMeetingPrepStore();
+        prepStoreForRun.beginDeviceSyncRun();
+      } catch { /* prep prompt unavailable — sync continues without it */ }
 
       try {
         for (const file of newFiles) {
@@ -766,6 +784,8 @@ export const useDeviceStore = defineStore('device', {
       } finally {
         this.currentSyncFile = null;
         this.syncPhase = 'idle';
+        // End of the sync run — "apply to all" answers no longer carry over.
+        prepStoreForRun?.endDeviceSyncRun();
       }
     },
 
@@ -855,6 +875,32 @@ export const useDeviceStore = defineStore('device', {
         const filePath = `${dirPath}/${file.file}`;
         await historyStore.updateRecording(recordId, { filePath, uploadStatus: 'pending' });
 
+        // Phase 2b: Ask for pre-meeting context/template (Suisse Notes Pro flow).
+        // The file is safely on the phone — we WAIT for the answer (product
+        // decision); "skip" is always available and with prompting disabled the
+        // saved defaults apply automatically. While waiting the record carries
+        // uploadStatus 'pending_prep', which is excluded from auto-retry so no
+        // path uploads without the answer. App killed while waiting → the
+        // MainLayout watcher re-prompts for stranded 'pending_prep' records.
+        try {
+          const { useMeetingPrepStore } = await import('./meeting-prep');
+          const prepStore = useMeetingPrepStore();
+          await prepStore.initialize();
+          // Start the request FIRST (registers the recordId as in-flight
+          // synchronously) so the stranded-record scanner can never race the
+          // status flip below and double-prompt.
+          const prepPromise = prepStore.requestDeviceSyncPrep({ recordId, title, fileName: file.file });
+          await historyStore.updateRecording(recordId, { uploadStatus: 'pending_prep' });
+          const prepFields = await prepPromise;
+          if (prepFields && Object.keys(prepFields).length > 0) {
+            await historyStore.updateRecording(recordId, { prep: prepFields });
+          }
+        } catch (prepError) {
+          console.warn('[DeviceSync] prep prompt failed — continuing without prep:', prepError);
+        } finally {
+          await historyStore.updateRecording(recordId, { uploadStatus: 'pending' });
+        }
+
         // Phase 3: Upload to server
         if (this._cancelRequested) throw new Error('cancelled');
 
@@ -869,11 +915,26 @@ export const useDeviceStore = defineStore('device', {
           metadata: {
             duration: durationSec.toString(),
             title,
-            filename: file.file
+            filename: file.file,
+            ...(historyStore.recordings.find(r => r.id === recordId)?.prep || {})
           },
           onProgress: () => {},
           getAuthStore: () => authStore
         });
+
+        if (result.inProgress) {
+          // Revert the optimistic 'uploading' write: stranded 'uploading' is
+          // excluded from auto-retry and manual retry, and the guard holder
+          // never flips it back on failure. 'pending' stays retry-eligible;
+          // the holder writes 'uploaded' itself on success.
+          await historyStore.updateRecording(recordId, { uploadStatus: 'pending' });
+          addBreadcrumb({
+            category: 'ble',
+            message: `Device file upload skipped because upload is already in progress: ${file.file}`,
+            level: 'info'
+          });
+          return;
+        }
 
         if (result.success) {
           await historyStore.updateRecording(recordId, {
@@ -989,11 +1050,19 @@ export const useDeviceStore = defineStore('device', {
           metadata: {
             duration: (rec.duration || 0).toString(),
             title: rec.title || '',
-            filename
+            filename,
+            ...(rec.prep || {})
           },
           onProgress: () => {},
           getAuthStore: () => authStore
         });
+
+        if (result.inProgress) {
+          // Revert the optimistic 'uploading' write (see syncAllNew) — the
+          // guard holder owns completion; keep this record retry-eligible.
+          await historyStore.updateRecording(rec.id, { uploadStatus: 'pending' });
+          return;
+        }
 
         if (result.success) {
           await historyStore.updateRecording(rec.id, {

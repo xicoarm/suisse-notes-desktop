@@ -53,7 +53,9 @@ onMounted(async () => {
             addToMobileUploadQueue(rec.id, rec.filePath, {
               duration: (rec.duration || 0).toString(),
               title: '',
-              customVocabulary: []
+              customVocabulary: [],
+              // Recovery recs never carry prep - the merged history record does.
+              ...(historyStore.recordings.find(r => r.id === rec.id)?.prep || rec.prep || {})
             });
           }
         }

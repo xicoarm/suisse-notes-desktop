@@ -181,6 +181,7 @@
             @deleted="onRecordingDeleted"
             @cancel-transfer="handleCancelTransfer"
             @resync="handleResync"
+            @answer-prep="handleAnswerPrep"
           />
         </div>
         <div
@@ -207,6 +208,7 @@
             @deleted="onRecordingDeleted"
             @cancel-transfer="handleCancelTransfer"
             @resync="handleResync"
+            @answer-prep="handleAnswerPrep"
           />
         </div>
       </template>
@@ -224,6 +226,7 @@
           @deleted="onRecordingDeleted"
           @cancel-transfer="handleCancelTransfer"
           @resync="handleResync"
+          @answer-prep="handleAnswerPrep"
         />
       </template>
     </div>
@@ -373,7 +376,19 @@ export default {
           result = { success: false, error: 'Unsupported platform' };
         }
 
-        if (result.success) {
+        if (result.inProgress) {
+          // Another driver (persistent queue / auto-retry) is uploading this
+          // recording right now. Leave the status untouched: writing
+          // 'uploading' here would strand the record — it is excluded from
+          // both auto-retry and the manual retry button, and no one owns
+          // flipping it back if the in-flight upload fails. The guard holder
+          // updates history on success; auto-retry picks it up on failure.
+          $q.notify({
+            type: 'info',
+            message: t('uploadAlreadyInProgress'),
+            timeout: 2500
+          });
+        } else if (result.success) {
           // Update history entry
           await historyStore.updateRecording(recording.id, {
             uploadStatus: 'uploaded',
@@ -468,6 +483,28 @@ export default {
       const updated = historyStore.allRecordings.find(r => r.id === recording.id);
       if (updated) {
         handleUpload({ ...updated, file: result.file });
+      }
+    };
+
+    // Suisse Notes Pro: record is waiting for the context/template answer
+    // ('pending_prep'). Re-open the prompt; on answer the record becomes
+    // 'pending' and the auto-retry/upload paths take over with the prep set.
+    const handleAnswerPrep = async (recording) => {
+      const { useMeetingPrepStore } = await import('../stores/meeting-prep');
+      const prepStore = useMeetingPrepStore();
+      await prepStore.initialize();
+      if (prepStore.isDeviceSyncPrepPending(recording.id)) return;
+      const fields = await prepStore.requestDeviceSyncPrep({
+        recordId: recording.id,
+        title: recording.title,
+        fileName: recording.deviceFilename
+      });
+      if (fields && Object.keys(fields).length > 0) {
+        await historyStore.updateRecording(recording.id, { prep: fields });
+      }
+      const current = historyStore.recordings.find((r) => r.id === recording.id);
+      if (current?.uploadStatus === 'pending_prep') {
+        await historyStore.updateRecording(recording.id, { uploadStatus: 'pending' });
       }
     };
 
@@ -619,6 +656,7 @@ export default {
       handleUpload,
       handleReupload,
       handleResync,
+      handleAnswerPrep,
       handleCancelTransfer,
       cancelActiveUpload,
       onRecordingDeleted

@@ -26,6 +26,40 @@ const MOBILE_UPLOAD_QUEUE_TMP_KEY = MOBILE_UPLOAD_QUEUE_KEY + '_tmp';
 // Re-entry guard for processMobileUploadQueue
 let isProcessingMobileQueue = false;
 
+// Per-record in-flight guard for Capacitor uploads. This is deliberately
+// in-memory only: if iOS kills the app mid-upload, the guard disappears while
+// the persisted queue item remains and can retry on next launch.
+// Map recordId -> acquisition timestamp (ms). Entries older than the stale
+// threshold are treated as leaked (e.g. a fetch wedged with no timeout —
+// the SAS path has no AbortController) and are taken over rather than
+// blocking every retry driver for the rest of the session.
+const activeMobileUploads = new Map();
+const STALE_UPLOAD_GUARD_MS = 30 * 60 * 1000; // 30 min — far beyond any real mobile upload
+
+function _isMobileUploadActive(recordId) {
+  if (!recordId) return false;
+  const startedAt = activeMobileUploads.get(recordId);
+  if (startedAt === undefined) return false;
+  return (Date.now() - startedAt) < STALE_UPLOAD_GUARD_MS;
+}
+
+function _beginMobileUpload(recordId) {
+  if (!isCapacitor() || !recordId) return true;
+  const startedAt = activeMobileUploads.get(recordId);
+  if (startedAt !== undefined) {
+    if ((Date.now() - startedAt) < STALE_UPLOAD_GUARD_MS) return false;
+    captureMessage(`upload: taking over stale in-flight guard recordId=${recordId} heldForMs=${Date.now() - startedAt}`, 'warning');
+  }
+  activeMobileUploads.set(recordId, Date.now());
+  return true;
+}
+
+function _endMobileUpload(recordId) {
+  if (isCapacitor() && recordId) {
+    activeMobileUploads.delete(recordId);
+  }
+}
+
 // Staleness threshold: 7 days
 const QUEUE_ITEM_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -328,6 +362,11 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
       continue;
     }
 
+    if (_isMobileUploadActive(item.recordId)) {
+      i++;
+      continue;
+    }
+
     try {
       const result = await uploadWithVerification({
         filePath: item.filePath,
@@ -354,6 +393,12 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
         } catch (e) {
           console.warn('Could not update history after queued upload:', e);
         }
+        i++;
+      } else if (result.inProgress) {
+        // Another driver holds the in-flight guard for this recordId. The
+        // pre-check above makes this normally unreachable (guard acquisition
+        // is synchronous), but never let a dedupe skip burn retry budget or
+        // be classified as a failure.
         i++;
       } else {
         // Token expired? Refresh in-place, retry same item without burning retry budget.
@@ -761,6 +806,16 @@ export const uploadWithVerification = async (options) => {
     addToMobileUploadQueue(recordId, filePath, metadata);
   }
 
+  if (!_beginMobileUpload(recordId)) {
+    captureMessage(`upload: skipped duplicate in-flight mobile upload recordId=${recordId}`, 'info');
+    return {
+      success: false,
+      canDelete: false,
+      inProgress: true,
+      error: 'Upload already in progress'
+    };
+  }
+
   try {
     // Phase 1a: Calculate local checksum before upload
     // Skip on mobile — reading the file for checksumming is expensive (base64 decode)
@@ -967,6 +1022,8 @@ export const uploadWithVerification = async (options) => {
       canDelete: false,
       error: error.message
     };
+  } finally {
+    _endMobileUpload(recordId);
   }
 };
 
@@ -1286,6 +1343,10 @@ export const uploadWithRetry = async (options) => {
       return result;
     }
 
+    if (result.inProgress) {
+      return result;
+    }
+
     // Check if error is retryable
     const retryable = isRetryableError(result.error);
     if (!retryable || attempt >= maxRetries) {
@@ -1405,6 +1466,12 @@ const processUploadQueue = async () => {
     upload.attempts++;
 
     const result = await uploadWithVerification(upload);
+
+    if (result.inProgress) {
+      upload.status = 'pending';
+      upload.attempts = Math.max(0, upload.attempts - 1);
+      break;
+    }
 
     if (result.success) {
       upload.status = 'complete';

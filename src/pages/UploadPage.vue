@@ -115,6 +115,9 @@
           @add-word="addSessionWord"
           @remove-word="removeSessionWord"
         />
+
+        <!-- Pre-meeting preparation (context, template, pre-fill) -->
+        <PreMeetingPrepOptions />
       </div>
 
       <!-- FILE PREVIEW STATE: Show file info before upload -->
@@ -194,6 +197,9 @@
           @add-word="addSessionWord"
           @remove-word="removeSessionWord"
         />
+
+        <!-- Pre-meeting preparation (context, template, pre-fill) -->
+        <PreMeetingPrepOptions />
       </div>
 
       <!-- Processing/Upload Progress Section -->
@@ -535,6 +541,8 @@ import { getApiUrlSync } from '../services/api';
 import { useShareLink } from '../composables/useShareLink';
 import ModeTabSwitcher from '../components/ModeTabSwitcher.vue';
 import TranscriptionOptions from '../components/TranscriptionOptions.vue';
+import PreMeetingPrepOptions from '../components/PreMeetingPrepOptions.vue';
+import { useMeetingPrepStore } from '../stores/meeting-prep';
 import ContactSalesDialog from '../components/ContactSalesDialog.vue';
 
 // Make isMobile reactive to handle Capacitor initialization timing
@@ -576,6 +584,7 @@ const { t } = useI18n();
 const recordingStore = useRecordingStore();
 const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
+const prepStore = useMeetingPrepStore();
 const minutesStore = useMinutesStore();
 const authStore = useAuthStore();
 const { openInBrowser, copyLink } = useShareLink();
@@ -849,6 +858,13 @@ const clearFileSelection = () => {
 const confirmAndStartUpload = async () => {
   if (!hasSelectedFile.value) return;
 
+  // A context document is still uploading/extracting - starting now would
+  // silently drop it from the meeting. Ask the user to wait a moment.
+  if (prepStore.uploadingCount > 0) {
+    $q.notify({ type: 'warning', message: t('prepFilesUploading') });
+    return;
+  }
+
   // Check if user has minutes remaining
   if (!minutesStore.hasMinutesRemaining) {
     if (isCapacitor()) {
@@ -922,6 +938,8 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
 
   // Get transcription options
   const options = transcriptionStore.transcriptionOptions;
+  // Pre-meeting preparation fields (context/template/pre-fill) for the backend
+  const prepFields = prepStore.metadataFields;
 
   isProcessing.value = false;
   isUploading.value = true;
@@ -935,7 +953,8 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
         duration: duration ? duration.toString() : '0',
         originalFilename: filename,
         title: options.title,
-        customVocabulary: options.customVocabulary
+        customVocabulary: options.customVocabulary,
+        ...prepFields
       }
     });
 
@@ -952,7 +971,8 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
             duration: duration ? duration.toString() : '0',
             originalFilename: filename,
             title: options.title,
-            customVocabulary: options.customVocabulary
+            customVocabulary: options.customVocabulary,
+            ...prepFields
           }
         });
       } else if (refreshResult.shouldLogout) {
@@ -964,7 +984,13 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
     isFileLoading.value = false;
     retryAttempt.value = 0;
 
-    if (uploadResult.success) {
+    if (uploadResult.inProgress) {
+      $q.notify({
+        type: 'info',
+        message: t('uploadAlreadyInProgress'),
+        timeout: 2500
+      });
+    } else if (uploadResult.success) {
       isUploaded.value = true;
       recordingStore.setUploaded(uploadResult.audioFileId);
 
@@ -977,11 +1003,13 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
         uploadStatus: uploadResult.gatewayFailed ? 'processing' : 'uploaded',
         storagePreference: null,
         transcriptionId: uploadResult.transcriptionId,
-        audioFileId: uploadResult.audioFileId
+        audioFileId: uploadResult.audioFileId,
+        prep: prepStore.historySnapshot
       });
 
       // Reset session after successful upload
       transcriptionStore.resetSession();
+      prepStore.resetSession();
 
       if (uploadResult.gatewayFailed && uploadResult.meetingId) {
         // Gateway failed — audio is saved but transcription is pending
@@ -1059,6 +1087,8 @@ const startMobileUpload = async (file, fileSize, filename) => {
 
   // Get transcription options
   const options = transcriptionStore.transcriptionOptions;
+  // Pre-meeting preparation fields (context/template/pre-fill) for the backend
+  const prepFields = prepStore.metadataFields;
 
   isProcessing.value = false;
   isUploading.value = true;
@@ -1074,7 +1104,8 @@ const startMobileUpload = async (file, fileSize, filename) => {
         duration: '0',
         originalFilename: filename,
         title: options.title,
-        customVocabulary: options.customVocabulary
+        customVocabulary: options.customVocabulary,
+        ...prepFields
       },
       onProgress: (p, bytesUploaded, bytesTotal) => recordingStore.updateUploadProgress(p, bytesUploaded || 0, bytesTotal || 0),
       getAuthStore: () => authStore // Enable token refresh
@@ -1084,7 +1115,16 @@ const startMobileUpload = async (file, fileSize, filename) => {
     isFileLoading.value = false;
     retryAttempt.value = 0;
 
-    if (uploadResult.success) {
+    if (uploadResult.inProgress) {
+      // A concurrent call for the same recordId holds the in-flight guard
+      // (e.g. double-tapped upload). Not a failure — the other upload is
+      // still running; don't set uploadError or a red toast.
+      $q.notify({
+        type: 'info',
+        message: t('uploadAlreadyInProgress'),
+        timeout: 2500
+      });
+    } else if (uploadResult.success) {
       isUploaded.value = true;
       recordingStore.setUploaded(uploadResult.audioFileId);
 
@@ -1097,11 +1137,13 @@ const startMobileUpload = async (file, fileSize, filename) => {
         uploadStatus: 'uploaded',
         storagePreference: null,
         transcriptionId: uploadResult.transcriptionId,
-        audioFileId: uploadResult.audioFileId
+        audioFileId: uploadResult.audioFileId,
+        prep: prepStore.historySnapshot
       });
 
       // Reset session after successful upload
       transcriptionStore.resetSession();
+      prepStore.resetSession();
 
       // Refresh minutes balance (server will deduct after transcription)
       setTimeout(() => {

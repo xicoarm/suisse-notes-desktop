@@ -41,6 +41,57 @@ function _toUpdateRequest(updates) {
   return out;
 }
 
+function _toClientUploadStatus(status) {
+  if (typeof status !== 'string') return null;
+  switch (status.toUpperCase()) {
+    case 'PENDING':
+      return 'pending';
+    case 'UPLOADING':
+      return 'uploading';
+    case 'UPLOADED':
+    case 'COMPLETED':
+      return 'uploaded';
+    case 'PROCESSING':
+    case 'PENDING_VERIFICATION':
+      return 'pending_verification';
+    case 'FAILED':
+    case 'TRANSCRIPTION_FAILED':
+      return 'failed';
+    case 'RECORDING':
+      return 'recording';
+    case 'CANCELLED':
+      return 'cancelled';
+    case 'SKIPPED':
+      return 'skipped';
+    case 'TRANSFERRING':
+      return 'transferring';
+    default:
+      return null;
+  }
+}
+
+function _normalizeServerRecording(serverRec) {
+  const id = serverRec?.id || serverRec?.recordId || serverRec?.meetingId || serverRec?.audioFileId;
+  const duration =
+    typeof serverRec?.duration === 'number'
+      ? serverRec.duration
+      : (typeof serverRec?.durationSeconds === 'number' ? serverRec.durationSeconds : 0);
+
+  return {
+    ...serverRec,
+    id,
+    uploadStatus: _toClientUploadStatus(serverRec?.uploadStatus) ||
+      _toClientUploadStatus(serverRec?.status) ||
+      'pending',
+    duration,
+    audioFileId: serverRec?.audioFileId || serverRec?.transcriptionId || null,
+    // Prefer any server-provided timestamp before falling back to 'now' —
+    // a wall-clock fallback changes on every fetch and destabilizes sort order.
+    createdAt: serverRec?.createdAt || serverRec?.startedAt || serverRec?.updatedAt || new Date().toISOString(),
+    title: serverRec?.title || serverRec?.filename || 'Recording'
+  };
+}
+
 // Auto-retry constants
 const RETRY_INITIAL_DELAY_MS = 60_000;   // 1 minute
 const RETRY_MAX_DELAY_MS = 1_800_000;    // 30 minutes
@@ -260,10 +311,27 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
 
           // Then fetch from server and merge with local cache
           const data = await _serverFetch('/api/desktop/history');
-          const serverRecordings = data.recordings || (Array.isArray(data) ? data : null);
+          const rawServerRecordings = data.recordings || (Array.isArray(data) ? data : null);
+          const serverRecordings = rawServerRecordings
+            ? rawServerRecordings.map(_normalizeServerRecording).filter(r => r.id)
+            : null;
+          if (serverRecordings && serverRecordings.length < rawServerRecordings.length) {
+            console.warn(`History fetch: dropped ${rawServerRecordings.length - serverRecordings.length} server recording(s) without any usable id`);
+          }
           if (serverRecordings) {
             // Merge: preserve local non-zero duration/fileSize when server has 0
             const cached = _getCachedRecordings(userId);
+            // Client-only bookkeeping the server never returns — losing these
+            // on fetch empties the device-recordings section, breaks the
+            // deviceFilename dedupe (BLE re-syncs would mint duplicates) and
+            // resets retry backoff.
+            const LOCAL_ONLY_FIELDS = [
+              'source', 'deviceFilename', 'storagePreference',
+              'retryCount', 'lastRetryAt', 'uploadError', '_serverSynced',
+              // Pre-meeting preparation (context/template/pre-fill) — client-only,
+              // re-sent on retry uploads; the server never returns it.
+              'prep'
+            ];
             const merged = serverRecordings.map(serverRec => {
               const localRec = cached.find(r => r.id === serverRec.id);
               if (localRec) {
@@ -276,6 +344,21 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
                 }
                 if (localRec.filePath && !serverRec.filePath) {
                   updates.filePath = localRec.filePath;
+                }
+                for (const field of LOCAL_ONLY_FIELDS) {
+                  if (localRec[field] != null && serverRec[field] == null) {
+                    updates[field] = localRec[field];
+                  }
+                }
+                // Server 'recording' is synthetic ("registered, no audio
+                // received yet") — it must not clobber a more advanced local
+                // status like 'failed' or 'pending': that would strip the
+                // record of its retry button and auto-retry eligibility,
+                // dead-ending a failed upload.
+                if (serverRec.uploadStatus === 'recording' &&
+                    localRec.uploadStatus &&
+                    localRec.uploadStatus !== 'recording') {
+                  updates.uploadStatus = localRec.uploadStatus;
                 }
                 if (Object.keys(updates).length > 0) {
                   return { ...serverRec, ...updates };
@@ -559,6 +642,14 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
       const retryable = this.recordings.filter(r =>
         (r.uploadStatus === 'failed' || r.uploadStatus === 'pending') &&
         r.filePath &&
+        // 'failed' WITH audioFileId means the server already holds the audio
+        // (transcription failed after a successful upload). Re-uploading is
+        // permanently futile: the backend dedupes by recordId — including
+        // FAILED meetings — and silently discards the bytes. Auto-retrying
+        // here just re-reads and re-sends the entire file forever (observed
+        // in production: the same 93MB blob re-uploaded for weeks). Recovery
+        // for these needs a server-side re-transcribe, not a re-upload.
+        !(r.uploadStatus === 'failed' && r.audioFileId) &&
         !_retryingIds.has(r.id)
       );
 
@@ -572,6 +663,7 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
         if (Date.now() - lastRetryAt < backoffMs) continue;
 
         _retryingIds.add(recording.id);
+        const prevStatus = recording.uploadStatus; // 'failed' | 'pending' per filter above
         try {
           await this.updateRecording(recording.id, {
             uploadStatus: 'uploading',
@@ -586,7 +678,8 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
               filePath: recording.filePath,
               metadata: {
                 duration: recording.duration?.toString(),
-                title: recording.title
+                title: recording.title,
+                ...(recording.prep || {})
               }
             });
 
@@ -599,7 +692,8 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
                   filePath: recording.filePath,
                   metadata: {
                     duration: recording.duration?.toString(),
-                    title: recording.title
+                    title: recording.title,
+                    ...(recording.prep || {})
                   }
                 });
               }
@@ -613,14 +707,27 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
               authToken: authStore.token,
               metadata: {
                 duration: recording.duration?.toString(),
-                title: recording.title
+                title: recording.title,
+                ...(recording.prep || {})
               },
               onProgress: () => {},
               getAuthStore: () => authStore
             });
           }
 
-          if (result?.success) {
+          if (result?.inProgress) {
+            // Another driver holds the in-flight guard — this was not an
+            // attempt. Revert the optimistic 'uploading' write and the
+            // retryCount bump so the record isn't stranded (auto-retry and
+            // the manual retry button only act on 'failed'/'pending') and
+            // the backoff isn't inflated. lastRetryAt is kept so the next
+            // check is naturally spaced.
+            console.log(`Auto-retry skipped for recording ${recording.id}: upload already in progress`);
+            await this.updateRecording(recording.id, {
+              uploadStatus: prevStatus,
+              retryCount
+            });
+          } else if (result?.success) {
             await this.updateRecording(recording.id, {
               uploadStatus: 'uploaded',
               transcriptionId: result.transcriptionId,

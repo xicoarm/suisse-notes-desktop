@@ -1,40 +1,21 @@
 /**
  * Desktop & Mobile API Contract — single source of truth.
  *
- * ╔══════════════════════════════════════════════════════════════════════════╗
- * ║ VENDORED FROM THE BACKEND — DO NOT EDIT HERE.                            ║
- * ║                                                                          ║
- * ║ Canonical copy:                                                          ║
- * ║   xicoarm/suisse-notes-v2 :: src/lib/api/desktop-contract.ts             ║
- * ║                                                                          ║
- * ║ Sync command from this repo root:                                        ║
- * ║   scp suisse-notes:/home/ubuntu/Suisse-Notes-V2/src/lib/api/\\           ║
- * ║       desktop-contract.ts src/lib/api/desktop-contract.ts                ║
- * ║                                                                          ║
- * ║ The client-side contract smoke test                                      ║
- * ║   (tests/unit/desktop-contract.client.test.js)                           ║
- * ║ walks every fetch('/api/desktop/...') callsite in src/ and fails CI if   ║
- * ║ any URL is missing from `DESKTOP_API_CONTRACT` below. So if the backend  ║
- * ║ updates this file, re-sync it here BEFORE the client uses a new path.   ║
- * ╚══════════════════════════════════════════════════════════════════════════╝
+ * Every endpoint under `/api/desktop/*` that desktop, iOS or Android clients
+ * are allowed to call MUST appear in `DESKTOP_API_CONTRACT` below.
  *
- * On the BACKEND side this file is consumed by:
+ * Three things consume this file:
  *   1. The route handlers under `src/app/api/desktop/*` — they import the
  *      request/response types so the wire format is type-checked.
- *   2. The server-side contract smoke test (`tests/desktop-contract.test.ts`)
- *      and the build-time check `scripts/check-desktop-contract.ts` (run by
- *      dev.sh build_staged) — both fail if any contract entry's route.ts is
- *      missing.
+ *   2. The contract smoke test (`tests/desktop-contract.test.ts`) — it
+ *      iterates the manifest and fails CI if any documented endpoint
+ *      responds with 404. This is the guard against the "mobile shipped
+ *      a call we don't serve" incident.
  *   3. The hand-written OpenAPI spec at `public/api/desktop-openapi.json`.
  *
- * On THIS side (desktop/mobile client):
- *   - Import types for all `_serverFetch('/api/desktop/...')` request bodies.
- *   - Import `DESKTOP_API_CONTRACT` for the client-side smoke test.
- *
- * Rule: if you change a request or response shape, change it on the backend
- * first, deploy, then sync this file. The PR template references this for a
- * reason. (See: April 2026 SAS upload incident, May 2026 /api/desktop/history
- * 400-mismatch incident.)
+ * Rule: if you change a request or response shape, change it here first,
+ * then update the route handlers, the OpenAPI spec, and the smoke test
+ * fixture. The PR template references this file for a reason.
  */
 
 /* eslint-disable @typescript-eslint/no-empty-object-type */
@@ -170,7 +151,84 @@ export interface UploadMetadata {
   appVersion?: string;
   deviceId?: string;
   duration?: number;
+  /** Legacy free-text STT context. Superseded by contextText (both accepted). */
   context?: string;
+  /**
+   * Pre-meeting context free text. Persisted on the meeting (MeetingPrep) and
+   * used for BOTH transcription hints and document generation.
+   */
+  contextText?: string;
+  /**
+   * Pre-selected DocumentTemplate id (from GET /api/desktop/templates) for the
+   * default document. Highest-priority selection — overrides the starred
+   * default and the AI template matching.
+   */
+  templateId?: string;
+  /**
+   * Sections of the selected template the user filled in BEFORE the meeting.
+   * Keys come from GET /api/desktop/templates/[templateId]/sections.
+   */
+  templatePrefill?: TemplatePrefill;
+  /** Ids of context documents uploaded via POST /api/context-files. */
+  contextFileIds?: string[];
+}
+
+export interface PrefillEntry {
+  /** Section key from GET /api/desktop/templates/[templateId]/sections. */
+  key: string;
+  /** Optional display label (informational). */
+  label?: string;
+  /** The user's pre-filled content for this section. */
+  content: string;
+}
+export interface TemplatePrefill {
+  entries: PrefillEntry[];
+}
+
+// GET /api/desktop/templates — slim template list for the pre-meeting picker.
+export interface DesktopTemplateResource {
+  id: string;
+  name: string;
+  description: string | null;
+  /** "blocks" | "docx" */
+  templateType: string;
+  isBuiltIn: boolean;
+  /** True when this is the user's global default (block-library star). */
+  isStarred: boolean;
+}
+export interface DesktopTemplatesResponse {
+  templates: DesktopTemplateResource[];
+  defaultTemplateId: string | null;
+}
+
+// GET /api/desktop/templates/[templateId]/sections — fillable sections for the
+// pre-fill UI. Section keys are what TemplatePrefill entries must use.
+export interface TemplateSectionResource {
+  key: string;
+  label: string;
+  /** "text" | "table" (docx) or "block" (block templates). */
+  kind: string;
+}
+export interface TemplateSectionsResponse {
+  id: string;
+  name: string;
+  templateType: string;
+  sections: TemplateSectionResource[];
+}
+
+// POST /api/context-files — multipart { file }: upload ONE pre-meeting context
+// document (PDF/DOCX/TXT/MD/CSV/image, ≤20 MB). Text is extracted server-side
+// (incl. OCR). Pass the returned id in UploadMetadata.contextFileIds.
+// DELETE /api/context-files/[id] removes an own, still-unattached file.
+export interface ContextFileResponse {
+  id: string;
+  fileName: string;
+  sizeBytes: number;
+  /** "done" | "failed" — failed files are kept but contribute no text. */
+  extractionStatus: string;
+  ocrUsed: boolean;
+  textLength: number;
+  textPreview: string | null;
 }
 export interface UploadResponse {
   success: boolean;
@@ -281,6 +339,25 @@ export const DESKTOP_API_CONTRACT: ContractEntry[] = [
     auth: "none",
     description: "Public download links for the desktop installer.",
   },
+  {
+    path: "/api/desktop/templates",
+    methods: ["GET"],
+    auth: "required",
+    description: "Slim document-template list for the pre-meeting picker.",
+  },
+  {
+    path: "/api/desktop/templates/[templateId]/sections",
+    methods: ["GET"],
+    auth: "required",
+    description: "Fillable sections of a template for the pre-fill UI.",
+  },
+  {
+    path: "/api/context-files",
+    methods: ["POST"],
+    auth: "required",
+    description:
+      "Upload a pre-meeting context document (multipart file, ≤20 MB); returns the id for UploadMetadata.contextFileIds.",
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -321,6 +398,7 @@ export const DESKTOP_ERROR_CODES = {
   UNAUTHORIZED: "UNAUTHORIZED",
   FORBIDDEN: "FORBIDDEN",
   RECORDING_NOT_FOUND: "RECORDING_NOT_FOUND",
+  TEMPLATE_NOT_FOUND: "TEMPLATE_NOT_FOUND",
   RECORDING_ALREADY_FINALIZED: "RECORDING_ALREADY_FINALIZED",
   INVALID_REQUEST: "INVALID_REQUEST",
   INSUFFICIENT_MINUTES: "INSUFFICIENT_MINUTES",

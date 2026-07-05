@@ -135,6 +135,9 @@
           @add-word="addSessionWord"
           @remove-word="removeSessionWord"
         />
+
+        <!-- Pre-meeting preparation (context, template, pre-fill) -->
+        <PreMeetingPrepOptions />
       </div>
 
       <!-- RECORDING/PAUSED STATE: Full-width recording card -->
@@ -428,6 +431,19 @@
                 />
               </template>
               {{ $t('captureStalledWarning', 'Recording may have stalled — no audio has been saved for a while. Please verify; stop and save if it does not recover.') }}
+              <template #action>
+                <!-- INT-2: runs a recovery attempt inside a user gesture — iOS
+                     may refuse AudioContext.resume() from a timer but allows
+                     it here. -->
+                <q-btn
+                  flat
+                  dense
+                  color="negative"
+                  icon="refresh"
+                  :label="$t('captureRecoverNow', 'Recover now')"
+                  @click="handleRecoverNow"
+                />
+              </template>
             </q-banner>
           </div>
 
@@ -788,6 +804,7 @@ import { useRecorder } from '../composables/useRecorder';
 import { isElectron, isCapacitor, isAndroid } from '../utils/platform';
 import { humanizeStorageError } from '../utils/storageErrors';
 import { uploadWithVerification } from '../services/upload';
+import { forceCaptureRecovery } from '../services/recordingService';
 import { getApiUrlSync } from '../services/api';
 import { stopStorageMonitor } from '../services/storageMonitor';
 import { setRecordingActive } from '../boot/lifecycle';
@@ -795,6 +812,8 @@ import { useAuthStore } from '../stores/auth';
 import { useShareLink } from '../composables/useShareLink';
 import ModeTabSwitcher from '../components/ModeTabSwitcher.vue';
 import TranscriptionOptions from '../components/TranscriptionOptions.vue';
+import PreMeetingPrepOptions from '../components/PreMeetingPrepOptions.vue';
+import { useMeetingPrepStore } from '../stores/meeting-prep';
 import RecordingControls from '../components/RecordingControls.vue';
 import AudioLevelMeter from '../components/AudioLevelMeter.vue';
 import StorageOptionDialog from '../components/StorageOptionDialog.vue';
@@ -806,6 +825,7 @@ const { t } = useI18n();
 const recordingStore = useRecordingStore();
 const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
+const prepStore = useMeetingPrepStore();
 const minutesStore = useMinutesStore();
 const authStore = useAuthStore();
 const { openInBrowser, copyLink } = useShareLink();
@@ -829,6 +849,10 @@ const {
   recordingHealthMessage,
   // Capture-stall watchdog (data-loss prevention)
   captureStalled,
+  // INT-2: interruption auto-recovery succeeded — surface the gap
+  captureRecoveredInfo,
+  // INT-2: in-place recovery exhausted — emergency stop-with-save happened
+  captureRecoveryFailed,
   // Minutes limit tracking
   minutesLimitWarning,
   minutesLimitReached,
@@ -974,6 +998,40 @@ watch(minutesLimitWarning, (minutesRemaining) => {
 });
 
 // Watch for minutes limit reached - auto-stop recording
+// INT-2: interruption auto-recovery restored capture — tell the user how big
+// the gap is, so they can repeat what was said instead of discovering the
+// hole after the meeting.
+watch(captureRecoveredInfo, (info) => {
+  if (!info) return;
+  const gapMin = Math.max(1, Math.round(info.gapSeconds / 60));
+  $q.notify({
+    type: 'warning',
+    message: t('captureRecoveredGap', { minutes: gapMin }),
+    icon: 'mic',
+    timeout: 8000
+  });
+});
+
+// INT-2: the stall banner's "Recover now" button — a user gesture lets iOS
+// grant AudioContext.resume() where the background timer may be refused.
+const handleRecoverNow = () => {
+  forceCaptureRecovery().catch(e => console.warn('Manual capture recovery failed:', e));
+};
+
+// INT-2: in-place recovery exhausted — the service emergency-stopped with
+// save (useRecorder mirrors the disk-full path). Tell the user their audio up
+// to the interruption is safe and a fresh recording will work immediately.
+watch(captureRecoveryFailed, (info) => {
+  if (!info) return;
+  $q.notify({
+    type: 'negative',
+    message: t('captureRecoveryFailedMsg'),
+    icon: 'mic_off',
+    timeout: 0,
+    actions: [{ label: t('ok', 'OK'), color: 'white' }]
+  });
+});
+
 watch(minutesLimitReached, async (reached) => {
   if (reached && (recordingStore.isRecording || recordingStore.isPaused)) {
     // Show notification
@@ -1239,7 +1297,53 @@ onUnmounted(() => {
     clearInterval(autoSaveTimer.value);
     autoSaveTimer.value = null;
   }
+  stopBackgroundUploadWatch();
 });
+
+// When startAutoUpload finds an upload for this recordId already in flight
+// (persistent queue got there first), the queue holder owns completion. Poll
+// the history entry it updates and converge the page's phase, so the record
+// screen doesn't sit in 'uploading' forever with a locked file.
+let backgroundUploadWatchTimer = null;
+
+const stopBackgroundUploadWatch = () => {
+  if (backgroundUploadWatchTimer) {
+    clearInterval(backgroundUploadWatchTimer);
+    backgroundUploadWatchTimer = null;
+  }
+};
+
+const watchBackgroundUpload = (recordId) => {
+  stopBackgroundUploadWatch();
+  const startedAt = Date.now();
+  const WATCH_TIMEOUT_MS = 30 * 60 * 1000; // give up after 30 min; queue keeps retrying on its own
+
+  backgroundUploadWatchTimer = setInterval(async () => {
+    // Session moved on (new recording started / page reset) — stop watching
+    if (recordingStore.recordId !== recordId || !recordingStore.isUploading) {
+      stopBackgroundUploadWatch();
+      return;
+    }
+
+    const rec = historyStore.recordings.find(r => r.id === recordId);
+    if (rec?.uploadStatus === 'uploaded') {
+      stopBackgroundUploadWatch();
+      recordingStore.setUploaded(rec.audioFileId || null);
+      recordingStore.unlockFile(recordId);
+      transcriptionStore.resetSession();
+      prepStore.resetSession();
+      $q.notify({ type: 'positive', message: t('uploadSuccessful') });
+    } else if (rec?.uploadStatus === 'failed') {
+      stopBackgroundUploadWatch();
+      await handleUploadError(rec.uploadError || 'Upload failed');
+    } else if (Date.now() - startedAt > WATCH_TIMEOUT_MS) {
+      // Queue is still retrying in the background; free the page so the
+      // user can keep working. The file stays locked (protects the retry).
+      stopBackgroundUploadWatch();
+      await handleUploadError(rec?.uploadError || 'Upload still pending — it will retry in the background');
+    }
+  }, 5000);
+};
 
 // Double-start protection (UI layer): the start flow spends multiple seconds
 // in awaits (minutes sync, mic acquisition, session IPC) during which the
@@ -1392,7 +1496,8 @@ const doStartRecordingInternal = async () => {
       fileSize: 0,
       filePath: null,
       uploadStatus: 'recording',
-      storagePreference: currentStoragePreference.value
+      storagePreference: currentStoragePreference.value,
+      prep: prepStore.historySnapshot
     });
   } else {
     $q.notify({
@@ -1624,6 +1729,14 @@ const startAutoUpload = async () => {
 
   // Get transcription options
   const options = transcriptionStore.transcriptionOptions;
+  // A context file might still be uploading/extracting - wait (bounded) so an
+  // attached document is never silently dropped from the meeting.
+  const uploadsSettled = await prepStore.waitForContextUploads();
+  if (!uploadsSettled) {
+    $q.notify({ type: 'warning', message: t('prepUploadFailed') });
+  }
+  // Pre-meeting preparation fields (context/template/pre-fill) for the backend
+  const prepFields = prepStore.metadataFields;
 
   try {
     let result;
@@ -1636,7 +1749,8 @@ const startAutoUpload = async () => {
         metadata: {
           duration: finalDuration.value.toString(),
           title: options.title,
-          customVocabulary: options.customVocabulary
+          customVocabulary: options.customVocabulary,
+          ...prepFields
         }
       });
 
@@ -1652,7 +1766,8 @@ const startAutoUpload = async () => {
             metadata: {
               duration: finalDuration.value.toString(),
               title: options.title,
-              customVocabulary: options.customVocabulary
+              customVocabulary: options.customVocabulary,
+              ...prepFields
             }
           });
         } else if (refreshResult.shouldLogout) {
@@ -1669,7 +1784,8 @@ const startAutoUpload = async () => {
         metadata: {
           duration: finalDuration.value.toString(),
           title: options.title,
-          customVocabulary: options.customVocabulary
+          customVocabulary: options.customVocabulary,
+          ...prepFields
         },
         onProgress: (p, bytesUploaded, bytesTotal) => recordingStore.updateUploadProgress(p, bytesUploaded || 0, bytesTotal || 0),
         getAuthStore: () => authStore // Enable token refresh
@@ -1680,6 +1796,21 @@ const startAutoUpload = async () => {
 
     // phase reset handled by store actions
     recordingStore.uploadRetryAttempt = 0;
+
+    if (result.inProgress) {
+      // Another driver (the persistent mobile queue) is uploading this exact
+      // recording. A bare return would strand the page in phase 'uploading'
+      // forever (blocking new recordings) and leave the file locked with no
+      // completion owner. Hand off: watch the history entry — the queue
+      // holder writes 'uploaded' on success — and converge the page state.
+      $q.notify({
+        type: 'info',
+        message: t('uploadAlreadyInProgress'),
+        timeout: 2500
+      });
+      watchBackgroundUpload(recordingStore.recordId);
+      return;
+    }
 
     if (result.success) {
       recordingStore.setUploaded(result.audioFileId);
@@ -1718,6 +1849,7 @@ const startAutoUpload = async () => {
 
       // Reset session after successful upload
       transcriptionStore.resetSession();
+      prepStore.resetSession();
 
       // Refresh minutes balance (server will deduct after transcription)
       // Use a slight delay to allow server to process
@@ -1785,7 +1917,8 @@ const handleUploadError = async (errorMessage) => {
       addToMobileUploadQueue(recordingStore.recordId, currentFilePath.value, {
         duration: finalDuration.value?.toString(),
         title: options.title,
-        customVocabulary: options.customVocabulary
+        customVocabulary: options.customVocabulary,
+        ...prepStore.metadataFields
       });
     } catch (e) {
       console.warn('Could not add to mobile upload queue:', e);
