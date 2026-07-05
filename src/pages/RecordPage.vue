@@ -135,6 +135,9 @@
           @add-word="addSessionWord"
           @remove-word="removeSessionWord"
         />
+
+        <!-- Pre-meeting preparation (context, template, pre-fill) -->
+        <PreMeetingPrepOptions />
       </div>
 
       <!-- RECORDING/PAUSED STATE: Full-width recording card -->
@@ -809,6 +812,8 @@ import { useAuthStore } from '../stores/auth';
 import { useShareLink } from '../composables/useShareLink';
 import ModeTabSwitcher from '../components/ModeTabSwitcher.vue';
 import TranscriptionOptions from '../components/TranscriptionOptions.vue';
+import PreMeetingPrepOptions from '../components/PreMeetingPrepOptions.vue';
+import { useMeetingPrepStore } from '../stores/meeting-prep';
 import RecordingControls from '../components/RecordingControls.vue';
 import AudioLevelMeter from '../components/AudioLevelMeter.vue';
 import StorageOptionDialog from '../components/StorageOptionDialog.vue';
@@ -820,6 +825,7 @@ const { t } = useI18n();
 const recordingStore = useRecordingStore();
 const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
+const prepStore = useMeetingPrepStore();
 const minutesStore = useMinutesStore();
 const authStore = useAuthStore();
 const { openInBrowser, copyLink } = useShareLink();
@@ -1489,7 +1495,8 @@ const doStartRecordingInternal = async () => {
       fileSize: 0,
       filePath: null,
       uploadStatus: 'recording',
-      storagePreference: currentStoragePreference.value
+      storagePreference: currentStoragePreference.value,
+      prep: prepStore.historySnapshot
     });
   } else {
     $q.notify({
@@ -1721,6 +1728,8 @@ const startAutoUpload = async () => {
 
   // Get transcription options
   const options = transcriptionStore.transcriptionOptions;
+  // Pre-meeting preparation fields (context/template/pre-fill) for the backend
+  const prepFields = prepStore.metadataFields;
 
   try {
     let result;
@@ -1733,7 +1742,8 @@ const startAutoUpload = async () => {
         metadata: {
           duration: finalDuration.value.toString(),
           title: options.title,
-          customVocabulary: options.customVocabulary
+          customVocabulary: options.customVocabulary,
+          ...prepFields
         }
       });
 
@@ -1749,7 +1759,8 @@ const startAutoUpload = async () => {
             metadata: {
               duration: finalDuration.value.toString(),
               title: options.title,
-              customVocabulary: options.customVocabulary
+              customVocabulary: options.customVocabulary,
+              ...prepFields
             }
           });
         } else if (refreshResult.shouldLogout) {
@@ -1766,7 +1777,8 @@ const startAutoUpload = async () => {
         metadata: {
           duration: finalDuration.value.toString(),
           title: options.title,
-          customVocabulary: options.customVocabulary
+          customVocabulary: options.customVocabulary,
+          ...prepFields
         },
         onProgress: (p, bytesUploaded, bytesTotal) => recordingStore.updateUploadProgress(p, bytesUploaded || 0, bytesTotal || 0),
         getAuthStore: () => authStore // Enable token refresh
@@ -1830,6 +1842,7 @@ const startAutoUpload = async () => {
 
       // Reset session after successful upload
       transcriptionStore.resetSession();
+      prepStore.resetSession();
 
       // Refresh minutes balance (server will deduct after transcription)
       // Use a slight delay to allow server to process
@@ -1897,7 +1910,8 @@ const handleUploadError = async (errorMessage) => {
       addToMobileUploadQueue(recordingStore.recordId, currentFilePath.value, {
         duration: finalDuration.value?.toString(),
         title: options.title,
-        customVocabulary: options.customVocabulary
+        customVocabulary: options.customVocabulary,
+        ...prepStore.metadataFields
       });
     } catch (e) {
       console.warn('Could not add to mobile upload queue:', e);

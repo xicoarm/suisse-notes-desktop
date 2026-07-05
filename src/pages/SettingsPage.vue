@@ -291,7 +291,6 @@
             {{ userDataPath }}
           </div>
         </div>
-
       </div>
 
       <!-- Transcription Section -->
@@ -320,6 +319,70 @@
             @remove-word="removeGlobalWord"
           />
         </div>
+      </div>
+
+      <!-- Suisse Notes Pro: context prompt on device sync (mobile only) -->
+      <div
+        v-if="isMobileApp"
+        class="settings-section"
+      >
+        <div class="section-title">
+          {{ $t('settingsDeviceSyncTitle') }}
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">
+              {{ $t('settingsAskOnDeviceSync') }}
+            </div>
+            <div class="setting-description">
+              {{ $t('settingsAskOnDeviceSyncDesc') }}
+            </div>
+          </div>
+          <q-toggle
+            :model-value="prepStore.askOnDeviceSync"
+            color="primary"
+            @update:model-value="(v) => { prepStore.askOnDeviceSync = v; prepStore.saveSettings(); }"
+          />
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">
+              {{ $t('settingsDeviceSyncDefaultTemplate') }}
+            </div>
+          </div>
+        </div>
+        <q-select
+          :model-value="prepStore.deviceSyncDefaultTemplateId"
+          :options="prepTemplateOptions"
+          emit-value
+          map-options
+          outlined
+          dense
+          class="device-sync-input"
+          @update:model-value="(v) => { prepStore.deviceSyncDefaultTemplateId = v; prepStore.saveSettings(); }"
+        />
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">
+              {{ $t('settingsDeviceSyncDefaultContext') }}
+            </div>
+          </div>
+        </div>
+        <q-input
+          :model-value="prepStore.deviceSyncDefaultContext"
+          :placeholder="$t('prepContextHint')"
+          type="textarea"
+          autogrow
+          outlined
+          dense
+          class="device-sync-input"
+          :maxlength="20000"
+          @update:model-value="(v) => { prepStore.deviceSyncDefaultContext = v; }"
+          @blur="prepStore.saveSettings()"
+        />
       </div>
 
       <!-- Delete Confirmation Dialog -->
@@ -533,6 +596,7 @@ import { useAuthStore } from '../stores/auth';
 import { useMinutesStore } from '../stores/minutes';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
+import { useMeetingPrepStore } from '../stores/meeting-prep';
 import { useDeviceStore } from '../stores/device';
 import { useLanguage } from '../composables/useLanguage';
 import { isCapacitor, isElectron } from '../utils/platform';
@@ -546,6 +610,15 @@ const authStore = useAuthStore();
 const minutesStore = useMinutesStore();
 const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
+const prepStore = useMeetingPrepStore();
+prepStore.initialize();
+const prepTemplateOptions = computed(() => [
+  { label: t('prepTemplateAuto'), value: null },
+  ...prepStore.templates.map((tpl) => ({
+    label: tpl.isBuiltIn ? `${tpl.name} · Suisse Notes` : tpl.name,
+    value: tpl.id
+  }))
+]);
 const { languages, currentLang, setLanguage, initLanguage } = useLanguage();
 const deviceStore = useDeviceStore();
 const isMobileApp = isCapacitor();

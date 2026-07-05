@@ -110,6 +110,19 @@
           </q-btn>
         </template>
 
+        <!-- Waiting for the context/template answer (Suisse Notes Pro sync) -->
+        <q-btn
+          v-else-if="recording.uploadStatus === 'pending_prep'"
+          flat
+          round
+          icon="auto_awesome"
+          color="primary"
+          size="sm"
+          @click="$emit('answer-prep', recording)"
+        >
+          <q-tooltip>{{ $t('statusPendingPrep') }}</q-tooltip>
+        </q-btn>
+
         <q-btn
           v-else-if="recording.uploadStatus === 'pending' && recording.filePath"
           flat
@@ -359,7 +372,7 @@ export default {
     }
   },
 
-  emits: ['upload', 'retry', 'deleted', 'cancel-transfer', 'resync', 'reupload'],
+  emits: ['upload', 'retry', 'deleted', 'cancel-transfer', 'resync', 'reupload', 'answer-prep'],
 
   setup(props, { emit }) {
     const { t } = useI18n();

@@ -53,7 +53,8 @@ onMounted(async () => {
             addToMobileUploadQueue(rec.id, rec.filePath, {
               duration: (rec.duration || 0).toString(),
               title: '',
-              customVocabulary: []
+              customVocabulary: [],
+              ...(rec.prep || {})
             });
           }
         }

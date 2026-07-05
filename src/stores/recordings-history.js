@@ -327,7 +327,10 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
             // resets retry backoff.
             const LOCAL_ONLY_FIELDS = [
               'source', 'deviceFilename', 'storagePreference',
-              'retryCount', 'lastRetryAt', 'uploadError', '_serverSynced'
+              'retryCount', 'lastRetryAt', 'uploadError', '_serverSynced',
+              // Pre-meeting preparation (context/template/pre-fill) — client-only,
+              // re-sent on retry uploads; the server never returns it.
+              'prep'
             ];
             const merged = serverRecordings.map(serverRec => {
               const localRec = cached.find(r => r.id === serverRec.id);
@@ -675,7 +678,8 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
               filePath: recording.filePath,
               metadata: {
                 duration: recording.duration?.toString(),
-                title: recording.title
+                title: recording.title,
+                ...(recording.prep || {})
               }
             });
 
@@ -688,7 +692,8 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
                   filePath: recording.filePath,
                   metadata: {
                     duration: recording.duration?.toString(),
-                    title: recording.title
+                    title: recording.title,
+                    ...(recording.prep || {})
                   }
                 });
               }
@@ -702,7 +707,8 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
               authToken: authStore.token,
               metadata: {
                 duration: recording.duration?.toString(),
-                title: recording.title
+                title: recording.title,
+                ...(recording.prep || {})
               },
               onProgress: () => {},
               getAuthStore: () => authStore
