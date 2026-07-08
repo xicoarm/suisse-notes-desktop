@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.5.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.0...v4.5.1) (2026-07-08)
+
+
+### Bug Fixes
+
+* **desktop:** show cross-device recordings in history ([52a873a](https://github.com/xicoarm/suisse-notes-desktop/commit/52a873a15775d198aa1250b2dd4f322ec7e92697))
+
 ## [4.5.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.4.1...v4.5.0) (2026-07-05)
 
 
