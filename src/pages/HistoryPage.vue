@@ -613,6 +613,11 @@ export default {
     onMounted(async () => {
       if (!historyStore.loaded) {
         await historyStore.loadRecordings();
+      } else if (isElectron()) {
+        // Desktop: silently refresh so recordings made on other devices (or
+        // since the last visit) appear without an app restart. Mobile already
+        // accumulates its full history via the local cache, so it's left as-is.
+        historyStore.loadRecordings({ background: true });
       }
 
       // Electron-only: Set up upload progress listeners

@@ -519,7 +519,15 @@ export default {
     };
 
     const confirmDelete = async () => {
-      await historyStore.deleteRecording(props.recording.id, deleteFile.value);
+      const result = await historyStore.deleteRecording(props.recording.id, deleteFile.value);
+      // A failed delete (e.g. file locked mid-upload, or store error) must not
+      // silently look successful: keep the dialog open and surface the reason,
+      // otherwise the row "reverts" after the dialog closes and the user is
+      // left confused. Server-only cross-device rows always return success.
+      if (!result?.success) {
+        $q.notify({ type: 'negative', message: t('deleteFailed'), caption: result?.error, timeout: 6000 });
+        return;
+      }
       showDeleteDialog.value = false;
       emit('deleted', props.recording.id);
     };

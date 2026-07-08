@@ -275,7 +275,10 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
     },
 
     // Load recordings (platform-aware)
-    async loadRecordings() {
+    // background=true: a silent refresh (no loading spinner, keep the current
+    // list visible). Used on desktop when re-visiting the History page so
+    // recordings made on other devices appear without an app restart.
+    async loadRecordings({ background = false } = {}) {
       if (this.loading) return;
 
       const userId = this._getUserId();
@@ -287,18 +290,31 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
       }
 
       if (isElectron()) {
-        // Desktop: load from Electron store
-        try {
-          this.loading = true;
-          this.recordings = await window.electronAPI.history.getAll(userId);
-          this.defaultStoragePreference =
-            await window.electronAPI.history.getDefaultStoragePreference();
-          this.loaded = true;
-        } catch (error) {
-          console.error('Error loading recordings history:', error);
-        } finally {
-          this.loading = false;
+        // Desktop: the local electron-store holds recordings made on THIS
+        // machine. On a foreground load we (re)read them; on a background
+        // refresh the in-memory local list is already current (kept by
+        // add/update/delete), so we skip the reload and only re-pull the
+        // server side.
+        if (!background) {
+          try {
+            this.loading = true;
+            this.recordings = await window.electronAPI.history.getAll(userId);
+            this.defaultStoragePreference =
+              await window.electronAPI.history.getDefaultStoragePreference();
+            this.loaded = true;
+          } catch (error) {
+            console.error('Error loading recordings history:', error);
+          } finally {
+            this.loading = false;
+          }
         }
+        // Merge the server-side history so recordings made on the user's OTHER
+        // devices (iPhone, iPad, another Mac) also appear here. Desktop used to
+        // show ONLY locally-made recordings, so its history looked incomplete
+        // next to mobile (which fetches this same endpoint). Best-effort and
+        // non-blocking: the local list is already painted, server records
+        // stream in, and a failure never wipes local data.
+        await this._mergeServerHistory();
       } else {
         // Mobile/Web: load from server API, fall back to localStorage cache
         try {
@@ -399,6 +415,50 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
       }
     },
 
+    // Desktop only: fetch this user's server-side recording history (their
+    // recordings across ALL devices, last 90 days) and merge the ones not
+    // already held locally into the in-memory list as read-only entries.
+    // Local recordings (with a filePath / richer upload state) always win over
+    // a server duplicate of the same id. Best-effort: any failure leaves the
+    // existing (local) list untouched.
+    async _mergeServerHistory() {
+      const PAGE_LIMIT = 100; // server max page size
+      const MAX_PAGES = 20;   // safety cap (server caps history at ~500 / 90 days)
+      try {
+        const serverRaw = [];
+        let cursor = null;
+        let pages = 0;
+        do {
+          const qs = new URLSearchParams({ limit: String(PAGE_LIMIT) });
+          if (cursor) qs.set('cursor', cursor);
+          const data = await _serverFetch(`/api/desktop/history?${qs.toString()}`);
+          const batch = data?.recordings || (Array.isArray(data) ? data : []);
+          serverRaw.push(...batch);
+          cursor = data?.nextCursor || null;
+          pages += 1;
+        } while (cursor && pages < MAX_PAGES);
+
+        const serverRecordings = serverRaw
+          .map(_normalizeServerRecording)
+          .filter(r => r.id);
+
+        // Rebuild: keep genuine local recordings (drop any server-only entries
+        // merged on a previous refresh so this pass replaces them with fresh
+        // server state), then append the server recordings we don't hold
+        // locally. Tagged `_serverOnly` so delete/update know they aren't in
+        // the electron-store.
+        const localRecordings = this.recordings.filter(r => !r._serverOnly);
+        const localIds = new Set(localRecordings.map(r => r.id));
+        const serverOnly = serverRecordings
+          .filter(r => !localIds.has(r.id))
+          .map(r => ({ ...r, _serverOnly: true }));
+        this.recordings = [...localRecordings, ...serverOnly];
+      } catch (error) {
+        // Offline / auth blip / server error — keep whatever we already show.
+        console.warn('Could not merge server history (desktop), showing local only:', error);
+      }
+    },
+
     // Add a new recording to history (with userId) — idempotent: if ID exists, delegates to updateRecording
     async addRecording(recording) {
       try {
@@ -484,9 +544,16 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
         }
 
         if (isElectron()) {
+          const index = this.recordings.findIndex(r => r.id === id);
+          // Server-only recordings (made on another device) aren't in the
+          // electron-store, so history:update would report "not found". Update
+          // the in-memory copy only.
+          if (index !== -1 && this.recordings[index]._serverOnly) {
+            this.recordings[index] = { ...this.recordings[index], ...updates };
+            return { success: true };
+          }
           const result = await window.electronAPI.history.update(id, updates, userId);
           if (result.success) {
-            const index = this.recordings.findIndex(r => r.id === id);
             if (index !== -1) {
               this.recordings[index] = { ...this.recordings[index], ...updates };
             }
@@ -535,6 +602,16 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
         }
 
         if (isElectron()) {
+          // Server-only recordings (made on another device) aren't in the
+          // local electron-store, so history:delete would report "not found".
+          // Just drop them from the in-memory list — like mobile, this hides
+          // the row locally (the desktop contract has no server-side DELETE, so
+          // it reappears on the next server refresh).
+          const target = this.recordings.find(r => r.id === id);
+          if (target?._serverOnly) {
+            this.recordings = this.recordings.filter(r => r.id !== id);
+            return { success: true };
+          }
           const result = await window.electronAPI.history.delete(id, deleteFile, userId);
           if (result.success) {
             this.recordings = this.recordings.filter(r => r.id !== id);
