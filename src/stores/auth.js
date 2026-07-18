@@ -103,8 +103,45 @@ async function platformGetUserInfo() {
   return getUserCredentials();
 }
 
-// Token refresh interval: 6 hours
-const TOKEN_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+// Token refresh interval: 30 minutes. The backend /api/auth/refresh route is
+// designed for this cadence (issues a fresh 7-day JWT each call) — the old 6h
+// interval let long-idle sessions drift toward expiry with no visible signal.
+const TOKEN_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
+// Mirror of the backend's post-expiry grace window on /api/auth/refresh:
+// an expired token can still be exchanged for a fresh one within 24h.
+const REFRESH_GRACE_PERIOD_MS = 24 * 60 * 60 * 1000;
+// Proactively refresh when less than this much lifetime remains.
+const TOKEN_STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+function decodeJwtExpMs(token) {
+  try {
+    const payload = token.split('.')[1];
+    const json = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+    return typeof json.exp === 'number' ? json.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Classify a stored JWT against the backend's lifetime rules:
+ * 'active' — valid with comfortable lifetime left
+ * 'stale'  — valid but close to expiry (refresh soon)
+ * 'grace'  — expired, but within the backend's 24h refresh grace window
+ * 'dead'   — expired beyond grace; only a fresh login can revive the session
+ * Undecodable tokens classify as 'stale' (the server is the authority — a
+ * refresh attempt settles it) rather than locking the user out client-side.
+ */
+export function getTokenState(token) {
+  if (!token) return 'dead';
+  const expMs = decodeJwtExpMs(token);
+  if (expMs === null) return 'stale';
+  const now = Date.now();
+  if (expMs > now + TOKEN_STALE_THRESHOLD_MS) return 'active';
+  if (expMs > now) return 'stale';
+  if (now - expMs < REFRESH_GRACE_PERIOD_MS) return 'grace';
+  return 'dead';
+}
 
 export const useAuthStore = defineStore('auth', {
   state: () => ({
@@ -319,9 +356,39 @@ export const useAuthStore = defineStore('auth', {
         const hasUserInfo = userInfo && Object.keys(userInfo).length > 0;
 
         if (token && hasUserInfo) {
+          // Never restore a session the server would reject: a blind restore
+          // shows a "logged in" UI on a dead token, lets the user record, and
+          // only fails at upload time — after the meeting is over.
+          const tokenState = getTokenState(token);
+
+          if (tokenState === 'dead') {
+            console.warn('Stored token expired beyond refresh grace - requiring re-login');
+            await platformClearToken();
+            this.isAuthenticated = false;
+            return;
+          }
+
           this.token = token;
           this.user = userInfo;
           this.isAuthenticated = true;
+
+          if (tokenState === 'grace') {
+            // Expired but revivable — settle it NOW, before any UI claims a
+            // working session. A definitive rejection means re-login; a
+            // network failure keeps the session (offline use stays possible).
+            const refresh = await this._doTokenRefresh();
+            if (!refresh.success && refresh.authRejected) {
+              console.warn('Stored token rejected by refresh - requiring re-login');
+              await platformClearToken();
+              this.user = null;
+              this.token = null;
+              this.isAuthenticated = false;
+              return;
+            }
+          } else if (tokenState === 'stale') {
+            // Still valid — refresh in the background to restore full lifetime
+            this._doTokenRefresh().catch(() => {});
+          }
 
           // Set Sentry user context on session restore
           setUser(userInfo);
@@ -352,6 +419,57 @@ export const useAuthStore = defineStore('auth', {
     },
 
     /**
+     * True when the stored token is near or past expiry (but maybe still
+     * revivable). upload.js probes for this before processing the mobile
+     * queue to refresh proactively after long offline periods.
+     */
+    isTokenExpiringSoon() {
+      const state = getTokenState(this.token);
+      return state === 'stale' || state === 'grace';
+    },
+
+    /**
+     * Gate for starting a recording: the session must be one the upload at
+     * the END of the recording will accept. Starts long recordings on a
+     * fresh 7-day token; blocks only on a definitive server rejection —
+     * a network failure never blocks (offline capture stays local and the
+     * persistent upload queue retries after reconnect/login).
+     * @returns {{ ok: boolean, reason?: string, degraded?: boolean }}
+     */
+    async ensureRecordingSession() {
+      if (!this.isAuthenticated || !this.token) {
+        return { ok: false, reason: 'loggedOut' };
+      }
+      if (!(this.user?.id || this.user?.userId)) {
+        // Without a user id the history entry for the recording cannot be
+        // written (userId ownership guard) — the capture would be invisible.
+        return { ok: false, reason: 'loggedOut' };
+      }
+
+      const state = getTokenState(this.token);
+      if (state === 'dead') {
+        await this.forceLogout('Your session has expired. Please log in again.');
+        return { ok: false, reason: 'sessionExpired' };
+      }
+      if (state === 'active') {
+        return { ok: true };
+      }
+
+      // 'stale' or 'grace': renew now so even a many-hour recording ends on
+      // a token with days of lifetime left.
+      const refresh = await this.handleAuthError();
+      if (refresh.success) {
+        return { ok: true };
+      }
+      if (refresh.shouldLogout) {
+        return { ok: false, reason: 'sessionExpired' };
+      }
+      // Transient refresh failure with a token that is at worst in grace:
+      // allow the recording (local-first) rather than punishing offline use.
+      return { ok: true, degraded: true };
+    },
+
+    /**
      * Handle 401/auth errors — refresh token or force logout.
      * Deduplicates concurrent calls via _refreshPromise mutex.
      * Called from minutes store, upload service, RecordPage, HistoryPage, UploadPage.
@@ -369,15 +487,21 @@ export const useAuthStore = defineStore('auth', {
           if (result.success) {
             return { success: true, token: result.token };
           }
-          // Refresh failed — force logout
-          this.forceLogout('Your session has expired. Please log in again.');
-          return { success: false, shouldLogout: true };
+          if (result.authRejected) {
+            // The server definitively rejected the session — force logout
+            this.forceLogout('Your session has expired. Please log in again.');
+            return { success: false, shouldLogout: true };
+          }
+          // Transient failure (network/server blip): keep the session — the
+          // caller's retry/queue machinery owns the failed request. Logging
+          // the user out here used to wipe in-memory history state mid-flow
+          // and orphan the recording being uploaded.
+          return { success: false, shouldLogout: false, transient: true };
         })
         .catch((err) => {
           this._refreshPromise = null;
           console.error('Token refresh error:', err);
-          this.forceLogout('Your session has expired. Please log in again.');
-          return { success: false, shouldLogout: true };
+          return { success: false, shouldLogout: false, transient: true };
         });
 
       return this._refreshPromise;
@@ -389,7 +513,7 @@ export const useAuthStore = defineStore('auth', {
      */
     async _doTokenRefresh() {
       if (!this.token && !this.isAuthenticated) {
-        return { success: false };
+        return { success: false, authRejected: true };
       }
 
       try {
@@ -398,13 +522,21 @@ export const useAuthStore = defineStore('auth', {
         if (isElectron()) {
           // Electron: use IPC handler (main process has the encrypted token)
           result = await window.electronAPI.auth.refreshToken();
+          if (!result?.success) {
+            // Distinguish a definitive rejection (expired beyond grace,
+            // disabled account, no stored token) from a transient failure so
+            // callers don't force-logout on a network blip.
+            const authRejected = result?.status === 401 || result?.status === 403 ||
+              /not authenticated/i.test(result?.error || '');
+            return { success: false, authRejected };
+          }
         } else {
           // Mobile / web: direct fetch
           const response = await authenticatedRequest(API_ENDPOINTS.refreshToken, this.token, {
             method: 'POST'
           });
           if (!response.ok) {
-            return { success: false };
+            return { success: false, authRejected: response.status === 401 || response.status === 403 };
           }
           result = await response.json();
           // Normalize: direct API returns { token, user } at top level

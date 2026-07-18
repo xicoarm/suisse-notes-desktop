@@ -1475,6 +1475,25 @@ const doStartRecording = async () => {
 };
 
 const doStartRecordingInternal = async () => {
+  // Never start a capture on a session the upload at the end would reject.
+  // A stale-restored login must surface HERE — before the meeting — not as a
+  // failed upload hours later.
+  const session = await authStore.ensureRecordingSession();
+  if (!session.ok) {
+    // 'sessionExpired' already triggered forceLogout, whose event handler
+    // notifies and redirects — don't stack a second toast on top.
+    if (session.reason !== 'sessionExpired') {
+      $q.notify({
+        type: 'negative',
+        message: t('loginRequiredToRecord'),
+        icon: 'lock',
+        timeout: 6000
+      });
+    }
+    router.push('/login');
+    return;
+  }
+
   // Block start if recovery is in progress (FIX H)
   if (recordingStore.recoveryInProgress) {
     $q.notify({
@@ -1490,7 +1509,7 @@ const doStartRecordingInternal = async () => {
     // Add to history immediately so recording survives app kill
     await historyStore.addRecording({
       id: recordingStore.recordId,
-      userId: authStore.user?.id || null,
+      userId: authStore.user?.id || authStore.user?.userId || null,
       createdAt: new Date().toISOString(),
       duration: 0,
       fileSize: 0,
@@ -1717,6 +1736,12 @@ const handleCancel = async () => {
 };
 
 const startAutoUpload = async () => {
+  // Captured up-front: if the upload 401s and the refresh force-logs-out,
+  // authStore.user is already null by the time the failure bookkeeping runs.
+  // Without an explicit owner those history writes are refused by the userId
+  // guard and the entry silently stays 'pending' — the recording looks lost.
+  const ownerUserId = authStore.user?.id || authStore.user?.userId || null;
+
   // phase set to 'uploading' via setUploading()
   recordingStore.setUploading({
     createdAt: new Date().toISOString(),
@@ -1771,7 +1796,7 @@ const startAutoUpload = async () => {
             }
           });
         } else if (refreshResult.shouldLogout) {
-          result = { success: false, error: 'Session expired. Please log in again.' };
+          result = { success: false, error: t('sessionExpiredLoginAgain') };
         }
       }
     } else if (isCapacitor()) {
@@ -1819,7 +1844,8 @@ const startAutoUpload = async () => {
       await historyStore.updateRecording(recordingStore.recordId, {
         uploadStatus: 'uploaded',
         transcriptionId: result.transcriptionId,
-        audioFileId: result.audioFileId
+        audioFileId: result.audioFileId,
+        ...(ownerUserId ? { userId: ownerUserId } : {})
       });
 
       // P0 Data Loss Fix: Only delete if upload was verified AND canDelete returns true
@@ -1865,15 +1891,15 @@ const startAutoUpload = async () => {
       });
     } else {
       // P0 Data Loss Fix: Keep file locked on failure - will be unlocked on retry or explicit delete
-      handleUploadError(result.error);
+      handleUploadError(result.error, ownerUserId);
     }
   } catch (error) {
     // phase reset handled by store actions
-    handleUploadError(error.message);
+    handleUploadError(error.message, ownerUserId);
   }
 };
 
-const handleUploadError = async (errorMessage) => {
+const handleUploadError = async (errorMessage, ownerUserId = null) => {
   // Make "Insufficient minutes" error more user-friendly
   if (errorMessage && errorMessage.includes('Insufficient minutes')) {
     recordingStore.uploadError ='No recording minutes remaining. Please upgrade your plan or purchase more minutes at app.suisse-notes.ch';
@@ -1886,10 +1912,13 @@ const handleUploadError = async (errorMessage) => {
     recordingStore.uploadError =errorMessage;
   }
 
-  // Update history entry as failed (already added before upload started)
+  // Update history entry as failed (already added before upload started).
+  // ownerUserId keeps this write valid even after a forced logout nulled
+  // authStore.user (the userId ownership guard would otherwise refuse it).
   await historyStore.updateRecording(recordingStore.recordId, {
     uploadStatus: 'failed',
-    uploadError: errorMessage
+    uploadError: errorMessage,
+    ...(ownerUserId ? { userId: ownerUserId } : {})
   });
 
   // Detect insufficient minutes errors BEFORE queuing for retry (would never succeed)

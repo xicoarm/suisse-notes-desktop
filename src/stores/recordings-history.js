@@ -302,6 +302,19 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
             this.defaultStoragePreference =
               await window.electronAPI.history.getDefaultStoragePreference();
             this.loaded = true;
+
+            // Heal entries stranded in 'uploading' by a crash/kill/forced
+            // logout (mobile has the same fix in its branch below). Stranded
+            // entries are invisible to every retry path — auto-retry only
+            // touches 'failed'/'pending' — so they'd spin forever.
+            for (const rec of this.recordings) {
+              if (rec.uploadStatus === 'uploading' && !_retryingIds.has(rec.id)) {
+                rec.uploadStatus = 'pending';
+                window.electronAPI.history
+                  .update(rec.id, { uploadStatus: 'pending' }, userId)
+                  .catch((e) => console.warn('Could not persist stale-uploading reset:', e));
+              }
+            }
           } catch (error) {
             console.error('Error loading recordings history:', error);
           } finally {

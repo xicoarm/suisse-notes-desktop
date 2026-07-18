@@ -800,6 +800,15 @@ async function processPendingUploads() {
     if (upload.retryCount >= 10) {
       log.warn(`Upload ${upload.recordId} exceeded max retries, removing from queue`);
       removeFromUploadQueue(upload.recordId);
+      // Surface the drop in history — a silent queue removal leaves the
+      // entry 'pending' forever with no retry button and no explanation.
+      const recordings = historyStore.get('recordings', []);
+      const recording = recordings.find(r => r.id === upload.recordId);
+      if (recording && recording.uploadStatus !== 'uploaded') {
+        recording.uploadStatus = 'failed';
+        recording.uploadError = 'Upload failed after 10 attempts';
+        historyStore.set('recordings', recordings);
+      }
       continue;
     }
 
@@ -1986,6 +1995,10 @@ ipcMain.handle('auth:refreshToken', async () => {
     log.warn('Token refresh failed:', error.response?.status, error.message);
     return {
       success: false,
+      // status lets the renderer distinguish a definitive auth rejection
+      // (401/403 → re-login required) from a transient network failure
+      // (no status → keep the session, retry later).
+      status: error.response?.status,
       error: error.response?.data?.error || error.message || 'Token refresh failed'
     };
   }
@@ -3942,9 +3955,13 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
 async function tryDirectUpload({ recordId, filePath, metadata, abortController, maxRetries }) {
   const authToken = await getAuthToken();
   if (!authToken) {
+    // status 401 so the renderer's token-refresh/re-login recovery path
+    // treats this exactly like a server-side auth rejection (it keys on
+    // result.status === 401; without it this fell through as a generic
+    // terminal failure and the recording was dropped from the retry queue).
     return {
       handled: true,
-      result: { success: false, error: 'Not authenticated. Please login first.', canRetry: false },
+      result: { success: false, error: 'Not authenticated. Please login first.', status: 401, canRetry: false },
     };
   }
 
@@ -4113,7 +4130,9 @@ async function uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, a
 
       const authToken = await getAuthToken();
       if (!authToken) {
-        return { success: false, error: 'Not authenticated. Please login first.', canRetry: false };
+        // status 401: route this through the renderer's auth-recovery path
+        // (refresh + retry / persistent queue) instead of a generic failure.
+        return { success: false, error: 'Not authenticated. Please login first.', status: 401, canRetry: false };
       }
 
       const fileStats = await fs.promises.stat(filePath);
@@ -4379,10 +4398,12 @@ const inFlightUploads = new Set();
 ipcMain.handle('upload:start', async (event, params) => {
   const { recordId, filePath, metadata } = params;
 
-  // Prevent duplicate concurrent uploads of the same recording
+  // Prevent duplicate concurrent uploads of the same recording.
+  // inProgress lets the renderer's retry paths hand off to the running upload
+  // instead of misfiling the rejection as a fresh failure.
   if (inFlightUploads.has(recordId)) {
     log.warn(`Upload already in progress for ${recordId}, rejecting duplicate`);
-    return { success: false, error: 'Upload already in progress', duplicate: true };
+    return { success: false, error: 'Upload already in progress', duplicate: true, inProgress: true };
   }
   inFlightUploads.add(recordId);
 
@@ -4411,8 +4432,12 @@ ipcMain.handle('upload:start', async (event, params) => {
     // Unlike a user cancel (routed through upload:cancel, which registers the
     // recordId in cancelledUploads), it must NOT be removed from the queue — we
     // want it to resume on next launch.
+    // 401 is NOT terminal for the recording: it becomes uploadable the moment
+    // the user re-logs-in (auth:saveToken triggers processPendingUploads).
+    // Dropping it here silently lost recordings made on an expired session.
+    const authFailure = result.status === 401;
     const abortedByQuit = result.cancelled && isQuittingWithUploads && !cancelledUploads.has(recordId);
-    if ((result.success || result.canRetry === false) && !abortedByQuit) {
+    if ((result.success || (result.canRetry === false && !authFailure)) && !abortedByQuit) {
       removeFromUploadQueue(recordId);
       if (!result.success) {
         log.warn(`[upload] Removing terminal-failure ${recordId} from queue (status=${result.status}, error=${result.error})`);

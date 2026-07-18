@@ -546,22 +546,24 @@ onMounted(() => {
   // Set up auth expired listener (Electron only) - Auto-logout on expiration
   if (isElectron() && window.electronAPI?.auth?.onExpired) {
     window.electronAPI.auth.onExpired(async (data) => {
-      console.warn('Auth expired, auto-logging out:', data);
+      console.warn('Auth expired:', data);
 
-      // Check if recording is in progress - warn but still need to logout
-      const hasActiveRecording = recordingStore.isRecording || recordingStore.isPaused;
-
-      if (hasActiveRecording) {
-        // Recording is active - show warning but recording is saved locally
+      // Never yank the session out from under an active capture/processing/
+      // upload: forceLogout resets the history store and nulls the user,
+      // which orphans the in-flight recording's bookkeeping. The capture
+      // keeps writing locally; auth is re-checked at upload time.
+      if (recordingStore.isBlocking) {
         $q.notify({
           type: 'warning',
-          message: 'Session expired. Your recording is saved locally and can be uploaded after logging in again.',
+          message: t('sessionExpiredDuringRecording'),
+          icon: 'lock_clock',
           timeout: 8000
         });
+        return;
       }
 
       // Auto-logout and redirect to login
-      await authStore.forceLogout(data.message || 'Your session has expired.');
+      await authStore.forceLogout(data.message || t('sessionExpiredLoginAgain'));
       router.push('/login');
     });
   }
@@ -573,6 +575,14 @@ onMounted(() => {
 // Handler for force logout - defined outside onMounted so it's accessible in onUnmounted
 const handleForceLogout = async (event) => {
   console.warn('Force logout triggered:', event.detail?.message);
+  // Make the logged-out transition unmissable — being silently dropped onto
+  // the login page reads as a glitch, not as "you must log in again".
+  $q.notify({
+    type: 'warning',
+    message: t('sessionExpiredLoginAgain'),
+    icon: 'lock',
+    timeout: 6000
+  });
   router.push('/login');
 };
 
