@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.5.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.1...v4.5.2) (2026-07-18)
+
+
+### Bug Fixes
+
+* **auth:** gate recording on a live session; never lose recordings to auth expiry ([e16bcef](https://github.com/xicoarm/suisse-notes-desktop/commit/e16bcefe03641c8f6326cabaf8b2fad23df2b80c))
+
 ### [4.5.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.0...v4.5.1) (2026-07-08)
 
 
