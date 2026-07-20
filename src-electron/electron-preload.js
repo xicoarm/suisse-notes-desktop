@@ -236,6 +236,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     stop: () => ipcRenderer.invoke('systemAudio:stop'),
     // Legacy (kept for backward compat)
     getSources: () => ipcRenderer.invoke('systemAudio:getSources'),
+    diag: (level, message) => ipcRenderer.invoke('systemAudio:diag', level, message),
     checkPermission: () => ipcRenderer.invoke('systemAudio:checkPermission'),
     getEnabled: () => ipcRenderer.invoke('config:getSystemAudioEnabled'),
     setEnabled: (enabled) => ipcRenderer.invoke('config:setSystemAudioEnabled', enabled)

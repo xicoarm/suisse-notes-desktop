@@ -2711,6 +2711,15 @@ async function mergeSystemAudio(micPath, recordId) {
   log.info(`Merging system audio (${fs.statSync(systemAudioPath).size} bytes) with mic recording`);
 
   try {
+    // Mix mic + system audio at FULL volume for each.
+    //
+    // The bundled ffmpeg is an old (2018) build whose `amix` filter lacks the
+    // `normalize=0` option, so a plain `amix=inputs=2` force-averages the inputs
+    // — each source ends up at 50% volume, which made captured system audio
+    // (meeting participants) sound faint or inaudible in the transcript. We
+    // pre-boost each input by 2.0 to cancel that averaging (net 1.0 = full
+    // volume, matching the Windows Web-Audio path which sums both at unity gain),
+    // then run an lookahead limiter so simultaneous loud passages can't clip.
     await ffmpegWithTimeout(
       ffmpeg()
         // System audio: raw PCM, 48kHz, mono, 16-bit signed little-endian
@@ -2718,8 +2727,13 @@ async function mergeSystemAudio(micPath, recordId) {
         .inputOptions(['-f', 's16le', '-ar', '48000', '-ac', '1'])
         // Mic recording
         .input(micPath)
-        // Mix both streams
-        .complexFilter('[0:a][1:a]amix=inputs=2:duration=longest:dropout_transition=0')
+        // Keep BOTH mic and system audio audible at full level, then limit.
+        .complexFilter([
+          '[0:a]volume=2.0[sys]',
+          '[1:a]volume=2.0[mic]',
+          '[sys][mic]amix=inputs=2:duration=longest:dropout_transition=0[mixed]',
+          '[mixed]alimiter=limit=0.95[out]'
+        ], ['out'])
         .output(mergedPath),
       FFMPEG_TIMEOUT_MS,
       'System audio merge'
@@ -5241,18 +5255,34 @@ async function stopSystemAudio() {
   }
 }
 
-// Get available desktop capturer sources (used on Windows for system audio)
+// Get available desktop capturer sources (used on Windows for system audio).
+// Only SCREEN sources carry loopback (system) audio on Windows — window sources
+// yield a video-only capture with no audio track — so we fetch screens only and
+// log what we found. Silent "no system audio" reports were previously impossible
+// to diagnose because this path never logged anything to main.log.
 ipcMain.handle('systemAudio:getSources', async () => {
   try {
     const sources = await desktopCapturer.getSources({
-      types: ['window', 'screen'],
+      types: ['screen'],
       fetchWindowIcons: false
     });
+    log.info(`System audio: desktopCapturer returned ${sources.length} screen source(s): ${sources.map(s => s.id).join(', ') || '(none)'}`);
     return sources.map(s => ({ id: s.id, name: s.name }));
   } catch (error) {
-    log.error('Error getting desktop sources:', error);
+    log.error('Error getting desktop sources for system audio:', error);
     return [];
   }
+});
+
+// Renderer-side system-audio diagnostics bridge. The Windows capture path runs
+// entirely in the renderer (getUserMedia loopback), so its failures never reached
+// main.log — making "system audio doesn't work" undiagnosable. Route them here.
+ipcMain.handle('systemAudio:diag', (event, level, message) => {
+  const line = `System audio (renderer): ${message}`;
+  if (level === 'error') log.error(line);
+  else if (level === 'warn') log.warn(line);
+  else log.info(line);
+  return { success: true };
 });
 ipcMain.handle('systemAudio:checkPermission', () => {
   if (isSystemAudioSupported()) return 'granted';

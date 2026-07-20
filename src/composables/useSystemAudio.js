@@ -89,52 +89,83 @@ export function useSystemAudio() {
     }
   };
 
-  // Windows: capture system audio via desktopCapturer + getUserMedia
+  // Report a system-audio diagnostic to the main process so it lands in
+  // main.log. The Windows capture path runs entirely in the renderer, so its
+  // failures were previously invisible — indistinguishable from "feature broken."
+  const diag = (level, message) => {
+    try { window.electronAPI?.systemAudio?.diag?.(level, message); } catch { /* best effort */ }
+  };
+
+  // Windows: capture system audio via desktopCapturer + getUserMedia.
+  //
+  // Loopback (system) audio on Windows only comes from a SCREEN source — a window
+  // source produces a video-only capture with no audio track. We therefore refuse
+  // to fall back to a non-screen source (the old `|| sources[0]` fallback would
+  // silently attach a soundless capture). The 1x1 video constraint also throws
+  // OverconstrainedError on some GPU/driver stacks and takes the whole request
+  // down with it, so we retry audio-only if the combined request fails.
   const startDesktopCapture = async () => {
     try {
       const sources = await window.electronAPI.systemAudio.getSources();
       if (!sources || sources.length === 0) {
-        throw new Error('No audio sources available');
+        diag('error', 'no screen sources returned by desktopCapturer — cannot capture loopback audio');
+        throw new Error('No screen source available for system audio');
       }
 
-      // Find a screen source (captures all system audio)
+      // Only a screen source carries loopback audio on Windows.
       const screenSource = sources.find(s =>
         s.id.startsWith('screen:') ||
         s.name === 'Entire Screen' ||
-        s.name.includes('Screen')
-      ) || sources[0];
+        /screen/i.test(s.name)
+      );
+      if (!screenSource) {
+        diag('error', `no screen-type source among ${sources.length} source(s): ${sources.map(s => s.id).join(', ')}`);
+        throw new Error('No screen source available for system audio');
+      }
 
-      // Request system audio via getUserMedia with chromeMediaSource
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: screenSource.id
+      const audioMandatory = {
+        chromeMediaSource: 'desktop',
+        chromeMediaSourceId: screenSource.id
+      };
+
+      let stream = null;
+      // Primary: audio + tiny video (Chromium historically required a video
+      // track alongside desktop audio). Fallback: audio-only, in case the video
+      // constraint is what's being rejected.
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { mandatory: audioMandatory },
+          video: {
+            mandatory: {
+              ...audioMandatory,
+              maxWidth: 1,
+              maxHeight: 1,
+              maxFrameRate: 1
+            }
           }
-        },
-        video: {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: screenSource.id,
-            maxWidth: 1,
-            maxHeight: 1,
-            maxFrameRate: 1
-          }
-        }
-      });
+        });
+      } catch (combinedErr) {
+        diag('warn', `combined audio+video loopback request failed (${combinedErr.name}: ${combinedErr.message}); retrying audio-only`);
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { mandatory: audioMandatory }
+        });
+      }
 
       // Stop video tracks immediately — we only need audio
       stream.getVideoTracks().forEach(track => track.stop());
 
       if (stream.getAudioTracks().length === 0) {
+        diag('error', `capture succeeded but produced no audio track (source ${screenSource.id}) — check the default playback device supports loopback`);
         throw new Error('No audio tracks in system audio stream');
       }
 
       systemAudioStream.value = new MediaStream(stream.getAudioTracks());
+      diag('info', `loopback capture started (source ${screenSource.id}, ${stream.getAudioTracks().length} track(s))`);
       console.log('System audio captured via desktopCapturer');
       return systemAudioStream.value;
     } catch (e) {
       console.error('Error capturing system audio via desktopCapturer:', e);
+      diag('error', `desktopCapturer capture failed (${e.name || 'Error'}: ${e.message})`);
       if (e.name === 'NotAllowedError') {
         permissionStatus.value = 'denied';
       }
