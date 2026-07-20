@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.5.3](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.2...v4.5.3) (2026-07-20)
+
+
+### Bug Fixes
+
+* **desktop-audio:** capture mic + system audio reliably and at full volume ([bba74d4](https://github.com/xicoarm/suisse-notes-desktop/commit/bba74d4dbe0d163f3487ad452e15ff1245dfabef))
+
 ### [4.5.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.1...v4.5.2) (2026-07-18)
 
 
