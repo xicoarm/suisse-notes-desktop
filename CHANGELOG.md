@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.5.4](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.3...v4.5.4) (2026-07-22)
+
+
+### Bug Fixes
+
+* **network:** honor OS proxy settings for main-process HTTPS ([ff79341](https://github.com/xicoarm/suisse-notes-desktop/commit/ff7934149a01695caff4c81cf91b16fd52d6a8b0))
+* **system-audio:** survive Bluetooth A2DP/HFP profile flips on Windows ([17632fd](https://github.com/xicoarm/suisse-notes-desktop/commit/17632fd95921b328ad70d0eced57086ad1a11f1b))
+
 ### [4.5.3](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.2...v4.5.3) (2026-07-20)
 
 
