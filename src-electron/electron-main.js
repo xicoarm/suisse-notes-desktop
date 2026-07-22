@@ -17,6 +17,12 @@ const { uploadViaPresignedSas, abortDirectUpload } = require('./upload-direct');
 // roots are honoured. See os-ca.js for the full rationale.
 require('./os-ca').installOsTrustStore();
 
+// Route main-process axios traffic through the OS-configured proxy. Node
+// ignores Windows/macOS proxy settings; on proxy-enforcing networks direct
+// connects are dropped and uploads die with ETIMEDOUT while the renderer
+// works. See os-proxy.js for the full rationale.
+require('./os-proxy').installSystemProxy();
+
 // === Log Rotation Configuration ===
 // Prevent infinite log file growth
 log.transports.file.maxSize = 5 * 1024 * 1024; // 5MB max per log file
