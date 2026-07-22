@@ -1664,28 +1664,6 @@ async function startRecordingInternal(options) {
       throw new Error('Microphone access is not available.');
     }
 
-    // Start system audio capture:
-    // - macOS: AudioTee writes PCM to file, merged via FFmpeg in combineChunks (returns true)
-    // - Windows: desktopCapturer returns a MediaStream for real-time mixing
-    let audioTeeActive = false;
-    if (systemAudioEnabled && captureSystemAudio) {
-      try {
-        const result = await captureSystemAudio(recordingStore.recordId);
-        if (!result) {
-          emit('systemAudioError', 'System audio capture could not start');
-        } else if (result instanceof MediaStream) {
-          // Windows: desktopCapturer returns a stream to mix in renderer
-          sysStream = result;
-        } else {
-          // macOS: result is true, AudioTee handles file-based capture
-          audioTeeActive = true;
-        }
-      } catch (e) {
-        console.warn('Could not start system audio capture:', e);
-        emit('systemAudioError', e.message || 'System audio capture failed');
-      }
-    }
-
     // Capture microphone with a strict -> relaxed -> generic fallback ladder.
     const strictConstraints = {
       echoCancellation: true,
@@ -1719,6 +1697,34 @@ async function startRecordingInternal(options) {
       } catch (candidateError) {
         micCaptureError = candidateError;
         console.warn('Microphone capture attempt failed:', candidateError.name, candidateError.message);
+      }
+    }
+
+    // Start system audio capture — AFTER the mic is acquired, never before.
+    // Opening a Bluetooth headset's microphone forces the headset from A2DP
+    // into HFP, which suspends the A2DP output endpoint and re-routes all
+    // system audio to the HFP endpoint. Windows loopback capture binds to
+    // the default output device ONCE at start; capturing before the mic
+    // meant our own mic acquisition flipped the profile out from under the
+    // loopback, which then recorded pure silence for the whole session.
+    // - macOS: AudioTee writes PCM to file, merged via FFmpeg in combineChunks (returns true)
+    // - Windows: desktopCapturer returns a MediaStream for real-time mixing
+    let audioTeeActive = false;
+    if (systemAudioEnabled && captureSystemAudio) {
+      try {
+        const result = await captureSystemAudio(recordingStore.recordId);
+        if (!result) {
+          emit('systemAudioError', 'System audio capture could not start');
+        } else if (result instanceof MediaStream) {
+          // Windows: desktopCapturer returns a stream to mix in renderer
+          sysStream = result;
+        } else {
+          // macOS: result is true, AudioTee handles file-based capture
+          audioTeeActive = true;
+        }
+      } catch (e) {
+        console.warn('Could not start system audio capture:', e);
+        emit('systemAudioError', e.message || 'System audio capture failed');
       }
     }
 

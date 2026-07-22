@@ -37,6 +37,10 @@ class MockAudioContext {
     this.state = 'running';
     return Promise.resolve();
   }
+
+  addEventListener() {}
+
+  removeEventListener() {}
 }
 
 class MockMediaRecorder {
@@ -79,6 +83,7 @@ function createMockRecordingStore() {
   return {
     startRecording: vi.fn().mockResolvedValue({ success: true }),
     stopRecording: vi.fn().mockResolvedValue({ success: true, filePath: 'fake.webm' }),
+    reset: vi.fn(),
     saveChunk: vi.fn().mockResolvedValue({ success: true }),
     setError: vi.fn(),
     updateDuration: vi.fn(),
@@ -104,11 +109,20 @@ function createTrack(settings = {}) {
   };
 }
 
+// Must be a real class instance registered as global.MediaStream: startRecording
+// distinguishes the Windows loopback path from macOS AudioTee via
+// `result instanceof MediaStream`, and jsdom does not provide MediaStream.
+class MockMediaStream {
+  constructor(tracks = []) {
+    this._tracks = tracks;
+  }
+  getAudioTracks() { return this._tracks; }
+  getVideoTracks() { return []; }
+  getTracks() { return this._tracks; }
+}
+
 function createStream(track) {
-  return {
-    getAudioTracks: () => [track],
-    getTracks: () => [track]
-  };
+  return new MockMediaStream([track]);
 }
 
 describe('recordingService microphone health', () => {
@@ -116,6 +130,7 @@ describe('recordingService microphone health', () => {
     vi.clearAllMocks();
 
     global.MediaRecorder = MockMediaRecorder;
+    global.MediaStream = MockMediaStream;
     global.window.AudioContext = MockAudioContext;
     global.window.webkitAudioContext = MockAudioContext;
 
