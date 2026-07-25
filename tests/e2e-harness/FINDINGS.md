@@ -1,5 +1,42 @@
 # Desktop App — Test Findings Log
 
+> ## Executive summary (overnight run, 2026-07-25 → 26)
+>
+> Built a realistic end-to-end test harness (real app driven over CDP, synthetic
+> meeting audio fed as the mic, forensic audio verification, adversarial mock
+> backend, **and** a live run against the real production backend). Then ran the
+> full scenario suite as a bug-hunt.
+>
+> **Real app defects found (all fixed):**
+> - **F-001 (P1):** dev/staging renderer silently called **production** APIs for
+>   minutes/history/templates (preload never exposed `config.getApiUrl`). Fixed.
+> - **F-002 (P2):** `getApiUrlSync` ignored the API override → sync/async callers
+>   could hit different backends. Fixed.
+> - (Plus the earlier reliability-audit fixes — safety net, ELECTRON-27 storm,
+>   macOS merge, AudioTee lifecycle, BT rebind, update guard — all on the same
+>   branch; see the cross-platform table below for Win/Mac/mobile exposure.)
+>
+> **Validated working (real behavior, forensically confirmed):**
+> - V-002 **live pipeline**: real app → Azure upload → backend Meeting →
+>   transcription **COMPLETED**, 8 transcript segments with correct text.
+> - V-001 **MSIG dead-mic detection** (the Angela fix) fires correctly on a
+>   realistic dead-device recording, no false alarm on healthy speech.
+> - V-003 **ELECTRON-27 storm fixed**: terminal 400 tried once, not forever.
+> - V-004 **upload recovery**: transient 500, expired-token, and socket-cut all
+>   recover without losing the file.
+> - V-005 **crash recovery**: renderer crash loses only the in-flight ~3 s chunk.
+> - V-006 **auto-split**: 2 boundaries crossed, zero audio lost (the path that
+>   has never fired in production).
+> - V-007 **5h15m endurance** (s7): _running detached at report time — result
+>   appended when it lands._
+>
+> **Top open gap:** none of the macOS-specific paths (AudioTee, FFmpeg merge,
+> sleep/resume) nor a real Bluetooth speakerphone have been exercised on real
+> hardware — needs the user's Mac + the speakerphones. See the ⚠️ at the end of
+> the cross-platform table.
+
+---
+
 The purpose of the E2E harness is **finding and documenting real defects in the
 Suisse Notes desktop app** — lost audio, failed uploads, silent data loss,
 desync, mislabeled state. This file is the running record.
@@ -201,5 +238,19 @@ speakerphone end-to-end (bug J / the Angela case) on both platforms.
   recovery itself completed correctly (verified above via main.log + the
   recovered file). Fix later: reuse a single app instance / add a settle delay
   before relaunch. Does not affect any app-behavior conclusion.
+
+## V-006 — Auto-split boundary integrity VALIDATED (the never-fired-in-prod path)
+- **Type:** validation (positive), scenario s3-autosplit (compressed threshold)
+- 8-minute recording with the split threshold compressed to 180 s, crossing
+  **two** auto-split boundaries. Final combined file: duration 470 s, **`holes=0`**
+  — no audio lost across either split, multi-session combine intact.
+- Significance: the 4h55m auto-split path has never fired in production (longest
+  real meeting was 40 s under the threshold), so this is the first positive
+  evidence the split + second/third-session + combine chain works. The real
+  full-scale + endurance version is s7 (5h15m).
+- Cross-platform: auto-split lives in `recordingService.js` (shared) with a
+  platform branch — `resetChunkIndex` only on Electron (mobile keeps a
+  monotonic index; documented in code). The split LOGIC is shared; the combine
+  differs (Electron main vs mobile native muxer).
 
 _Findings below are appended as scenarios run._
