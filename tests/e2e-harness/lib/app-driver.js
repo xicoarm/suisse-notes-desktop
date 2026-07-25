@@ -96,14 +96,27 @@ class AppDriver {
    * frames mid-wait. Re-resolve the page and re-try until either the login
    * form or the record page is present and SURVIVES a settle delay.
    */
-  async waitForStablePage(timeoutMs = 180_000) {
+  async waitForStablePage(timeoutMs = 300_000) {
     const deadline = Date.now() + timeoutMs;
     let lastErr = null;
+    const seenUrls = new Set();
     while (Date.now() < deadline) {
       try {
         const pages = await this.browser.pages();
-        this.page = pages.find(p => !p.url().startsWith('devtools://'));
+        this.page = pages.find(p => !p.url().startsWith('devtools://') && p.url() !== 'about:blank')
+          || pages.find(p => !p.url().startsWith('devtools://'));
         if (!this.page) { await sleep(1500); continue; }
+        seenUrls.add(this.page.url());
+        // Fresh profiles land on the WELCOME page ("Anmelden" / "LOSLEGEN")
+        // before any login form exists — click through it like a user.
+        await this.page.evaluate(() => {
+          const els = [...document.querySelectorAll('button, a, .q-btn')];
+          const hit = els.find(el => /anmelden|log\s?in|sign\s?in/i.test(el.textContent || ''))
+            || els.find(el => /loslegen|get started/i.test(el.textContent || ''));
+          if (hit && !document.querySelector('input[type=email]') && !document.querySelector('[data-test=record-start]')) {
+            hit.click();
+          }
+        }).catch(() => { /* page mid-navigation */ });
         await this.page.waitForSelector('input[type=email], [data-test=record-start]', { timeout: 20_000 });
         await sleep(2500); // survive an imminent hot-reload
         await this.page.waitForSelector('input[type=email], [data-test=record-start]', { timeout: 10_000 });
@@ -113,7 +126,9 @@ class AppDriver {
         await sleep(1500);
       }
     }
-    throw new Error(`App page never stabilized: ${lastErr?.message}\nLast output:\n${this.log.slice(-20).join('')}`);
+    // Post-mortem aids: page URL history + a screenshot of whatever is shown.
+    try { await this.screenshot('stable-page-timeout'); } catch (e) { /* page may be dead */ }
+    throw new Error(`App page never stabilized (urls seen: ${[...seenUrls].join(', ') || 'none'}): ${lastErr?.message}\nLast output:\n${this.log.slice(-20).join('')}`);
   }
 
   /** Realistic login through the actual form (no-op if already logged in). */
@@ -136,16 +151,100 @@ class AppDriver {
     }
   }
 
-  async startRecording() {
-    await this.page.waitForSelector('[data-test=record-start]', { timeout: 30_000 });
-    await this.page.click('[data-test=record-start]');
-    await this.page.waitForSelector('[data-test=record-stop]', { timeout: 60_000 });
+  /**
+   * Force the minutes store to unlimited directly in the page. Belt-and-
+   * suspenders over the mock's unlimited response: guarantees the credit gate
+   * (the "Kein Guthaben mehr" dialog) can never block a test regardless of API
+   * routing / CORS / caching. Returns what it found, for diagnostics.
+   */
+  async seedUnlimitedMinutes() {
+    return this.page.evaluate(() => {
+      const pinia = window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia;
+      const m = pinia?.state?.value?.minutes;
+      if (!m) return { seeded: false, reason: 'no minutes store' };
+      const before = { remaining: m.remaining, unlimited: m.unlimited };
+      m.unlimited = true;
+      m.remaining = -1;
+      m.total = -1;
+      m.lastFetchedAt = Date.now(); // suppress the pre-start syncWithServer refetch
+      return { seeded: true, before };
+    });
   }
 
-  async stopRecording() {
-    await this.page.click('[data-test=record-stop]');
-    await this.page.waitForSelector('[data-test=record-stop-confirm]', { timeout: 15_000 });
-    await this.page.click('[data-test=record-stop-confirm]');
+  async clickByTest(sel, timeout = 15_000) {
+    await this.page.waitForSelector(sel, { timeout });
+    await this.page.$eval(sel, (el) => {
+      el.scrollIntoView({ block: 'center' });
+      el.click();
+    });
+  }
+
+  /**
+   * Resilient start: the path from "idle" to "recording" has several racy
+   * gates (credit re-sync on click, storage-preference dialog on first run,
+   * button ripple/tooltip overlaps). Instead of a fixed click sequence, poll:
+   * every second, look at the page and take whatever action moves us forward —
+   * dismiss a credit dialog + re-seed, confirm the storage dialog, click
+   * record if idle — until the recording phase is reached.
+   */
+  async startRecording(timeoutMs = 90_000) {
+    await this.page.waitForSelector('[data-test=record-start], [data-test=record-stop]', { timeout: 60_000 });
+    const deadline = Date.now() + timeoutMs;
+    let lastAction = '';
+    while (Date.now() < deadline) {
+      const phase = await this.getPhase();
+      if (phase === 'recording' || await this.page.$('[data-test=record-stop]')) return;
+
+      const view = await this.page.evaluate(() => {
+        const q = (sel) => document.querySelector(sel);
+        const dialogText = [...document.querySelectorAll('.q-dialog')].map(d => d.textContent || '').join(' ');
+        return {
+          hasStart: !!q('[data-test=record-start]'),
+          hasStorage: !!q('[data-test=storage-dialog-confirm]'),
+          hasCredit: /Guthaben|no credit|minutes remaining|Kein Guthaben/i.test(dialogText),
+        };
+      });
+
+      if (view.hasStorage) {
+        await this.clickByTest('[data-test=storage-dialog-confirm]', 5_000).catch(() => {});
+        lastAction = 'storage-confirm';
+      } else if (view.hasCredit) {
+        // Re-seed unlimited and dismiss the credit dialog, then retry start.
+        await this.seedUnlimitedMinutes();
+        await this.page.evaluate(() => {
+          const btn = [...document.querySelectorAll('.q-dialog .q-btn')]
+            .find(b => /später|later|abbrechen|cancel|schließen|close|vielleicht/i.test(b.textContent || ''));
+          if (btn) btn.click();
+        });
+        lastAction = 'credit-dismiss+reseed';
+      } else if (view.hasStart) {
+        await this.seedUnlimitedMinutes();
+        await this.clickByTest('[data-test=record-start]', 5_000).catch(() => {});
+        lastAction = 'click-start';
+      }
+      await sleep(1000);
+    }
+    await this.screenshot('start-timeout');
+    throw new Error(`Could not reach recording state within ${timeoutMs}ms (last action: ${lastAction}, phase: ${await this.getPhase()})`);
+  }
+
+  async stopRecording(timeoutMs = 30_000) {
+    // In-page clicks bypass puppeteer hit-testing (a round q-btn reports
+    // "not clickable" when a tooltip/ripple overlaps its center). Poll until
+    // the recording phase actually ends — a single click can be swallowed if
+    // the confirm bottom-sheet is mid-animation.
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const phase = await this.getPhase();
+      if (phase && phase !== 'recording' && phase !== 'paused') return;
+      if (await this.page.$('[data-test=record-stop-confirm]')) {
+        await this.clickByTest('[data-test=record-stop-confirm]', 5_000).catch(() => {});
+      } else if (await this.page.$('[data-test=record-stop]')) {
+        await this.clickByTest('[data-test=record-stop]', 5_000).catch(() => {});
+      }
+      await sleep(1000);
+    }
+    throw new Error(`Could not stop recording within ${timeoutMs}ms (phase: ${await this.getPhase()})`);
   }
 
   /** Wait until the recording store reports a phase (polled via the DOM-less

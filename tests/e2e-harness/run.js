@@ -1,21 +1,21 @@
-/**
- * E2E harness runner — real app, real audio, scripted adversity.
+﻿/**
+ * E2E harness runner - real app, real audio, scripted adversity.
  *
  *   node tests/e2e-harness/run.js <scenario> [--keep]
  *
  * Scenarios:
  *   selftest          Generate ground truth + verify the verifier (no app)
- *   s1-baseline       4-min realistic meeting → record → stop → upload → verify
- *   s2-angela-bt      Angela replay: speech → digital zeros → -30dB speech →
+ *   s1-baseline       4-min realistic meeting -> record -> stop -> upload -> verify
+ *   s2-angela-bt      Angela replay: speech -> digital zeros -> -30dB speech ->
  *                     speech. Asserts the MSIG health UI reacts (badge +
  *                     precise message) and the output file matches ground truth
  *   s3-autosplit      Compressed long-meeting: auto-split every 3 min over an
- *                     8-min meeting → split logic + session combining
+ *                     8-min meeting -> split logic + session combining
  *   s4-storm          Terminal-400 backend: upload attempts must be BOUNDED
  *                     and stop (ELECTRON-27 regression)
- *   s5-resilience     Transient 500 / 401-expiry / socket-cut — upload must
+ *   s5-resilience     Transient 500 / 401-expiry / socket-cut - upload must
  *                     survive all three and never lose the file
- *   s6-crash          Renderer crash mid-recording → relaunch → recovery
+ *   s6-crash          Renderer crash mid-recording -> relaunch -> recovery
  *
  * Everything runs in an isolated userData profile against a local mock
  * backend. No production system is touched.
@@ -31,19 +31,54 @@ const { AppDriver, sleep } = require('./lib/app-driver');
 
 const KEEP = process.argv.includes('--keep');
 
+// Problem strings that indicate a PRODUCT defect (not a harness/timeout issue).
+// When a verdict raises one of these, it is a real app-bug candidate and gets
+// persisted to work/app-defects.json for promotion into FINDINGS.md.
+const DEFECT_SIGNATURES = [
+  /AUDIO GAP/i, /duplicat/i, /TRUNCAT/i, /TOO LONG/i, /SEGMENT LEVEL/i,
+  /RETRY STORM/i, /data must be preserved/i, /Local file missing/i,
+  /Recovery produced no/i, /never left "Healthy"/i, /FALSE ALARM/i,
+  /Expected exactly 1 upload/i, /did not complete/i, /No output file/i,
+];
+
+function isDefect(problem) {
+  return DEFECT_SIGNATURES.some(re => re.test(problem));
+}
+
+function recordDefects(name, result) {
+  const defects = (result.problems || []).filter(isDefect);
+  if (!defects.length) return;
+  const file = path.join(WORK_DIR, 'app-defects.json');
+  let all = [];
+  try { all = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { /* first defect */ }
+  for (const d of defects) {
+    all.push({
+      scenario: name,
+      problem: d,
+      notes: result.notes || [],
+      evidence: `work/result_${name}.json`,
+      capturedAt: new Date().toISOString(),
+    });
+  }
+  fs.writeFileSync(file, JSON.stringify(all, null, 2));
+  console.log(`\n  *** ${defects.length} APP-DEFECT candidate(s) recorded to work/app-defects.json ***`);
+  console.log('  *** Review and promote to tests/e2e-harness/FINDINGS.md ***');
+}
+
 function report(name, result) {
   const line = '='.repeat(70);
   console.log(`\n${line}\n${result.pass ? 'PASS' : 'FAIL'}  ${name}\n${line}`);
   for (const n of result.notes || []) console.log(`  note: ${n}`);
-  for (const p of result.problems || []) console.log(`  PROBLEM: ${p}`);
+  for (const p of result.problems || []) console.log(`  ${isDefect(p) ? 'APP-DEFECT' : 'PROBLEM'}: ${p}`);
   const outPath = path.join(WORK_DIR, `result_${name}.json`);
   fs.mkdirSync(WORK_DIR, { recursive: true });
   fs.writeFileSync(outPath, JSON.stringify(result, null, 2));
+  recordDefects(name, result);
   console.log(`  full result: ${outPath}`);
   return result.pass;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function selftest() {
   // Ground truth must verify against itself: every pulse found, levels right.
@@ -58,7 +93,7 @@ async function selftest() {
 }
 
 async function withApp(name, scenario, opts, fn) {
-  const mock = await startMockBackend({ port: opts.mockPort || 3999 });
+  const mock = await startMockBackend({ port: opts.mockPort || 3000 });
   const app = new AppDriver({
     name,
     apiUrl: mock.url,
@@ -98,7 +133,7 @@ async function s1Baseline() {
 }
 
 async function s2AngelaBt() {
-  // The Angela replay: healthy → dead device (zeros) → whisper-quiet → healthy.
+  // The Angela replay: healthy -> dead device (zeros) -> whisper-quiet -> healthy.
   const sc = buildScenario('s2', [
     { type: 'speech', seconds: 120 },
     { type: 'zeros', seconds: 90 },
@@ -128,7 +163,7 @@ async function s2AngelaBt() {
     //    the zero-signal wording within ~35s of the zeros starting (15s
     //    detection + re-acquire + verification, plus sampling slack).
     const zeroWarn = healthLog.find(h => h.t >= 120 && h.t <= 160 &&
-      h.badge && !/healthy|in ordnung|checking|wird geprüft/i.test(h.badge));
+      h.badge && !/healthy|in ordnung|checking|wird gepr/i.test(h.badge));
     if (!zeroWarn) {
       problems.push('Health UI never left "Healthy" during the dead-device (zeros) window');
     } else {
@@ -139,12 +174,12 @@ async function s2AngelaBt() {
       h.badge && !/healthy|in ordnung/i.test(h.badge));
     if (falseAlarm) problems.push(`FALSE ALARM at t=${falseAlarm.t}s during healthy speech: [${falseAlarm.badge}]`);
     // 3. The quiet window (210-330s) should surface the low-level hint
-    //    (degraded badge) at some point — informational, so only WARN if absent.
+    //    (degraded badge) at some point - informational, so only WARN if absent.
     const lowLevel = healthLog.find(h => h.t >= 260 && h.t <= 330 &&
       h.badge && /unstable|instabil/i.test(h.badge));
     notes.push(lowLevel
       ? `low-level hint seen at t=${lowLevel.t}s`
-      : 'low-level hint NOT observed in quiet window (tolerated — conservative detector)');
+      : 'low-level hint NOT observed in quiet window (tolerated - conservative detector)');
 
     // 4. File forensics: everything the fake mic delivered must be in the file.
     const out = app.findOutputFile();
@@ -173,7 +208,7 @@ async function s3Autosplit() {
 
     const out = app.findOutputFile();
     if (!out) return { pass: false, problems: ['No output file produced after auto-split session'] };
-    // The final combined file must contain the ENTIRE 8 minutes — two split
+    // The final combined file must contain the ENTIRE 8 minutes - two split
     // boundaries crossed with zero audio loss.
     const v = verdict(out, sc, { tailLossMaxS: 10 });
     v.notes.push('crossed 2 auto-split boundaries (180s compressed threshold)');
@@ -200,9 +235,9 @@ async function s4Storm() {
     // attempt once more via its own path. Anything > 4 attempts = a loop.
     if (uploads.length === 0) problems.push('Upload was never attempted');
     if (uploads.length > 4) problems.push(`RETRY STORM: ${uploads.length} attempts against a terminal 400 (must stop after classification)`);
-    // The file must still exist locally (terminal failure ≠ delete audio).
+    // The file must still exist locally (terminal failure must NOT delete audio).
     const out = app.findOutputFile();
-    if (!out) problems.push('Local file missing after terminal upload failure — data must be preserved');
+    if (!out) problems.push('Local file missing after terminal upload failure - data must be preserved');
     return { pass: problems.length === 0, problems, notes };
   });
 }
@@ -217,7 +252,7 @@ async function s5Resilience() {
   const problems = [];
   const notes = [];
   for (const [mode, label] of runs) {
-    const ok = await withApp(`s5-${mode}`, sc, { mockPort: 3999, cdpPort: 9339 }, async (app, mock) => {
+    const ok = await withApp(`s5-${mode}`, sc, { mockPort: 3000, cdpPort: 9339 }, async (app, mock) => {
       mock.setMode(mode);
       await app.startRecording();
       await sleep(55_000);
@@ -230,7 +265,7 @@ async function s5Resilience() {
       const uploads = mock.state.requests.filter(r => r.url === '/api/desktop/upload');
       return {
         pass: uploads.length >= 2,
-        problems: uploads.length >= 2 ? [] : [`${label}: expected retry (≥2 attempts), saw ${uploads.length}`],
+        problems: uploads.length >= 2 ? [] : [`${label}: expected retry (â‰¥2 attempts), saw ${uploads.length}`],
         notes: [`${label}: ${uploads.length} attempts, final success`],
       };
     });
@@ -242,7 +277,7 @@ async function s5Resilience() {
 
 async function s6Crash() {
   const sc = buildScenario('s6', [{ type: 'speech', seconds: 180 }]);
-  const mock = await startMockBackend({ port: 3999 });
+  const mock = await startMockBackend({ port: 3000 });
   const app = new AppDriver({ name: 's6-crash', apiUrl: mock.url, fakeAudioWav: sc.wavPath, cdpPort: 9339 });
   try {
     await app.launch();
@@ -253,7 +288,7 @@ async function s6Crash() {
     await sleep(5_000);
     await app.close({ keepProfile: true });
 
-    // Relaunch on the SAME profile — recovery must find and combine the chunks.
+    // Relaunch on the SAME profile - recovery must find and combine the chunks.
     const app2 = new AppDriver({ name: 's6-crash', apiUrl: mock.url, cdpPort: 9341, userDataDir: app.userDataDir });
     await app2.launch({ freshProfile: false });
     await app2.login();
@@ -279,7 +314,7 @@ async function s6Crash() {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const SCENARIOS = {
   selftest,
@@ -305,3 +340,4 @@ const SCENARIOS = {
     process.exit(1);
   }
 })();
+

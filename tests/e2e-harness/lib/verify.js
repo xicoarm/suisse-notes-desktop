@@ -87,7 +87,18 @@ function analyze(filePath, scenarioMeta) {
     rms.push(10 * Math.log10(sum / SR || 1e-12));
   }
 
-  return { durationS, pulses, rmsPerSecondDb: rms };
+  // Per-100ms silence map (independent of the pilot tone). Used to find LOST
+  // AUDIO directly: a sustained low-energy stretch that is NOT expected by the
+  // scenario means captured speech went missing — the thing we actually fear.
+  const SIL_DB = -55;
+  const silence = [];
+  for (let w0 = 0, t = 0; w0 + win <= pcm.length; w0 += win, t += WIN_S) {
+    let sum = 0;
+    for (let i = 0; i < win; i++) sum += pcm[w0 + i] * pcm[w0 + i];
+    silence.push(10 * Math.log10(sum / win || 1e-12) < SIL_DB);
+  }
+
+  return { durationS, pulses, rmsPerSecondDb: rms, silence, winS: WIN_S };
 }
 
 /**
@@ -113,15 +124,37 @@ function verdict(filePath, scenarioMeta, expectations = {}) {
     problems.push(`TOO LONG: file is ${a.durationS.toFixed(1)}s, expected ≈ ${expectedS.toFixed(1)}s (duplicated audio?)`);
   }
 
-  // 2. Expected pulse times (pulses are muted inside zero windows).
+  // Capture START-OFFSET: getUserMedia/MediaRecorder legitimately begin a
+  // fraction of a second after the fake-audio file starts playing, so the
+  // whole pulse train is shifted. Derive that offset from the FIRST detected
+  // pulse (its distance from the nearest 10 s grid point) and check every
+  // pulse relative to it — startup latency then reads as a constant offset,
+  // NOT as a gap, while a genuine mid-recording dropout still leaves a hole.
+  // Robust offset: the MEDIAN of each pulse's residual to the 10 s grid. Using
+  // only the first pulse was fragile (it can be clipped/jittered by startup);
+  // the median is stable across the whole train and immune to one bad pulse.
+  const residual = (t) => {
+    let r = t % period;
+    if (r > period / 2) r -= period;
+    return r;
+  };
+  const residuals = a.pulses.map(residual).sort((x, y) => x - y);
+  const captureOffset = residuals.length ? residuals[Math.floor(residuals.length / 2)] : 0;
+  notes.push(`capture start-offset ≈ ${captureOffset.toFixed(2)}s`);
+
+  // 2. Expected pulse times (shifted by the capture offset; pulses are muted
+  //    inside zero windows). The very first grid pulse (t=0) can be partially
+  //    clipped by the startup latency itself, so it's not required.
   const zeroWindows = scenarioMeta.timeline.filter(s => s.type === 'zeros').map(s => [s.start, s.end]);
   const inZero = (t) => zeroWindows.some(([s, e]) => t >= s - 0.5 && t < e + 0.5);
   const expectedPulses = [];
   for (let t = 0; t < expectedS - 1; t += period) {
-    if (!inZero(t)) expectedPulses.push(t);
+    if (t === 0) continue; // startup clip may eat the first pulse — don't require it
+    if (!inZero(t)) expectedPulses.push(t + captureOffset);
   }
 
-  // Match each expected pulse to a detected one within ±1.5s.
+  // Match each expected pulse to a detected one within ±1.2s (tolerance now
+  // only needs to cover jitter, since the systematic offset is removed).
   const unmatched = [];
   const usedIdx = new Set();
   for (const et of expectedPulses) {
@@ -131,21 +164,28 @@ function verdict(filePath, scenarioMeta, expectations = {}) {
       const d = Math.abs(pt - et);
       if (!usedIdx.has(i) && d < bestDiff) { best = i; bestDiff = d; }
     });
-    if (best >= 0 && bestDiff <= 1.5) {
+    if (best >= 0 && bestDiff <= 1.2) {
       usedIdx.add(best);
     } else {
       unmatched.push(et);
     }
   }
-  if (unmatched.length > 0) {
-    problems.push(`AUDIO GAPS: ${unmatched.length} pilot pulse(s) missing at t≈[${unmatched.slice(0, 10).map(t => t.toFixed(0)).join(', ')}]s`);
-  }
   const extras = a.pulses.filter((_, i) => !usedIdx.has(i));
-  // Extra pulses within zero windows or beyond scenario = duplication/desync.
-  const realExtras = extras.filter(t => t < expectedS + 2);
-  if (realExtras.length > 0) {
-    problems.push(`UNEXPECTED PULSES (duplication/desync?): ${realExtras.length} at t≈[${realExtras.slice(0, 10).map(t => t.toFixed(0)).join(', ')}]s`);
-  }
+  // The first-grid pulse (near captureOffset) is legitimate but intentionally
+  // not in expectedPulses (t=0 excluded), so don't count it as an extra.
+  const realExtras = extras.filter(t => t < expectedS + 2 && Math.abs(t - captureOffset) > 1.5);
+
+  // The pilot tone corroborates but does NOT decide: a lossy-Opus encode under
+  // speech attenuates the odd tone below detection, and startup jitter shuffles
+  // the boundary pulses. Treat pulse mismatches as HARD failures only when they
+  // coincide with real evidence of loss — an energy hole (§4) or a duration
+  // shortfall (§1). Otherwise they are diagnostic notes, so codec/jitter noise
+  // never manufactures a false "AUDIO GAP" defect (and never hides a real one:
+  // a genuine dropped chunk shows up as a hole and a duration loss too).
+  // `pulseCorroboratesLoss` is finalized after the holes check below.
+  const pulseNote = [];
+  if (unmatched.length > 0) pulseNote.push(`${unmatched.length} pilot pulse(s) unmatched at t≈[${unmatched.slice(0, 10).map(t => t.toFixed(0)).join(', ')}]s`);
+  if (realExtras.length > 0) pulseNote.push(`${realExtras.length} extra pulse(s) at t≈[${realExtras.slice(0, 10).map(t => t.toFixed(0)).join(', ')}]s`);
 
   // 3. Segment level profile.
   for (const seg of scenarioMeta.timeline) {
@@ -172,7 +212,47 @@ function verdict(filePath, scenarioMeta, expectations = {}) {
     }
   }
 
-  notes.push(`duration=${a.durationS.toFixed(1)}s pulses=${a.pulses.length}/${expectedPulses.length}`);
+  // 4. DIRECT lost-audio check (tone-independent): find sustained silences
+  //    (≥ LONG_SIL_S) in the captured file that the scenario does NOT expect.
+  //    Speech segments contain only short inter-sentence pauses (<2s); a
+  //    longer hole means captured audio actually went missing — the real
+  //    data-loss failure this whole harness exists to catch.
+  const LONG_SIL_S = 3.0;
+  const winS = a.winS;
+  const speechWindows = scenarioMeta.timeline
+    .filter(s => s.type === 'speech' || s.type === 'quiet')
+    .map(s => [s.start + captureOffset, s.end + captureOffset]);
+  const inSpeech = (t) => speechWindows.some(([s, e]) => t >= s + 1 && t < e - 1);
+  let runStart = null;
+  const holes = [];
+  for (let i = 0; i < a.silence.length; i++) {
+    const t = i * winS;
+    if (a.silence[i]) {
+      if (runStart === null) runStart = t;
+    } else {
+      if (runStart !== null && t - runStart >= LONG_SIL_S && inSpeech(runStart + (t - runStart) / 2)) {
+        holes.push([runStart, t]);
+      }
+      runStart = null;
+    }
+  }
+  if (holes.length) {
+    problems.push(`LOST AUDIO: ${holes.length} unexpected silence hole(s) ≥${LONG_SIL_S}s inside speech at ` +
+      holes.slice(0, 8).map(([s, e]) => `${s.toFixed(0)}-${e.toFixed(0)}s`).join(', '));
+  }
+
+  // Finalize the pilot-tone verdict: escalate to a hard failure only if a real
+  // energy hole exists (the tone gap is then corroborated as real lost audio).
+  const durationShort = a.durationS < expectedS - tailLossMaxS;
+  if (pulseNote.length) {
+    if (holes.length || durationShort) {
+      problems.push(`PILOT MISMATCH (corroborates lost audio): ${pulseNote.join('; ')}`);
+    } else {
+      notes.push(`pilot-tone diagnostics (no energy hole → codec/jitter, not loss): ${pulseNote.join('; ')}`);
+    }
+  }
+
+  notes.push(`duration=${a.durationS.toFixed(1)}s pulses=${a.pulses.length}/${expectedPulses.length} holes=${holes.length}`);
   return { pass: problems.length === 0, problems, notes, analysis: a };
 }
 

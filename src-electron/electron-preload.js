@@ -25,6 +25,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Configuration (read-only - no user-configurable URLs)
   config: {
     get: () => ipcRenderer.invoke('config:get'),
+    // Renderer inherits the main process's resolved API base URL (fixes the
+    // dev-electron renderer silently using production; see main handler).
+    getApiUrl: () => ipcRenderer.invoke('config:getApiUrl'),
     getTranscriptionSettings: () => ipcRenderer.invoke('config:getTranscriptionSettings'),
     setTranscriptionSettings: (settings) => ipcRenderer.invoke('config:setTranscriptionSettings', settings)
   },

@@ -39,6 +39,12 @@ export default function (ctx) {
       vueRouterMode: 'hash',
       // Use our custom Quasar variables for brand colors
       sassVariables: 'src/css/quasar.variables.scss',
+      // DEV ONLY: forward the API override into the renderer so the e2e
+      // harness can point the whole app (renderer + main) at its local mock
+      // backend. Never applied to production builds.
+      ...(ctx.dev && process.env.VITE_API_URL
+        ? { env: { VITE_API_URL: process.env.VITE_API_URL } }
+        : {}),
       // Enable source maps in CI for Sentry (when SENTRY_AUTH_TOKEN is set)
       ...(process.env.SENTRY_AUTH_TOKEN && ctx.mode.capacitor ? { sourcemap: true } : {}),
       extendViteConf(viteConf) {

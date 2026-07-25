@@ -135,6 +135,14 @@ export const getApiUrl = async () => {
 let cachedApiUrl = null;
 
 export const getApiUrlSync = () => {
+  // Honor the explicit override exactly like the async getter — without this,
+  // sync callers (minutes fetch, history sync, templates) silently targeted a
+  // DIFFERENT backend than async callers whenever the override was set.
+  const override = typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL;
+  if (override) {
+    return override;
+  }
+
   if (cachedApiUrl) {
     return cachedApiUrl;
   }

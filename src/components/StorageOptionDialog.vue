@@ -1,8 +1,13 @@
 <template>
-  <q-dialog v-model="dialogVisible" persistent>
+  <q-dialog
+    v-model="dialogVisible"
+    persistent
+  >
     <q-card class="storage-dialog">
       <q-card-section class="dialog-header">
-        <div class="text-h6">Storage Options</div>
+        <div class="text-h6">
+          Storage Options
+        </div>
         <div class="text-subtitle text-grey-6">
           What should happen to recordings after upload?
         </div>
@@ -15,10 +20,14 @@
           color="primary"
           class="storage-options"
         >
-          <template v-slot:label="opt">
+          <template #label="opt">
             <div class="option-content">
-              <div class="option-label">{{ opt.label }}</div>
-              <div class="option-description">{{ opt.description }}</div>
+              <div class="option-label">
+                {{ opt.label }}
+              </div>
+              <div class="option-description">
+                {{ opt.description }}
+              </div>
             </div>
           </template>
         </q-option-group>
@@ -32,18 +41,22 @@
         />
       </q-card-section>
 
-      <q-card-actions align="right" class="dialog-actions">
+      <q-card-actions
+        align="right"
+        class="dialog-actions"
+      >
         <q-btn
+          v-close-popup
           flat
           label="Cancel"
           color="grey-7"
-          v-close-popup
           @click="onCancel"
         />
         <q-btn
           unelevated
           label="Start Recording"
           class="gradient-btn"
+          data-test="storage-dialog-confirm"
           @click="onConfirm"
         />
       </q-card-actions>

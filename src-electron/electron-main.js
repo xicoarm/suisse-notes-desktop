@@ -1735,6 +1735,14 @@ ipcMain.handle('config:get', async () => {
   };
 });
 
+// The renderer's getApiUrl() (src/services/api.js, Electron path) calls this to
+// inherit the main process's resolved API base. Without it the call fell
+// through to the PRODUCTION fallback, so in dev-electron the renderer silently
+// talked to production for minutes/history/templates while the main process
+// used its configured backend — a real environment split, and the reason the
+// E2E harness (which points main at a local mock) still saw production data.
+ipcMain.handle('config:getApiUrl', async () => API_BASE_URL);
+
 // --- Authentication ---
 
 // Helper: Get unique device ID (for DesktopAppUser tracking)

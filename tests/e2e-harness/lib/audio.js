@@ -26,10 +26,14 @@ const { execFileSync, execSync } = require('child_process');
 const FFMPEG = require('@ffmpeg-installer/ffmpeg').path;
 
 const SAMPLE_RATE = 48000;
-const PULSE_FREQ_HZ = 7000;      // above speech formants, far below the Opus cutoff
+// 4 kHz: high enough to sit above most speech energy, low enough that Opus at
+// 128 kbps preserves it reliably (a pure 7 kHz tone got crushed to -70 dB
+// under speech and produced false "gaps"). Louder, too, so it survives the
+// lossy encode with margin.
+const PULSE_FREQ_HZ = 4000;
 const PULSE_PERIOD_S = 10;       // one pulse every 10s
 const PULSE_LEN_S = 0.4;
-const PULSE_GAIN = 0.18;         // ≈ -15 dBFS — comfortably above the -50 dB detector floor
+const PULSE_GAIN = 0.30;         // ≈ -10 dBFS — clear of codec attenuation
 
 const WORK_DIR = path.join(__dirname, '..', 'work');
 const CACHE_DIR = path.join(WORK_DIR, 'audio-cache');
