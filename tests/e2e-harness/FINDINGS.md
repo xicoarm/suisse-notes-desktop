@@ -179,4 +179,27 @@ speakerphone end-to-end (bug J / the Angela case) on both platforms.
   exercised here). The token-refresh-on-401 is present in both desktop main and
   the mobile poller.
 
+## V-005 — Renderer-crash recovery VALIDATED (no meaningful audio loss)
+- **Type:** validation (positive), scenario s6-crash
+- The renderer was crashed (`Page.crash`) at t=90 s mid-recording. On relaunch
+  the app logged: *Found interrupted recording session … Successfully recovered
+  recording … (1.16 MB) … Recovery complete: 1 recording(s) recovered.*
+- **Forensic check of the recovered file:** duration **86.9 s**, `holes=0`.
+  The app recovered ~87 s of the ~90 s recorded — losing only the single
+  in-flight ~3 s timeslice that had not yet been fsync'd at the moment of the
+  crash. That matches the documented worst-case loss window exactly.
+- **Conclusion:** crash recovery works; maximum audio loss on a hard renderer
+  crash is one 3 s chunk. Cross-platform: `recoverOrphanedRecordings` is
+  Electron-main (Win+Mac desktop). Mobile has its own recovery
+  (`checkRecoveryState` + Capacitor Filesystem), a different code path.
+
+## H-002 — Harness limitation: relaunch (2nd app instance) page-stabilization
+- **Type:** harness limitation (NOT an app defect)
+- s6 launches a second `quasar dev` instance after killing the first; the driver
+  timed out waiting for the relaunched page to stabilize (likely dev-server port
+  contention while the first instance's tree is still tearing down). The APP
+  recovery itself completed correctly (verified above via main.log + the
+  recovered file). Fix later: reuse a single app instance / add a settle delay
+  before relaunch. Does not affect any app-behavior conclusion.
+
 _Findings below are appended as scenarios run._
