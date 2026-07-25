@@ -280,6 +280,31 @@ let skipAutoUpdate = false;
 // Note: For private GitHub repos, GH_TOKEN must be set during build
 // electron-builder will automatically include it in app-update.yml
 
+// === E2E test hooks (DEV ONLY — hard-gated on !app.isPackaged) ===============
+// Used by tests/e2e-harness to run the REAL app against controlled conditions:
+// - SUISSE_TEST_FAKE_AUDIO=<wav>  feeds a WAV file as the microphone through
+//   Chromium's fake capture device — the genuine getUserMedia → MediaRecorder
+//   → chunk → combine → upload pipeline runs against known ground-truth audio.
+// - SUISSE_TEST_USERDATA=<dir>    isolates userData so harness runs can never
+//   touch a real profile (recordings, tokens, queues) on the dev machine.
+// - SUISSE_TEST_CDP_PORT=<port>   opens the DevTools protocol so the harness
+//   can drive the UI like a user (click record, navigate, crash the renderer).
+// Packaged builds ignore all three unconditionally.
+if (!app.isPackaged) {
+  if (process.env.SUISSE_TEST_USERDATA) {
+    app.setPath('userData', process.env.SUISSE_TEST_USERDATA);
+  }
+  if (process.env.SUISSE_TEST_FAKE_AUDIO) {
+    app.commandLine.appendSwitch('use-fake-device-for-media-stream');
+    app.commandLine.appendSwitch('use-file-for-fake-audio-capture', process.env.SUISSE_TEST_FAKE_AUDIO);
+    // Skip the OS permission prompt for the fake device
+    app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
+  }
+  if (process.env.SUISSE_TEST_CDP_PORT) {
+    app.commandLine.appendSwitch('remote-debugging-port', process.env.SUISSE_TEST_CDP_PORT);
+  }
+}
+
 // Environment-aware API configuration
 // Uses config.js for environment detection
 const { getApiUrl, getEnvironmentInfo } = require('./config');

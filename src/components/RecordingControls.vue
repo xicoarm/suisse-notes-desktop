@@ -9,6 +9,7 @@
       icon="mic"
       :loading="props.startBusy"
       :disable="props.startBusy"
+      data-test="record-start"
       @click="$emit('start')"
     >
       <q-tooltip>{{ t('aboutStartRecording') }}</q-tooltip>
@@ -45,6 +46,7 @@
         size="md"
         color="dark"
         icon="stop"
+        data-test="record-stop"
         @click="showStopDialog = true"
       >
         <q-tooltip>{{ t('stopRecordingTooltip') }}</q-tooltip>
@@ -125,6 +127,7 @@
         <div class="stop-dialog-actions">
           <div
             class="stop-action-item action-primary"
+            data-test="record-stop-confirm"
             @click="handleEndRecording"
           >
             <div class="action-icon-wrap primary-bg">
