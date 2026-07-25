@@ -187,8 +187,10 @@ function verdict(filePath, scenarioMeta, expectations = {}) {
   if (unmatched.length > 0) pulseNote.push(`${unmatched.length} pilot pulse(s) unmatched at t≈[${unmatched.slice(0, 10).map(t => t.toFixed(0)).join(', ')}]s`);
   if (realExtras.length > 0) pulseNote.push(`${realExtras.length} extra pulse(s) at t≈[${realExtras.slice(0, 10).map(t => t.toFixed(0)).join(', ')}]s`);
 
-  // 3. Segment level profile.
-  for (const seg of scenarioMeta.timeline) {
+  // 3. Segment level profile. Skippable for scenarios where a mid-recording
+  //    getUserMedia re-acquire desyncs the fake-audio device's level timeline
+  //    (see FINDINGS.md H-001) — the holes check still guarantees no lost audio.
+  for (const seg of (expectations.ignoreSegmentLevels ? [] : scenarioMeta.timeline)) {
     const s = Math.ceil(seg.start) + 1;
     const e = Math.min(Math.floor(seg.end) - 1, Math.floor(a.durationS) - 1);
     if (e - s < 3) continue; // segment too short (or beyond capture) to judge

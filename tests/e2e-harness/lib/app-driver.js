@@ -131,6 +131,25 @@ class AppDriver {
     throw new Error(`App page never stabilized (urls seen: ${[...seenUrls].join(', ') || 'none'}): ${lastErr?.message}\nLast output:\n${this.log.slice(-20).join('')}`);
   }
 
+  /** The recordId of the current/last recording, read from the store. */
+  async getRecordId() {
+    return this.page.evaluate(() => {
+      const pinia = window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia;
+      return pinia?.state?.value?.recording?.recordId ?? null;
+    });
+  }
+
+  /** Read a recording's history record (audioFileId, transcriptionId, status). */
+  async getHistoryRecord(recordId) {
+    return this.page.evaluate((rid) => {
+      const pinia = window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia;
+      const recs = pinia?.state?.value?.['recordings-history']?.recordings
+        || pinia?.state?.value?.recordingsHistory?.recordings || [];
+      const r = recs.find(x => x.id === rid);
+      return r ? { id: r.id, audioFileId: r.audioFileId, transcriptionId: r.transcriptionId, uploadStatus: r.uploadStatus, duration: r.duration } : null;
+    }, recordId);
+  }
+
   /** Realistic login through the actual form (no-op if already logged in). */
   async login(email = 'e2e@test.local', password = 'e2e-password') {
     const attempt = async () => {

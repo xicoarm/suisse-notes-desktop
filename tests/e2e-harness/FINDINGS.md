@@ -74,4 +74,86 @@ with the scenario, timestamps, and the `work/result_<scenario>.json` evidence.
 
 ---
 
+## V-001 — MSIG dead-microphone detection VALIDATED against realistic audio
+- **Type:** validation (positive result), not a defect
+- **Scenario:** s2-angela-bt (2 min speech → 90 s digital zeros → 2 min −30 dB → 1 min speech)
+- **Result:** at t=140 s (20 s into the dead-device window) the health UI escalated
+  to **"Keine Aufnahme"** with the precise German message
+  *«Das gewählte Mikrofon «…» ist verbunden, liefert aber KEIN Signal»* —
+  exactly the Angela case. No false alarm during the healthy speech before it.
+  `holes=0` — the capture pipeline lost no audio. The zeros window recorded as
+  true digital silence at the right offset (−inf dBFS, 130–205 s in the file).
+- **Conclusion:** the mic-signal-health fix (branch `fix/mic-input-health-hardening`)
+  works against realistic audio, on Windows. Cross-platform: the detector lives
+  in `src/services/recordingService.js` (shared with mobile); macOS/iOS/Android
+  run the same JS health loop, so the *detection* is expected to behave
+  identically — but the *re-acquire* action differs by platform (desktop swaps
+  getUserMedia device; mobile has no device picker). Live device confirmation on
+  macOS + a real BT headset is still the open gap (hardware, needs the user).
+
+## H-001 — Harness limitation: fake-audio device restarts on getUserMedia re-acquire
+- **Type:** harness limitation (NOT an app defect) — documented so it isn't re-investigated
+- When MSIG performs its same-device re-acquire it calls `getUserMedia` again;
+  Chromium's `--use-file-for-fake-audio-capture` device does not preserve the
+  scenario's scripted level timeline across that re-open. So in s2 the −30 dB
+  "quiet" segment after the re-acquire read at full level. The APP records
+  faithfully (`holes=0`); it does not control the fake source's content. The
+  s2 segment-level assertion after the zeros window is therefore unreliable and
+  is NOT treated as an app defect (verified: the app captured exactly what the
+  fake device delivered). Real quiet-input behavior is covered by the unit test
+  `recordingService.micSignal.test.js` (LOW_LEVEL detector) instead.
+
+## V-002 — Full desktop → backend → transcription pipeline VALIDATED on production
+- **Type:** validation (positive), live end-to-end
+- **Run:** `run-live.js` — the real app recorded 45 s of TTS speech, combined,
+  uploaded to real Azure via `app.suisse-notes.ch`, and the backend processed it.
+- **Result:** upload returned `audioFileId=b6ef2625…`, backend status reached
+  **COMPLETED**, a `Meeting` row was created (status COMPLETED, duration 42 s,
+  AI-generated German title), with **8 `TranscriptSegment` rows whose text
+  matches the spoken audio** ("Thank you for joining today's meeting", …). Test
+  meeting deleted afterward; production left clean.
+- **Conclusion:** the customer-critical path (record → combine → Azure upload →
+  Meeting → transcription → transcript + title) works. No backend upload or
+  transcription error observed for a clean recording. Cross-platform: the
+  desktop upload path (`src-electron/electron-main.js` + `upload-direct.js`) is
+  Electron-only (Win+Mac share it); mobile uploads via `src/services/upload.js`
+  (separate code, not exercised here — covered by its own mobile testing).
+
+---
+
+## Cross-platform exposure of the reliability-audit fixes
+
+The user asked, for every Windows defect found, whether macOS and mobile are
+also affected. Verdicts below are by shared-code analysis (which file the
+defect lives in and how each platform reaches it). All were fixed on branch
+`fix/mic-input-health-hardening` (commits `45ffbc3` MSIG, `d25cfac` audit).
+
+Legend: **Win** = Windows desktop · **Mac** = macOS desktop · **iOS/Android** = Capacitor mobile.
+
+| # | Defect | Lives in | Win | Mac | Mobile | Notes |
+|---|---|---|---|---|---|---|
+| A | **Emergency handlers were RecordPage-scoped** (disk-full/chunk-fail/wedged/minutes stop, suspend flush fired into the void on any other page) | `useRecorder.js` + `recordingSafetyNet.js` (shared); `App.vue` inits net on ALL platforms | ✅ | ✅ | ✅ (partial) | Emergency-stop + minutes + chunk-fail handling is shared → mobile was equally exposed and equally fixed. The system suspend/resume half is `window.electronAPI`-gated → desktop-only. Mobile especially exposed since it navigates/backgrounds often. |
+| B | **Upload retry storm** (ELECTRON-27): terminal 400 auto-retried forever | `recordings-history.js` `retryFailedUploads` (shared, called from `App.vue` on both platforms) | ✅ | ✅ | ✅ | The auto-retry loop is shared; the `uploadTerminal` latch + `RETRY_AUTO_MAX` fix protects mobile too. Mobile's own queue (`upload.js`) had a separate 10-retry cap but no terminal-classification — the shared history-store fix closes it for mobile as well. |
+| C | **Main-process upload fatal-status classification holes** (SAS re-init, thrown fatal statuses, retryCount reset, Sentry storm) | `electron-main.js` + `upload-direct.js` | ✅ | ✅ | ❌ | Electron main-process only. Mobile uploads via `upload.js` (different code) — not affected by these specific holes. |
+| D | **System-audio merge: flat 5-min timeout killed 4-5h merges; PCM deleted on failure; ffmpeg-missing silent** | `electron-main.js` `mergeSystemAudio` / AudioTee | ❌ | ✅ | ❌ | **macOS-only** — AudioTee + FFmpeg PCM merge is the mac system-audio path. Windows mixes system audio live via Web Audio (no post-merge). Mobile has no system audio. This is the one cluster that is macOS-specific. |
+| E | **AudioTee lifecycle: orphaned on renderer crash; wrote wall-clock PCM through sleep (desync)** | `electron-main.js` | ❌ | ✅ | ❌ | macOS-only (AudioTee). |
+| F | **Auto-update installed during combine phase** (`isProcessingRecording` unguarded) | `electron-main.js` updater | ✅ | ✅ | ❌ | Electron auto-updater, both desktops. Mobile updates via store, not this path. |
+| G | **Verification poll gave up on token expiry mid-long-upload** | `electron-main.js` `pollServerStatus` | ✅ | ✅ | ❌ | Main-process poller, both desktops. Mobile's `upload.js` poller already refreshed — not affected. |
+| H | **BT loopback rebind monitor leaked across page remounts → could inject system audio into a later sysaudio-OFF recording** | `useSystemAudio.js` | ✅ | ❌ | ❌ | **Windows-only** — the rebind monitor targets Windows desktopCapturer loopback. macOS uses AudioTee (no such monitor). Mobile none. |
+| I | **Dev/staging renderer silently called PRODUCTION** for minutes/history/templates (F-001) | preload `config.getApiUrl` missing → `api.js` prod fallback | ✅ | ✅ | ❌ | Electron preload path, both desktops. Mobile resolves API via `detectEnvironment`, not `electronAPI` — not affected. |
+| J | **MSIG mic-signal health** (zero-signal detection, post-switch verify, low-level) | `recordingService.js` (shared) | ✅ | ✅ | ✅ | The detection loop is shared JS → all platforms gain it. The re-acquire ACTION differs: desktop swaps `getUserMedia` device; mobile has no device picker so re-acquire re-opens the OS-default mic. Detection + precise messaging is cross-platform; the automatic recovery is most effective on desktop. |
+
+**Summary for the user:**
+- Bugs **A, B, J** are in shared renderer code → **also affected mobile**, now fixed for all.
+- Bugs **C, F, G, I** are Electron-desktop (Win **and** Mac), not mobile.
+- Bugs **D, E** are **macOS-specific** (AudioTee/FFmpeg).
+- Bug **H** is **Windows-specific** (loopback rebind).
+- The single biggest structural bug (A, the RecordPage-scoped safety net) hit **every platform** and is the highest-value fix.
+
+⚠️ **macOS still needs live-hardware confirmation** — every mac path (AudioTee
+capture, the FFmpeg merge, the sleep/resume AudioTee stop) has been fixed and
+reasoned through but never executed on a real Mac in this effort. That is the
+top open verification gap (needs the user's Mac). Same for a real Bluetooth
+speakerphone end-to-end (bug J / the Angela case) on both platforms.
+
 _Findings below are appended as scenarios run._
