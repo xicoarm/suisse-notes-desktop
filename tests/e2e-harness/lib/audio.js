@@ -119,8 +119,29 @@ $synth.Dispose()
   return cached;
 }
 
+/**
+ * Fill a long speech segment by TILING a cached ~10-min speech pool instead of
+ * TTS-ing hours of audio (which would be prohibitively slow). The pool is
+ * generated once and looped to reach `seconds`; ffmpeg trims to exact length.
+ * Used by the multi-hour endurance scenario.
+ */
+function generateLongSpeech(seconds, outPath) {
+  ensureDirs();
+  const POOL_S = 600; // 10-min unique pool, cached
+  const pool = generateSpeechBase(POOL_S);
+  const reps = Math.ceil(seconds / POOL_S);
+  const listPath = path.join(CACHE_DIR, `tilelist_${seconds}.txt`);
+  fs.writeFileSync(listPath, Array.from({ length: reps }, () => `file '${pool.replace(/\\/g, '/')}'`).join('\n'));
+  ff(['-f', 'concat', '-safe', '0', '-i', listPath, '-t', String(seconds), '-c:a', 'pcm_s16le', outPath]);
+  return outPath;
+}
+
 /** One segment WAV of the requested type and length. */
 function generateSegment(type, seconds, outPath, opts = {}) {
+  // Long speech (>15 min) tiles the cached pool; short speech is generated directly.
+  if (type === 'speech' && seconds > 900) {
+    return generateLongSpeech(seconds, outPath);
+  }
   ensureDirs();
   switch (type) {
     case 'speech': {

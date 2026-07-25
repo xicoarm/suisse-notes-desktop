@@ -156,4 +156,27 @@ reasoned through but never executed on a real Mac in this effort. That is the
 top open verification gap (needs the user's Mac). Same for a real Bluetooth
 speakerphone end-to-end (bug J / the Angela case) on both platforms.
 
+## V-003 — ELECTRON-27 retry storm FIXED (regression test passes)
+- **Type:** validation (positive), scenario s4-storm
+- Backend scripted to reject `/api/desktop/upload` with a permanent HTTP 400.
+- **Result:** the app attempted the upload **exactly once over 3 minutes** and
+  stopped (terminal classification held); the local recording file was
+  preserved (not deleted on terminal failure). Before the fix this same
+  condition produced 533 Sentry events from 3 users (uploads retried forever).
+- Cross-platform: the fix is in shared `recordings-history.js` + Electron main;
+  mobile's shared auto-retry loop is protected by the same `uploadTerminal`
+  latch (see cross-platform table, row B).
+
+## V-004 — Upload recovery paths VALIDATED (transient 500, token expiry, socket cut)
+- **Type:** validation (positive), scenario s5-resilience (3 sub-runs)
+- **Transient 500** → 2 attempts, final success.
+- **Expired token mid-upload (401)** → app refreshed the token and succeeded (3
+  attempts). Validates the 401-recovery path end-to-end.
+- **Socket cut at 50% of the body (ECONNRESET)** → 2 attempts, final success;
+  the local file was never lost.
+- Cross-platform: upload-retry classification is Electron-main for desktop
+  (Win+Mac); mobile has its own retryable-error logic in `upload.js` (not
+  exercised here). The token-refresh-on-401 is present in both desktop main and
+  the mobile poller.
+
 _Findings below are appended as scenarios run._

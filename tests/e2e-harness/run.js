@@ -322,6 +322,72 @@ async function s6Crash() {
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+async function s7Endurance() {
+  // A realistic 5h15m workshop: four ~70-min talk blocks separated by three
+  // ~13-min breaks (faint room tone). Crosses the REAL 4h55m auto-split
+  // threshold during block 4, then runs ~20 min more so the post-split second
+  // session and the multi-session combine are exercised. The breaks also test
+  // the no-false-alarm requirement: faint steady noise must NOT trigger the
+  // zero-signal or low-level health detectors.
+  const plan = [
+    { type: 'speech', seconds: 4200 }, { type: 'noise', seconds: 700 },
+    { type: 'speech', seconds: 4200 }, { type: 'noise', seconds: 700 },
+    { type: 'speech', seconds: 4200 }, { type: 'noise', seconds: 700 },
+    { type: 'speech', seconds: 4200 },
+  ]; // total 18900s = 5h15m
+  console.log('s7: building 5h15m scenario audio (tiling cached speech pool)...');
+  const sc = buildScenario('s7', plan);
+
+  return withApp('s7-endurance', sc, {}, async (app, mock) => {
+    const problems = [];
+    const notes = [];
+    const healthLog = [];
+    const progressFile = path.join(WORK_DIR, 's7-progress.jsonl');
+    fs.writeFileSync(progressFile, '');
+
+    await app.startRecording();
+    const t0 = Date.now();
+    const totalMs = sc.totalSeconds * 1000;
+    // Sample health + phase every 30s to disk (crash-proof evidence).
+    let falseAlarmBreak = null;
+    let splitObserved = false;
+    while (Date.now() - t0 < totalMs - 5000) {
+      await sleep(30_000);
+      const tSec = Math.round((Date.now() - t0) / 1000);
+      let h = {}; let phase = null; let saved = null;
+      try { h = await app.getMicHealthUi(); } catch (e) { /* keep going */ }
+      try { phase = await app.getPhase(); } catch (e) { /* keep going */ }
+      const rec = { t: tSec, phase, badge: h.badge, msg: (h.message || '').slice(0, 60) };
+      healthLog.push(rec);
+      fs.appendFileSync(progressFile, JSON.stringify(rec) + '\n');
+      // Break windows (noise): must NOT show a critical/unstable badge.
+      const inBreak = [[4200, 4900], [9100, 9800], [14000, 14700]].some(([s, e]) => tSec >= s + 30 && tSec < e - 30);
+      if (inBreak && rec.badge && !/healthy|in ordnung/i.test(rec.badge)) falseAlarmBreak = rec;
+    }
+
+    await app.stopRecording(90_000);
+    const phase = await app.waitForPhase(['uploaded', 'idle'], 600_000).catch(() => null);
+    notes.push('final phase=' + phase);
+
+    if (falseAlarmBreak) problems.push(`FALSE ALARM during a break at t=${falseAlarmBreak.t}s: [${falseAlarmBreak.badge}] (faint room tone must not warn)`);
+
+    const out = app.findOutputFile();
+    if (!out) {
+      problems.push('No output file after 5h15m recording (auto-split/combine failure?)');
+      return { pass: false, problems, notes, healthLog: healthLog.slice(-40) };
+    }
+    // The final combined file must contain the WHOLE 5h15m with no lost audio
+    // across the split boundary. Segment levels skipped (breaks are noise).
+    const v = verdict(out, sc, { tailLossMaxS: 20, ignoreSegmentLevels: true });
+    problems.push(...v.problems);
+    notes.push(...v.notes);
+    const uploads = mock.state.requests.filter(r => r.url === '/api/desktop/upload');
+    notes.push(`upload attempts: ${uploads.length}`);
+    if (uploads.length !== 1) problems.push(`Expected exactly 1 upload, saw ${uploads.length}`);
+    return { pass: problems.length === 0, problems, notes, healthLog: healthLog.slice(-40) };
+  });
+}
+
 const SCENARIOS = {
   selftest,
   's1-baseline': s1Baseline,
@@ -330,6 +396,7 @@ const SCENARIOS = {
   's4-storm': s4Storm,
   's5-resilience': s5Resilience,
   's6-crash': s6Crash,
+  's7-endurance': s7Endurance,
 };
 
 (async () => {
