@@ -42,6 +42,11 @@ const messages = {
     micSwitchSilentToast: 'Microphone "{device}" delivers NO signal — the recording is currently silent. Please choose a different microphone.',
     micAutoSwitchedToast: 'Your microphone disconnected — automatically switched to "{device}".',
     micSwitchFailedToast: 'Could not switch the microphone: {error}',
+    safetyNetDiskFullStop: 'Your disk is full — the recording was stopped and everything captured so far has been saved. It will upload automatically.',
+    safetyNetChunkFailStop: 'Audio could no longer be saved to disk — the recording was stopped and everything captured so far has been saved.',
+    captureWarningFfmpegMissing: 'System audio can be captured, but the audio processor (FFmpeg) is not working on this computer — the system audio may be missing from the final recording. Please reinstall the app.',
+    captureWarningMergeDegraded: 'The system audio of this recording could not be merged — the file contains the microphone only. The system audio was kept for support recovery.',
+    systemAudioStoppedAfterSleep: 'System audio capture was stopped when your computer went to sleep. Re-enable the system audio toggle to continue capturing it.',
 
     // Audio level meter
     audioLevelLow: 'Low',
@@ -513,6 +518,11 @@ const messages = {
     micSwitchSilentToast: 'Mikrofon «{device}» liefert KEIN Signal — die Aufnahme ist im Moment stumm. Bitte wählen Sie ein anderes Mikrofon.',
     micAutoSwitchedToast: 'Ihr Mikrofon wurde getrennt — automatisch auf «{device}» gewechselt.',
     micSwitchFailedToast: 'Mikrofon konnte nicht gewechselt werden: {error}',
+    safetyNetDiskFullStop: 'Ihre Festplatte ist voll — die Aufnahme wurde gestoppt und alles bisher Aufgenommene gesichert. Der Upload erfolgt automatisch.',
+    safetyNetChunkFailStop: 'Audio konnte nicht mehr gespeichert werden — die Aufnahme wurde gestoppt und alles bisher Aufgenommene gesichert.',
+    captureWarningFfmpegMissing: 'Systemaudio kann aufgezeichnet werden, aber der Audio-Prozessor (FFmpeg) funktioniert auf diesem Computer nicht — das Systemaudio könnte in der finalen Aufnahme fehlen. Bitte installieren Sie die App neu.',
+    captureWarningMergeDegraded: 'Das Systemaudio dieser Aufnahme konnte nicht zusammengeführt werden — die Datei enthält nur das Mikrofon. Das Systemaudio wurde für eine Support-Wiederherstellung aufbewahrt.',
+    systemAudioStoppedAfterSleep: 'Die Systemaudio-Aufzeichnung wurde beim Ruhezustand des Computers gestoppt. Aktivieren Sie den Systemaudio-Schalter erneut, um sie fortzusetzen.',
 
     // Audio level meter
     audioLevelLow: 'Niedrig',
@@ -984,6 +994,11 @@ const messages = {
     micSwitchSilentToast: 'Le microphone «{device}» ne délivre AUCUN signal — l\'enregistrement est actuellement muet. Veuillez choisir un autre microphone.',
     micAutoSwitchedToast: 'Votre microphone a été déconnecté — basculement automatique vers «{device}».',
     micSwitchFailedToast: 'Impossible de changer de microphone : {error}',
+    safetyNetDiskFullStop: 'Votre disque est plein — l\'enregistrement a été arrêté et tout ce qui a été capturé jusqu\'ici est sauvegardé. L\'envoi se fera automatiquement.',
+    safetyNetChunkFailStop: 'L\'audio ne pouvait plus être sauvegardé — l\'enregistrement a été arrêté et tout ce qui a été capturé jusqu\'ici est sauvegardé.',
+    captureWarningFfmpegMissing: 'L\'audio système peut être capturé, mais le processeur audio (FFmpeg) ne fonctionne pas sur cet ordinateur — l\'audio système pourrait manquer dans l\'enregistrement final. Veuillez réinstaller l\'application.',
+    captureWarningMergeDegraded: 'L\'audio système de cet enregistrement n\'a pas pu être fusionné — le fichier ne contient que le microphone. L\'audio système a été conservé pour une récupération par le support.',
+    systemAudioStoppedAfterSleep: 'La capture de l\'audio système a été arrêtée lors de la mise en veille de l\'ordinateur. Réactivez l\'interrupteur audio système pour continuer à le capturer.',
 
     // Audio level meter
     audioLevelLow: 'Faible',
@@ -1455,6 +1470,11 @@ const messages = {
     micSwitchSilentToast: 'Il microfono «{device}» NON fornisce alcun segnale — la registrazione è attualmente muta. Scegli un altro microfono.',
     micAutoSwitchedToast: 'Il microfono è stato disconnesso — passaggio automatico a «{device}».',
     micSwitchFailedToast: 'Impossibile cambiare microfono: {error}',
+    safetyNetDiskFullStop: 'Il disco è pieno — la registrazione è stata fermata e tutto ciò che è stato acquisito finora è stato salvato. Il caricamento avverrà automaticamente.',
+    safetyNetChunkFailStop: 'Non è più stato possibile salvare l\'audio — la registrazione è stata fermata e tutto ciò che è stato acquisito finora è stato salvato.',
+    captureWarningFfmpegMissing: 'L\'audio di sistema può essere acquisito, ma il processore audio (FFmpeg) non funziona su questo computer — l\'audio di sistema potrebbe mancare nella registrazione finale. Reinstalla l\'app.',
+    captureWarningMergeDegraded: 'L\'audio di sistema di questa registrazione non è stato unito — il file contiene solo il microfono. L\'audio di sistema è stato conservato per il recupero da parte del supporto.',
+    systemAudioStoppedAfterSleep: 'L\'acquisizione dell\'audio di sistema è stata interrotta quando il computer è andato in standby. Riattiva l\'interruttore dell\'audio di sistema per continuare.',
 
     // Audio level meter
     audioLevelLow: 'Basso',

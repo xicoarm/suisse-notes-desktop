@@ -498,6 +498,18 @@ async function uploadViaPresignedSas(opts) {
           }
         } catch (e) {
           log.error(`[uploadDirect] Re-init after SAS expiry failed:`, e.message);
+          // A FATAL status from re-init (400/402/413/…) will fail identically
+          // on every future attempt — returning canRetry:true here fed the
+          // permanent-retry loop (ELECTRON-27 class). Classify it.
+          if (isFatalAxiosError(e)) {
+            return {
+              mode: 'azure',
+              success: false,
+              status: e.response.status,
+              error: e.response.data?.error || `Re-init failed: ${e.message}`,
+              canRetry: false,
+            };
+          }
         }
         return {
           mode: 'azure',

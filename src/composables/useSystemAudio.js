@@ -2,6 +2,18 @@ import { ref } from 'vue';
 import { isElectron } from '../utils/platform';
 import { addSystemAudioStream } from '../services/recordingService';
 
+// The loopback capture is inherently a singleton (one recording, one mix), but
+// this composable is instantiated fresh on every RecordPage mount while a
+// recording survives navigation. Module-level monitor ownership guarantees at
+// most ONE rebind monitor exists app-wide and that stopCapture from ANY
+// instance disarms whichever instance installed it. Previously the monitor and
+// stream ref lived purely in per-instance closures: navigate away and back
+// during a system-audio recording, stop from the new instance → the OLD
+// instance's devicechange listener survived forever holding a live stream ref,
+// and a later Bluetooth profile flip could re-acquire the loopback and inject
+// system audio into a subsequent recording where the user had it DISABLED.
+let _activeMonitorRemove = null;
+
 export function useSystemAudio() {
   const systemAudioEnabled = ref(false);
   const permissionStatus = ref('unknown'); // 'unknown' | 'granted' | 'denied' | 'unsupported'
@@ -183,13 +195,20 @@ export function useSystemAudio() {
 
   const installRebindMonitor = () => {
     if (monitorInstalled) return;
+    // Singleton guard: disarm any monitor a PREVIOUS composable instance left
+    // behind (RecordPage was remounted mid-capture) before installing ours.
+    if (_activeMonitorRemove && _activeMonitorRemove !== removeRebindMonitor) {
+      try { _activeMonitorRemove(); } catch (e) { /* stale instance */ }
+    }
     monitorInstalled = true;
+    _activeMonitorRemove = removeRebindMonitor;
     navigator.mediaDevices.addEventListener('devicechange', _onDeviceChange);
   };
 
   const removeRebindMonitor = () => {
     if (!monitorInstalled) return;
     monitorInstalled = false;
+    if (_activeMonitorRemove === removeRebindMonitor) _activeMonitorRemove = null;
     navigator.mediaDevices.removeEventListener('devicechange', _onDeviceChange);
     if (rebindTimer) {
       clearTimeout(rebindTimer);
@@ -220,6 +239,10 @@ export function useSystemAudio() {
 
   const rebindLoopback = async (reason) => {
     if (rebindInProgress || !systemAudioStream.value) return;
+    // Only the instance that currently OWNS the monitor may rebind — a stale
+    // instance (superseded by a RecordPage remount) must never re-acquire a
+    // loopback and push it into someone else's recording mix.
+    if (_activeMonitorRemove !== removeRebindMonitor) return;
     rebindInProgress = true;
     try {
       // Acquire the new binding BEFORE touching the old stream: if this

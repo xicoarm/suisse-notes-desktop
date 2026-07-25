@@ -95,6 +95,15 @@ function _normalizeServerRecording(serverRec) {
 // Auto-retry constants
 const RETRY_INITIAL_DELAY_MS = 60_000;   // 1 minute
 const RETRY_MAX_DELAY_MS = 1_800_000;    // 30 minutes
+// Hard cap on AUTOMATIC retries per recording. Without it, a permanently
+// rejected upload (HTTP 400/413/422 — the server will answer identically
+// forever) was re-attempted every backoff interval for WEEKS: Sentry
+// ELECTRON-27 recorded 533 events from just 3 users whose renderers kept
+// resurrecting uploads the main-process queue had already (correctly)
+// dropped as terminal. Terminal failures now stop auto-retrying immediately
+// (uploadTerminal flag); transient failures stop after this many attempts.
+// The manual Retry button clears the flag — user intent always wins.
+const RETRY_AUTO_MAX = 8;
 const _retryingIds = new Set(); // Track currently retrying uploads to prevent concurrent retries
 
 // localStorage cache helpers for mobile
@@ -740,6 +749,9 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
         // in production: the same 93MB blob re-uploaded for weeks). Recovery
         // for these needs a server-side re-transcribe, not a re-upload.
         !(r.uploadStatus === 'failed' && r.audioFileId) &&
+        // Terminal server rejection (400/413/422/…) — retrying is futile until
+        // the user changes something; only the manual Retry button re-arms it.
+        !r.uploadTerminal &&
         !_retryingIds.has(r.id)
       );
 
@@ -827,15 +839,26 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
             });
             console.log(`Auto-retry succeeded for recording ${recording.id}`);
           } else {
+            // Terminal = the server told us this exact upload can never
+            // succeed (canRetry:false, e.g. 400/413/422 — but NOT 401, which
+            // heals on re-login), or the automatic budget is exhausted.
+            const terminal =
+              (result?.canRetry === false && result?.status !== 401) ||
+              retryCount + 1 >= RETRY_AUTO_MAX;
             await this.updateRecording(recording.id, {
               uploadStatus: 'failed',
-              uploadError: result?.error || 'Upload failed'
+              uploadError: result?.error || 'Upload failed',
+              ...(terminal ? { uploadTerminal: true } : {})
             });
+            if (terminal) {
+              console.warn(`Auto-retry STOPPED for recording ${recording.id}: ${result?.canRetry === false ? 'terminal server rejection' : 'retry budget exhausted'} (${result?.status || 'n/a'})`);
+            }
           }
         } catch (error) {
           await this.updateRecording(recording.id, {
             uploadStatus: 'failed',
-            uploadError: error.message
+            uploadError: error.message,
+            ...(retryCount + 1 >= RETRY_AUTO_MAX ? { uploadTerminal: true } : {})
           });
         } finally {
           _retryingIds.delete(recording.id);

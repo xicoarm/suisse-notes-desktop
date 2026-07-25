@@ -10,7 +10,7 @@ const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
 const Sentry = require('@sentry/electron/main');
 const { machineIdSync } = require('node-machine-id');
-const { uploadViaPresignedSas, abortDirectUpload } = require('./upload-direct');
+const { uploadViaPresignedSas, abortDirectUpload, FATAL_HTTP_STATUSES } = require('./upload-direct');
 
 // Trust the OS certificate store from the main process. Must run before any
 // outbound HTTPS (auto-update, uploads, Sentry) so corporate / TLS-inspection
@@ -124,6 +124,12 @@ process.on('unhandledRejection', (reason, promise) => {
 app.on('render-process-gone', (event, webContents, details) => {
   log.error('Renderer process gone:', details);
   Sentry.captureMessage(`Renderer crashed: ${details.reason}`, 'error');
+
+  // The renderer owned the capture session. AudioTee (macOS system audio) is a
+  // spawned child that would otherwise keep writing wall-clock PCM to disk with
+  // no mic timeline to pair it with — the eventual merge of that torn pair
+  // produces a badly desynced file. Stop it now; recovery re-files what exists.
+  stopSystemAudio().catch(e => log.warn('Failed to stop AudioTee after renderer crash:', e?.message));
 
   // P0 Data Loss Fix: Write crash metadata for active recording (V8)
   // Do NOT clear active recording state - let recoverOrphanedRecordings find it on next launch
@@ -349,21 +355,43 @@ function getActiveRecording() {
 }
 
 // === Upload Queue Management ===
+// Sentry throttle: one upload-failure exception per recordId per app session.
+// Without it, every automatic retry pass of the same doomed upload produced a
+// fresh Sentry event — ELECTRON-27 accumulated 533 events from 3 users.
+const reportedUploadFailures = new Set();
+function captureUploadFailureOnce(recordId, error, operation, extra = {}) {
+  const key = `${operation}:${recordId}`;
+  if (reportedUploadFailures.has(key)) {
+    log.warn(`[upload] Suppressing repeat Sentry capture for ${key}: ${error?.message}`);
+    return;
+  }
+  reportedUploadFailures.add(key);
+  Sentry.captureException(error, { tags: { operation, recordId }, extra });
+}
+
 // Add upload to persistent queue
 function addToUploadQueue(recordId, filePath, metadata) {
   const queue = uploadQueueStore.get('pendingUploads', []);
-  // Check if already in queue
-  if (!queue.find(u => u.recordId === recordId)) {
-    queue.push({
-      recordId,
-      filePath,
-      metadata,
-      addedAt: new Date().toISOString(),
-      retryCount: 0
-    });
+  const existing = queue.find(u => u.recordId === recordId);
+  if (existing) {
+    // Re-enqueue of a known recording (e.g. manual retry): refresh the file
+    // path/metadata but KEEP the accumulated retryCount — resetting it made
+    // the max-retries cap unreachable for a doomed upload that kept getting
+    // re-added, so it retried forever (ELECTRON-27 class).
+    existing.filePath = filePath;
+    existing.metadata = metadata;
     uploadQueueStore.set('pendingUploads', queue);
-    log.info('Added to upload queue:', recordId);
+    return;
   }
+  queue.push({
+    recordId,
+    filePath,
+    metadata,
+    addedAt: new Date().toISOString(),
+    retryCount: 0
+  });
+  uploadQueueStore.set('pendingUploads', queue);
+  log.info('Added to upload queue:', recordId);
 }
 
 // Remove upload from queue
@@ -1323,6 +1351,18 @@ app.whenReady().then(() => {
         });
         log.info('Active recording state saved for recovery:', activeSession.recordId);
       }
+
+      // AudioTee is a spawned child that keeps writing WALL-CLOCK PCM through
+      // system sleep while the mic timeline is frozen — after a 30-min nap the
+      // merge would offset every later word by 30 minutes. Stop it cleanly at
+      // suspend; the PCM captured so far merges correctly (padded from start).
+      // The renderer is told on resume so the UI reflects that system audio is
+      // now off and the user can re-enable it.
+      if (activeAudioTee) {
+        audioTeeStoppedBySuspend = true;
+        log.info('Stopping AudioTee for system suspend (prevents wall-clock PCM desync)');
+        await stopSystemAudio().catch(e => log.warn('AudioTee suspend-stop failed:', e?.message));
+      }
     }
   });
 
@@ -1339,9 +1379,13 @@ app.whenReady().then(() => {
         mainWindow.webContents.send('recording:resume', {
           recordId: activeSession.recordId,
           suspendedAt: activeSession.suspendedAt,
-          needsRecovery: true
+          needsRecovery: true,
+          // System audio was stopped at suspend (see above) — the renderer
+          // must flip its toggle/state and tell the user.
+          systemAudioStopped: audioTeeStoppedBySuspend
         });
       }
+      audioTeeStoppedBySuspend = false;
 
       // Clear the recovery flag
       activeRecordingStore.set('activeSession', {
@@ -1581,10 +1625,12 @@ ipcMain.handle('updater:quitAndInstall', () => {
   if (!pendingUpdateInfo) {
     return { success: false, error: 'No update downloaded' };
   }
-  // Never restart out from under an active capture or upload — the renderer
-  // gates the dialog on idle, but guard here too (defense in depth).
-  if (isRecordingInProgress || isUploadInProgress || pendingUploadsCount > 0) {
-    log.warn('updater:quitAndInstall refused — recording or upload in progress');
+  // Never restart out from under an active capture, COMBINE, or upload — the
+  // renderer gates the dialog on idle, but guard here too (defense in depth).
+  // isProcessingRecording covers the post-stop combine window: killing FFmpeg
+  // mid-concat on a multi-hour recording leaves an unvalidated partial file.
+  if (isRecordingInProgress || isProcessingRecording || isUploadInProgress || pendingUploadsCount > 0) {
+    log.warn('updater:quitAndInstall refused — recording, processing or upload in progress');
     return { success: false, error: 'Recording or upload in progress' };
   }
   log.info(`Installing update ${pendingUpdateInfo.version} on user request`);
@@ -1972,7 +2018,10 @@ ipcMain.handle('auth:createWebSession', async () => {
 
 // --- Token Refresh ---
 
-ipcMain.handle('auth:refreshToken', async () => {
+// Refresh the auth token from the main process and persist it to configStore.
+// Shared by the IPC handler AND main-side flows that hit a 401 mid-operation
+// (e.g. the upload-verification poll after a long transfer).
+async function refreshMainAuthToken() {
   try {
     const authToken = await getAuthToken();
     if (!authToken) {
@@ -1993,7 +2042,7 @@ ipcMain.handle('auth:refreshToken', async () => {
       } else {
         configStore.set('authToken', response.data.token);
       }
-      log.info('Token refreshed successfully via IPC');
+      log.info('Token refreshed successfully (main process)');
       return { success: true, token: response.data.token, user: response.data.user };
     }
     return { success: false, error: 'No token in refresh response' };
@@ -2008,7 +2057,9 @@ ipcMain.handle('auth:refreshToken', async () => {
       error: error.response?.data?.error || error.message || 'Token refresh failed'
     };
   }
-});
+}
+
+ipcMain.handle('auth:refreshToken', async () => refreshMainAuthToken());
 
 // --- Minutes / Credits ---
 
@@ -2165,6 +2216,9 @@ function validateChunkSequence(chunks, ext) {
 // transient AV/EDR locks on the final path, with bounded retries as a belt.
 function writeFileWithSync(filePath, data) {
   const retryableCodes = new Set(['EBUSY', 'EACCES', 'EPERM', 'EMFILE', 'ENFILE']);
+  // NB: the retry delay below is a BLOCKING busy-wait on the main process —
+  // extending it stalls all IPC (incl. chunk saves). Slow-AV machines that
+  // outlast ~1.2s need an async variant of this helper, not longer delays.
   const delays = [100, 300, 800];
   const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
 
@@ -2698,6 +2752,22 @@ function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operati
   });
 }
 
+// Tell the renderer (and Sentry, once) that captured system audio could NOT be
+// carried into the final file. Previously this degradation was a main.log-only
+// warn — the user uploaded a "complete" meeting whose participants were simply
+// missing (field evidence: ELECTRON-1Y, ffmpeg unavailable on 2 machines).
+function notifyMergeDegraded(recordId, reason, detail) {
+  log.warn(`System audio merge degraded for ${recordId}: ${reason} (${detail || 'no detail'})`);
+  Sentry.captureMessage(`System audio merge degraded: ${reason}`, {
+    level: 'warning',
+    tags: { operation: 'merge-degraded', recordId },
+    extra: { detail },
+  });
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('system:capture-warning', { kind: 'merge-degraded', recordId, reason, detail });
+  }
+}
+
 // Merge system audio (PCM) with mic recording using FFmpeg amix
 async function mergeSystemAudio(micPath, recordId) {
   const recordPath = getRecordingPath(recordId);
@@ -2709,12 +2779,24 @@ async function mergeSystemAudio(micPath, recordId) {
     return micPath;
   }
   if (binaryHealth.ffmpeg.available === false) {
-    log.warn(`FFmpeg unavailable (${binaryHealth.ffmpeg.error || 'spawn failed'}) — skipping system audio merge, keeping mic-only`);
+    notifyMergeDegraded(recordId, 'ffmpeg-unavailable', binaryHealth.ffmpeg.error || 'spawn failed');
     return micPath;
   }
 
   const mergedPath = micPath.replace(/(\.\w+)$/, '_merged$1');
-  log.info(`Merging system audio (${fs.statSync(systemAudioPath).size} bytes) with mic recording`);
+  const pcmBytes = fs.statSync(systemAudioPath).size;
+  let mergedOk = false;
+  log.info(`Merging system audio (${pcmBytes} bytes) with mic recording`);
+
+  // The merge re-encodes the FULL meeting. The flat 5-minute FFMPEG_TIMEOUT_MS
+  // is plenty for an hour but kills the merge of a 4-5h meeting (PCM alone is
+  // ~340 MB/hour) on a slow disk — silently discarding every participant's
+  // audio. Scale the budget with input size: 5 min base + 10 min per GB of
+  // PCM, capped at 45 min. (Stderr-silence watchdog still catches true hangs.)
+  const mergeTimeoutMs = Math.min(
+    45 * 60_000,
+    FFMPEG_TIMEOUT_MS + Math.ceil(pcmBytes / (1024 * 1024 * 1024)) * 10 * 60_000
+  );
 
   try {
     // Mix mic + system audio at FULL volume for each.
@@ -2741,7 +2823,7 @@ async function mergeSystemAudio(micPath, recordId) {
           '[mixed]alimiter=limit=0.95[out]'
         ], ['out'])
         .output(mergedPath),
-      FFMPEG_TIMEOUT_MS,
+      mergeTimeoutMs,
       'System audio merge'
     );
 
@@ -2752,17 +2834,24 @@ async function mergeSystemAudio(micPath, recordId) {
       fs.unlinkSync(micPath);
       fs.renameSync(mergedPath, micPath);
       log.info('System audio merged successfully');
+      mergedOk = true;
     } else {
-      log.warn('Merged file validation failed, keeping mic-only recording');
+      notifyMergeDegraded(recordId, 'merged-file-invalid', mergedValidation.error || 'validation failed');
       try { fs.unlinkSync(mergedPath); } catch (e) { /* ignore */ }
     }
   } catch (err) {
-    log.warn('System audio merge failed, keeping mic-only recording:', err.message);
+    notifyMergeDegraded(recordId, 'merge-failed', err.message);
     try { if (fs.existsSync(mergedPath)) fs.unlinkSync(mergedPath); } catch (e) { /* ignore */ }
   }
 
-  // Clean up system audio file
-  try { fs.unlinkSync(systemAudioPath); } catch (e) { /* ignore */ }
+  // Clean up the PCM only after a SUCCESSFUL merge. On failure it is the only
+  // copy of the participants' audio — keep it in the recording dir so a fixed
+  // build (or manual support intervention) can still merge it later.
+  if (mergedOk) {
+    try { fs.unlinkSync(systemAudioPath); } catch (e) { /* ignore */ }
+  } else {
+    log.warn(`Keeping ${systemAudioPath} for later recovery (merge did not succeed)`);
+  }
   return micPath;
 }
 
@@ -3758,7 +3847,10 @@ function sleep(ms) {
  */
 async function pollServerStatus(audioFileId, maxAttempts = 15) {
   const pollInterval = 2000; // 2 seconds between polls
-  const authToken = await getAuthToken();
+  let authToken = await getAuthToken();
+  // Parity with the renderer poller: a token that expired during a long
+  // transfer gets ONE refresh before we give up on real verification.
+  let authRefreshAttempted = false;
 
   // Status semantics — keep in lockstep with the renderer copy in
   // src/services/upload.js and the server contract in
@@ -3834,10 +3926,20 @@ async function pollServerStatus(audioFileId, maxAttempts = 15) {
       }
 
       // 401 on the status endpoint after the authenticated POST already
-      // landed the bytes — don't punish the user for a polling-side auth
-      // problem. Treat as trust-based, the renderer-side poller does the
-      // same. See src/services/upload.js pollServerStatus.
+      // landed the bytes — the token likely expired DURING the long transfer.
+      // Try one refresh so verification stays real; only then fall back to
+      // trust-based like the renderer poller (src/services/upload.js).
       if (error.response && error.response.status === 401) {
+        if (!authRefreshAttempted) {
+          authRefreshAttempted = true;
+          const refresh = await refreshMainAuthToken();
+          if (refresh.success && refresh.token) {
+            log.info('Upload status 401 — token refreshed, retrying verification');
+            authToken = refresh.token;
+            attempt--; // rewind: this attempt didn't count
+            continue;
+          }
+        }
         log.warn('Upload status endpoint returned 401; using trust-based confirmation');
         return { persisted: true, verified: false, fallback: true, authError: true };
       }
@@ -4040,13 +4142,32 @@ async function tryDirectUpload({ recordId, filePath, metadata, abortController, 
         },
       });
     } catch (err) {
+      // Defense-in-depth (ELECTRON-27 class): a thrown error carrying a FATAL
+      // HTTP status must terminate — it will fail identically on every retry,
+      // every 5-minute queue pass, and every app launch. upload-direct
+      // classifies these itself, but any slip (new code path, axios quirk)
+      // must not turn into a permanent retry loop.
+      const fatalStatus = err?.response?.status && FATAL_HTTP_STATUSES.has(err.response.status);
+      if (fatalStatus) {
+        captureUploadFailureOnce(recordId, err, 'upload-direct', {
+          attempt: attempt + 1, maxRetries, classified: 'fatal-thrown',
+        });
+        return {
+          handled: true,
+          result: {
+            success: false,
+            status: err.response.status,
+            error: err.response.data?.error || err.message,
+            canRetry: false,
+          },
+        };
+      }
       // Bubbled-up transient error from upload-direct → retry.
       lastTransientError = err;
       log.warn(`[upload] Direct upload transient error attempt ${attempt + 1}: ${err.message}`);
       if (attempt >= maxRetries) {
-        Sentry.captureException(err, {
-          tags: { operation: 'upload-direct', recordId },
-          extra: { attempt: attempt + 1, maxRetries },
+        captureUploadFailureOnce(recordId, err, 'upload-direct', {
+          attempt: attempt + 1, maxRetries,
         });
         return {
           handled: true,
@@ -4392,16 +4513,15 @@ async function uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, a
         }
 
         // Report upload failure to Sentry (retries exhausted or non-retryable)
-        Sentry.captureException(error, {
-          tags: { operation: 'upload', recordId },
-          extra: {
-            attempt: attempt + 1,
-            maxRetries,
-            errorCode: error.code,
-            httpStatus: status,
-            isRetryable,
-            isTimeout: error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED',
-          },
+        // — throttled to once per recordId/session so automatic retry passes
+        // of the same doomed upload cannot storm Sentry (ELECTRON-27).
+        captureUploadFailureOnce(recordId, error, 'upload', {
+          attempt: attempt + 1,
+          maxRetries,
+          errorCode: error.code,
+          httpStatus: status,
+          isRetryable,
+          isTimeout: error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED',
         });
 
         return { success: false, error: errorMessage, status, canRetry: isRetryable };
@@ -5074,6 +5194,9 @@ ipcMain.handle('dialog:getDroppedFilePath', async (event, filePath) => {
 // --- System Audio (AudioTee — macOS 14.2+ Core Audio Taps) ---
 
 let activeAudioTee = null; // { process, writeStream, filePath, recordId }
+// Set when AudioTee was stopped by the system-suspend handler; consumed by the
+// resume notification so the renderer can reflect that system audio is off.
+let audioTeeStoppedBySuspend = false;
 
 function getAudioTeeBinaryPath() {
   if (app.isPackaged) {
@@ -5124,6 +5247,22 @@ ipcMain.handle('systemAudio:start', async (event, recordId, offsetMs = 0) => {
     const binaryPath = getAudioTeeBinaryPath();
     if (!fs.existsSync(binaryPath)) {
       return { success: false, error: 'AudioTee binary not found' };
+    }
+
+    // FFmpeg is what merges the captured PCM into the final file at stop time.
+    // If it is already known-broken on this machine (ELECTRON-1Y), the capture
+    // would run for the whole meeting and then silently degrade to mic-only.
+    // Capture anyway (PCM is kept on disk for recovery) but warn the user NOW,
+    // before the meeting, not after it.
+    if (binaryHealth.ffmpeg.available === false) {
+      log.warn('systemAudio:start with unavailable ffmpeg — warning user up-front');
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('system:capture-warning', {
+          kind: 'ffmpeg-missing',
+          recordId,
+          detail: binaryHealth.ffmpeg.error || 'ffmpeg spawn failed',
+        });
+      }
     }
 
     const recordPath = getRecordingPath(recordId);

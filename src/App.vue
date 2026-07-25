@@ -22,6 +22,17 @@ onMounted(async () => {
   await configStore.loadConfig();
   // Session check is now handled by router guard (prevents race condition)
 
+  // App-lifetime recording guardian: emergency stops (disk full, chunk-save
+  // failures, wedged recorder, minutes limit), system suspend/resume flushes
+  // and capture-quality warnings must keep working while the user is on ANY
+  // page — the recording survives navigation, so its safety handlers must too.
+  try {
+    const { initRecordingSafetyNet } = await import('./services/recordingSafetyNet');
+    initRecordingSafetyNet();
+  } catch (e) {
+    console.error('Recording safety net init failed:', e);
+  }
+
   // Initialize mobile lifecycle callbacks (background/foreground/online/offline)
   if (isMobile()) {
     recordingStore.initializeLifecycle();

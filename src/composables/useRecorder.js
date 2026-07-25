@@ -5,6 +5,7 @@ import { useMinutesStore } from '../stores/minutes';
 import { useSystemAudio } from './useSystemAudio';
 import { isElectron, isCapacitor } from '../utils/platform';
 import * as recordingService from '../services/recordingService';
+import { setRecordPageActive } from '../services/recordingSafetyNet';
 import { captureMessage } from '../boot/sentry';
 
 /**
@@ -523,39 +524,15 @@ export function useRecorder() {
       navigator.mediaDevices.addEventListener('devicechange', loadMicrophones);
     }
 
-    // Set up suspend/resume handlers (Electron only)
-    if (window.electronAPI && window.electronAPI.system) {
-      window.electronAPI.system.onSuspend(async () => {
-        if (recordingStore.isRecording) {
-          await recordingService.flushRecordingData();
-        }
-        // Acknowledge to main process that flush is complete
-        window.electronAPI.system.sendSuspendAck();
-      });
+    // System suspend/resume handling moved to recordingSafetyNet (app-level,
+    // survives navigation). Registering page-scoped copies here — and tearing
+    // them down with system.removeAllListeners on unmount — meant a suspend
+    // that hit while the user was on ANY other page got no renderer flush,
+    // and it silently deregistered the app-level listeners too.
 
-      window.electronAPI.system.onResume(async (data) => {
-        if (data.needsRecovery && recordingStore.isRecording) {
-          // B2: OS resumed from sleep — refresh the watchdog baseline so the
-          // frozen-timer gap during sleep is not read as a capture stall.
-          recordingService.notifyForegrounded();
-          // Explicitly resume AudioContext — it may be suspended after system sleep
-          await recordingService.resumeAudioContexts();
-
-          silenceWarning.value = 'Recording resumed after system sleep - please check audio is working';
-          setTimeout(() => {
-            if (audioLevel.value > 1) {
-              silenceWarning.value = null;
-            }
-          }, 5000);
-        }
-      });
-
-      // AudioTee runs as a standalone process — Audio Service crashes don't affect it.
-      // Keep the listener for logging but no recovery needed.
-      window.electronAPI.system.onAudioServiceCrashed(async () => {
-        console.warn('Audio Service crashed — AudioTee capture is independent and should continue');
-      });
-    }
+    // Tell the safety net that RecordPage's own (richer) emergency handlers
+    // are now alive — the net stands down for the events handled here.
+    setRecordPageActive(true);
   });
 
   // Cleanup on unmount - DO NOT stop recording, only remove listeners
@@ -590,10 +567,13 @@ export function useRecorder() {
       navigator.mediaDevices.removeEventListener('devicechange', loadMicrophones);
     }
 
-    // Remove system event listeners (but don't stop recording!)
-    if (window.electronAPI && window.electronAPI.system) {
-      window.electronAPI.system.removeAllListeners();
-    }
+    // NB: system suspend/resume listeners are owned by recordingSafetyNet and
+    // must NOT be removed here — system.removeAllListeners() would strip the
+    // app-level ones off the shared IPC channels too.
+
+    // The safety net takes over emergency handling while no RecordPage is
+    // mounted (the recording itself persists across navigation).
+    setRecordPageActive(false);
 
     // NOTE: We intentionally do NOT stop the recording here
     // The recording service persists across navigation

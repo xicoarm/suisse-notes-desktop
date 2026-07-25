@@ -275,6 +275,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onAudioServiceCrashed: (callback) => {
       ipcRenderer.on('system:audio-service-crashed', (event, data) => callback(data));
     },
+    // Capture-quality warnings the user MUST see (ffmpeg missing before a
+    // system-audio meeting, system-audio merge degraded to mic-only, …).
+    // Deliberately NOT covered by removeAllListeners: the subscriber is the
+    // app-level safety net (App.vue), which must survive RecordPage unmounts.
+    onCaptureWarning: (callback) => {
+      ipcRenderer.on('system:capture-warning', (event, data) => callback(data));
+    },
     // Remove all system listeners
     removeAllListeners: () => {
       ipcRenderer.removeAllListeners('recording:suspend');

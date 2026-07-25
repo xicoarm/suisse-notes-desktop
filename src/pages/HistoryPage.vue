@@ -329,6 +329,15 @@ export default {
       uploadProgress.value = 0;
       retryAttempt.value = 0;
 
+      // A user-initiated retry re-arms a terminally-failed upload: clear the
+      // terminal latch and the auto-retry budget so, if THIS attempt fails
+      // transiently, the background auto-retry may resume afterwards.
+      if (recording.uploadTerminal || recording.retryCount) {
+        try {
+          await historyStore.updateRecording(recording.id, { uploadTerminal: null, retryCount: 0 });
+        } catch (e) { /* best-effort — the upload attempt below proceeds regardless */ }
+      }
+
       // P0 Data Loss Fix: Lock file before upload to prevent deletion during upload
       recordingStore.lockForUpload(recording.id);
 
