@@ -346,6 +346,9 @@
             />
             <span>{{ micHealthMessage }}</span>
           </div>
+          <!-- MSIG: prefer the TRANSLATED reason-derived message over the
+               service's raw English silenceWarning text, so degraded states
+               never render a mixed-language UI. -->
           <div
             v-else-if="silenceWarning"
             class="health-notice health-notice--warning"
@@ -355,7 +358,7 @@
               size="14px"
               color="warning"
             />
-            <span>{{ silenceWarning }}</span>
+            <span>{{ recordingHealth?.reasonCode ? micHealthMessage : silenceWarning }}</span>
           </div>
 
           <!-- System Audio Capture Error Warning -->
@@ -844,6 +847,9 @@ const {
   systemAudioCaptureError,
   // Microphone capture error (e.g., mic in use by another app)
   micCaptureError,
+  // MSIG: post-switch signal-probe verdicts + automatic device switches
+  micSwitchEvent,
+  micAutoSwitchInfo,
   recordingHealth,
   isMicHealthy,
   recordingHealthMessage,
@@ -878,12 +884,64 @@ const handleMicSwitch = async (newDeviceId) => {
   try {
     const result = await switchMicrophoneDuringRecording(newDeviceId);
     if (!result.success) {
+      // MSIG: a failed switch was previously console-only — the user picked a
+      // device, nothing happened, and nobody said why.
       console.error('Mic switch failed:', result.error);
+      $q.notify({
+        type: 'negative',
+        message: t('micSwitchFailedToast', { error: result.error || '' }),
+        icon: 'mic_off',
+        timeout: 8000
+      });
     }
+    // Success verdict/toast comes from the signal probe (micSwitchEvent watch)
+    // — "stream acquired" alone is no reason to celebrate.
   } finally {
     switchingMic.value = false;
   }
 };
+
+// MSIG: post-switch signal-probe verdict → precise toast. ok:true confirms
+// audio is really flowing from the chosen device; ok:false is the moment the
+// user must act (the device is connected but silent).
+watch(micSwitchEvent, (ev) => {
+  if (!ev) return;
+  micSwitchEvent.value = null; // consume (transient event)
+  if (ev.unverified) return;   // probe unavailable — nothing truthful to say
+  const device = ev.label || t('micGenericDevice');
+  if (ev.ok) {
+    // The auto-switch case gets its own, more prominent toast below.
+    if (ev.context === 'auto-recovery') return;
+    $q.notify({
+      type: 'positive',
+      message: t('micSwitchOkToast', { device }),
+      icon: 'mic',
+      timeout: 4000
+    });
+  } else {
+    $q.notify({
+      type: 'negative',
+      message: t('micSwitchSilentToast', { device }),
+      icon: 'mic_off',
+      timeout: 0,
+      actions: [{ label: t('ok', 'OK'), color: 'white' }]
+    });
+  }
+});
+
+// MSIG: the service auto-switched to another device after the selected mic
+// vanished. This existed before but was NEVER shown to the user.
+watch(micAutoSwitchInfo, (info) => {
+  if (!info) return;
+  micAutoSwitchInfo.value = null; // consume
+  $q.notify({
+    type: 'warning',
+    message: t('micAutoSwitchedToast', { device: info.toLabel || t('micGenericDevice') }),
+    icon: 'mic',
+    timeout: 10000,
+    actions: [{ label: t('ok', 'OK'), color: 'white' }]
+  });
+});
 
 // System audio toggle functionality.
 // While paused, toggling ON desyncs the merged audio because AudioTee runs
@@ -914,21 +972,36 @@ const showMacPermissionNotice = computed(() => {
 });
 
 const micHealthStatus = computed(() => recordingHealth.value?.status || 'ok');
+const micVerifying = computed(() => recordingHealth.value?.verifying === true);
 
 const micHealthBadgeColor = computed(() => {
+  if (micVerifying.value) return 'info';
   if (micHealthStatus.value === 'critical') return 'negative';
   if (micHealthStatus.value === 'degraded') return 'warning';
   return 'positive';
 });
 
 const micHealthBadgeText = computed(() => {
+  if (micVerifying.value) return t('micHealthVerifying');
   if (micHealthStatus.value === 'critical') return t('micHealthCritical');
   if (micHealthStatus.value === 'degraded') return t('micHealthDegraded');
   return t('micHealthOk');
 });
 
+// MSIG: live "silent for N s/min" — recordingStore.duration ticks once per
+// second while recording, giving this computed a cheap re-evaluation pulse
+// without a dedicated timer.
+const micSilenceSeconds = computed(() => {
+  void recordingStore.duration; // reactivity pulse
+  const since = recordingHealth.value?.silenceSince;
+  if (!since) return null;
+  return Math.max(0, Math.round((Date.now() - since) / 1000));
+});
+
 const micHealthMessage = computed(() => {
+  if (micVerifying.value) return t('micHealthVerifyingMsg');
   const reasonCode = recordingHealth.value?.reasonCode || null;
+  const device = recordingHealth.value?.trackLabel || t('micGenericDevice');
   switch (reasonCode) {
     case 'no_audio_detected':
       return t('micHealthNoAudio');
@@ -942,6 +1015,23 @@ const micHealthMessage = computed(() => {
       return t('micHealthSystemOnly');
     case 'monitoring_error':
       return t('micHealthMonitoringError');
+    case 'zero_signal': {
+      // Precise: WHICH device, for HOW LONG, and what to do — with the action
+      // that actually exists on this platform (mobile has no device picker;
+      // the OS routes Bluetooth itself).
+      const seconds = micSilenceSeconds.value ?? 0;
+      const params = { device, seconds };
+      if (recordingHealth.value?.afterSwitch) {
+        return isCapacitor()
+          ? t('micHealthZeroSignalSwitchedMobile', params)
+          : t('micHealthZeroSignalSwitchedDesktop', params);
+      }
+      return isCapacitor()
+        ? t('micHealthZeroSignalMobile', params)
+        : t('micHealthZeroSignalDesktop', params);
+    }
+    case 'low_level':
+      return t('micHealthLowLevel', { db: recordingHealth.value?.measuredDb ?? '' });
     default:
       return recordingHealthMessage.value || t('micHealthReady');
   }

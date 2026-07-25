@@ -137,6 +137,67 @@ const MIC_HEALTH_DEGRADED_SECONDS = 30;  // Show subtle hint after 30s of silenc
 const MIC_HEALTH_CRITICAL_SECONDS = 60;  // Escalate to critical after 60s
 const MIC_HEALTH_RECOVERY_SECONDS = 3;
 
+// MSIG: mic signal forensics (Insel incident 2026-07-22 — dead Bluetooth
+// speakerphone kept an enumerated "phantom" endpoint whose track stayed
+// readyState==='live' while delivering pure digital zeros; 6 minutes of
+// warned-but-unrecovered silence, then a manual switch onto another silent
+// BT profile that the health monitor blessed as OK because its thresholds
+// sit at the analyser noise floor).
+//
+// A healthy OPEN microphone never delivers sustained exact-digital-silence:
+// even a silent room leaves AGC/ADC noise far above -90 dBFS. Sustained
+// peaks below ZERO_PEAK_DBFS therefore mean a dead/hardware-muted device,
+// which we can flag much faster than generic low-audio, and which justifies
+// one automatic same-device re-acquire (safe: it never switches the user
+// onto a device they did not choose — a hardware-muted headset must NOT be
+// silently replaced by the laptop mic).
+const ZERO_PEAK_DBFS = -90;
+const ZERO_DEGRADED_MS = 15000;
+const ZERO_CRITICAL_MS = 45000;
+const ZERO_DEGRADED_SYSAUDIO_MS = 120000;  // parity with the relaxed NO_AUDIO thresholds
+const ZERO_CRITICAL_SYSAUDIO_MS = 300000;
+// Post-switch verification: after ANY mic swap (manual, auto-recovery,
+// re-acquire) the new stream must prove it delivers signal before health may
+// report OK — "getUserMedia succeeded" is not proof (phantom endpoints
+// happily hand out silent streams).
+const SWITCH_VERIFY_MS = 5000;
+const SWITCH_VERIFY_SIGNAL_DBFS = -80;   // any tick above this = device delivers signal
+// LOW_LEVEL: input carries speech-like modulation but ~30dB too quiet for
+// STT (broken BT gain, wrong endpoint). Modulation-gated so meeting pauses
+// (steady noise floor, no syllable dynamics) can never false-positive.
+const LOW_LEVEL_EVAL_INTERVAL_MS = 5000;
+const LOW_LEVEL_WINDOW_MS = 180000;
+const LOW_LEVEL_MIN_ACTIVE_MS = 30000;
+const LOW_LEVEL_ACTIVITY_ABOVE_FLOOR_DB = 12;
+const LOW_LEVEL_P90_DBFS = -45;
+const LOW_LEVEL_CLEAR_P90_DBFS = -40;    // hysteresis so the hint doesn't flap
+// Post-switch loudness comparison: the new device is "verified" (has signal)
+// but dramatically quieter than what this session's speech measured before —
+// exactly Angela's phase 2. Compared against a slow EMA of active-tick RMS.
+const SWITCH_BASELINE_DROP_DB = 20;
+const SWITCH_BASELINE_MIN_ACTIVE_MS = 30000;
+const LEVEL_BASELINE_ALPHA = 0.005;      // EMA time constant ≈ 20s of active ticks
+const LEVEL_ACTIVITY_FLOOR_DBFS = -60;   // ticks quieter than this don't teach the baseline
+
+let zeroSignalSince = null;        // wall-clock start of the current all-zeros run
+let zeroEpisodeReported = false;   // one Sentry breadcrumb per episode
+let zeroEpisodeReacquired = false; // one automatic same-device re-acquire per episode
+let zeroReacquireInFlight = false;
+// micVerify: pending post-switch verification, resolved by the health loop.
+// { context: 'manual-switch'|'auto-recovery'|'reacquire', label, deviceId,
+//   since, deadline, generation, baselineBefore, resolvers: [fn] }
+let micVerify = null;
+// Post-switch loudness watch: after a verified switch, compare 30s of active
+// audio against the pre-switch baseline. { since, baselineBefore, activeMs, levels: [] }
+let switchLevelWatch = null;
+let levelBaselineDb = null;        // slow EMA of active-tick RMS (session speech reference)
+let micTickHistory = [];           // ring buffer {t, rmsDb, voiceEnergy} for LOW_LEVEL (3 min)
+let lowLevelActive = false;
+let lowLevelReported = false;
+let lastLowLevelEvalAt = 0;
+let lowLevelMeasuredDb = null;     // active-speech P90 that triggered LOW_LEVEL
+let micSignalFloatBuf = null;
+
 // Dev/test-only env-var override helper. Honored ONLY in non-production builds
 // (Vite sets import.meta.env.PROD=true at production build time). Production
 // bundles always use the hard-coded fallback regardless of any VITE_* var —
@@ -169,7 +230,12 @@ export const MIC_HEALTH_REASON = Object.freeze({
   MIC_CAPTURE_FAILED: 'mic_capture_failed',
   TRACK_ENDED: 'track_ended',
   SYSTEM_AUDIO_ONLY: 'system_audio_only',
-  MONITORING_ERROR: 'monitoring_error'
+  MONITORING_ERROR: 'monitoring_error',
+  // MSIG: track is live but delivers sustained digital silence — dead BT
+  // endpoint, hardware mute switch, wedged capture stream.
+  ZERO_SIGNAL: 'zero_signal',
+  // MSIG: speech-like modulation present but far too quiet to transcribe.
+  LOW_LEVEL: 'low_level'
 });
 
 let micHealthState = {
@@ -183,6 +249,11 @@ let micHealthState = {
   trackLabel: '',
   sampleRate: null,
   channelCount: null,
+  // MSIG fields — let the UI say precisely WHAT is wrong and for HOW LONG:
+  silenceSince: null,   // wall-clock ms when the current zero-signal run began
+  measuredDb: null,     // active-speech level (dBFS) that triggered LOW_LEVEL
+  verifying: false,     // a just-switched mic is being probed for real signal
+  afterSwitch: false,   // reason was established right after a device switch
   changedAt: Date.now()
 };
 let micAnomalyCounter = 0;
@@ -254,6 +325,12 @@ function getMicHealthMessage(reasonCode) {
       return 'Recording system audio only — microphone is not active.';
     case MIC_HEALTH_REASON.MONITORING_ERROR:
       return 'Microphone monitoring issue. Recording continues normally.';
+    case MIC_HEALTH_REASON.ZERO_SIGNAL:
+      return hasSysAudio
+        ? 'Microphone delivers no signal — system audio is still being recorded. The device may be off or muted.'
+        : 'Microphone is connected but delivers no signal. The device may be switched off or hardware-muted. Please switch to a different microphone.';
+    case MIC_HEALTH_REASON.LOW_LEVEL:
+      return 'Microphone signal is very quiet — the recording may be hard to understand. Check the device volume/position or switch microphones.';
     default:
       return null;
   }
@@ -288,6 +365,13 @@ function updateMicHealthState(status, reasonCode = null, message = null, updates
     message: resolvedMessage,
     changedAt: Date.now()
   };
+  // MSIG: a healthy state carries no stale forensics (verifying is managed
+  // independently — a probe can be pending while the status is still OK).
+  if (status === MIC_HEALTH_STATUS.OK) {
+    nextState.silenceSince = null;
+    nextState.measuredDb = null;
+    nextState.afterSwitch = false;
+  }
 
   const changed = [
     'status',
@@ -299,7 +383,11 @@ function updateMicHealthState(status, reasonCode = null, message = null, updates
     'actualDeviceId',
     'trackLabel',
     'sampleRate',
-    'channelCount'
+    'channelCount',
+    'silenceSince',
+    'measuredDb',
+    'verifying',
+    'afterSwitch'
   ].some((key) => nextState[key] !== previous[key]);
 
   micHealthState = nextState;
@@ -316,6 +404,8 @@ function updateMicHealthState(status, reasonCode = null, message = null, updates
 function resetMicHealthState() {
   micAnomalyCounter = 0;
   micRecoveryCounter = 0;
+  resetMicSignalState();
+  levelBaselineDb = null; // session speech reference — per recording
   micHealthState = {
     status: MIC_HEALTH_STATUS.OK,
     reasonCode: null,
@@ -327,9 +417,55 @@ function resetMicHealthState() {
     trackLabel: '',
     sampleRate: null,
     channelCount: null,
+    silenceSince: null,
+    measuredDb: null,
+    verifying: false,
+    afterSwitch: false,
     changedAt: Date.now()
   };
   emit('healthChange', { ...micHealthState });
+}
+
+/**
+ * MSIG: clear the transient signal-forensics episode state. Called on fresh
+ * start, teardown, pause (measurement is gated while paused, so a stale
+ * wall-clock episode must not "age" through the pause), and on wake from
+ * system sleep (same reason).
+ * Deliberately does NOT touch levelBaselineDb — the session speech reference
+ * survives episodes so a post-switch loudness drop can still be compared.
+ */
+function resetMicSignalState() {
+  zeroSignalSince = null;
+  zeroEpisodeReported = false;
+  zeroEpisodeReacquired = false;
+  lowLevelActive = false;
+  lowLevelReported = false;
+  lowLevelMeasuredDb = null;
+  micTickHistory = [];
+  lastLowLevelEvalAt = 0;
+  switchLevelWatch = null;
+  resolveMicVerification(null);
+}
+
+/**
+ * MSIG: resolve and clear a pending post-switch verification. verdict is
+ * 'signal' | 'silent' | null (null = aborted: teardown/pause/superseded —
+ * no health verdict is derived, but awaiting callers are unblocked).
+ */
+function resolveMicVerification(verdict) {
+  const v = micVerify;
+  if (!v) return;
+  micVerify = null;
+  if (verdict === null && micHealthState.verifying) {
+    // Aborted probe (pause/teardown/superseded): the UI must not stay stuck
+    // on "checking…". The 'signal'/'silent' paths set their own state.
+    updateMicHealthState(micHealthState.status, micHealthState.reasonCode, micHealthState.message, {
+      verifying: false
+    });
+  }
+  for (const fn of v.resolvers) {
+    try { fn(verdict); } catch (e) { /* consumer error must not break the loop */ }
+  }
 }
 
 function updateMicHealthTrackDetails(micStream, requestedDeviceId) {
@@ -535,10 +671,25 @@ export async function resumeAudioContexts() {
 /**
  * Switch microphone source mid-recording without stopping the MediaRecorder.
  * Follows the same pattern as addSystemAudioStream/removeSystemAudioStream.
- * @param {string} newDeviceId - The device ID to switch to
- * @returns {Promise<{success: boolean, error?: string}>}
+ *
+ * MSIG: "getUserMedia succeeded" is NOT proof the device works — Windows
+ * happily opens phantom endpoints of dead Bluetooth devices and hands out
+ * streams of pure silence (Insel incident: the UI showed "In Ordnung" for
+ * 20 minutes of unusable audio). So unless opts.skipVerify is set, health
+ * does NOT flip to OK here; a 5s signal probe in the health loop delivers
+ * the verdict, exposed via the returned `verified` promise
+ * ('signal' | 'silent' | null=aborted).
+ *
+ * @param {string|null} newDeviceId - Device ID to switch to (null = OS default)
+ * @param {Object} opts
+ * @param {string}  opts.verifyContext - 'manual-switch' (default) | 'auto-recovery' | 'reacquire'
+ * @param {boolean} opts.skipVerify - legacy behavior for INT-2 (its own success
+ *   metric is chunk flow, and probing during an OS audio-session interruption
+ *   would false-positive "silent")
+ * @returns {Promise<{success: boolean, error?: string, label?: string, verified?: Promise}>}
  */
-export async function switchMicrophoneStream(newDeviceId) {
+export async function switchMicrophoneStream(newDeviceId, opts = {}) {
+  const verifyContext = opts.verifyContext || 'manual-switch';
   if (!mixingContext || !mixingDest) {
     return { success: false, error: 'No active recording to switch microphone in' };
   }
@@ -546,15 +697,21 @@ export async function switchMicrophoneStream(newDeviceId) {
   try {
     // DREC-3: remember the active device so auto-recovery can prefer it if it
     // drops and later reappears.
-    lastRequestedDeviceId = newDeviceId;
+    lastRequestedDeviceId = newDeviceId || null;
     // Step 1: Acquire new mic stream with fallback constraints
     let newStream = null;
-    const constraintLadder = [
-      { deviceId: { exact: newDeviceId }, echoCancellation: true, noiseSuppression: true, sampleRate: 48000 },
-      { deviceId: { ideal: newDeviceId }, noiseSuppression: true },
-      { noiseSuppression: true },
-      true
-    ];
+    const constraintLadder = newDeviceId
+      ? [
+        { deviceId: { exact: newDeviceId }, echoCancellation: true, noiseSuppression: true, sampleRate: 48000 },
+        { deviceId: { ideal: newDeviceId }, noiseSuppression: true },
+        { noiseSuppression: true },
+        true
+      ]
+      : [
+        { echoCancellation: true, noiseSuppression: true, sampleRate: 48000 },
+        { noiseSuppression: true },
+        true
+      ];
 
     for (const constraints of constraintLadder) {
       try {
@@ -636,16 +793,60 @@ export async function switchMicrophoneStream(newDeviceId) {
       startMicHealthMonitoring(newStream, recordingStoreRef);
     }
 
-    // Step 7: Update health state to OK
-    updateMicHealthTrackDetails(newStream, newDeviceId);
-    clearSilenceWarning();
-    micAnomalyCounter = 0;
-    micRecoveryCounter = 0;
+    // Step 7 (MSIG): defer the health verdict to the signal probe. The state
+    // keeps its previous status/warnings (honest: a still-silent recording
+    // must not flash "healthy" for 5 seconds), gains the new track details,
+    // and is flagged `verifying` so the UI can show "checking…".
+    const newTrack = newStream.getAudioTracks()[0];
+    const settings = newTrack?.getSettings ? newTrack.getSettings() : {};
+    const trackLabel = newTrack?.label || newDeviceId || 'System default';
 
-    const trackLabel = newStream.getAudioTracks()[0]?.label || newDeviceId;
-    console.log('Microphone switched successfully to:', trackLabel);
+    if (opts.skipVerify) {
+      updateMicHealthTrackDetails(newStream, newDeviceId);
+      clearSilenceWarning();
+      micAnomalyCounter = 0;
+      micRecoveryCounter = 0;
+      console.log('Microphone switched successfully to:', trackLabel);
+      emit('microphoneChange', { deviceId: newDeviceId, label: trackLabel });
+      return { success: true, label: trackLabel };
+    }
+
+    resolveMicVerification(null); // supersede any older pending probe
+    micVerify = {
+      context: verifyContext,
+      label: trackLabel,
+      deviceId: newDeviceId || settings.deviceId || null,
+      since: Date.now(),
+      deadline: Date.now() + SWITCH_VERIFY_MS,
+      baselineBefore: levelBaselineDb,
+      resolvers: []
+    };
+    // Fresh stream, fresh episode clock (a silent verdict re-anchors it) —
+    // and a fresh low-level history: the old device's levels must not be
+    // held against the new one.
+    zeroSignalSince = null;
+    switchLevelWatch = null;
+    micTickHistory = [];
+    lowLevelActive = false;
+    lastLowLevelEvalAt = 0;
+    updateMicHealthState(micHealthState.status, micHealthState.reasonCode, micHealthState.message, {
+      verifying: true,
+      micActive: true,
+      inputDeviceId: newDeviceId || null,
+      actualDeviceId: settings.deviceId || null,
+      trackLabel,
+      sampleRate: settings.sampleRate || null,
+      channelCount: settings.channelCount || null
+    });
+
+    const verified = new Promise((res) => {
+      if (micVerify) micVerify.resolvers.push(res);
+      else res(null);
+    });
+
+    console.log('Microphone switched to:', trackLabel, '— verifying signal');
     emit('microphoneChange', { deviceId: newDeviceId, label: trackLabel });
-    return { success: true };
+    return { success: true, label: trackLabel, verified };
   } catch (e) {
     console.error('Error switching microphone:', e);
     return { success: false, error: e.message };
@@ -685,23 +886,58 @@ function registerMicGraceTimeout(fn, delayMs) {
  */
 async function handleMicDeviceChange() {
   if (!recordingStoreRef?.isRecording) return;
+
+  // MSIG: a device-set change during a zero-signal episode is a fresh chance —
+  // the wedged endpoint may have been re-registered by the OS (e.g. the BT
+  // device was power-cycled). Re-arm the one-per-episode same-device
+  // re-acquire; the health loop performs it on its next escalated tick.
+  // Still same-device only: sustained zeros can mean a hardware-muted mic,
+  // and a muted user must never be silently moved onto another microphone.
+  if (micHealthState.reasonCode === MIC_HEALTH_REASON.ZERO_SIGNAL && zeroSignalSince && !zeroReacquireInFlight) {
+    zeroEpisodeReacquired = false;
+    return;
+  }
+
   if (micHealthState.reasonCode !== MIC_HEALTH_REASON.TRACK_ENDED) return;
   if (micAutoRecovering) return;
   if (!navigator.mediaDevices?.enumerateDevices) return;
   micAutoRecovering = true;
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
-    const inputs = devices.filter(d => d.kind === 'audioinput' && d.deviceId);
+    // 'communications' is a Windows pseudo-device that duplicates 'default'
+    // semantics — skip it so it cannot burn a candidate slot.
+    const inputs = devices.filter(d => d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'communications');
     if (inputs.length === 0) return;
-    // Prefer the originally-requested device if it reappeared; otherwise the
-    // first available input so the recording keeps capturing *something*.
-    const target = inputs.find(d => d.deviceId === lastRequestedDeviceId) || inputs[0];
-    const result = await switchMicrophoneStream(target.deviceId);
-    if (result.success) {
-      clearMicGraceTimeouts(); // device is live again — do not escalate to CRITICAL
-      emit('micRecovered', { deviceId: target.deviceId });
-      console.log('Mic auto-recovered onto device', target.deviceId);
+    // Prefer the originally-requested device if it reappeared, then walk the
+    // remaining inputs. Every candidate must PROVE it delivers signal (a
+    // still-enumerated phantom endpoint opens fine and records silence) —
+    // up to 3 candidates, ~5s probe each.
+    const preferred = inputs.find(d => d.deviceId === lastRequestedDeviceId);
+    const candidates = [
+      ...(preferred ? [preferred] : []),
+      ...inputs.filter(d => d !== preferred)
+    ].slice(0, 3);
+    const fromLabel = micHealthState.trackLabel || '';
+    for (const candidate of candidates) {
+      const result = await switchMicrophoneStream(candidate.deviceId, { verifyContext: 'auto-recovery' });
+      if (!result.success) continue;
+      const verdict = await result.verified;
+      if (verdict === 'signal') {
+        clearMicGraceTimeouts(); // device is live again — do not escalate to CRITICAL
+        emit('micRecovered', { deviceId: candidate.deviceId });
+        emit('micAutoSwitched', {
+          fromLabel,
+          toLabel: result.label || candidate.label || '',
+          deviceId: candidate.deviceId
+        });
+        captureMessage(`mic-health: auto-recovered onto "${result.label || candidate.deviceId}" after device loss (signal verified)`, 'warning');
+        return;
+      }
+      if (verdict === null) return; // probe aborted (stop/pause/teardown) — stand down
+      captureMessage(`mic-health: auto-recovery candidate "${result.label || candidate.deviceId}" delivered no signal — trying next`, 'warning');
     }
+    // Every candidate was silent: the last one stays active and the health
+    // state already shows the precise ZERO_SIGNAL after-switch message.
   } catch (e) {
     console.warn('Mic auto-recovery on devicechange failed:', e);
   } finally {
@@ -831,7 +1067,10 @@ async function attemptCaptureRecovery() {
           targetDeviceId = (inputs.find(d => d.deviceId === lastRequestedDeviceId) || inputs[0]).deviceId;
         }
       } catch (e) { /* fall through with lastRequestedDeviceId */ }
-      const result = await switchMicrophoneStream(targetDeviceId || 'default');
+      // MSIG: skipVerify — INT-2's success metric is chunk flow (checked at
+      // the top of every tick), and running a signal probe during an OS
+      // audio-session interruption would false-positive "silent".
+      const result = await switchMicrophoneStream(targetDeviceId || 'default', { skipVerify: true });
       if (!result.success) {
         captureRecoveryHealthyTicks = 0;
         return; // mic still unavailable — next tick
@@ -957,6 +1196,79 @@ function startLevelMonitoring(mediaStream, micStream, recordingStore) {
   }
 }
 
+/** MSIG: p-quantile (0..1) of a numeric array. Returns null on empty input. */
+function percentileDb(values, p) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.round(p * (sorted.length - 1))));
+  return sorted[idx];
+}
+
+/** MSIG: linear amplitude → dBFS (exact zeros map to -Infinity). */
+function toDbfs(amplitude) {
+  return amplitude > 0 ? 20 * Math.log10(amplitude) : -Infinity;
+}
+
+/**
+ * MSIG: one automatic re-acquire of the SAME device during a zero-signal
+ * episode. Fixes wedged capture streams (Windows audio-engine / BT profile
+ * flips) without ever moving the user onto a device they did not choose —
+ * a hardware-muted headset must not be silently replaced by the room mic.
+ * The post-switch verification decides whether it actually helped.
+ */
+async function attemptSameDeviceReacquire() {
+  if (zeroReacquireInFlight) return;
+  zeroReacquireInFlight = true;
+  try {
+    const sinceSec = zeroSignalSince ? Math.round((Date.now() - zeroSignalSince) / 1000) : 0;
+    captureMessage(`mic-health: zero-signal for ${sinceSec}s on "${micHealthState.trackLabel || 'unknown mic'}" — re-acquiring the same device`, 'warning');
+    const result = await switchMicrophoneStream(lastRequestedDeviceId || null, { verifyContext: 'reacquire' });
+    if (!result.success) {
+      captureMessage(`mic-health: same-device re-acquire could not open a stream (${result.error})`, 'warning');
+      return;
+    }
+    const verdict = await result.verified;
+    captureMessage(`mic-health: same-device re-acquire verdict: ${verdict || 'aborted'}`, verdict === 'signal' ? 'warning' : 'error');
+  } catch (e) {
+    console.warn('Same-device re-acquire failed:', e);
+  } finally {
+    zeroReacquireInFlight = false;
+  }
+}
+
+/**
+ * MSIG: evaluate the continuous quiet-input detector over the rolling tick
+ * history. Modulation-gated: a tick only counts as "speech-like activity"
+ * when it rises ≥12dB above the window's own floor — steady room tone or a
+ * silent meeting pause produces no active ticks and therefore NO verdict
+ * either way (we refuse to judge quietness without evidence of speech).
+ */
+function evaluateLowLevel() {
+  const finite = micTickHistory.filter(h => Number.isFinite(h.rmsDb));
+  if (finite.length < 100) return; // need ≥10s of measurable signal
+  const rmsValues = finite.map(h => h.rmsDb);
+  const floor = percentileDb(rmsValues, 0.10);
+  const active = rmsValues.filter(v => v > floor + LOW_LEVEL_ACTIVITY_ABOVE_FLOOR_DB);
+  const activeMs = active.length * HEALTH_SAMPLE_INTERVAL_MS;
+  if (activeMs < LOW_LEVEL_MIN_ACTIVE_MS) return;
+  const p90 = percentileDb(active, 0.90);
+  if (!lowLevelActive && p90 <= LOW_LEVEL_P90_DBFS) {
+    lowLevelActive = true;
+    lowLevelMeasuredDb = Math.round(p90);
+    if (!lowLevelReported) {
+      lowLevelReported = true;
+      captureMessage(`mic-health: LOW LEVEL — active-speech P90 ${Math.round(p90)}dBFS over ${Math.round(activeMs / 1000)}s (device "${micHealthState.trackLabel || 'unknown'}")`, 'warning');
+    }
+  } else if (lowLevelActive) {
+    if (p90 > LOW_LEVEL_CLEAR_P90_DBFS) {
+      lowLevelActive = false;
+      lowLevelMeasuredDb = null;
+    } else {
+      lowLevelMeasuredDb = Math.round(p90); // keep the displayed value current
+    }
+  }
+}
+
 function startMicHealthMonitoring(micStream, recordingStore) {
   try {
     micHealthAudioContext = new (window.AudioContext || window.webkitAudioContext)({
@@ -969,23 +1281,47 @@ function startMicHealthMonitoring(micStream, recordingStore) {
     micHealthAnalyser.fftSize = 256;
     const bufferLength = micHealthAnalyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
+    // MSIG: float time-domain probe. dBFS thresholds are meaningless on the
+    // 8-bit fallback API (its quantization floor is ≈-42dBFS), so the
+    // zero-signal / low-level detectors are simply disabled where the float
+    // API is missing — never guessed. Every current platform (Electron 28,
+    // iOS ≥14.5 WKWebView, Android Chrome) has it.
+    const hasFloatProbe = typeof micHealthAnalyser.getFloatTimeDomainData === 'function';
+    micSignalFloatBuf = hasFloatProbe ? new Float32Array(micHealthAnalyser.fftSize) : null;
     micAnomalyCounter = 0;
     micRecoveryCounter = 0;
 
     micHealthInterval = setInterval(() => {
-      if (!recordingStore.isRecording || !micHealthAnalyser) {
+      if (!micHealthAnalyser) return;
+      if (!recordingStore.isRecording) {
+        // Paused/stopped: measurement is gated, so wall-clock episode state
+        // must not keep aging (a 10-min pause would otherwise resume straight
+        // into CRITICAL). A pending switch probe cannot be measured either —
+        // abort it without a verdict.
+        if (zeroSignalSince || micVerify || micTickHistory.length) {
+          resetMicSignalState();
+        }
         return;
       }
 
       const micTrack = micStream.getAudioTracks()[0];
       if (!micTrack || micTrack.readyState !== 'live') {
+        // MSIG: if this stream was mid-verification, deliver the verdict —
+        // a dead track certainly has no signal, and an unresolved probe
+        // would hang its awaiting caller (auto-recovery) forever.
+        if (micVerify) {
+          const v = micVerify;
+          resolveMicVerification('silent');
+          emit('micSwitchVerified', { ok: false, context: v.context, label: v.label, deviceId: v.deviceId });
+        }
         updateMicHealthState(
           MIC_HEALTH_STATUS.CRITICAL,
           MIC_HEALTH_REASON.TRACK_ENDED,
           null,
           {
             micActive: false,
-            systemAudioActive
+            systemAudioActive,
+            verifying: false
           }
         );
         setSilenceWarning(micHealthState.message);
@@ -995,6 +1331,9 @@ function startMicHealthMonitoring(micStream, recordingStore) {
       if (micMuted) {
         micAnomalyCounter = 0;
         micRecoveryCounter = 0;
+        // Intentional mute: no zero-signal forensics either.
+        zeroSignalSince = null;
+        zeroEpisodeReported = false;
         clearSilenceWarning();
         return;
       }
@@ -1007,6 +1346,160 @@ function startMicHealthMonitoring(micStream, recordingStore) {
         voiceEnergy += dataArray[i];
       }
       voiceEnergy /= Math.max(1, (highBin - VOICE_FREQ_LOW_BIN));
+
+      // ── MSIG: float time-domain measurement (rms/peak in dBFS) ──
+      let rmsDb = null;
+      let peakDb = null;
+      if (micSignalFloatBuf) {
+        micHealthAnalyser.getFloatTimeDomainData(micSignalFloatBuf);
+        let sumSq = 0;
+        let peak = 0;
+        for (let i = 0; i < micSignalFloatBuf.length; i++) {
+          const v = micSignalFloatBuf[i];
+          sumSq += v * v;
+          const a = Math.abs(v);
+          if (a > peak) peak = a;
+        }
+        rmsDb = toDbfs(Math.sqrt(sumSq / micSignalFloatBuf.length));
+        peakDb = toDbfs(peak);
+      }
+
+      // ── MSIG: pending post-switch verification owns the verdict ──
+      if (micVerify) {
+        if (micSignalFloatBuf == null) {
+          // No float probe → cannot verify; behave like the legacy path.
+          const v = micVerify;
+          resolveMicVerification('signal');
+          updateMicHealthState(MIC_HEALTH_STATUS.OK, null, null, {
+            micActive: true, systemAudioActive, verifying: false
+          });
+          clearSilenceWarning();
+          emit('micSwitchVerified', { ok: true, unverified: true, context: v.context, label: v.label, deviceId: v.deviceId });
+        } else if (micHealthAudioContext?.state !== 'running') {
+          // Measurement context suspended (autoplay policy / interruption):
+          // nothing truthful can be read — postpone the verdict rather than
+          // judging a healthy device on synthesized silence.
+          micVerify.deadline = Date.now() + SWITCH_VERIFY_MS;
+        } else if (peakDb > SWITCH_VERIFY_SIGNAL_DBFS) {
+          // The new device demonstrably delivers signal.
+          const v = micVerify;
+          resolveMicVerification('signal');
+          zeroSignalSince = null;
+          zeroEpisodeReported = false;
+          zeroEpisodeReacquired = false;
+          micAnomalyCounter = 0;
+          micRecoveryCounter = 0;
+          updateMicHealthState(MIC_HEALTH_STATUS.OK, null, null, {
+            micActive: true, systemAudioActive, verifying: false
+          });
+          clearSilenceWarning();
+          captureMessage(`mic-health: switch to "${v.label || v.deviceId || 'default'}" verified — signal present (${v.context})`, 'info');
+          emit('micSwitchVerified', { ok: true, context: v.context, label: v.label, deviceId: v.deviceId });
+          // Watch the first 30s of active audio on the new device against the
+          // pre-switch speech baseline (catches "works but 30dB too quiet").
+          if (v.baselineBefore != null) {
+            switchLevelWatch = { baselineBefore: v.baselineBefore, activeMs: 0, levels: [] };
+          }
+        } else if (Date.now() >= micVerify.deadline) {
+          // Probe window elapsed with pure silence: the chosen device is
+          // connected but delivers nothing. Say so IMMEDIATELY — this is the
+          // moment the user is watching the screen after switching.
+          const v = micVerify;
+          resolveMicVerification('silent');
+          zeroSignalSince = v.since; // keep the episode clock running
+          const status = v.context === 'reacquire'
+            ? MIC_HEALTH_STATUS.CRITICAL // we already tried the only safe fix
+            : MIC_HEALTH_STATUS.DEGRADED;
+          updateMicHealthState(status, MIC_HEALTH_REASON.ZERO_SIGNAL, null, {
+            micActive: true, systemAudioActive, verifying: false,
+            afterSwitch: true, silenceSince: v.since
+          });
+          setSilenceWarning(micHealthState.message);
+          captureMessage(`mic-health: switch to "${v.label || v.deviceId || 'default'}" delivered NO signal within ${SWITCH_VERIFY_MS / 1000}s (${v.context})`, 'error');
+          emit('micSwitchVerified', { ok: false, context: v.context, label: v.label, deviceId: v.deviceId });
+        }
+        return; // while verifying, the regular detectors stand down
+      }
+
+      // ── MSIG: zero-signal episode tracking (wall-clock, sleep-safe) ──
+      // Gated to contexts where zeros are meaningful: measurement context
+      // running, no INT-2 interruption episode (that machinery owns muted/
+      // frozen sessions), no auto-split, track not OS-muted.
+      let zeroEscalated = false;
+      if (micSignalFloatBuf) {
+        const zeroGatesOpen =
+          micHealthAudioContext?.state === 'running' &&
+          !captureRecoveryTimer &&
+          !(isAutoSplittingRef?.value) &&
+          micTrack.muted !== true;
+        const isZero = peakDb <= ZERO_PEAK_DBFS;
+        if (isZero && zeroGatesOpen) {
+          if (!zeroSignalSince) zeroSignalSince = Date.now();
+          const zeroMs = Date.now() - zeroSignalSince;
+          const degMs = systemAudioActive ? ZERO_DEGRADED_SYSAUDIO_MS : ZERO_DEGRADED_MS;
+          const critMs = systemAudioActive ? ZERO_CRITICAL_SYSAUDIO_MS : ZERO_CRITICAL_MS;
+          if (zeroMs >= degMs) {
+            zeroEscalated = true;
+            if (!zeroEpisodeReported) {
+              zeroEpisodeReported = true;
+              captureMessage(`mic-health: ZERO SIGNAL episode — "${micHealthState.trackLabel || 'unknown mic'}" live but delivering digital silence for ${Math.round(zeroMs / 1000)}s`, 'error');
+            }
+            const status = zeroMs >= critMs ? MIC_HEALTH_STATUS.CRITICAL : MIC_HEALTH_STATUS.DEGRADED;
+            updateMicHealthState(status, MIC_HEALTH_REASON.ZERO_SIGNAL, null, {
+              micActive: true, systemAudioActive, silenceSince: zeroSignalSince
+            });
+            setSilenceWarning(micHealthState.message);
+            micAnomalyCounter++;
+            micRecoveryCounter = 0;
+            if (!zeroEpisodeReacquired && !zeroReacquireInFlight) {
+              zeroEpisodeReacquired = true;
+              attemptSameDeviceReacquire();
+            }
+          }
+        } else if (zeroSignalSince) {
+          // Signal returned (or a gate closed — INT-2 / split owns the state
+          // now). End the episode; the recovery counters below produce the OK.
+          if (!isZero && micHealthState.reasonCode === MIC_HEALTH_REASON.ZERO_SIGNAL) {
+            captureMessage(`mic-health: zero-signal episode ended after ${Math.round((Date.now() - zeroSignalSince) / 1000)}s — signal returned`, 'warning');
+          }
+          zeroSignalSince = null;
+          zeroEpisodeReported = false;
+          if (!isZero) zeroEpisodeReacquired = false;
+        }
+
+        // ── MSIG: rolling history, session baseline, post-switch watch ──
+        const now = Date.now();
+        micTickHistory.push({ t: now, rmsDb });
+        while (micTickHistory.length && now - micTickHistory[0].t > LOW_LEVEL_WINDOW_MS) {
+          micTickHistory.shift();
+        }
+        if (Number.isFinite(rmsDb) && rmsDb > LEVEL_ACTIVITY_FLOOR_DBFS) {
+          levelBaselineDb = levelBaselineDb == null
+            ? rmsDb
+            : levelBaselineDb + LEVEL_BASELINE_ALPHA * (rmsDb - levelBaselineDb);
+          if (switchLevelWatch) {
+            switchLevelWatch.activeMs += HEALTH_SAMPLE_INTERVAL_MS;
+            switchLevelWatch.levels.push(rmsDb);
+            if (switchLevelWatch.activeMs >= SWITCH_BASELINE_MIN_ACTIVE_MS) {
+              const p90 = percentileDb(switchLevelWatch.levels, 0.90);
+              const base = switchLevelWatch.baselineBefore;
+              switchLevelWatch = null;
+              if (p90 != null && p90 <= base - SWITCH_BASELINE_DROP_DB && p90 <= LOW_LEVEL_CLEAR_P90_DBFS) {
+                lowLevelActive = true;
+                lowLevelMeasuredDb = Math.round(p90);
+                captureMessage(`mic-health: post-switch level drop — active P90 ${Math.round(p90)}dBFS vs session baseline ${Math.round(base)}dBFS`, 'warning');
+              }
+            }
+          }
+        }
+        if (!zeroEscalated && !systemAudioActive && !zeroSignalSince &&
+            now - lastLowLevelEvalAt >= LOW_LEVEL_EVAL_INTERVAL_MS) {
+          lastLowLevelEvalAt = now;
+          evaluateLowLevel();
+        }
+      }
+
+      if (zeroEscalated) return; // zero machinery already set the state this tick
 
       let reasonCode = null;
       if (average < SILENCE_THRESHOLD) {
@@ -1046,6 +1539,17 @@ function startMicHealthMonitoring(micStream, recordingStore) {
           });
           setSilenceWarning(micHealthState.message);
         }
+      } else if (lowLevelActive) {
+        // MSIG: audible speech-like input, but far too quiet to transcribe.
+        // Informational yellow only — never critical, never an auto-action.
+        micAnomalyCounter = 0;
+        micRecoveryCounter = 0;
+        updateMicHealthState(MIC_HEALTH_STATUS.DEGRADED, MIC_HEALTH_REASON.LOW_LEVEL, null, {
+          micActive: true,
+          systemAudioActive,
+          measuredDb: lowLevelMeasuredDb
+        });
+        setSilenceWarning(micHealthState.message);
       } else {
         micAnomalyCounter = 0;
         micRecoveryCounter++;
@@ -1118,9 +1622,11 @@ function stopLevelMonitoring() {
 
   mixedAnalyser = null;
   micHealthAnalyser = null;
+  micSignalFloatBuf = null;
   micAnomalyCounter = 0;
   micRecoveryCounter = 0;
   currentAudioLevel = 0;
+  resetMicSignalState();
   clearSilenceWarning();
   emit('levelChange', 0);
 }
@@ -1321,6 +1827,10 @@ export function notifyForegrounded() {
   if (durationInterval) {
     lastSuccessfulChunkAt = Date.now();
     stallWarned = false;
+    // MSIG: JS timers were frozen while suspended — wall-clock zero-signal /
+    // low-level episode state would otherwise "age" through the sleep and
+    // fire spuriously on the first post-wake ticks.
+    resetMicSignalState();
   }
 }
 

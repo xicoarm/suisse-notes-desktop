@@ -56,6 +56,11 @@ export function useRecorder() {
   // transient "recording resumed — gap of X" notice so the user knows there
   // is a hole in the audio instead of discovering it after the meeting.
   const captureRecoveredInfo = ref(null); // null | { gapSeconds, reason }
+  // MSIG: post-switch signal-probe verdicts and automatic device switches.
+  // Previously 'micRecovered'/'microphoneChange' had NO listeners — the app
+  // could switch (or fail to switch) the user's microphone in total silence.
+  const micSwitchEvent = ref(null);      // null | { ok, context, label, deviceId, unverified? }
+  const micAutoSwitchInfo = ref(null);   // null | { fromLabel, toLabel, deviceId }
   // MOBR-1/INT-1: snapshot of persisted-chunk count + timestamp taken when the
   // app/tab is hidden during a mobile recording, so we can detect on return
   // whether the WebView was suspended (capture gap) while backgrounded.
@@ -217,6 +222,16 @@ export function useRecorder() {
     } catch (e) {
       console.error('Emergency stop-with-save after failed recovery failed:', e);
     }
+  };
+
+  // MSIG: post-switch verification verdict (manual switch, auto-recovery or
+  // same-device re-acquire). The page turns these into precise toasts.
+  const handleMicSwitchVerified = (data) => {
+    micSwitchEvent.value = data || null;
+  };
+  // MSIG: the service auto-switched devices after the selected mic vanished.
+  const handleMicAutoSwitched = (data) => {
+    micAutoSwitchInfo.value = data || null;
   };
 
   // Minutes limit event handlers
@@ -484,6 +499,8 @@ export function useRecorder() {
     recordingService.addEventListener('captureStalled', handleCaptureStalled);
     recordingService.addEventListener('captureRecovered', handleCaptureRecovered);
     recordingService.addEventListener('captureRecoveryFailed', handleCaptureRecoveryFailed);
+    recordingService.addEventListener('micSwitchVerified', handleMicSwitchVerified);
+    recordingService.addEventListener('micAutoSwitched', handleMicAutoSwitched);
 
     // Set up visibility and beforeunload handlers
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -561,6 +578,8 @@ export function useRecorder() {
     recordingService.removeEventListener('captureStalled', handleCaptureStalled);
     recordingService.removeEventListener('captureRecovered', handleCaptureRecovered);
     recordingService.removeEventListener('captureRecoveryFailed', handleCaptureRecoveryFailed);
+    recordingService.removeEventListener('micSwitchVerified', handleMicSwitchVerified);
+    recordingService.removeEventListener('micAutoSwitched', handleMicAutoSwitched);
 
     // Remove visibility and beforeunload handlers
     document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -591,6 +610,8 @@ export function useRecorder() {
     silenceWarning,
     systemAudioCaptureError,
     micCaptureError,
+    micSwitchEvent,
+    micAutoSwitchInfo,
     recordingHealth,
     isMicHealthy,
     recordingHealthMessage,
