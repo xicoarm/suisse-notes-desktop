@@ -364,4 +364,132 @@ mistaken for real defects:
   the s7 loop calls `isAppAlive()` each tick and aborts within seconds with an
   "APP DIED at t=Ns" verdict (recording how much audio was captured first).
 
-_Findings below are appended as scenarios run._
+---
+
+# STRESS AUDIT (2026-07-26) — adverse conditions, edge cases, "what if the user does X"
+
+Deep code-grounded analysis of every realistic adverse condition (5 parallel
+analysis passes, each finding VERIFIED against code before landing here — the
+passes overclaimed; dead-code/known-limitation candidates were dismissed).
+Each item: behavior, severity, **fixed vs open**, and **cross-platform** (Win /
+Mac / iOS / Android).
+
+## Owner's key question — mic disconnect: auto-failover or alert? BOTH, correctly.
+**When the microphone truly disconnects (Bluetooth drop, USB unplug — the track
+'ends'), the app runs an AUTOMATIC SEQUENTIAL failover**: `handleMicDeviceChange`
+(`recordingService.js`) tries candidate input devices one at a time, and for
+each one **verifies real audio signal with a ~5 s probe before accepting it** —
+it does NOT blindly grab the first device (Windows hands out silent "phantom"
+streams for dead BT endpoints, so verification is essential). Order: the
+originally-used device first (if it reappeared), then the rest; `communications`
+pseudo-device skipped. On success → a toast names the new device. If all
+candidates are silent → a precise CRITICAL banner tells the user to switch
+manually. **When the device is dead-but-still-connected (delivers digital zeros
+— the Angela case), it deliberately does NOT auto-switch to a different device**
+(privacy: a hardware-muted headset must not be silently replaced by the room
+mic) — it does one same-device re-acquire and alerts precisely.
+- **Gaps (open, narrow):** failover tries **max 3 candidates** (a working mic
+  4th in the list isn't reached); it's gated on the OS firing a `devicechange`
+  event (a drop that ends the track without re-enumerating gets grace→CRITICAL
+  + manual only); a mid-recording OS-default change is NOT auto-followed
+  (intentional, but may surprise); no mic-permission-revoked-specific message
+  mid-recording (only at startup). Cross-platform: shared logic; on mobile the
+  OS owns routing (no picker) so failover is largely N/A — messaging differs.
+
+## FIXED THIS SESSION
+### S-001 (P1) — Battery/disk-critical "emergency stop" was a half-stop → FIXED
+- `src/stores/recording.js` `emergencyStop` (called on **critical battery** and
+  **storage-full**) only flushed metadata + set `phase='stopped'` — it **never
+  stopped the MediaRecorder or combined the chunks**. On a dying battery the
+  recorder kept capturing into oblivion; the finished file only appeared via
+  next-launch recovery (and could be lost if the device died first).
+- **Fix:** now does a real stop-with-save via `recordingService.stopRecording`
+  (same graceful teardown+combine the app-level safety net uses;
+  re-entrancy-guarded so it can't double-combine). Fallback preserves the old
+  flush-only behavior if the real stop throws. **Cross-platform: shared engine —
+  fixes desktop AND mobile** (battery-critical is primarily a mobile trigger).
+- Verified: existing unit tests still pass (the 1 red is the pre-existing
+  chronically-failing `stopRecording` phase test, unrelated).
+
+### S-002 (P2) — `before-quit` didn't guard the combine phase → FIXED
+- The `before-quit` guard checked recording + uploads but **omitted
+  `isProcessingRecording`**, so a quit during the post-stop FFmpeg combine
+  (auto-install-on-quit, OS quit, fast stop→quit) killed FFmpeg mid-concat,
+  leaving an unvalidated partial (chunks survive; recovery re-combines — so not
+  data loss, but it contradicted the manual `quitAndInstall` guard which DOES
+  cover processing). **Fix:** added `isProcessingRecording` to the guard + a
+  bounded 60 s wait for the combine to finish before quitting. Electron
+  desktop (Win+Mac). Mobile N/A.
+
+## CONFIRMED OPEN (documented; fix needs device testing or a considered change)
+- **S-003 (P2, suspected freeze lead):** Sentry **Session Replay** is enabled
+  (`sentry.js`: `replaysOnErrorSampleRate:1.0` + `trackComponents:true`) — it
+  continuously serializes DOM mutations, and the **audio-level meter mutates
+  every 100 ms** for the whole recording (~10 mutations/s for hours). This is
+  the most plausible mechanism for the renderer becoming unresponsive under
+  load (the s7 freeze), amplified by host contention. NOT a recording-logic
+  leak — the recording hot loops are all rigorously bounded (verified).
+  **Recommended:** run the endurance test on the PACKAGED build (the s7 run used
+  `quasar dev`, whose HMR/websocket + dev overhead can detach the frame in ways
+  production never does — a real methodology flaw); throttle the 100 ms
+  `levelChange` UI updates to ~250 ms; consider disabling Replay during active
+  long recordings. Cross-platform: config is shared; the DOM-churn cost applies
+  to all WebView platforms.
+- **S-004 (P3, hygiene):** `integrity.js addChunkToRecordingIntegrity` does
+  `[...chunks, chunk]` per chunk → O(n²), stored in Pinia-reactive state. Slow
+  bleed (capped every 4h55m by auto-split; ~single-digit MB at 5 h; no template
+  reads it). Fix: `markRaw` the integrity array or cap it. All platforms.
+- **S-005 (P2):** **cold-start recovery notification is RecordPage-scoped** —
+  the "we recovered your recording after a crash/power-loss" toast only shows if
+  the user lands on the record page. Launch onto History/Settings → the
+  recording is silently re-filed as `pending` and auto-uploaded with no notice.
+  NOT data loss (file safe + uploads), pure UX gap. Same class as the safety-net
+  fix; should be wired app-wide through `recordingSafetyNet`. Desktop + mobile.
+- **S-006 (P2):** **desktop upload retry budget burns per 5-min pass, not per
+  real attempt** — a desktop left offline ~50 min exhausts all 10 retries and
+  marks the recording `failed` prematurely (file safe, manual retry works;
+  mobile is immune — event-driven + 7-day window). Also **desktop has no
+  network-online-triggered resume** (relies on the 5-min interval; mobile
+  resumes on `networkStatusChange`). Electron desktop; mobile safe.
+- **S-007 (P3):** all timing is wall-clock `Date.now()` (no monotonic clock) —
+  a large **forward clock/NTP jump** mid-recording triggers a false
+  capture-stall banner + spurious recovery + Sentry noise (no data loss;
+  backward jump just delays auto-split). All platforms.
+- **S-008 (P3):** `cancelRecording` isn't mutually excluded with
+  `stopInFlightPromise`/`startInProgress` — a cancel racing an in-flight stop
+  could null the recorder handlers mid-teardown. Narrow latent race. All.
+- **S-009 (P3, Windows):** no `display-removed` handler — Windows system-audio
+  loopback survives a monitor unplug only via `track-ended`/`devicechange`
+  side-channels; if the unplugged monitor was the only screen source the rebind
+  keeps a dead capture (mic unaffected; system-audio-only recordings exposed).
+  macOS N/A (AudioTee is device-independent).
+- **S-010 (P3):** `keepAliveForRecording` is **dead code** — the auth store has
+  no such method, so the `typeof` guard silently no-ops the "keep session alive
+  during long recordings" feature. Benign (covered by the 7-day token + upload-
+  time refresh) but the feature does nothing. All platforms.
+- **M-003 (P2, re-confirmed):** mobile disk-full defeated by the fake-10 GB
+  `getFreeDiskSpace` fallback (desktop fixed, mobile not). Mobile only.
+
+## VERIFIED ROBUST (no bug — the guard exists; recorded so it isn't re-audited)
+- **Power/kill durability:** per-chunk fsync + fsync'd start-metadata (correct
+  user attribution) + validate-before-delete recovery → **hard power loss / kill
+  loses only ~3–6 s** (the in-flight timeslice) and recovers on next launch.
+  Graceful quit / OS shutdown / SIGTERM flush the final chunk. Renderer-crash
+  and main-crash both recover. Lid-close AudioTee desync fix holds (macOS).
+- **Network:** recording is fully local (no network on the capture path);
+  mid-upload drop **resumes** (SAS per-block) and never deletes the file;
+  offline-for-days survives restart with a bounded retry → visible `failed`
+  card; token-expiry-offline refreshes and resumes; transcription-poll network
+  loss falls back to trust-based (no forced re-upload). **No scenario silently
+  loses audio or a completed upload.**
+- **Concurrency:** double-start (3-layer generation guard — the doubled-audio
+  fix), double-stop (shared in-flight promise), single-instance lock (+ recovery
+  latches so two instances can't race recovery), system-audio toggle incl. the
+  paused-desync guard, pause/resume drift + auto-split survival across many
+  pauses, and titles-never-touch-the-filesystem (UUID-named dirs) — all verified
+  safe.
+- **Mic disruption:** exclusive-access steal (INT-2 recovery loop), hardware-
+  mute detection (zero-signal), self-mute suppression (no false alarm) — all
+  handled.
+
+_Scenario runs below are appended as they complete._

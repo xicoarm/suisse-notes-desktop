@@ -1481,12 +1481,26 @@ app.whenReady().then(() => {
   app.on('before-quit', async (e) => {
     if (app._quitFlushed) return;
     const hasUpload = isUploadInProgress || pendingUploadsCount > 0;
-    if (!isRecordingInProgress && !hasUpload) return;
+    // Stress-audit fix (2026-07-26): the guard omitted isProcessingRecording,
+    // so a quit arriving during the post-stop FFmpeg combine (auto-install on
+    // quit, OS quit, or a fast stop→quit) tore down FFmpeg mid-concat. The
+    // manual quitAndInstall guard already covers processing; align this path.
+    if (!isRecordingInProgress && !isProcessingRecording && !hasUpload) return;
 
     e.preventDefault();
 
     if (isRecordingInProgress) {
       await flushBeforeQuit('before_quit');
+    }
+
+    // Let an in-flight combine finish (bounded) rather than killing FFmpeg
+    // mid-concat and leaving an unvalidated partial. Chunks survive either way
+    // (launch recovery re-combines), but finishing cleanly avoids the churn.
+    if (isProcessingRecording) {
+      const combineDeadline = Date.now() + 60_000;
+      while (isProcessingRecording && Date.now() < combineDeadline) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
     }
 
     // DRD-2: the previous handler ignored in-flight uploads, so quitting

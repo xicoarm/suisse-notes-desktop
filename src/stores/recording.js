@@ -421,22 +421,47 @@ export const useRecordingStore = defineStore('recording', {
       // Do NOT change status to 'stopped' - keep it so the UI can show the alert
     },
 
-    // Emergency stop for critical situations (battery, storage)
+    // Emergency stop for critical situations (battery, storage).
+    //
+    // BUGFIX (stress audit 2026-07-26): this used to only flushCurrentState()
+    // and set phase='stopped' — it NEVER stopped the MediaRecorder or combined
+    // the chunks. On a dying battery or a full disk the recorder kept capturing
+    // into oblivion and the finished file only appeared via next-launch
+    // recovery (and could be lost entirely if the device died first). Now it
+    // does a real stop-with-save through recordingService.stopRecording (the
+    // same graceful teardown + combine the app-level safety net uses), so the
+    // recording is finalized immediately while there is still power/disk.
+    // Shared desktop + mobile (recordingService is the shared engine).
     async emergencyStop(reason) {
       console.warn('Emergency stop triggered:', reason);
+      stopStorageMonitor();
       try {
-        // Save current chunk immediately
-        await this.flushCurrentState();
-        // Stop recording
-        this.phase ='stopped';
+        const svc = await import('../services/recordingService.js');
+        // Best-effort system-audio teardown (desktop only; no-op on mobile).
+        const stopSystemAudio = async () => {
+          try {
+            svc.removeSystemAudioStream?.();
+            svc.setSystemAudioActive?.(false);
+            if (isElectron() && window.electronAPI?.systemAudio?.stop) {
+              await window.electronAPI.systemAudio.stop();
+            }
+          } catch (e) { /* best effort */ }
+        };
+        // stopRecording is re-entrancy-guarded (shares one in-flight promise),
+        // so if the safety net's emergency stop already fired for the same
+        // condition, this simply awaits it — no double-combine.
+        await svc.stopRecording(this, stopSystemAudio);
         this.error = `Recording stopped: ${reason}`;
-        stopStorageMonitor();
-
-        if (isElectron()) {
-          await window.electronAPI.recording.setInProgress(false);
-        }
       } catch (error) {
-        console.error('Error during emergency stop:', error);
+        console.error('Error during emergency stop (falling back to flush-only):', error);
+        // Fallback preserves the old behavior so chunks are at least persisted
+        // for next-launch recovery if the real stop path threw.
+        try { await this.flushCurrentState(); } catch (e) { /* ignore */ }
+        this.phase = 'stopped';
+        this.error = `Recording stopped: ${reason}`;
+        if (isElectron()) {
+          try { await window.electronAPI.recording.setInProgress(false); } catch (e) { /* ignore */ }
+        }
       }
     },
 
