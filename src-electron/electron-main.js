@@ -289,8 +289,14 @@ let skipAutoUpdate = false;
 //   touch a real profile (recordings, tokens, queues) on the dev machine.
 // - SUISSE_TEST_CDP_PORT=<port>   opens the DevTools protocol so the harness
 //   can drive the UI like a user (click record, navigate, crash the renderer).
-// Packaged builds ignore all three unconditionally.
-if (!app.isPackaged) {
+//
+// Normally hard-gated on !app.isPackaged. The ENDURANCE test must run the
+// PACKAGED build (the `quasar dev` server's HMR/websocket can detach the frame
+// under load and invalidate a long run), so SUISSE_E2E_HOOKS=1 additionally
+// enables these hooks in a packaged build. The shipped release NEVER sets that
+// env var, so real users are unaffected; and the hooks themselves are benign
+// (feed a WAV as the mic, isolate userData, open a local CDP port).
+if (!app.isPackaged || process.env.SUISSE_E2E_HOOKS === '1') {
   if (process.env.SUISSE_TEST_USERDATA) {
     app.setPath('userData', process.env.SUISSE_TEST_USERDATA);
   }
