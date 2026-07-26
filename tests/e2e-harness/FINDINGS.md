@@ -253,4 +253,90 @@ speakerphone end-to-end (bug J / the Angela case) on both platforms.
   monotonic index; documented in code). The split LOGIC is shared; the combine
   differs (Electron main vs mobile native muxer).
 
+## V-008 — Backend upload + transcription pipeline: NO errors observed
+- **Type:** validation (positive) — backend-side, per the explicit ask to
+  document any upload/transcription errors.
+- **Backend app** (`suisse-notes-dev`, PM2): error log empty (0 bytes since the
+  2026-07-23 rotation); no upload/500/Azure/blob errors in the out log.
+- **Transcription gateway** (`swiss-german-api`): my E2E job traced cleanly —
+  `[Azure] [b6ef2625-3bc] submitted … [clean-flac]` → `Merged 164/164 words,
+  provider_speakers=2, forced 0 orphans` → `Completed (Soniox, 164 words)`.
+  Every recent gateway job shows the same health (0 forced orphans, correct
+  speaker counts, jobs completing). No transcription failures, no stuck jobs.
+- **Note (pre-existing, from backend docs/testing.md §3):** the gateway has a
+  known *observability* gap — a silent diarization degradation would not raise
+  an alert (the 2026-07-24 incident ran a day undetected). Not triggered here;
+  flagged so it isn't mistaken for "all monitored".
+
+## M-001 — Mobile upload path: all desktop bug classes CONFIRMED SAFE
+- **Type:** cross-platform verification (mobile), read-only code audit
+- Verified `src/services/upload.js` + shared `recordings-history.js` against the
+  6 desktop upload bug classes. All safe on mobile:
+  - **Retry storm:** bounded — `_isRetryableError` terminal classification +
+    `MAX_QUEUE_RETRIES=10` + shared `uploadTerminal`/`RETRY_AUTO_MAX=8`.
+  - **Lost recordings:** purged/unrecoverable items are surfaced to history as
+    `failed` with an error (not left `pending`).
+  - **Futile re-upload:** same `failed && audioFileId` guard as desktop; backend
+    dedups by recordId.
+  - **OOM on large files:** live paths stream via `readBlobFromCapacitorPath`
+    (disk-backed). The base64 TUS path is **dead code** (unreachable) — see M-002.
+  - **Duplicate uploads:** in-flight guard (`_beginMobileUpload`, 30-min stale
+    takeover) + queue skip + server dedup.
+  - **Token expiry:** proactive + mid-flow refresh, 401 handled in poll.
+- **Conclusion:** the desktop upload fixes were correctly ported to / shared with
+  mobile; no mobile-specific upload data-loss bug found.
+
+## M-002 — Dead code: mobile TUS upload path (`uploadFileMobile`) with latent OOM pattern
+- **Severity:** P3 (unreachable — no runtime impact) · **Status:** open (cleanup)
+- `src/services/upload.js:~1045` `uploadFileMobile` is never called but still
+  reads the whole file into memory (base64 → ArrayBuffer → Blob, ~3-4× size) —
+  the exact pattern that caused the earlier Android OOM. Harmless because
+  unreachable; should be deleted so it can't be wired back in by mistake.
+
+## M-003 — Mobile disk-full detection defeated by a fake-10GB fallback (P2)
+- **Severity:** P2 · **Status:** open · **Platform:** iOS/Android (Capacitor)
+- **Verified in code.** `src/services/storage.js:409-414`: when
+  `Filesystem.getFreeDiskSpace` is unavailable, `getFreeDiskSpace()` returns a
+  **fake 10 GB free** (`success:true, freeMB:10240`). Chunk-save disk-full
+  classification (`saveChunk`, `storage.js:133-139`) then checks
+  `space.freeMB < 50` → always false → returns `{success:false}` **without
+  `diskFull:true`**. The safety net's fast disk-full emergency stop
+  (`recordingSafetyNet.js`, keys on `data.diskFull`) therefore does not fire.
+- **Mitigation that limits severity:** the `>=3 consecutive chunk-save errors`
+  backstop still triggers an emergency stop (~9 s), so audio isn't lost forever
+  — but the specific "disk full" message + immediate stop are lost, and it only
+  works if the underlying write actually keeps erroring.
+- This is the SAME "pretend 10 GB" lie that was explicitly fixed on the Electron
+  path (`storage.js:386-390` comment: *"pretending 10GB free here kept the
+  storage monitor permanently ok … until the disk actually filled"*). The mobile
+  branch was not given the same fix.
+- **Fix:** mirror the Electron path — return `{success:false, error:'unknown'}`
+  when `getFreeDiskSpace` is unavailable instead of faking 10 GB; and/or detect
+  the real write error more directly. **Cross-platform note:** desktop is
+  already fixed; this is mobile-only residue.
+
+## Dead-code / known-limitation dismissals (rigor: NOT logged as bugs)
+A deep mobile recording audit surfaced several candidates that verification
+**refuted or reclassified** — recorded here so they aren't re-investigated or
+mistaken for real defects:
+- **Android native `resume()` no result-check; iOS native interruption ladder;
+  native chunk errors not reaching JS** — all analyze the native capture
+  plugins, which are **dead code in production**. `recordingService.js:17-21`
+  only calls `BackgroundRecording.startForegroundService()` (the notification);
+  it never calls the native `startRecording`. Real capture is the shared WebView
+  MediaRecorder on all platforms. → **not real bugs.**
+- **Background-suspension audio gap** (WebView frozen when backgrounded) — this
+  is the KNOWN, documented MOBR-1/INT-1 limitation: a best-effort gap-detection
+  heuristic + Sentry telemetry ships today, with native background capture as
+  the planned follow-up. → **known accepted limitation, not new.** (The finder's
+  "50% threshold too permissive" is a tuning opinion worth revisiting.)
+- **Auto-split monotonic chunk index on mobile** — the `C1` design comment
+  documents that mobile intentionally keeps a monotonic index (no per-segment
+  dirs yet) specifically to PREVENT chunk_0 overwrite. The "collision" scenario
+  is speculative; the index is the guard. → note for the per-segment-dir
+  follow-up, not a confirmed bug.
+- **MSIG re-acquire "blind" on mobile** — only degrades if the WebView lacks
+  `getFloatTimeDomainData`, which modern WKWebView / Android Chrome provide, so
+  the float probe normally works. → low risk; verify on a real device.
+
 _Findings below are appended as scenarios run._
