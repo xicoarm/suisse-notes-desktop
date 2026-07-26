@@ -493,3 +493,79 @@ mic) — it does one same-device re-acquire and alerts precisely.
   handled.
 
 _Scenario runs below are appended as they complete._
+
+---
+
+## Reliability hardening pass 2026-07-26 (autonomous) — power-loss triggered
+
+A real power-loss (laptop low-battery hibernate) killed the endurance run at
+2h22m. Forensics + a 3-agent audit (change review, failure-mode/feedback matrix,
+data-loss deep audit) turned it into a batch of real fixes. All on branch
+`fix/mic-input-health-hardening`.
+
+### F-003 — P1 — Recovered recording stranded (stuck 'recording', never uploaded)
+- **Found by:** power-loss recovery test (`tests/e2e-harness/verify-recovery.js`).
+- After a crash/power-loss, `recoverOrphanedRecordings` rebuilt a valid combined
+  file but only *created* a history entry `if (!existingRecording)`. The entry is
+  created at record-**start**, so it always exists on real recovery → the update
+  was skipped → the recording stayed `uploadStatus:'recording'`, no filePath,
+  invisible to the user and **never uploaded** (the app-retry loop only picks up
+  `pending`/`failed`). Audio safe on disk, but effectively lost to the user.
+- **Fix:** recovery now UPDATES the stuck entry → `pending` + filePath + `recovered`,
+  AND enqueues it into the main-process **autonomous** upload queue
+  (`addToUploadQueue` + `processPendingUploads`, uses the main-side auth token) so
+  it uploads even if the renderer never logs in. Verified: history file →
+  `pending`+filePath; upload proceeds via main queue.
+
+### F-004 — HIGH (data loss) — combineChunks deleted the only copy after a non-blocking validation
+- **Found by:** data-loss deep audit (RISK 1).
+- `combineChunks` single- and multi-session branches called `validateAudioOutput`
+  "before deleting sources" but ignored the result (log.warn) and deleted the
+  sessions/chunks anyway. A corrupt concat (truncated/zero-length/torn) →
+  **silent total loss** while reporting success. (The recovery path already blocked
+  correctly; only the top-level combine didn't.)
+- **Fix:** both branches now BLOCK on invalid output — keep sources, return
+  `{success:false}` (store treats it as a recoverable error; launch-recovery
+  re-combines). A false-fail costs a retry, never a meeting.
+
+### F-005 — MEDIUM — recovery multi-session concat had no re-encode fallback
+- One bad session failed the ENTIRE recovery; sources kept but eventually GC'd
+  unrecovered after 3 failed attempts. **Fix:** codec-copy→re-encode fallback
+  (mirrors main combine path) + `finally` cleanup of the concat list.
+
+### F-006 — MEDIUM — torn/zero-byte final chunk could corrupt the combined container
+- A hard-kill can leave an empty/torn trailing chunk; byte-concat could corrupt
+  the WebM (worst case a zero-byte chunk_0 → header-less unparseable file).
+  **Fix:** `combineChunksStreaming` now skips zero-byte chunks (lossless).
+
+### F-007 — MEDIUM (pre-existing race) — main queue + renderer could double-upload
+- `processPendingUploads` uploaded via `uploadWithRetry` without the
+  `inFlightUploads` guard that `upload:start` uses → the same recording could be
+  POSTed twice (duplicate meeting). Exposed while wiring recovery→upload.
+  **Fix:** `processPendingUploads` now honors `inFlightUploads` (add/finally-delete
+  + skip-if-in-flight).
+
+### Feedback gaps (audio was safe, but user wasn't told — trust-damaging)
+- **GAP-1 (P1):** desktop crash/power-loss recovery was SILENT. **Fix:** main sends
+  `recording:recovered` IPC → safety-net persistent toast ("Recovered N interrupted
+  recording(s) — your audio was saved and is uploading") + refreshes stale history.
+- **GAP-2:** terminal upload failure showed a generic 5s "Upload failed". **Fix:**
+  persistent toast that says the recording is saved locally + will retry (and a
+  distinct "too large" message for 413).
+- **GAP-3:** the 30-min capture-recovery give-up path was silent (app kept
+  "recording" nothing). **Fix:** it now escalates to `captureRecoveryFailed` →
+  emergency stop-with-save + persistent toast.
+- **GAP-4 (open, low):** start-time system-audio failure is a RecordPage banner that
+  doesn't survive navigation. Not fixed (user is on RecordPage at record-start).
+
+### Also
+- i18n: added the missing `ok` key (all 4 locales) — action buttons were rendering
+  the literal "ok" (Bug from change review).
+- Recovery terminal-status guard broadened to skipped/cancelled/pending_verification
+  so recovery can't resurrect a user-dismissed recording.
+- All changes reviewed by an adversarial agent: no crash/data-loss/double-upload
+  bugs; 12/12 recording unit tests pass.
+
+### Machine hardening for the endurance re-run
+- Disabled sleep + hibernate on AC **and** battery (`powercfg`), kept plugged in —
+  the last run died to a low-battery hibernate, not an app bug.

@@ -34,6 +34,7 @@ class AppDriver {
     this.fakeAudioWav = opts.fakeAudioWav;       // scenario WAV fed as the mic
     this.userDataDir = opts.userDataDir || path.join(WORK_DIR, 'userdata', opts.name || 'default');
     this.env = opts.env || {};                   // extra env (e.g. VITE_SUISSE_MAX_DURATION_SECONDS)
+    this.packagedExe = opts.packagedExe || null; // drive the built .exe instead of quasar dev
     this.proc = null;
     this.browser = null;
     this.page = null;
@@ -48,6 +49,12 @@ class AppDriver {
     if (freshProfile) fs.rmSync(this.userDataDir, { recursive: true, force: true });
     fs.mkdirSync(this.userDataDir, { recursive: true });
 
+    // Packaged-build mode (opts.packagedExe or SUISSE_E2E_PACKAGED_EXE): drive
+    // the built .exe instead of `quasar dev`. Removes the dev-server HMR/websocket
+    // confound for the endurance test. Requires SUISSE_E2E_HOOKS=1 (the packaged
+    // build's escape to enable the test hooks).
+    const packagedExe = this.packagedExe || process.env.SUISSE_E2E_PACKAGED_EXE || null;
+
     const env = {
       ...process.env,
       API_BASE_URL: this.apiUrl,
@@ -55,17 +62,23 @@ class AppDriver {
       SUISSE_TEST_USERDATA: this.userDataDir,
       SUISSE_TEST_CDP_PORT: String(this.cdpPort),
       ...(this.fakeAudioWav ? { SUISSE_TEST_FAKE_AUDIO: this.fakeAudioWav } : {}),
+      ...(packagedExe ? { SUISSE_E2E_HOOKS: '1' } : {}),
       ...this.env,
     };
 
-    // shell:true — Node 20+ on Windows refuses to spawn .cmd shims directly
-    // (CVE-2024-27980 hardening); the whole tree is killed via taskkill /T.
-    this.proc = spawn('npx quasar dev -m electron', {
-      cwd: REPO_ROOT,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: true,
-    });
+    if (packagedExe) {
+      // Spawn the packaged app directly (no shell, no dev server).
+      this.proc = spawn(packagedExe, [], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    } else {
+      // shell:true — Node 20+ on Windows refuses to spawn .cmd shims directly
+      // (CVE-2024-27980 hardening); the whole tree is killed via taskkill /T.
+      this.proc = spawn('npx quasar dev -m electron', {
+        cwd: REPO_ROOT,
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: true,
+      });
+    }
     this.proc.stdout.on('data', d => this.log.push(d.toString()));
     this.proc.stderr.on('data', d => this.log.push(d.toString()));
 
@@ -115,6 +128,18 @@ class AppDriver {
             || els.find(el => /loslegen|get started/i.test(el.textContent || ''));
           if (hit && !document.querySelector('input[type=email]') && !document.querySelector('[data-test=record-start]')) {
             hit.click();
+          }
+        }).catch(() => { /* page mid-navigation */ });
+        // A restored-session relaunch (crash/power-loss recovery tests) lands on
+        // the desktop HOME route (/about), which has neither the login form nor
+        // the record button. Hop to /record so the page stabilizes on the record
+        // UI. A valid session shows record-start there; an invalid one is bounced
+        // to /login (email form) — either way waitForSelector below resolves.
+        await this.page.evaluate(() => {
+          if (location.hash.includes('/about') &&
+              !document.querySelector('input[type=email]') &&
+              !document.querySelector('[data-test=record-start]')) {
+            location.hash = '#/record';
           }
         }).catch(() => { /* page mid-navigation */ });
         await this.page.waitForSelector('input[type=email], [data-test=record-start]', { timeout: 20_000 });
