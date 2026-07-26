@@ -351,10 +351,18 @@ async function s7Endurance() {
     // Sample health + phase every 30s to disk (crash-proof evidence).
     let falseAlarmBreak = null;
     let splitObserved = false;
+    let deadAtSec = null;
     while (Date.now() - t0 < totalMs - 5000) {
       await sleep(30_000);
       const tSec = Math.round((Date.now() - t0) / 1000);
-      let h = {}; let phase = null; let saved = null;
+      // Fail FAST if the app died (H-003): otherwise a frozen renderer makes the
+      // health calls block for hours. If unresponsive, record when and abort.
+      if (!(await app.isAppAlive())) {
+        deadAtSec = tSec;
+        fs.appendFileSync(progressFile, JSON.stringify({ t: tSec, dead: true }) + '\n');
+        break;
+      }
+      let h = {}; let phase = null;
       try { h = await app.getMicHealthUi(); } catch (e) { /* keep going */ }
       try { phase = await app.getPhase(); } catch (e) { /* keep going */ }
       const rec = { t: tSec, phase, badge: h.badge, msg: (h.message || '').slice(0, 60) };
@@ -363,6 +371,17 @@ async function s7Endurance() {
       // Break windows (noise): must NOT show a critical/unstable badge.
       const inBreak = [[4200, 4900], [9100, 9800], [14000, 14700]].some(([s, e]) => tSec >= s + 30 && tSec < e - 30);
       if (inBreak && rec.badge && !/healthy|in ordnung/i.test(rec.badge)) falseAlarmBreak = rec;
+    }
+
+    // If the app died mid-run, report it clearly and stop (don't try to drive
+    // a dead app). The recovered chunks (if any) are checked on the next launch
+    // by the app's own recovery; here we just surface the death time.
+    if (deadAtSec !== null) {
+      const chunks = require('fs').existsSync(app.recordingsDir)
+        ? require('fs').readdirSync(app.recordingsDir, { recursive: true }).filter(f => /chunk/.test(String(f))).length : 0;
+      problems.push(`APP DIED at t=${deadAtSec}s (renderer unresponsive) — endurance NOT completed. ~${chunks} chunks on disk (~${Math.round(chunks * 3 / 60)} min captured before death).`);
+      notes.push('NOTE: attribute cause carefully — a real endurance crash vs. host resource contention. Re-run in isolation (no other machine activity).');
+      return { pass: false, problems, notes, healthLog: healthLog.slice(-20) };
     }
 
     await app.stopRecording(90_000);

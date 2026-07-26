@@ -339,4 +339,29 @@ mistaken for real defects:
   `getFloatTimeDomainData`, which modern WKWebView / Android Chrome provide, so
   the float probe normally works. → low risk; verify on a real device.
 
+## V-007 — 5h15m endurance: INCONCLUSIVE (app froze ~20 min in, run confounded)
+- **Type:** inconclusive result — NOT a confirmed app defect, NOT a pass.
+- The endurance run recorded **cleanly for ~20 minutes** (health "In Ordnung",
+  30 s samples t=30…t=1171, ~403 chunks, no gaps), then the renderer became
+  unresponsive / the frame detached. No `main.log` crash signature was captured.
+- **Confound (important):** during that exact 20-minute window the host machine
+  was under heavy parallel load from THIS session — mobile Explore agents, SSH
+  backend queries, git commits, diagnostics. A resource spike could have
+  crashed the renderer. The cause cannot be attributed to a real app endurance
+  bug vs. host contention from this run.
+- **What IS validated meanwhile:** the auto-split + combine LOGIC is proven by
+  s3 (V-006, holes=0 across 2 boundaries); the first 20 min showed no memory/
+  health degradation. The UNVERIFIED dimension is pure 5h stability.
+- **Next step:** re-run s7 in ISOLATION — nothing else touching the machine for
+  the full 5h15m (ideally overnight). The harness now fails fast if the app
+  dies (H-003) so a repeat won't hang for hours.
+
+## H-003 — Harness: health-sampling calls hung ~8h on a dead app (FIXED)
+- **Type:** harness defect (fixed this session)
+- When the app froze at ~20 min, `getMicHealthUi`/`getPhase` (`page.evaluate`)
+  blocked ~2 h per call on the detached frame, turning a dead run into an 8-hour
+  zombie. Fixed: `evalTimed()` wraps every evaluate in a 15 s hard-timeout, and
+  the s7 loop calls `isAppAlive()` each tick and aborts within seconds with an
+  "APP DIED at t=Ns" verdict (recording how much audio was captured first).
+
 _Findings below are appended as scenarios run._

@@ -279,8 +279,28 @@ class AppDriver {
     throw new Error(`Timed out waiting for phase ${wanted} (current: ${await this.getPhase()})`);
   }
 
+  /**
+   * H-003 fix: wrap page.evaluate in a hard timeout. If the app's renderer
+   * freezes or the frame detaches during a long run, puppeteer's evaluate can
+   * block for a very long time (observed: a single call hung ~2h on a dead
+   * frame during the s7 endurance run, stretching an 8h zombie). A fast reject
+   * lets the caller detect a dead app and abort in seconds instead of hours.
+   */
+  async evalTimed(fn, arg, timeoutMs = 15_000) {
+    return Promise.race([
+      this.page.evaluate(fn, arg),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('evalTimed: app unresponsive (' + timeoutMs + 'ms)')), timeoutMs)),
+    ]);
+  }
+
+  /** True if the app is still responsive (a quick round-trip succeeds). */
+  async isAppAlive() {
+    try { await this.evalTimed(() => 1, undefined, 10_000); return true; }
+    catch (e) { return false; }
+  }
+
   async getPhase() {
-    return this.page.evaluate(() => {
+    return this.evalTimed(() => {
       const pinia = window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia;
       const state = pinia?.state?.value?.recording;
       return state?.phase ?? null;
@@ -289,7 +309,7 @@ class AppDriver {
 
   /** Read the mic-health state as the UI sees it (badge + message text). */
   async getMicHealthUi() {
-    return this.page.evaluate(() => {
+    return this.evalTimed(() => {
       const badge = document.querySelector('.mic-health-row .q-badge');
       const msg = document.querySelector('.mic-health-message');
       return { badge: badge?.textContent?.trim() ?? null, message: msg?.textContent?.trim() ?? null };
