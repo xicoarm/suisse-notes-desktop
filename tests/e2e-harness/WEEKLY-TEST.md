@@ -202,7 +202,7 @@ that the word shows in the local UI.
 | # | Test | Steps | Expected | Verify |
 |---|---|---|---|---|
 | I1 | Battery low/critical | Simulate low battery during recording | **ALERT only** (warning at low, persistent negative at critical) — **never auto-stops** (per Marc's decision). Chunks already persisted every ~3s. | Notify appears; recording continues |
-| I2 | Power kill mid-recording | Hard-kill the machine while recording | On relaunch, `recoverOrphanedRecordings` finds the partial recording, validates, and offers/uploads it — all audio up to the last ~3s chunk is preserved | recovered file present; uploads |
+| I2 | Power kill mid-recording | Hard-kill the machine while recording (or run `node verify-recovery.js`) | On relaunch: `recoverOrphanedRecordings` reconstructs a valid file (all audio to the last ~3s chunk), the history entry flips `recording`→`pending`+filePath+`recovered`, a **"Recovered N recording(s)" toast** appears, and it **auto-uploads via the main-process queue** (works even if the renderer isn't logged in) | recovered file present; toast shown; `Meeting` reaches COMPLETED |
 | I3 | App crash | Kill the renderer | Only in-flight ~3s chunk lost; rest recovered | see s5 |
 | I4 | Disk full (ENOSPC) | Fill disk near finalize | Pre-combine space gate + 4-language retry dialog; recording recoverable | dialog appears; no corrupt file |
 | I5 | Another app steals mic | Open another app that grabs exclusive mic | MSIG detects level drop → attempts re-acquire; if truly gone, dead-mic alert (not silent) | `main.log` MSIG |
