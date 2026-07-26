@@ -8,6 +8,12 @@ import { setLifecycleCallbacks, clearLifecycleCallbacks, setRecordingActive } fr
 import { sentryRecordingStart, sentryRecordingStop, sentryRecordingPause, sentryRecordingResume, sentryRecordingError } from '../services/sentryHelpers';
 import { humanizeStorageError } from '../utils/storageErrors';
 import { i18n } from '../boot/i18n';
+import { Notify } from 'quasar';
+
+const t = (key, params) => i18n.global.t(key, params || {});
+// Dedup battery alerts across the periodic battery poll so we notify on a
+// transition (ok→low→critical), not on every poll tick. Reset per recording.
+let batteryAlertShown = null; // null | 'low' | 'critical'
 
 // Map raw Node/libuv error messages to localized, actionable text before they
 // hit the UI. See utils/storageErrors.js for the classification logic.
@@ -163,14 +169,32 @@ export const useRecordingStore = defineStore('recording', {
           },
           onLowBattery: async (batteryPercent) => {
             this.batteryLevel = batteryPercent;
-            // Warning notification could be triggered here
+            // ALERT ONLY — never interrupt the recording for low battery. Chunks
+            // are persisted to disk every ~3s (fsync'd), so even a sudden
+            // shutdown keeps everything up to the last few seconds (recovered on
+            // next launch). The user decides whether to plug in or stop.
+            if (this.phase === 'recording' && batteryAlertShown === null) {
+              batteryAlertShown = 'low';
+              Notify.create({
+                type: 'warning', icon: 'battery_alert', timeout: 10000,
+                message: t('batteryLowWarning', { percent: Math.round(batteryPercent) }),
+              });
+            }
           },
           onCriticalBattery: async (batteryPercent) => {
             this.batteryLevel = batteryPercent;
-            // Emergency stop at critical battery
-            if (this.phase === 'recording') {
-              console.warn('Critical battery - emergency stop');
-              await this.emergencyStop('Critical battery level');
+            // ALERT ONLY — do NOT stop the recording. A persistent, urgent
+            // notice; the recording keeps running and keeps saving chunks so
+            // nothing is lost if the device dies. (Owner decision 2026-07-26:
+            // auto-stopping at 5% was too aggressive.)
+            if (this.phase === 'recording' && batteryAlertShown !== 'critical') {
+              batteryAlertShown = 'critical';
+              console.warn('Critical battery - alerting user (recording continues, chunks kept)');
+              Notify.create({
+                type: 'negative', icon: 'battery_alert', timeout: 0,
+                message: t('batteryCriticalWarning', { percent: Math.round(batteryPercent) }),
+                actions: [{ label: t('ok', 'OK'), color: 'white' }],
+              });
             }
           }
         });
@@ -202,6 +226,7 @@ export const useRecordingStore = defineStore('recording', {
         console.warn(`startRecording rejected: phase is '${this.phase}'`);
         return { success: false, error: `Cannot start a recording while phase is '${this.phase}'` };
       }
+      batteryAlertShown = null; // re-arm battery alerts for this recording
       try {
         // P1 Fix: Wait for cold-start recovery to complete before starting a new recording
         // Prevents race where recovery and new recording both modify store state

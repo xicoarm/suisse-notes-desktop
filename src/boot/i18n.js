@@ -47,6 +47,8 @@ const messages = {
     captureWarningFfmpegMissing: 'System audio can be captured, but the audio processor (FFmpeg) is not working on this computer — the system audio may be missing from the final recording. Please reinstall the app.',
     captureWarningMergeDegraded: 'The system audio of this recording could not be merged — the file contains the microphone only. The system audio was kept for support recovery.',
     systemAudioStoppedAfterSleep: 'System audio capture was stopped when your computer went to sleep. Re-enable the system audio toggle to continue capturing it.',
+    batteryLowWarning: 'Battery low ({percent}%). Consider plugging in — your recording is being saved continuously and will not be lost.',
+    batteryCriticalWarning: 'Battery critically low ({percent}%). Plug in now. The recording keeps running and everything captured so far is safe, but your device may shut down soon.',
 
     // Audio level meter
     audioLevelLow: 'Low',
@@ -523,6 +525,8 @@ const messages = {
     captureWarningFfmpegMissing: 'Systemaudio kann aufgezeichnet werden, aber der Audio-Prozessor (FFmpeg) funktioniert auf diesem Computer nicht — das Systemaudio könnte in der finalen Aufnahme fehlen. Bitte installieren Sie die App neu.',
     captureWarningMergeDegraded: 'Das Systemaudio dieser Aufnahme konnte nicht zusammengeführt werden — die Datei enthält nur das Mikrofon. Das Systemaudio wurde für eine Support-Wiederherstellung aufbewahrt.',
     systemAudioStoppedAfterSleep: 'Die Systemaudio-Aufzeichnung wurde beim Ruhezustand des Computers gestoppt. Aktivieren Sie den Systemaudio-Schalter erneut, um sie fortzusetzen.',
+    batteryLowWarning: 'Akku niedrig ({percent}%). Schliessen Sie das Gerät ans Stromnetz an — Ihre Aufnahme wird laufend gespeichert und geht nicht verloren.',
+    batteryCriticalWarning: 'Akku kritisch niedrig ({percent}%). Schliessen Sie jetzt das Ladegerät an. Die Aufnahme läuft weiter und alles bisher Aufgenommene ist sicher, aber Ihr Gerät könnte sich bald ausschalten.',
 
     // Audio level meter
     audioLevelLow: 'Niedrig',
@@ -999,6 +1003,8 @@ const messages = {
     captureWarningFfmpegMissing: 'L\'audio système peut être capturé, mais le processeur audio (FFmpeg) ne fonctionne pas sur cet ordinateur — l\'audio système pourrait manquer dans l\'enregistrement final. Veuillez réinstaller l\'application.',
     captureWarningMergeDegraded: 'L\'audio système de cet enregistrement n\'a pas pu être fusionné — le fichier ne contient que le microphone. L\'audio système a été conservé pour une récupération par le support.',
     systemAudioStoppedAfterSleep: 'La capture de l\'audio système a été arrêtée lors de la mise en veille de l\'ordinateur. Réactivez l\'interrupteur audio système pour continuer à le capturer.',
+    batteryLowWarning: 'Batterie faible ({percent}%). Pensez à brancher l\'appareil — votre enregistrement est sauvegardé en continu et ne sera pas perdu.',
+    batteryCriticalWarning: 'Batterie critique ({percent}%). Branchez maintenant. L\'enregistrement continue et tout ce qui a été capturé est en sécurité, mais votre appareil pourrait bientôt s\'éteindre.',
 
     // Audio level meter
     audioLevelLow: 'Faible',
@@ -1475,6 +1481,8 @@ const messages = {
     captureWarningFfmpegMissing: 'L\'audio di sistema può essere acquisito, ma il processore audio (FFmpeg) non funziona su questo computer — l\'audio di sistema potrebbe mancare nella registrazione finale. Reinstalla l\'app.',
     captureWarningMergeDegraded: 'L\'audio di sistema di questa registrazione non è stato unito — il file contiene solo il microfono. L\'audio di sistema è stato conservato per il recupero da parte del supporto.',
     systemAudioStoppedAfterSleep: 'L\'acquisizione dell\'audio di sistema è stata interrotta quando il computer è andato in standby. Riattiva l\'interruttore dell\'audio di sistema per continuare.',
+    batteryLowWarning: 'Batteria in esaurimento ({percent}%). Valuta di collegare l\'alimentazione — la registrazione viene salvata di continuo e non andrà persa.',
+    batteryCriticalWarning: 'Batteria quasi esaurita ({percent}%). Collega ora l\'alimentazione. La registrazione prosegue e tutto ciò che è stato acquisito è al sicuro, ma il dispositivo potrebbe spegnersi a breve.',
 
     // Audio level meter
     audioLevelLow: 'Basso',
