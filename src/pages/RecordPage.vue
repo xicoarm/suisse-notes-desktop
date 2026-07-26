@@ -2056,10 +2056,18 @@ const handleUploadError = async (errorMessage, ownerUserId = null) => {
       timeout: 8000
     });
   } else {
+    // Terminal server failure: the recording is NOT lost — it stays on disk and
+    // the app auto-retries (and it's retryable from History). A generic 5s
+    // "Upload failed" left users thinking their meeting was gone (audit GAP-2).
+    // Make it persistent and reassuring, and name the too-large case explicitly.
+    const tooLarge = errorMessage && /413|too large|entity too large|payload too large|file size/i.test(errorMessage);
     $q.notify({
       type: 'negative',
-      message: t('uploadFailedServer'),
-      timeout: 5000
+      message: tooLarge ? t('uploadTooLarge') : t('uploadFailedServer'),
+      caption: tooLarge ? undefined : t('uploadKeptLocally'),
+      icon: 'cloud_off',
+      timeout: 0,
+      actions: [{ label: t('ok', 'OK'), color: 'white' }]
     });
   }
 };

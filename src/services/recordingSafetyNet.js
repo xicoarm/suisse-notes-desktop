@@ -189,6 +189,33 @@ async function handleSystemResume(data) {
   }
 }
 
+/** Main-process crash/power-loss recovery finished. The old behavior was
+ *  SILENT on desktop: a recovered meeting just appeared in history with no
+ *  toast, no badge — a user who didn't scroll never knew their audio survived
+ *  (reliability audit GAP-1). Tell them clearly, and refresh the in-memory
+ *  history (the main process rewrote the store file, so pinia is stale). */
+async function handleRecordingRecovered(data) {
+  const count = data?.count || 0;
+  if (count <= 0) return;
+  try {
+    const historyStore = useRecordingsHistoryStore();
+    if (typeof historyStore.loadRecordings === 'function') {
+      await historyStore.loadRecordings();
+    }
+  } catch (e) {
+    console.warn('SafetyNet: reload history after recovery failed:', e);
+  }
+  Notify.create({
+    type: 'positive',
+    message: t('recordingRecoveredMsg', { count }),
+    caption: t('recordingRecoveredCaption'),
+    icon: 'restore',
+    timeout: 0,
+    actions: [{ label: t('ok', 'OK'), color: 'white' }]
+  });
+  captureMessage(`safety-net: notified user of ${count} recovered recording(s)`, 'info');
+}
+
 export function initRecordingSafetyNet() {
   if (initialized) return;
   initialized = true;
@@ -200,6 +227,9 @@ export function initRecordingSafetyNet() {
   if (isElectron() && window.electronAPI?.system) {
     if (window.electronAPI.system.onCaptureWarning) {
       window.electronAPI.system.onCaptureWarning(handleCaptureWarning);
+    }
+    if (window.electronAPI.system.onRecordingRecovered) {
+      window.electronAPI.system.onRecordingRecovered(handleRecordingRecovered);
     }
     // App-lifetime suspend/resume handling. useRecorder registers its own
     // page-scoped copies; both running is safe (flush + ack are idempotent,

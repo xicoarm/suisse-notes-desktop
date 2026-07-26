@@ -76,7 +76,14 @@ function isTransientNetworkError(err, message) {
 
 Sentry.init({
   dsn: 'https://185912b1585eb5138079ae189a6d41ec@o4510659364716544.ingest.de.sentry.io/4510659366748240',
-  environment: app.isPackaged ? 'production' : 'development',
+  // E2E test runs drive the *packaged* app with SUISSE_E2E_HOOKS=1. Without this
+  // guard those runs would tag events `production` and masquerade as real-user
+  // incidents in the same issue stream (the mic-health/recovery telemetry fires
+  // loudly by design). Route them to a dedicated `e2e` environment so triage can
+  // filter `environment:production` and never see synthetic test noise.
+  environment: process.env.SUISSE_E2E_HOOKS === '1'
+    ? 'e2e'
+    : (app.isPackaged ? 'production' : 'development'),
   release: `suisse-notes@${app.getVersion()}`,
   beforeSend(event, hint) {
     // Scrub sensitive data from error reports
@@ -475,6 +482,8 @@ async function recoverOrphanedRecordings() {
     let totalAttempted = 0;
     let skippedLive = false;
     let skippedFresh = false;
+    const recoveredForUpload = []; // {recordId, filePath, metadata} to enqueue for autonomous upload
+    const recoveredRecords = [];   // lightweight {id, createdAt, durationSeconds} for the renderer toast
 
     for (const dir of dirs) {
       try {
@@ -542,50 +551,80 @@ async function recoverOrphanedRecordings() {
           recoveredCount++;
           log.info(`Successfully recovered recording: ${dir} (${result.fileSizeMb}MB)`);
 
-          // Add to history with "recovered" status
-          // Try to read userId from metadata.json first, then fall back to activeSession or 'unknown'
+          // Add/update the history entry with the recovered file + "pending"
+          // upload status. Read metadata.json for userId/startedAt/duration —
+          // this runs for BOTH the new-entry and existing-entry paths.
           const recordings = historyStore.get('recordings', []);
-          const existingRecording = recordings.find(r => r.id === dir);
+          const existingIndex = recordings.findIndex(r => r.id === dir);
 
-          if (!existingRecording) {
-            // Try to read metadata.json to get userId and other info
-            let metadataUserId = null;
-            let metadataStartedAt = null;
-            let metadataDuration = 0;
-            const metadataPath = path.join(dirPath, 'metadata.json');
-
-            if (fs.existsSync(metadataPath)) {
-              try {
-                const metadataContent = fs.readFileSync(metadataPath, 'utf8');
-                const metadata = JSON.parse(metadataContent);
-                metadataUserId = metadata.userId;
-                metadataStartedAt = metadata.startedAt;
-                metadataDuration = metadata.duration || 0;
-                log.info(`Read metadata.json for ${dir}: userId=${metadataUserId}, startedAt=${metadataStartedAt}`);
-              } catch (e) {
-                log.warn(`Could not read metadata.json for ${dir}:`, e.message);
-              }
+          let metadataUserId = null;
+          let metadataStartedAt = null;
+          let metadataDuration = 0;
+          const metadataPath = path.join(dirPath, 'metadata.json');
+          if (fs.existsSync(metadataPath)) {
+            try {
+              const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+              metadataUserId = metadata.userId;
+              metadataStartedAt = metadata.startedAt;
+              metadataDuration = metadata.duration || 0;
+              log.info(`Read metadata.json for ${dir}: userId=${metadataUserId}, startedAt=${metadataStartedAt}`);
+            } catch (e) {
+              log.warn(`Could not read metadata.json for ${dir}:`, e.message);
             }
+          }
 
-            // Determine userId: prefer metadata, then activeSession, then 'unknown'
+          const recoveredFileSize = parseFloat(result.fileSizeMb) * 1024 * 1024;
+
+          if (existingIndex === -1) {
+            // No history entry yet — create one for the recovered recording.
             const userId = metadataUserId || activeSession?.userId || 'unknown';
             const createdAt = metadataStartedAt || activeSession?.startedAt || new Date().toISOString();
-
-            // Create a new history entry for the recovered recording
-            const recoveredEntry = {
+            recordings.push({
               id: dir,
-              userId: userId,
-              createdAt: createdAt,
-              duration: metadataDuration, // Use duration from metadata if available
-              fileSize: parseFloat(result.fileSizeMb) * 1024 * 1024,
+              userId,
+              createdAt,
+              duration: metadataDuration,
+              fileSize: recoveredFileSize,
               filePath: result.outputPath,
               uploadStatus: 'pending',
               storagePreference: 'keep',
-              recovered: true // Mark as recovered
-            };
-            recordings.push(recoveredEntry);
+              recovered: true
+            });
             historyStore.set('recordings', recordings);
             log.info(`Added recovered recording to history: ${dir} (userId: ${userId})`);
+            recoveredForUpload.push({ recordId: dir, filePath: result.outputPath, metadata: { duration: String(metadataDuration || 0) } });
+            recoveredRecords.push({ id: dir, createdAt, durationSeconds: metadataDuration || 0 });
+          } else {
+            // A history entry already EXISTS — it was created at record-start and
+            // is stuck at uploadStatus:'recording' with an empty filePath because
+            // the app died mid-recording (crash, power loss, forced sleep). The
+            // old code skipped this case entirely, stranding the recovered audio
+            // on disk: valid file, but invisible to the user and never uploaded.
+            // (Found via a real power-loss during the 5h endurance test.) Update
+            // it in place so the recovered file becomes visible and gets uploaded.
+            // Never clobber an already-terminal upload status.
+            const existing = recordings[existingIndex];
+            // Never resurrect a recording the user finished with or explicitly
+            // dismissed. Terminal states include upload success AND user intent
+            // (skipped/cancelled) — flipping those to 'pending' would re-upload a
+            // recording the user chose not to send.
+            const TERMINAL_STATUSES = ['completed', 'uploaded', 'skipped', 'cancelled', 'pending_verification'];
+            const terminal = TERMINAL_STATUSES.includes(existing.uploadStatus);
+            recordings[existingIndex] = {
+              ...existing,
+              filePath: existing.filePath || result.outputPath,
+              fileSize: existing.fileSize > 0 ? existing.fileSize : recoveredFileSize,
+              duration: existing.duration > 0 ? existing.duration : metadataDuration,
+              uploadStatus: terminal ? existing.uploadStatus : 'pending',
+              recovered: true
+            };
+            historyStore.set('recordings', recordings);
+            log.info(`Updated stuck history entry for recovered recording: ${dir} (status ${existing.uploadStatus} -> ${recordings[existingIndex].uploadStatus}, filePath ${existing.filePath ? 'kept' : 'set'})`);
+            if (!terminal) {
+              const finalRec = recordings[existingIndex];
+              recoveredForUpload.push({ recordId: dir, filePath: finalRec.filePath, metadata: { duration: String(finalRec.duration || 0), ...(finalRec.prep || {}) } });
+              recoveredRecords.push({ id: dir, createdAt: finalRec.createdAt, durationSeconds: finalRec.duration || 0 });
+            }
           }
         } else {
           log.warn(`Could not recover recording ${dir}: ${result.error}`);
@@ -617,6 +656,29 @@ async function recoverOrphanedRecordings() {
 
     if (recoveredCount > 0) {
       log.info(`Recovery complete: ${recoveredCount} recording(s) recovered`);
+
+      // Enqueue recovered recordings into the main-process AUTONOMOUS upload queue
+      // so they upload even if the renderer never comes up, isn't logged in, or
+      // the user quits quickly. processPendingUploads() uses the main-side auth
+      // token and does not depend on the renderer. (Before this, a recovered
+      // recording sat 'pending' until the renderer's 60s retry loop ran — which
+      // never fired if the renderer wasn't authenticated; confirmed by the
+      // power-loss recovery test where the file recovered but never uploaded.)
+      for (const u of recoveredForUpload) {
+        try { addToUploadQueue(u.recordId, u.filePath, u.metadata); } catch (e) { log.warn('recovery: enqueue failed:', e.message); }
+      }
+
+      // Give the user clear feedback and refresh the (now-stale) renderer history.
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        try {
+          mainWindow.webContents.send('recording:recovered', { count: recoveredCount, records: recoveredRecords });
+        } catch (e) { /* ignore */ }
+      }
+
+      // Kick the queue immediately (don't wait for the next periodic trigger).
+      if (recoveredForUpload.length > 0) {
+        processPendingUploads().catch(err => log.error('recovery: upload processing failed:', err));
+      }
     }
 
     // A dir was skipped because its chunks were written <60s ago but no
@@ -704,17 +766,39 @@ async function combineChunksForRecovery(recordId) {
         ).join('\n');
         fs.writeFileSync(concatListPath, listContent);
 
-        await ffmpegWithTimeout(
-          ffmpeg()
-            .input(concatListPath)
-            .inputOptions(['-f', 'concat', '-safe', '0'])
-            .audioCodec('copy')
-            .output(outputPath),
-          FFMPEG_TIMEOUT_MS,
-          'Recovery concat sessions'
-        );
-
-        fs.unlinkSync(concatListPath);
+        // Codec-copy first; fall back to a full re-encode if copy fails. A session
+        // that was itself a raw-concat fallback can have an imperfect container
+        // that codec-copy rejects — without this fallback one bad session failed
+        // the ENTIRE recovery, and the recording was eventually GC'd unrecovered
+        // (reliability audit RISK 2). Matches the main combine path's fallback.
+        // The finally guarantees concat_list.txt is cleaned even if re-encode throws.
+        try {
+          try {
+            await ffmpegWithTimeout(
+              ffmpeg()
+                .input(concatListPath)
+                .inputOptions(['-f', 'concat', '-safe', '0'])
+                .audioCodec('copy')
+                .output(outputPath),
+              FFMPEG_TIMEOUT_MS,
+              'Recovery concat sessions (codec copy)',
+              { reportToSentry: false }
+            );
+          } catch (copyErr) {
+            log.warn('Recovery concat codec-copy failed, re-encoding:', copyErr.message);
+            try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
+            await ffmpegWithTimeout(
+              ffmpeg()
+                .input(concatListPath)
+                .inputOptions(['-f', 'concat', '-safe', '0'])
+                .output(outputPath),
+              FFMPEG_TIMEOUT_MS,
+              'Recovery concat sessions (re-encode)'
+            );
+          }
+        } finally {
+          try { fs.unlinkSync(concatListPath); } catch (e) { /* ignore */ }
+        }
 
         // P0 Data Loss Fix: Validate output BEFORE deleting sources
         const concatValidation = validateAudioOutput(outputPath);
@@ -861,6 +945,13 @@ async function processPendingUploads() {
 
   // Process each pending upload with delay between them
   for (const upload of queue) {
+    // Don't double-upload: if the renderer's upload:start path already has this
+    // recording in flight, let it finish — otherwise we POST the same file twice
+    // and create a duplicate meeting on the server.
+    if (inFlightUploads.has(upload.recordId)) {
+      log.info(`Pending processor: ${upload.recordId} already in flight (renderer path), skipping`);
+      continue;
+    }
     // Skip if too many retries (max 10)
     if (upload.retryCount >= 10) {
       log.warn(`Upload ${upload.recordId} exceeded max retries, removing from queue`);
@@ -889,6 +980,7 @@ async function processPendingUploads() {
     log.info(`Retrying upload for ${upload.recordId} (attempt ${upload.retryCount + 1})`);
     updateUploadQueueRetry(upload.recordId);
 
+    inFlightUploads.add(upload.recordId);
     try {
       const result = await uploadWithRetry(upload.recordId, upload.filePath, upload.metadata, 2);
 
@@ -951,6 +1043,8 @@ async function processPendingUploads() {
       }
     } catch (e) {
       log.error(`Failed to upload ${upload.recordId}:`, e.message);
+    } finally {
+      inFlightUploads.delete(upload.recordId);
     }
 
     // Wait 5 seconds between uploads to avoid overwhelming the server
@@ -2368,6 +2462,16 @@ async function combineChunksStreaming(chunksPath, sortedChunks, outputPath) {
       try {
         for (const chunkFile of sortedChunks) {
           const chunkPath = path.join(chunksPath, chunkFile);
+          // Skip zero-byte chunks. A torn write at a hard-kill (power loss) boundary
+          // can leave an empty chunk file; it carries no audio and feeding an empty
+          // fragment into the byte-concat can corrupt the WebM container. Excluding
+          // it is lossless. (Reliability audit RISK 3.)
+          let chunkSize = 0;
+          try { chunkSize = (await fs.promises.stat(chunkPath)).size; } catch (e) { chunkSize = 0; }
+          if (chunkSize === 0) {
+            log.warn(`combineChunksStreaming: skipping zero-byte chunk ${chunkFile}`);
+            continue;
+          }
           const data = await fs.promises.readFile(chunkPath);
           // Wait for write to complete before reading next chunk
           await new Promise((res, rej) => {
@@ -3428,14 +3532,20 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           if (sessionFiles.length === 1) {
             fs.copyFileSync(path.join(sessionsPath, sessionFiles[0]), outputPath);
 
-            // P0 Data Loss Fix: Validate output BEFORE deleting sources
+            // P0 Data Loss Fix: Validate output BEFORE deleting sources — and
+            // BLOCK on failure. The session file is the ONLY remaining copy once
+            // chunks have been rolled; deleting it after a bad copy/combine was a
+            // silent total-loss path (reliability audit RISK 1). Keep the sources
+            // so the user can retry and launch-recovery can re-combine. A
+            // false-fail here just means a retry, never a lost meeting.
             const singleSessionValidation = validateAudioOutput(outputPath);
             if (!singleSessionValidation.valid) {
-              log.warn('combineChunks: Single session output validation warning:', singleSessionValidation.error);
-              // Continue anyway - audio data may still be usable by the server
+              log.error('combineChunks: single-session output INVALID — preserving sources, not deleting:', singleSessionValidation.error);
+              try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
+              return { success: false, error: `Combined file validation failed: ${singleSessionValidation.error}` };
             }
 
-            // Cleanup
+            // Valid → safe to delete sources
             await rmDirSafeBestEffort(sessionsPath, 'combineChunks-single');
             if (fs.existsSync(chunksPath)) {
               await rmDirSafeBestEffort(chunksPath, 'combineChunks-single');
@@ -3511,11 +3621,16 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
           // Cleanup
           fs.unlinkSync(concatListPath);
 
-          // P0 Data Loss Fix: Validate output BEFORE deleting sources
+          // P0 Data Loss Fix: Validate output BEFORE deleting sources — and BLOCK
+          // on failure. The individually-validated session files are the ONLY copy
+          // once chunks have been rolled; deleting them after a corrupt concat was
+          // a silent total-loss path (reliability audit RISK 1). Keep them for
+          // retry / launch-recovery. A false-fail just means a retry, never loss.
           const multiSessionValidation = validateAudioOutput(outputPath);
           if (!multiSessionValidation.valid) {
-            log.warn('combineChunks: Multi-session output validation warning:', multiSessionValidation.error);
-            // Continue anyway - audio data may still be usable by the server
+            log.error('combineChunks: multi-session output INVALID — preserving session files, not deleting:', multiSessionValidation.error);
+            try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (e) { /* ignore */ }
+            return { success: false, error: `Multi-session combine validation failed: ${multiSessionValidation.error}` };
           }
 
           // Get actual audio duration via ffprobe
@@ -3527,6 +3642,7 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
             console.warn('Could not get audio duration for multi session:', e.message);
           }
 
+          // Valid → safe to delete sources
           await rmDirSafeBestEffort(sessionsPath, 'combineChunks-multi');
           if (fs.existsSync(chunksPath)) {
             await rmDirSafeBestEffort(chunksPath, 'combineChunks-multi');

@@ -126,10 +126,18 @@ async function initElectronRenderer(app, router) {
     const SentryVue = await import('@sentry/vue');
     SentryModule = SentryVue;
 
+    // E2E runs drive the packaged app (import.meta.env.DEV === false), so without
+    // this guard the synthetic mic-health/recovery/crash telemetry the renderer
+    // emits would tag `production` and masquerade as real-user incidents. The
+    // preload exposes isE2E (from SUISSE_E2E_HOOKS) — route those to `e2e`.
+    const rendererEnvironment = window.electronAPI?.isE2E
+      ? 'e2e'
+      : (import.meta.env.DEV ? 'development' : 'production');
+
     SentryVue.init({
       app,
       dsn,
-      environment: import.meta.env.DEV ? 'development' : 'production',
+      environment: rendererEnvironment,
       release: `suisse-notes@${appVersion}`,
       autoSessionTracking: false,
       sendClientReports: false,

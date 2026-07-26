@@ -1034,10 +1034,15 @@ async function attemptCaptureRecovery() {
       return;
     }
 
-    // Give up quietly after the window — the stall banner stays up and every
-    // chunk before the interruption is safely persisted either way.
+    // Give up after the window — but NOT quietly. Escalate to captureRecoveryFailed
+    // so the app does an emergency stop-with-save and tells the user (persistent
+    // toast), instead of sitting "recording" nothing with a stall banner that may
+    // no longer be mounted if the user navigated away (reliability audit GAP-3).
+    // Every chunk before the interruption is safely persisted either way.
     if (Date.now() - captureRecoveryStartedAt > CAPTURE_RECOVERY_GIVE_UP_MS) {
+      const stalledForSeconds = Math.round((Date.now() - captureRecoveryStartedAt) / 1000);
       captureMessage(`recording: capture recovery GAVE UP after ${Math.round(CAPTURE_RECOVERY_GIVE_UP_MS / 60000)}min (reason=${captureRecoveryReason})`, 'error');
+      emit('captureRecoveryFailed', { stalledForSeconds, reason: captureRecoveryReason, gaveUp: true });
       stopCaptureRecovery();
       return;
     }

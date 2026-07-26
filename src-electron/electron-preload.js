@@ -22,6 +22,12 @@ const IPC_TIMEOUTS = {
 
 // Expose protected methods to renderer process
 contextBridge.exposeInMainWorld('electronAPI', {
+  // True only during automated E2E runs (packaged app launched with
+  // SUISSE_E2E_HOOKS=1). Lets the renderer route Sentry to the `e2e`
+  // environment so synthetic mic-health/recovery telemetry never pollutes the
+  // real-user (`production`) issue stream. Read synchronously at preload time.
+  isE2E: process.env.SUISSE_E2E_HOOKS === '1',
+
   // Configuration (read-only - no user-configurable URLs)
   config: {
     get: () => ipcRenderer.invoke('config:get'),
@@ -284,6 +290,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // app-level safety net (App.vue), which must survive RecordPage unmounts.
     onCaptureWarning: (callback) => {
       ipcRenderer.on('system:capture-warning', (event, data) => callback(data));
+    },
+    // Crash/power-loss recovery finished (main process). Like onCaptureWarning,
+    // the subscriber is the app-level safety net and this is deliberately NOT
+    // cleared by removeAllListeners so it survives page navigation.
+    onRecordingRecovered: (callback) => {
+      ipcRenderer.on('recording:recovered', (event, data) => callback(data));
     },
     // Remove all system listeners
     removeAllListeners: () => {
