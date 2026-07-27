@@ -1656,8 +1656,10 @@ app.whenReady().then(() => {
   }
 
   // === Auto-Update: Check for updates silently ===
-  // Only check in production (packaged app), skip if on read-only volume
-  if (app.isPackaged && !skipAutoUpdate) {
+  // Only check in production (packaged app), skip if on read-only volume.
+  // Also skip during E2E runs — a test build must not self-update to a newer
+  // release mid-run (it downloads + quitAndInstalls and kills the test app).
+  if (app.isPackaged && !skipAutoUpdate && process.env.SUISSE_E2E_HOOKS !== '1') {
     // Check for updates on startup (silent - no notification)
     autoUpdater.checkForUpdates().catch(err => {
       log.error('Auto-update check failed:', err);
