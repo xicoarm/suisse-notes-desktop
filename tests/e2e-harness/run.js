@@ -355,17 +355,20 @@ async function s7Endurance() {
     while (Date.now() - t0 < totalMs - 5000) {
       await sleep(30_000);
       const tSec = Math.round((Date.now() - t0) / 1000);
-      // Fail FAST if the app died (H-003): otherwise a frozen renderer makes the
-      // health calls block for hours. If unresponsive, record when and abort.
-      if (!(await app.isAppAlive())) {
+      // Only abort after REPEATED unresponsiveness (confirmDead retries over
+      // ~90s). A single missed 10s ping is often a transient GC pause or
+      // host-contention hiccup, not a dead app — insta-killing on it false-failed
+      // a 5h run while the app (and real 5h user recordings) were actually fine.
+      if (await app.confirmDead()) {
         deadAtSec = tSec;
-        fs.appendFileSync(progressFile, JSON.stringify({ t: tSec, dead: true }) + '\n');
+        fs.appendFileSync(progressFile, JSON.stringify({ t: tSec, dead: true, note: 'unresponsive across confirmDead retries (~90s)' }) + '\n');
         break;
       }
-      let h = {}; let phase = null;
+      let h = {}; let phase = null; let mem = {};
       try { h = await app.getMicHealthUi(); } catch (e) { /* keep going */ }
       try { phase = await app.getPhase(); } catch (e) { /* keep going */ }
-      const rec = { t: tSec, phase, badge: h.badge, msg: (h.message || '').slice(0, 60) };
+      try { mem = await app.getRendererMemory(); } catch (e) { /* keep going */ }
+      const rec = { t: tSec, phase, badge: h.badge, msg: (h.message || '').slice(0, 60), heapMB: mem.heapMB, domNodes: mem.domNodes };
       healthLog.push(rec);
       fs.appendFileSync(progressFile, JSON.stringify(rec) + '\n');
       // Break windows (noise): must NOT show a critical/unstable badge.

@@ -324,6 +324,34 @@ class AppDriver {
     catch (e) { return false; }
   }
 
+  /** True only after REPEATED unresponsiveness — a single missed ping can be a
+   *  transient GC pause / host-contention hiccup, not a dead app. Confirms
+   *  death over several retries so a long endurance run doesn't false-fail on a
+   *  momentary stall while the app is actually fine. */
+  async confirmDead(retries = 4, gapMs = 20_000) {
+    for (let i = 0; i < retries; i++) {
+      if (await this.isAppAlive()) return false; // recovered -> not dead
+      if (i < retries - 1) await sleep(gapMs);
+    }
+    return true;
+  }
+
+  /** Renderer memory + DOM-size snapshot — used to detect growth/leaks over a
+   *  long run (the "renderer gets sluggish after hours" hypothesis). */
+  async getRendererMemory() {
+    try {
+      return await this.evalTimed(() => ({
+        heapMB: (window.performance && performance.memory && performance.memory.usedJSHeapSize)
+          ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null,
+        heapLimitMB: (window.performance && performance.memory && performance.memory.jsHeapSizeLimit)
+          ? Math.round(performance.memory.jsHeapSizeLimit / 1048576) : null,
+        domNodes: document.getElementsByTagName('*').length,
+      }), undefined, 10_000);
+    } catch (e) {
+      return { heapMB: null, domNodes: null };
+    }
+  }
+
   async getPhase() {
     return this.evalTimed(() => {
       const pinia = window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia;
