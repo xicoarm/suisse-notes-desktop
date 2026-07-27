@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.5.5](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.4...v4.5.5) (2026-07-27)
+
+
+### Bug Fixes
+
+* **recording:** detect dead-but-open microphones; verify every mic switch delivers signal ([45ffbc3](https://github.com/xicoarm/suisse-notes-desktop/commit/45ffbc33976a69027402e6edc1fdb4e8b0d2032b))
+* **recording:** low/critical battery ALERTS instead of auto-stopping (owner decision) ([a739aab](https://github.com/xicoarm/suisse-notes-desktop/commit/a739aab93a30f75a896d7b322e459becad1faeeb))
+* **reliability:** app-level recording safety net, upload retry-storm fixes, long-meeting hardening ([d25cfac](https://github.com/xicoarm/suisse-notes-desktop/commit/d25cfaceb4f5023fafc2143553ec8c82c057ac52))
+* **reliability:** battery/disk emergency-stop really stops+combines; guard combine on quit ([428e45e](https://github.com/xicoarm/suisse-notes-desktop/commit/428e45e75157ea699cd1307b6c0e0c6912fff95d))
+* **reliability:** rescue stranded recovered recordings + block silent data-loss in combine ([8a52395](https://github.com/xicoarm/suisse-notes-desktop/commit/8a52395a2952e9955b4ff11f933938ea5b52f19f))
+
 ### [4.5.4](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.3...v4.5.4) (2026-07-22)
 
 
