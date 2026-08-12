@@ -222,7 +222,7 @@ const messages = {
     cancelUploadTitle: 'Cancel Upload?',
     cancelUploadConfirm: 'Are you sure you want to cancel this upload? The recording will be saved locally and can be uploaded later.',
     confirmCancelUpload: 'Yes, Cancel',
-    openInSuisseNotes: 'Open in Suisse Notes',
+    openInSuisseNotes: 'Open in Suisse Meets',
     transcriptReady: 'Your transcript is ready!',
     transcriptCta: 'Click below to view your transcript, summaries, and action items',
 
@@ -277,7 +277,7 @@ const messages = {
     deleteAllRecordingsTitle: 'Delete All Recordings?',
     actionIrreversible: 'This action is irreversible.',
     deleteAllRecordingsMessage: 'All {count} local recording(s) will be permanently deleted from this device.',
-    deleteAllRecordingsWarning: 'Recordings that have been uploaded to Suisse Notes will still be available in the web app.',
+    deleteAllRecordingsWarning: 'Recordings that have been uploaded to Suisse Meets will still be available in the web app.',
     typeDeleteToConfirm: 'Type DELETE to confirm:',
     dangerZone: 'Danger Zone',
     aboutSection: 'About',
@@ -304,7 +304,7 @@ const messages = {
 
     // About Page
     aboutHeroSubtitle: 'Intelligent meeting transcription with AI-powered summaries, action items, and insights. Highest data protection standards, hosted in Switzerland. Optimized for Swiss German and all Swiss dialects.',
-    aboutFeaturesTitle: 'What Suisse Notes Can Do',
+    aboutFeaturesTitle: 'What Suisse Meets Can Do',
     aboutFeatureSwissTitle: 'Swiss German Support',
     aboutFeatureSwissDesc: 'Industry-leading accuracy for all Swiss dialects alongside High German, French, Italian, and English.',
     aboutFeaturePlatformTitle: 'Multi-Platform',
@@ -341,7 +341,7 @@ const messages = {
     noAccount: "Don't have an account?",
     createAccount: 'Create Account',
     forgotPassword: 'Forgot Password?',
-    appDescription: 'Recording app for Suisse Notes platform',
+    appDescription: 'Recording app for Suisse Meets platform',
     // Register page
     backToLogin: 'Back to Login',
     createYourAccount: 'Create your account',
@@ -479,7 +479,7 @@ const messages = {
 
     // Update-ready dialog
     updateReadyTitle: 'Update ready to install',
-    updateReadyMessage: 'Version {version} of Suisse Notes is ready. It contains stability and reliability improvements — we strongly recommend updating now. The app will restart briefly to apply it.',
+    updateReadyMessage: 'Version {version} of Suisse Meets is ready. It contains stability and reliability improvements — we strongly recommend updating now. The app will restart briefly to apply it.',
     updateReadyLaterHint: 'If you choose Later, the update installs automatically the next time you quit the app.',
     updateReadyNow: 'Update now',
     updateReadyLater: 'Later'
@@ -705,7 +705,7 @@ const messages = {
     cancelUploadTitle: 'Upload abbrechen?',
     cancelUploadConfirm: 'Möchten Sie den Upload wirklich abbrechen? Die Aufnahme wird lokal gespeichert und kann später hochgeladen werden.',
     confirmCancelUpload: 'Ja, abbrechen',
-    openInSuisseNotes: 'In Suisse Notes öffnen',
+    openInSuisseNotes: 'In Suisse Meets öffnen',
     transcriptReady: 'Ihr Transkript ist bereit!',
     transcriptCta: 'Klicken Sie unten, um Ihr Transkript, Zusammenfassungen und Aktionspunkte anzuzeigen',
 
@@ -787,7 +787,7 @@ const messages = {
 
     // About Page
     aboutHeroSubtitle: 'Intelligente Meeting-Transkription mit KI-gestützten Zusammenfassungen, Aktionspunkten und Erkenntnissen. Höchste Datenschutzstandards, gehostet in der Schweiz. Optimiert für Schweizerdeutsch und alle Schweizer Dialekte.',
-    aboutFeaturesTitle: 'Was Suisse Notes kann',
+    aboutFeaturesTitle: 'Was Suisse Meets kann',
     aboutFeatureSwissTitle: 'Schweizerdeutsch',
     aboutFeatureSwissDesc: 'Branchenführende Genauigkeit für alle Schweizer Dialekte sowie Hochdeutsch, Französisch, Italienisch und Englisch.',
     aboutFeaturePlatformTitle: 'Multi-Plattform',
@@ -824,7 +824,7 @@ const messages = {
     noAccount: 'Noch kein Konto?',
     createAccount: 'Konto erstellen',
     forgotPassword: 'Passwort vergessen?',
-    appDescription: 'Aufnahme-App für die Suisse Notes Plattform',
+    appDescription: 'Aufnahme-App für die Suisse Meets Plattform',
     // Register page
     backToLogin: 'Zurück zur Anmeldung',
     createYourAccount: 'Erstellen Sie Ihr Konto',
@@ -962,7 +962,7 @@ const messages = {
 
     // Update-ready dialog
     updateReadyTitle: 'Update bereit zur Installation',
-    updateReadyMessage: 'Version {version} von Suisse Notes ist bereit. Sie enthält Stabilitäts- und Zuverlässigkeitsverbesserungen – wir empfehlen dringend, jetzt zu aktualisieren. Die App wird kurz neu gestartet.',
+    updateReadyMessage: 'Version {version} von Suisse Meets ist bereit. Sie enthält Stabilitäts- und Zuverlässigkeitsverbesserungen – wir empfehlen dringend, jetzt zu aktualisieren. Die App wird kurz neu gestartet.',
     updateReadyLaterHint: 'Bei „Später“ wird das Update automatisch beim nächsten Beenden der App installiert.',
     updateReadyNow: 'Jetzt aktualisieren',
     updateReadyLater: 'Später'
@@ -1188,7 +1188,7 @@ const messages = {
     cancelUploadTitle: 'Annuler le téléchargement?',
     cancelUploadConfirm: 'Êtes-vous sûr de vouloir annuler ce téléchargement? L\'enregistrement sera sauvegardé localement et pourra être téléchargé plus tard.',
     confirmCancelUpload: 'Oui, annuler',
-    openInSuisseNotes: 'Ouvrir dans Suisse Notes',
+    openInSuisseNotes: 'Ouvrir dans Suisse Meets',
     transcriptReady: 'Votre transcription est prête!',
     transcriptCta: 'Cliquez ci-dessous pour voir votre transcription, résumés et points d\'action',
 
@@ -1270,7 +1270,7 @@ const messages = {
 
     // About Page
     aboutHeroSubtitle: 'Transcription intelligente de réunions avec résumés, points d\'action et insights alimentés par l\'IA. Normes de protection des données les plus élevées, hébergé en Suisse. Optimisé pour le suisse allemand et tous les dialectes suisses.',
-    aboutFeaturesTitle: 'Ce que Suisse Notes peut faire',
+    aboutFeaturesTitle: 'Ce que Suisse Meets peut faire',
     aboutFeatureSwissTitle: 'Suisse Allemand',
     aboutFeatureSwissDesc: 'Précision de pointe pour tous les dialectes suisses ainsi que l\'allemand standard, le français, l\'italien et l\'anglais.',
     aboutFeaturePlatformTitle: 'Multi-Plateforme',
@@ -1307,7 +1307,7 @@ const messages = {
     noAccount: 'Pas encore de compte?',
     createAccount: 'Créer un compte',
     forgotPassword: 'Mot de passe oublié?',
-    appDescription: 'Application d\'enregistrement pour la plateforme Suisse Notes',
+    appDescription: 'Application d\'enregistrement pour la plateforme Suisse Meets',
     // Register page
     backToLogin: 'Retour à la connexion',
     createYourAccount: 'Créez votre compte',
@@ -1445,7 +1445,7 @@ const messages = {
 
     // Update-ready dialog
     updateReadyTitle: 'Mise à jour prête à installer',
-    updateReadyMessage: 'La version {version} de Suisse Notes est prête. Elle contient des améliorations de stabilité et de fiabilité – nous vous recommandons vivement de mettre à jour maintenant. L\'application redémarrera brièvement.',
+    updateReadyMessage: 'La version {version} de Suisse Meets est prête. Elle contient des améliorations de stabilité et de fiabilité – nous vous recommandons vivement de mettre à jour maintenant. L\'application redémarrera brièvement.',
     updateReadyLaterHint: 'Si vous choisissez « Plus tard », la mise à jour s\'installera automatiquement à la prochaine fermeture de l\'application.',
     updateReadyNow: 'Mettre à jour',
     updateReadyLater: 'Plus tard'
@@ -1671,7 +1671,7 @@ const messages = {
     cancelUploadTitle: 'Annullare il caricamento?',
     cancelUploadConfirm: 'Sei sicuro di voler annullare questo caricamento? La registrazione verrà salvata localmente e potrà essere caricata in seguito.',
     confirmCancelUpload: 'Sì, annulla',
-    openInSuisseNotes: 'Apri in Suisse Notes',
+    openInSuisseNotes: 'Apri in Suisse Meets',
     transcriptReady: 'La tua trascrizione è pronta!',
     transcriptCta: 'Clicca sotto per vedere la trascrizione, i riassunti e i punti d\'azione',
 
@@ -1753,7 +1753,7 @@ const messages = {
 
     // About Page
     aboutHeroSubtitle: 'Trascrizione intelligente delle riunioni con riassunti, azioni e insight basati sull\'IA. Standard di protezione dati più elevati, ospitato in Svizzera. Ottimizzato per lo svizzero tedesco e tutti i dialetti svizzeri.',
-    aboutFeaturesTitle: 'Cosa può fare Suisse Notes',
+    aboutFeaturesTitle: 'Cosa può fare Suisse Meets',
     aboutFeatureSwissTitle: 'Svizzero Tedesco',
     aboutFeatureSwissDesc: 'Precisione leader del settore per tutti i dialetti svizzeri oltre a tedesco standard, francese, italiano e inglese.',
     aboutFeaturePlatformTitle: 'Multi-Piattaforma',
@@ -1790,7 +1790,7 @@ const messages = {
     noAccount: 'Non hai un account?',
     createAccount: 'Crea account',
     forgotPassword: 'Password dimenticata?',
-    appDescription: 'App di registrazione per la piattaforma Suisse Notes',
+    appDescription: 'App di registrazione per la piattaforma Suisse Meets',
     // Register page
     backToLogin: 'Torna al login',
     createYourAccount: 'Crea il tuo account',
@@ -1928,7 +1928,7 @@ const messages = {
 
     // Update-ready dialog
     updateReadyTitle: 'Aggiornamento pronto per l\'installazione',
-    updateReadyMessage: 'La versione {version} di Suisse Notes è pronta. Contiene miglioramenti di stabilità e affidabilità: consigliamo vivamente di aggiornare ora. L\'app si riavvierà brevemente.',
+    updateReadyMessage: 'La versione {version} di Suisse Meets è pronta. Contiene miglioramenti di stabilità e affidabilità: consigliamo vivamente di aggiornare ora. L\'app si riavvierà brevemente.',
     updateReadyLaterHint: 'Se scegli "Più tardi", l\'aggiornamento verrà installato automaticamente alla prossima chiusura dell\'app.',
     updateReadyNow: 'Aggiorna ora',
     updateReadyLater: 'Più tardi'

@@ -105,7 +105,7 @@ export default function (ctx) {
       // version: 6,
       // App identifier for mobile stores (no dashes allowed in Java package names)
       appId: 'ch.suissenotes.mobile',
-      appName: 'Suisse Notes',
+      appName: 'Suisse Meets',
       // iOS-specific settings
       ios: {
         // Enable background audio recording
@@ -123,15 +123,21 @@ export default function (ctx) {
       bundler: 'builder',
 
       builder: {
+        // appId is the app's OS-level identity (NSIS upgrade GUID, macOS TCC
+        // permissions). It must NEVER change across the rebrand — a new appId
+        // would install side-by-side on Windows and reset mic/screen permissions
+        // on macOS. Only the display name (productName) carries the new brand.
         appId: 'com.suisse-notes.desktop',
-        productName: 'Suisse Notes',
+        productName: 'Suisse Meets',
         icon: 'src-electron/icons/icon',
 
         // Custom URL scheme used by the SSO bridge: the system browser opens
         // /api/auth/microsoft/login?client=desktop, and the backend callback
         // hands the token back via suissenotes://auth/callback?token=...&user=...
         protocols: [
-          { name: 'Suisse Notes SSO', schemes: ['suissenotes'] }
+          // Scheme stays 'suissenotes' — the backend's OAuth callback redirects
+          // to it and every installed client registered it. Display name only.
+          { name: 'Suisse Meets SSO', schemes: ['suissenotes'] }
         ],
 
         // GitHub Releases for auto-updates
@@ -158,7 +164,7 @@ export default function (ctx) {
           allowToChangeInstallationDirectory: false,  // Required for oneClick
           createDesktopShortcut: true,
           createStartMenuShortcut: true,
-          shortcutName: 'Suisse Notes',
+          shortcutName: 'Suisse Meets',
           installerIcon: 'src-electron/icons/icon.ico',
           uninstallerIcon: 'src-electron/icons/icon.ico',
           installerHeaderIcon: 'src-electron/icons/icon.ico'
@@ -182,7 +188,7 @@ export default function (ctx) {
             NSSupportsAutomaticTermination: false,
             NSSupportsSuddenTermination: false,
             // Required for AudioTee system audio capture (macOS 14.2+)
-            NSAudioCaptureUsageDescription: 'Suisse Notes captures system audio to include meeting participants in the transcription.'
+            NSAudioCaptureUsageDescription: 'Suisse Meets captures system audio to include meeting participants in the transcription.'
           }
         },
         dmg: {

@@ -12,7 +12,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Suisse Notes</string>
+	<string>Suisse Meets</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -61,15 +61,15 @@
 	</array>
 	<!-- Microphone Permission -->
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Suisse Notes needs access to your microphone to record meetings and conversations for transcription.</string>
+	<string>Suisse Meets needs access to your microphone to record meetings and conversations for transcription.</string>
 	<!-- Camera Permission (required by iOS when file picker shows "Take Video" option) -->
 	<key>NSCameraUsageDescription</key>
-	<string>Suisse Notes may use the camera if you choose to record a video for transcription.</string>
+	<string>Suisse Meets may use the camera if you choose to record a video for transcription.</string>
 	<!-- Bluetooth Permission (for recording device sync and wireless audio) -->
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Suisse Notes uses Bluetooth to connect to your recording device for syncing meetings, and to wireless microphones for audio recording.</string>
+	<string>Suisse Meets uses Bluetooth to connect to your recording device for syncing meetings, and to wireless microphones for audio recording.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>Suisse Notes uses Bluetooth to connect to your recording device for syncing meetings, and to wireless microphones for audio recording.</string>
+	<string>Suisse Meets uses Bluetooth to connect to your recording device for syncing meetings, and to wireless microphones for audio recording.</string>
 	<!-- App Transport Security - Allow local dev servers, require HTTPS for production -->
 	<key>NSAppTransportSecurity</key>
 	<dict>

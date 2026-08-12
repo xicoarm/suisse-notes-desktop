@@ -62,7 +62,7 @@
             name="mic"
             class="logo-icon"
           />
-          <h1>Suisse Notes</h1>
+          <h1>Suisse Meets</h1>
           <p>{{ $t('signInToStart') }}</p>
         </div>
 

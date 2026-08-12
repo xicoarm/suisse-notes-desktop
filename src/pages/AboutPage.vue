@@ -11,7 +11,7 @@
           />
         </div>
         <h1 class="hero-title">
-          Suisse Notes
+          Suisse Meets
         </h1>
         <p class="hero-subtitle">
           {{ $t('aboutHeroSubtitle') }}

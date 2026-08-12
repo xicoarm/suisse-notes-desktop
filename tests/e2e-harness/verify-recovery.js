@@ -20,7 +20,7 @@ const { buildScenario } = require('./lib/audio');
 const { startMockBackend } = require('./lib/mock-backend');
 const { AppDriver, sleep } = require('./lib/app-driver');
 
-const EXE = 'C:/Users/arega/projects/Suisse_Notes_Desktop/dist/electron/Packaged/win-unpacked/Suisse Notes.exe';
+const EXE = 'C:/Users/arega/projects/Suisse_Notes_Desktop/dist/electron/Packaged/win-unpacked/Suisse Meets.exe';
 
 function readHistoryFile(userDataDir, recordId) {
   const p = path.join(userDataDir, 'recordings-history.json');
