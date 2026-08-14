@@ -95,6 +95,7 @@
               </div>
               <q-toggle
                 v-model="systemAudioEnabled"
+                data-test="system-audio-toggle"
                 color="primary"
                 size="sm"
                 :disable="recordingStore.isPaused"
@@ -111,6 +112,25 @@
                 color="positive"
               />
               <span>{{ $t('systemAudioEnabled') }}</span>
+            </div>
+            <!-- Windows routes call audio to the "default communication device"
+                 while the loopback can only capture the "default device". When
+                 they differ, system audio records pure silence — say so BEFORE
+                 the meeting, and name the device the user has to change. -->
+            <div
+              v-if="systemAudioEnabled && systemAudioOutputRoutingMismatch"
+              class="permission-notice"
+              data-test="system-audio-routing-warning"
+            >
+              <q-icon
+                name="warning"
+                size="xs"
+                color="warning"
+              />
+              <span>{{ $t('systemAudioWrongOutputDevice', {
+                defaultDevice: systemAudioOutputRoutingMismatch.defaultLabel,
+                commsDevice: systemAudioOutputRoutingMismatch.commsLabel
+              }) }}</span>
             </div>
             <div
               v-if="showMacPermissionNotice"
@@ -377,6 +397,35 @@
                 />
               </template>
               {{ $t('systemAudioCaptureError') }}
+            </q-banner>
+          </div>
+
+          <!-- SASIG: capture is running but the loopback delivers digital silence -->
+          <div
+            v-if="systemAudioSilent && !systemAudioCaptureError"
+            class="warning-section"
+            data-test="system-audio-silent-warning"
+          >
+            <q-banner
+              class="warning-banner"
+              rounded
+            >
+              <template #avatar>
+                <q-icon
+                  name="volume_off"
+                  color="warning"
+                />
+              </template>
+              {{ $t('systemAudioSilentWarning', { seconds: systemAudioSilent.silentSeconds }) }}
+              <div
+                v-if="systemAudioOutputRoutingMismatch"
+                class="text-caption q-mt-xs"
+              >
+                {{ $t('systemAudioWrongOutputDevice', {
+                  defaultDevice: systemAudioOutputRoutingMismatch.defaultLabel,
+                  commsDevice: systemAudioOutputRoutingMismatch.commsLabel
+                }) }}
+              </div>
             </q-banner>
           </div>
 
@@ -841,6 +890,10 @@ const {
   systemAudioEnabled,
   systemAudioPermissionStatus,
   isSystemAudioSupported,
+  // SASIG: Windows default-vs-communication output endpoint split (system audio
+  // would record silence), and the live loopback-silence verdict.
+  systemAudioOutputRoutingMismatch,
+  systemAudioSilent,
   // P0 Data Loss Fix: Silence detection warning
   silenceWarning,
   // System audio capture error
@@ -1353,9 +1406,9 @@ onMounted(async () => {
   }
 
   // Load system audio state (desktop only - mobile doesn't support system audio capture)
-  // Skip when recording is active — the service already holds the correct state
-  // and useRecorder.onMounted restores it. Loading from config would overwrite it
-  // because config:getSystemAudioEnabled defaults to false each session.
+  // Skip when recording is active — the service already holds the live state and
+  // useRecorder.onMounted restores it; the persisted preference must not override
+  // what the running recording is actually doing.
   if (isElectron() && !recordingStore.isRecording && !recordingStore.isPaused) {
     await loadSystemAudioState();
   }

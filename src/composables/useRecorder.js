@@ -62,6 +62,11 @@ export function useRecorder() {
   // could switch (or fail to switch) the user's microphone in total silence.
   const micSwitchEvent = ref(null);      // null | { ok, context, label, deviceId, unverified? }
   const micAutoSwitchInfo = ref(null);   // null | { fromLabel, toLabel, deviceId }
+  // SASIG: the system-audio capture is live but delivering digital silence
+  // (wrong Windows output endpoint, suspended BT endpoint, app rendering
+  // elsewhere). Previously invisible — a whole meeting could be captured
+  // mic-only without a single warning.
+  const systemAudioSilent = ref(null);   // null | { silentSeconds }
   // MOBR-1/INT-1: snapshot of persisted-chunk count + timestamp taken when the
   // app/tab is hidden during a mobile recording, so we can detect on return
   // whether the WebView was suspended (capture gap) while backgrounded.
@@ -123,6 +128,15 @@ export function useRecorder() {
       if (availableMicrophones.value.length > 0 && !selectedMicrophoneId.value) {
         selectedMicrophoneId.value = availableMicrophones.value[0].id;
       }
+
+      // SASIG: this runs on mount AND on every `devicechange`, with device
+      // labels unlocked by the getUserMedia above — the right moment to
+      // re-evaluate whether the Windows default output endpoint still matches
+      // the communication endpoint the loopback cannot see. Plugging in a
+      // headset mid-session is exactly what creates the split.
+      if (_systemAudioRef) {
+        _systemAudioRef.checkOutputRouting().catch(() => {});
+      }
     } catch (error) {
       console.error('Error loading microphones:', error);
     } finally {
@@ -160,6 +174,11 @@ export function useRecorder() {
 
   const handleSystemAudioError = (message) => {
     systemAudioCaptureError.value = message;
+  };
+
+  // SASIG: data===null clears the warning once signal returns.
+  const handleSystemAudioSilent = (data) => {
+    systemAudioSilent.value = data || null;
   };
 
   const handleMicError = (message) => {
@@ -491,6 +510,7 @@ export function useRecorder() {
     recordingService.addEventListener('micMuteChange', handleMicMuteChange);
     recordingService.addEventListener('systemAudioChange', handleSystemAudioChange);
     recordingService.addEventListener('systemAudioError', handleSystemAudioError);
+    recordingService.addEventListener('systemAudioSilent', handleSystemAudioSilent);
     recordingService.addEventListener('micError', handleMicError);
     recordingService.addEventListener('recordingDead', handleRecordingDead);
     recordingService.addEventListener('healthChange', handleHealthChange);
@@ -546,6 +566,7 @@ export function useRecorder() {
     recordingService.removeEventListener('micMuteChange', handleMicMuteChange);
     recordingService.removeEventListener('systemAudioChange', handleSystemAudioChange);
     recordingService.removeEventListener('systemAudioError', handleSystemAudioError);
+    recordingService.removeEventListener('systemAudioSilent', handleSystemAudioSilent);
     recordingService.removeEventListener('micError', handleMicError);
     recordingService.removeEventListener('recordingDead', handleRecordingDead);
     recordingService.removeEventListener('healthChange', handleHealthChange);
@@ -587,6 +608,15 @@ export function useRecorder() {
     systemAudioEnabled,
     systemAudioPermissionStatus: permissionStatus,
     isSystemAudioSupported: _systemAudioRef ? _systemAudioRef.isSupported : ref(false),
+    // SASIG: Windows default-vs-communication output endpoint split, and the
+    // live "loopback is delivering silence" verdict.
+    systemAudioOutputRoutingMismatch: _systemAudioRef
+      ? _systemAudioRef.outputRoutingMismatch
+      : ref(null),
+    checkSystemAudioOutputRouting: _systemAudioRef
+      ? _systemAudioRef.checkOutputRouting
+      : async () => null,
+    systemAudioSilent,
     silenceWarning,
     systemAudioCaptureError,
     micCaptureError,
