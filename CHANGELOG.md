@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.5.6](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.5...v4.5.6) (2026-08-14)
+
+**Windows system audio: you now get told when it is recording nothing.**
+
+Windows has two independent default output devices, and the system-audio capture
+can only listen to one of them. Meeting apps play call audio to the other one, so
+with a headset for calls and speakers for everything else, "record system audio"
+could stay on for a whole meeting and capture pure silence — no error, no warning.
+This release cannot capture the other device yet, but it stops the silence from
+going unnoticed: a warning before recording naming the device to change, and a
+second warning if no system audio arrives once recording has started. The
+system-audio toggle also stops resetting itself to off on every launch.
+
+The native capture helper below is included in the source tree but is **not active
+in this build** — it does not change how anything records yet.
+
+### Features
+
+* **system-audio:** native WASAPI helper that captures a CHOSEN Windows endpoint ([8b8cac4](https://github.com/xicoarm/suisse-notes-desktop/commit/8b8cac4d06edfb9a0432b7b9611c122e922f719f))
+
+
+### Bug Fixes
+
+* **e2e:** skip auto-update in E2E test builds (SUISSE_E2E_HOOKS) ([80c7697](https://github.com/xicoarm/suisse-notes-desktop/commit/80c7697aa41127e1a10e12cbb8ffad7a44aa4895))
+* **system-audio:** arm the silence watchdog after monitor teardown, add tests ([1c89999](https://github.com/xicoarm/suisse-notes-desktop/commit/1c899997ad74b38302531020674f9e19a09831eb))
+* **system-audio:** detect the Windows output-endpoint split that records silence ([856c057](https://github.com/xicoarm/suisse-notes-desktop/commit/856c05791c3294ac5f7feffc958f109ec945450a))
+
 ### [4.5.5](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.4...v4.5.5) (2026-07-27)
 
 
