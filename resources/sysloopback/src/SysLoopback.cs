@@ -160,6 +160,10 @@ internal static class SysLoopback
 
     private static int Main(string[] args)
     {
+        // Endpoint names carry umlauts ("Kopfhörer"); the console's OEM codepage
+        // would mangle them and callers match on these strings.
+        try { Console.OutputEncoding = new System.Text.UTF8Encoding(false); } catch { /* redirected */ }
+
         string role = "communications", outPath = null, deviceId = null;
         bool list = false;
         int seconds = 0; // 0 = run until stdin closes or "stop" (test affordance otherwise)

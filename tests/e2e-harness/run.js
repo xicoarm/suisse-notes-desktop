@@ -431,8 +431,37 @@ async function s7Endurance() {
  * reach the microphone acoustically. Anything found at PHASE_B_FREQ is proof of
  * a genuine digital capture, not of a speaker bleeding into the mic.
  */
-const PHASE_A_FREQ = 1000;  // -> communication endpoint (must NOT be captured)
-const PHASE_B_FREQ = 1500;  // -> multimedia endpoint    (MUST be captured)
+const PHASE_A_FREQ = 1000;  // -> an endpoint the loopback CANNOT hear
+const PHASE_B_FREQ = 1500;  // -> the multimedia default (the loopback MUST hear it)
+
+/**
+ * Read the machine's real endpoint layout via the native helper. The scenario
+ * must never assume a particular Windows sound configuration — the defaults are
+ * ambient state a user (or Windows itself, on a Bluetooth connect) can change
+ * between runs, and an assumed layout turns into false failures.
+ */
+function readEndpoints() {
+  const exe = path.join(REPO_ROOT_E2E, 'resources', 'sysloopback', 'win-x64', 'sysloopback.exe');
+  if (!fs.existsSync(exe)) return null;
+  let out;
+  try {
+    out = require('child_process').execFileSync(exe, ['--list'], { encoding: 'utf8', timeout: 20000 });
+  } catch (e) { return null; }
+
+  const devices = [];
+  const defaults = {};
+  for (const line of out.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let j;
+    try { j = JSON.parse(line); } catch (e) { continue; }
+    if (j.event === 'device') devices.push(j.detail.split(' :: ')[0]);
+    if (j.event === 'default') {
+      const [role, name] = j.detail.split(' :: ');
+      defaults[role] = name;
+    }
+  }
+  return { devices, defaults };
+}
 
 function playTone({ device, freq, seconds }) {
   const electronExe = path.join(REPO_ROOT_E2E, 'node_modules', 'electron', 'dist', 'electron.exe');
@@ -451,6 +480,17 @@ function playTone({ device, freq, seconds }) {
   };
 }
 
+/**
+ * Endpoint names are localized and contain umlauts ("Kopfhörer (Jabra …)").
+ * Match on the parenthesised product name when there is one — it is the stable,
+ * ASCII-ish part shared between the WASAPI friendly name and Chromium's label.
+ */
+function matchToken(endpointName) {
+  if (!endpointName) return '';
+  const m = /\(([^)]+)\)/.exec(endpointName);
+  return (m ? m[1] : endpointName).split(/\s+/).slice(0, 2).join(' ');
+}
+
 /** dBFS of one tone across the whole file. */
 function toneLevelDb(pcm, freq) {
   const win = Math.round(0.1 * VSR);
@@ -463,9 +503,26 @@ function toneLevelDb(pcm, freq) {
 }
 
 async function s8SysAudio() {
+  const eps = readEndpoints();
+  if (!eps) {
+    console.log('s8-sysaudio: sysloopback helper unavailable — cannot read endpoint layout');
+    return false;
+  }
+  const mmDefault = eps.defaults.multimedia;      // what the loopback binds to
+  const commsDefault = eps.defaults.communications;
+  const mismatchExpected = Boolean(mmDefault && commsDefault && mmDefault !== commsDefault);
+  // Phase A needs an endpoint the loopback CANNOT hear: any active endpoint that
+  // is not the multimedia default. Prefer the comms default (the real incident).
+  const deafTarget = (commsDefault && commsDefault !== mmDefault)
+    ? commsDefault
+    : eps.devices.find(d => d !== mmDefault);
+
+  console.log(`s8-sysaudio: multimedia=${mmDefault} | communications=${commsDefault} | mismatch=${mismatchExpected}`);
+
   return withApp('s8-sysaudio', null, { cdpPort: 9347 }, async (app, mock) => {
     const problems = [];
     const notes = [];
+    notes.push(`endpoints: multimedia="${mmDefault}" communications="${commsDefault}" mismatch=${mismatchExpected}`);
 
     // The app must read back the persisted preference — the getter used to be
     // hard-coded to `false`, so the toggle silently reset OFF every launch.
@@ -489,34 +546,48 @@ async function s8SysAudio() {
     const beforeStart = await ui();
     notes.push(`toggle on: ${beforeStart.toggleOn}`);
     if (!beforeStart.toggleOn) problems.push('System-audio toggle did not turn on');
-    if (!beforeStart.routing) {
-      problems.push('No output-endpoint warning before recording — this machine HAS a default/communication split, so the detection failed');
+
+    // The warning must track reality in BOTH directions: shown when the machine
+    // really has a split, and — just as important — absent when it does not.
+    if (mismatchExpected && !beforeStart.routing) {
+      problems.push(`Endpoint split exists (multimedia="${mmDefault}" vs communications="${commsDefault}") but no warning was shown`);
+    } else if (!mismatchExpected && beforeStart.routing) {
+      problems.push(`FALSE ALARM: endpoint warning shown although both default roles are "${mmDefault}"`);
     } else {
-      notes.push(`routing warning: ${beforeStart.routing.slice(0, 160)}`);
+      notes.push(mismatchExpected
+        ? `routing warning correctly shown: ${beforeStart.routing.slice(0, 140)}`
+        : 'no routing warning, and none expected (both default roles agree)');
     }
 
     await app.startRecording();
 
-    // ---- Phase A: play where the meeting app plays (comms endpoint) ----------
-    const toneA = playTone({ device: 'Jabra', freq: PHASE_A_FREQ, seconds: 130 });
+    // ---- Phase A: play where the loopback CANNOT hear ------------------------
+    // This reproduces the incident: audio exists, the user hears it, the capture
+    // is live — and records nothing.
     let silentSeenAfterS = null;
-    for (let t = 0; t < 130; t += 5) {
-      await sleep(5000);
-      const u = await ui();
-      if (u.silent && silentSeenAfterS === null) { silentSeenAfterS = t + 5; break; }
-    }
-    await toneA.done;
-    notes.push(`tone-player A: ${toneA.log.join('').trim()}`);
-
-    if (silentSeenAfterS === null) {
-      problems.push('Silence watchdog never fired while the loopback was capturing an idle endpoint for >2 min');
+    if (!deafTarget) {
+      notes.push('SKIPPED phase A: only one active render endpoint, so no endpoint is out of the loopback\'s reach');
     } else {
-      notes.push(`silence warning appeared after ~${silentSeenAfterS}s`);
-      if (silentSeenAfterS < 85) problems.push(`Silence warning fired after only ${silentSeenAfterS}s (threshold is 90s) — too trigger-happy`);
+      const toneA = playTone({ device: matchToken(deafTarget), freq: PHASE_A_FREQ, seconds: 130 });
+      for (let t = 0; t < 130; t += 5) {
+        await sleep(5000);
+        const u = await ui();
+        if (u.silent && silentSeenAfterS === null) { silentSeenAfterS = t + 5; break; }
+      }
+      toneA.stop();
+      await toneA.done;
+      notes.push(`tone-player A -> "${deafTarget}": ${toneA.log.join('').trim()}`);
+
+      if (silentSeenAfterS === null) {
+        problems.push(`Silence watchdog never fired while the loopback listened to "${mmDefault}" and the audio played to "${deafTarget}" for >2 min`);
+      } else {
+        notes.push(`silence warning appeared after ~${silentSeenAfterS}s`);
+        if (silentSeenAfterS < 85) problems.push(`Silence warning fired after only ${silentSeenAfterS}s (threshold is 90s) — too trigger-happy`);
+      }
     }
 
     // ---- Phase B: play where the loopback actually listens -------------------
-    const toneB = playTone({ device: 'Lautsprecher', freq: PHASE_B_FREQ, seconds: 45 });
+    const toneB = playTone({ device: matchToken(mmDefault), freq: PHASE_B_FREQ, seconds: 45 });
     await sleep(20_000);
     const during = await ui();
     if (during.silent) problems.push('Silence warning did NOT clear after real system audio arrived');
@@ -537,10 +608,10 @@ async function s8SysAudio() {
     notes.push(`output ${(pcm.length / VSR).toFixed(1)}s | ${PHASE_A_FREQ}Hz (comms endpoint) ${aDb.toFixed(1)}dB | ${PHASE_B_FREQ}Hz (default endpoint) ${bDb.toFixed(1)}dB`);
 
     if (bDb < -60) {
-      problems.push(`System audio played to the DEFAULT endpoint was not captured (${PHASE_B_FREQ}Hz at ${bDb.toFixed(1)}dB) — the capture path itself is broken`);
+      problems.push(`System audio played to the multimedia default "${mmDefault}" was not captured (${PHASE_B_FREQ}Hz at ${bDb.toFixed(1)}dB) — the capture path itself is broken`);
     }
-    if (aDb > bDb - 20) {
-      notes.push(`NOTE: ${PHASE_A_FREQ}Hz is only ${(bDb - aDb).toFixed(1)}dB below ${PHASE_B_FREQ}Hz — likely acoustic leakage of the headset into the room mic, not loopback capture`);
+    if (deafTarget && aDb > bDb - 20) {
+      notes.push(`NOTE: ${PHASE_A_FREQ}Hz is only ${(bDb - aDb).toFixed(1)}dB below ${PHASE_B_FREQ}Hz — most likely acoustic leakage into the room mic rather than loopback capture`);
     }
 
     return { pass: problems.length === 0, problems, notes };
