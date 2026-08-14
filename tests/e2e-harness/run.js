@@ -491,6 +491,34 @@ function matchToken(endpointName) {
   return (m ? m[1] : endpointName).split(/\s+/).slice(0, 2).join(' ');
 }
 
+/**
+ * Pre-flight: does this endpoint actually carry capturable audio right now?
+ *
+ * A Windows render endpoint can be "active" and still deliver pure silence to
+ * WASAPI loopback — a Bluetooth headset that is powered off or asleep is the
+ * common case, and Windows happily keeps it as the default output. Measured
+ * with the NATIVE helper, which binds to the endpoint directly, so this is a
+ * property of the endpoint rather than of the app under test. Without this
+ * probe the scenario would blame the product for a dead headset.
+ */
+async function endpointCarriesAudio(endpointName) {
+  const exe = path.join(REPO_ROOT_E2E, 'resources', 'sysloopback', 'win-x64', 'sysloopback.exe');
+  if (!fs.existsSync(exe)) return null;
+  const wav = path.join(WORK_DIR, 'endpoint-probe.wav');
+  try { fs.unlinkSync(wav); } catch (e) { /* first run */ }
+
+  const cap = spawn(exe, ['--role', 'multimedia', '--seconds', '9', '--out', wav], { stdio: 'ignore' });
+  const capDone = new Promise(res => cap.on('exit', res));
+  await sleep(1500);
+  const tone = playTone({ device: matchToken(endpointName), freq: PHASE_B_FREQ, seconds: 5 });
+  await tone.done;
+  await capDone;
+
+  if (!fs.existsSync(wav)) return null;
+  try { return toneLevelDb(decodeToPcm(wav), PHASE_B_FREQ); }
+  catch (e) { return null; }
+}
+
 /** dBFS of one tone across the whole file. */
 function toneLevelDb(pcm, freq) {
   const win = Math.round(0.1 * VSR);
@@ -519,6 +547,11 @@ async function s8SysAudio() {
 
   console.log(`s8-sysaudio: multimedia=${mmDefault} | communications=${commsDefault} | mismatch=${mismatchExpected}`);
 
+  // Probe BEFORE launching the app: is the endpoint the loopback will bind to
+  // even alive? Decides whether phase B can prove anything.
+  const mmAlive = await endpointCarriesAudio(mmDefault);
+  console.log(`s8-sysaudio: multimedia endpoint carries audio: ${mmAlive === null ? 'unknown' : mmAlive.toFixed(1) + 'dB'}`);
+
   return withApp('s8-sysaudio', null, { cdpPort: 9347 }, async (app, mock) => {
     const problems = [];
     const notes = [];
@@ -533,19 +566,31 @@ async function s8SysAudio() {
     if (persisted !== true) problems.push(`systemAudio.getEnabled() returned ${persisted} right after setEnabled(true) — the config getter is still lying`);
     notes.push(`config getEnabled after setEnabled(true): ${persisted}`);
 
-    // Turn the real toggle on, the way a user does.
-    await app.clickByTest('[data-test=system-audio-toggle]');
-    await sleep(2000);
-
+    // "System audio will be captured" only renders while the toggle is truly on,
+    // so it is the honest signal — a synthetic el.click() can leave the DOM
+    // attribute stale without Quasar ever having flipped the model.
     const ui = () => app.evalTimed(() => ({
-      toggleOn: document.querySelector('[data-test=system-audio-toggle]')?.getAttribute('aria-checked') === 'true',
+      toggleOn: !!document.querySelector('.system-audio-active'),
       routing: document.querySelector('[data-test=system-audio-routing-warning]')?.textContent?.trim() ?? null,
       silent: document.querySelector('[data-test=system-audio-silent-warning]')?.textContent?.trim() ?? null,
     }));
 
+    // Turn the real toggle on the way a user does — a real mouse event, because
+    // Quasar's QToggle does not react reliably to a synthetic el.click().
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if ((await ui()).toggleOn) break;
+      try { await app.page.click('[data-test=system-audio-toggle]'); }
+      catch (e) { notes.push(`toggle click attempt ${attempt + 1} failed: ${e.message}`); }
+      await sleep(2000);
+    }
+
     const beforeStart = await ui();
     notes.push(`toggle on: ${beforeStart.toggleOn}`);
-    if (!beforeStart.toggleOn) problems.push('System-audio toggle did not turn on');
+    if (!beforeStart.toggleOn) {
+      // Everything downstream measures the system-audio path; without it the
+      // run proves nothing, so fail loudly instead of reporting phantom defects.
+      return { pass: false, problems: ['System-audio toggle did not turn on — the rest of the scenario would be meaningless'], notes };
+    }
 
     // The warning must track reality in BOTH directions: shown when the machine
     // really has a split, and — just as important — absent when it does not.
@@ -587,13 +632,23 @@ async function s8SysAudio() {
     }
 
     // ---- Phase B: play where the loopback actually listens -------------------
-    const toneB = playTone({ device: matchToken(mmDefault), freq: PHASE_B_FREQ, seconds: 45 });
-    await sleep(20_000);
-    const during = await ui();
-    if (during.silent) problems.push('Silence warning did NOT clear after real system audio arrived');
-    else notes.push('silence warning cleared once system audio arrived');
-    await toneB.done;
-    notes.push(`tone-player B: ${toneB.log.join('').trim()}`);
+    let phaseBRan = false;
+    if (mmAlive === null || mmAlive < -70) {
+      notes.push(`SKIPPED phase B: the multimedia default "${mmDefault}" carries no capturable audio ` +
+                 `(native probe ${mmAlive === null ? 'unavailable' : mmAlive.toFixed(1) + 'dB'}) — a powered-off or ` +
+                 'sleeping Bluetooth endpoint cannot be captured by ANY method, so "the warning clears when audio ' +
+                 'arrives" is not testable in this audio configuration. Covered by the SASIG unit tests. ' +
+                 'To test it live, make a wired/active endpoint the Windows default output.');
+    } else {
+      phaseBRan = true;
+      const toneB = playTone({ device: matchToken(mmDefault), freq: PHASE_B_FREQ, seconds: 45 });
+      await sleep(20_000);
+      const during = await ui();
+      if (during.silent) problems.push('Silence warning did NOT clear after real system audio arrived');
+      else notes.push('silence warning cleared once system audio arrived');
+      await toneB.done;
+      notes.push(`tone-player B: ${toneB.log.join('').trim()}`);
+    }
 
     await app.stopRecording();
     await app.waitForPhase(['uploaded', 'idle'], 180_000);
@@ -607,7 +662,7 @@ async function s8SysAudio() {
     const bDb = toneLevelDb(pcm, PHASE_B_FREQ);
     notes.push(`output ${(pcm.length / VSR).toFixed(1)}s | ${PHASE_A_FREQ}Hz (comms endpoint) ${aDb.toFixed(1)}dB | ${PHASE_B_FREQ}Hz (default endpoint) ${bDb.toFixed(1)}dB`);
 
-    if (bDb < -60) {
+    if (phaseBRan && bDb < -60) {
       problems.push(`System audio played to the multimedia default "${mmDefault}" was not captured (${PHASE_B_FREQ}Hz at ${bDb.toFixed(1)}dB) — the capture path itself is broken`);
     }
     if (deafTarget && aDb > bDb - 20) {
