@@ -578,8 +578,8 @@ function createMixingPipeline(micStream, sysStream) {
 
   mixingContext = ctx;
   mixingDest = dest;
-  // SASIG: arm the loopback silence watchdog for the system stream wired in above.
-  if (sysStream) startSystemAudioSilenceMonitor();
+  // NOTE: the SASIG watchdog is armed by startLevelMonitoring, not here —
+  // startLevelMonitoring begins with a full monitor teardown.
   return dest.stream;
 }
 
@@ -1316,6 +1316,12 @@ function startLevelMonitoring(mediaStream, micStream, recordingStore) {
     }
     setSilenceWarning(micHealthState.message);
   }
+
+  // SASIG: arm the loopback watchdog HERE, not in createMixingPipeline — this
+  // function opens with stopLevelMonitoring(), which tears every monitor down,
+  // so anything armed earlier in the start sequence would be silently disarmed
+  // again before the recording ever began. (Caught by the SASIG unit tests.)
+  if (systemSourceNode) startSystemAudioSilenceMonitor();
 }
 
 /** MSIG: p-quantile (0..1) of a numeric array. Returns null on empty input. */
