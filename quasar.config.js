@@ -206,6 +206,13 @@ export default function (ctx) {
             from: 'resources/audiotee',
             to: 'audiotee',
             filter: ['**/*']
+          },
+          {
+            // Windows system-audio loopback helper. Ships the built exe only —
+            // the C# source stays in the repo but must not go into the package.
+            from: 'resources/sysloopback/win-x64',
+            to: 'sysloopback',
+            filter: ['**/*.exe']
           }
         ],
         // Extract icons from asar so they can be loaded natively for taskbar/tray

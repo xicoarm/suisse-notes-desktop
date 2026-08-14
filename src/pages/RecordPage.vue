@@ -95,6 +95,7 @@
               </div>
               <q-toggle
                 v-model="systemAudioEnabled"
+                data-test="system-audio-toggle"
                 color="primary"
                 size="sm"
                 :disable="recordingStore.isPaused"
@@ -119,6 +120,7 @@
             <div
               v-if="systemAudioEnabled && systemAudioOutputRoutingMismatch"
               class="permission-notice"
+              data-test="system-audio-routing-warning"
             >
               <q-icon
                 name="warning"
@@ -402,6 +404,7 @@
           <div
             v-if="systemAudioSilent && !systemAudioCaptureError"
             class="warning-section"
+            data-test="system-audio-silent-warning"
           >
             <q-banner
               class="warning-banner"

@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<body>
+<script>
+(async () => {
+  const o = await window.tone.opts();
+  try {
+    // Unlock device labels (enumerateDevices returns empty labels otherwise).
+    const probe = await navigator.mediaDevices.getUserMedia({ audio: true });
+    probe.getTracks().forEach(t => t.stop());
+  } catch (e) {
+    window.tone.log(`tone-player: could not unlock device labels: ${e.message}`);
+  }
+
+  const outs = (await navigator.mediaDevices.enumerateDevices())
+    .filter(d => d.kind === 'audiooutput' && d.deviceId !== 'default' && d.deviceId !== 'communications');
+
+  const match = o.device
+    ? outs.find(d => d.label.toLowerCase().includes(o.device.toLowerCase()))
+    : outs[0];
+
+  if (!match) {
+    window.tone.log(`tone-player: NO endpoint matching "${o.device}". Available: ${outs.map(d => d.label).join(' | ')}`);
+    return window.tone.done(2);
+  }
+
+  const ctx = new AudioContext();
+  await ctx.resume();
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  const dest = ctx.createMediaStreamDestination();
+  osc.type = 'sine';
+  osc.frequency.value = o.freq;
+  gain.gain.value = o.gain;
+  osc.connect(gain).connect(dest);
+  osc.start();
+
+  const el = new Audio();
+  el.srcObject = dest.stream;
+  try {
+    await el.setSinkId(match.deviceId);
+  } catch (e) {
+    window.tone.log(`tone-player: setSinkId failed for "${match.label}": ${e.message}`);
+    return window.tone.done(2);
+  }
+  await el.play();
+
+  window.tone.log(`tone-player: ${o.freq}Hz -> "${match.label}" for ${o.seconds}s`);
+  setTimeout(() => {
+    try { el.pause(); osc.stop(); ctx.close(); } catch (e) { /* shutting down */ }
+    window.tone.log('tone-player: done');
+    window.tone.done(0);
+  }, o.seconds * 1000);
+})();
+</script>

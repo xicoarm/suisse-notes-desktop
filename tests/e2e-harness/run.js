@@ -24,8 +24,11 @@
 
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 const { buildScenario, WORK_DIR } = require('./lib/audio');
-const { verdict } = require('./lib/verify');
+const { verdict, decodeToPcm, goertzel: vgoertzel, db: vdb, SR: VSR } = require('./lib/verify');
+
+const REPO_ROOT_E2E = path.resolve(__dirname, '..', '..');
 const { startMockBackend } = require('./lib/mock-backend');
 const { AppDriver, sleep } = require('./lib/app-driver');
 
@@ -410,6 +413,140 @@ async function s7Endurance() {
   });
 }
 
+/**
+ * s8-sysaudio — Windows output-endpoint split (incident 2026-08-14).
+ *
+ * Runs with REAL devices (no fake-audio switch: `use-fake-device-for-media-stream`
+ * would fake the loopback too). The mic therefore records a quiet room, which
+ * makes the oracle clean — any tone in the output can only have arrived through
+ * the system-audio capture.
+ *
+ *   Phase A: tone to the default COMMUNICATION endpoint (headset). This is where
+ *            Teams/Zoom render. The loopback must MISS it, and the app must say so.
+ *   Phase B: tone to the default MULTIMEDIA endpoint. The loopback must CATCH it,
+ *            and the warning must clear.
+ *
+ * Phase B's endpoint is typically muted at 0% on this machine — irrelevant, and
+ * useful: WASAPI loopback taps the mix before endpoint volume, so phase B cannot
+ * reach the microphone acoustically. Anything found at PHASE_B_FREQ is proof of
+ * a genuine digital capture, not of a speaker bleeding into the mic.
+ */
+const PHASE_A_FREQ = 1000;  // -> communication endpoint (must NOT be captured)
+const PHASE_B_FREQ = 1500;  // -> multimedia endpoint    (MUST be captured)
+
+function playTone({ device, freq, seconds }) {
+  const electronExe = path.join(REPO_ROOT_E2E, 'node_modules', 'electron', 'dist', 'electron.exe');
+  const child = spawn(electronExe, [
+    path.join(__dirname, 'tone-player'),
+    '--device', device, '--freq', String(freq), '--seconds', String(seconds),
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const out = [];
+  child.stdout.on('data', d => out.push(d.toString()));
+  child.stderr.on('data', d => out.push(d.toString()));
+  return {
+    child,
+    log: out,
+    stop: () => { try { child.kill(); } catch (e) { /* already gone */ } },
+    done: new Promise(res => child.on('exit', c => res({ code: c, log: out.join('') }))),
+  };
+}
+
+/** dBFS of one tone across the whole file. */
+function toneLevelDb(pcm, freq) {
+  const win = Math.round(0.1 * VSR);
+  let peak = 0;
+  for (let w0 = 0; w0 + win <= pcm.length; w0 += win) {
+    const p = vgoertzel(pcm, w0, win, freq, VSR);
+    if (p > peak) peak = p;
+  }
+  return vdb(peak);
+}
+
+async function s8SysAudio() {
+  return withApp('s8-sysaudio', null, { cdpPort: 9347 }, async (app, mock) => {
+    const problems = [];
+    const notes = [];
+
+    // The app must read back the persisted preference — the getter used to be
+    // hard-coded to `false`, so the toggle silently reset OFF every launch.
+    const persisted = await app.evalTimed(async () => {
+      await window.electronAPI.systemAudio.setEnabled(true);
+      return window.electronAPI.systemAudio.getEnabled();
+    });
+    if (persisted !== true) problems.push(`systemAudio.getEnabled() returned ${persisted} right after setEnabled(true) — the config getter is still lying`);
+    notes.push(`config getEnabled after setEnabled(true): ${persisted}`);
+
+    // Turn the real toggle on, the way a user does.
+    await app.clickByTest('[data-test=system-audio-toggle]');
+    await sleep(2000);
+
+    const ui = () => app.evalTimed(() => ({
+      toggleOn: document.querySelector('[data-test=system-audio-toggle]')?.getAttribute('aria-checked') === 'true',
+      routing: document.querySelector('[data-test=system-audio-routing-warning]')?.textContent?.trim() ?? null,
+      silent: document.querySelector('[data-test=system-audio-silent-warning]')?.textContent?.trim() ?? null,
+    }));
+
+    const beforeStart = await ui();
+    notes.push(`toggle on: ${beforeStart.toggleOn}`);
+    if (!beforeStart.toggleOn) problems.push('System-audio toggle did not turn on');
+    if (!beforeStart.routing) {
+      problems.push('No output-endpoint warning before recording — this machine HAS a default/communication split, so the detection failed');
+    } else {
+      notes.push(`routing warning: ${beforeStart.routing.slice(0, 160)}`);
+    }
+
+    await app.startRecording();
+
+    // ---- Phase A: play where the meeting app plays (comms endpoint) ----------
+    const toneA = playTone({ device: 'Jabra', freq: PHASE_A_FREQ, seconds: 130 });
+    let silentSeenAfterS = null;
+    for (let t = 0; t < 130; t += 5) {
+      await sleep(5000);
+      const u = await ui();
+      if (u.silent && silentSeenAfterS === null) { silentSeenAfterS = t + 5; break; }
+    }
+    await toneA.done;
+    notes.push(`tone-player A: ${toneA.log.join('').trim()}`);
+
+    if (silentSeenAfterS === null) {
+      problems.push('Silence watchdog never fired while the loopback was capturing an idle endpoint for >2 min');
+    } else {
+      notes.push(`silence warning appeared after ~${silentSeenAfterS}s`);
+      if (silentSeenAfterS < 85) problems.push(`Silence warning fired after only ${silentSeenAfterS}s (threshold is 90s) — too trigger-happy`);
+    }
+
+    // ---- Phase B: play where the loopback actually listens -------------------
+    const toneB = playTone({ device: 'Lautsprecher', freq: PHASE_B_FREQ, seconds: 45 });
+    await sleep(20_000);
+    const during = await ui();
+    if (during.silent) problems.push('Silence warning did NOT clear after real system audio arrived');
+    else notes.push('silence warning cleared once system audio arrived');
+    await toneB.done;
+    notes.push(`tone-player B: ${toneB.log.join('').trim()}`);
+
+    await app.stopRecording();
+    await app.waitForPhase(['uploaded', 'idle'], 180_000);
+
+    // ---- Forensics on the produced file --------------------------------------
+    const out = app.findOutputFile();
+    if (!out) return { pass: false, problems: [...problems, 'No output file produced'], notes };
+
+    const pcm = decodeToPcm(out);
+    const aDb = toneLevelDb(pcm, PHASE_A_FREQ);
+    const bDb = toneLevelDb(pcm, PHASE_B_FREQ);
+    notes.push(`output ${(pcm.length / VSR).toFixed(1)}s | ${PHASE_A_FREQ}Hz (comms endpoint) ${aDb.toFixed(1)}dB | ${PHASE_B_FREQ}Hz (default endpoint) ${bDb.toFixed(1)}dB`);
+
+    if (bDb < -60) {
+      problems.push(`System audio played to the DEFAULT endpoint was not captured (${PHASE_B_FREQ}Hz at ${bDb.toFixed(1)}dB) — the capture path itself is broken`);
+    }
+    if (aDb > bDb - 20) {
+      notes.push(`NOTE: ${PHASE_A_FREQ}Hz is only ${(bDb - aDb).toFixed(1)}dB below ${PHASE_B_FREQ}Hz — likely acoustic leakage of the headset into the room mic, not loopback capture`);
+    }
+
+    return { pass: problems.length === 0, problems, notes };
+  });
+}
+
 const SCENARIOS = {
   selftest,
   's1-baseline': s1Baseline,
@@ -419,6 +556,7 @@ const SCENARIOS = {
   's5-resilience': s5Resilience,
   's6-crash': s6Crash,
   's7-endurance': s7Endurance,
+  's8-sysaudio': s8SysAudio,
 };
 
 (async () => {

@@ -258,4 +258,4 @@ function verdict(filePath, scenarioMeta, expectations = {}) {
   return { pass: problems.length === 0, problems, notes, analysis: a };
 }
 
-module.exports = { analyze, verdict, decodeToPcm };
+module.exports = { analyze, verdict, decodeToPcm, goertzel, db, SR };
