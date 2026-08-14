@@ -21,6 +21,9 @@ export function useSystemAudio() {
   const error = ref(null);
   const isLoading = ref(false);
   const isSupported = ref(false);
+  // { defaultLabel, commsLabel } while the two Windows default output endpoints
+  // disagree — see checkOutputRouting below. null when they match / unknown.
+  const outputRoutingMismatch = ref(null);
 
   // Load initial state and check platform support
   const loadState = async () => {
@@ -39,6 +42,10 @@ export function useSystemAudio() {
       }
 
       systemAudioEnabled.value = await window.electronAPI.systemAudio.getEnabled();
+
+      // Surface the Windows default-vs-communication endpoint split up front, so
+      // the user can fix their sound settings BEFORE recording an hour of silence.
+      await checkOutputRouting();
 
       if (support.platform === 'darwin') {
         // AudioTee uses "System Audio Recording" permission — can't pre-check, assume granted
@@ -107,6 +114,58 @@ export function useSystemAudio() {
   // failures were previously invisible — indistinguishable from "feature broken."
   const diag = (level, message) => {
     try { window.electronAPI?.systemAudio?.diag?.(level, message); } catch { /* best effort */ }
+  };
+
+  // --- Windows output-endpoint routing check --------------------------------
+  //
+  // Windows keeps TWO independent default output endpoints: the "Default Device"
+  // (eConsole/eMultimedia) and the "Default Communication Device". Chromium's
+  // WASAPI loopback ALWAYS binds to the default MULTIMEDIA endpoint, while every
+  // conferencing app (Teams, Zoom, Meet, Slack) renders call audio to the default
+  // COMMUNICATION endpoint. Anyone using a headset for calls and speakers for
+  // everything else therefore has the two pointing at different devices — and the
+  // loopback then captures the idle endpoint: a live track, no error, no warning,
+  // and 100% digital silence for the whole meeting.
+  //
+  // Measured on a Jabra Evolve2 65 + laptop-speaker setup (2026-08-14): a test tone
+  // rendered to the default endpoint was captured at -19.5 dBFS; the SAME tone
+  // rendered to the comms endpoint was captured at -99.5 dBFS, i.e. nothing.
+  // Endpoint mute is irrelevant (loopback taps the mix before endpoint volume) —
+  // only the endpoint IDENTITY matters.
+  //
+  // Chromium exposes both roles as the "default" and "communications" pseudo
+  // devices, so the mismatch is detectable in the renderer and we can tell the
+  // user exactly which device to change instead of shipping silence.
+  const stripRolePrefix = (label = '') =>
+    label.replace(/^\s*(default|communications|standard|kommunikation(en)?)\s*[-–]\s*/i, '').trim();
+
+  const checkOutputRouting = async () => {
+    try {
+      if (!isElectron() || !navigator.mediaDevices?.enumerateDevices) return null;
+      const support = await window.electronAPI.systemAudio.isSupported();
+      if (support.platform !== 'win32') return null; // macOS AudioTee taps the process graph
+
+      const outputs = (await navigator.mediaDevices.enumerateDevices())
+        .filter(d => d.kind === 'audiooutput');
+      const def = outputs.find(d => d.deviceId === 'default');
+      const comms = outputs.find(d => d.deviceId === 'communications');
+      // Labels are empty until a media permission has been granted this session.
+      // Without them we cannot compare, and a guess would be worse than silence.
+      if (!def?.label || !comms?.label) return null;
+
+      const defaultLabel = stripRolePrefix(def.label);
+      const commsLabel = stripRolePrefix(comms.label);
+      if (!defaultLabel || !commsLabel || defaultLabel === commsLabel) {
+        outputRoutingMismatch.value = null;
+        return null;
+      }
+
+      outputRoutingMismatch.value = { defaultLabel, commsLabel };
+      return outputRoutingMismatch.value;
+    } catch (e) {
+      console.warn('Could not check system-audio output routing:', e);
+      return null;
+    }
   };
 
   // Windows: raw loopback acquisition via desktopCapturer + getUserMedia.
@@ -279,6 +338,17 @@ export function useSystemAudio() {
 
   const startDesktopCapture = async () => {
     try {
+      // Record the endpoint split in main.log BEFORE capturing, so a "system
+      // audio was silent" report is diagnosable from the log alone.
+      const routing = await checkOutputRouting();
+      if (routing) {
+        diag(
+          'warn',
+          `output-endpoint mismatch — loopback binds to the DEFAULT device "${routing.defaultLabel}" ` +
+          `but the default COMMUNICATION device is "${routing.commsLabel}". ` +
+          'Any call audio played to the communication device will NOT be captured.'
+        );
+      }
       const stream = await acquireLoopbackStream();
       systemAudioStream.value = stream;
       installRebindMonitor();
@@ -328,10 +398,12 @@ export function useSystemAudio() {
     error,
     isLoading,
     isSupported,
+    outputRoutingMismatch,
     loadState,
     setEnabled,
     startCapture,
     stopCapture,
-    captureSystemAudio
+    captureSystemAudio,
+    checkOutputRouting
   };
 }

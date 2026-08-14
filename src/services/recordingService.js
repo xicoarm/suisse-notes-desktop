@@ -57,6 +57,23 @@ let stateVerificationInterval = null;
 // System audio state (persists across navigation)
 let systemAudioActive = false;
 
+// SASIG — system-audio signal watchdog (Windows loopback silent-capture, 2026-08-14).
+// The loopback track can be `live`, unmuted and completely silent for an entire
+// meeting: WASAPI loopback binds to the default MULTIMEDIA output endpoint, while
+// conferencing apps render to the default COMMUNICATION endpoint, and a Bluetooth
+// profile flip or an endpoint going idle produces the same result. The mic has had
+// full health monitoring since MSIG; the system-audio track had none, so a 68-minute
+// recording of pure silence raised zero warnings. Measure the loopback the same way
+// the mic is measured and tell the user while the meeting is still running.
+const SYS_AUDIO_SILENCE_DBFS = -80;            // below this is digital silence, not "quiet"
+const SYS_AUDIO_SILENCE_WARN_MS = 90 * 1000;   // long enough to survive genuinely quiet passages
+let systemAudioAnalyser = null;
+let systemAudioSilenceInterval = null;
+let systemAudioSilentSince = null;
+let systemAudioSilenceWarned = false;
+let systemAudioSilenceReported = false;
+let systemAudioFloatBuf = null;
+
 // Mic mute state
 let micMuted = false;
 
@@ -561,7 +578,103 @@ function createMixingPipeline(micStream, sysStream) {
 
   mixingContext = ctx;
   mixingDest = dest;
+  // SASIG: arm the loopback silence watchdog for the system stream wired in above.
+  if (sysStream) startSystemAudioSilenceMonitor();
   return dest.stream;
+}
+
+/**
+ * SASIG: watch the loopback/system-audio source for digital silence.
+ *
+ * Taps `systemSourceNode` (already connected to the mixing destination, so the
+ * graph is being pulled) with an analyser and samples its peak level. If the
+ * source stays below SYS_AUDIO_SILENCE_DBFS for SYS_AUDIO_SILENCE_WARN_MS of
+ * *recording* time, the capture is silent for a structural reason — wrong output
+ * endpoint, suspended Bluetooth endpoint, an app rendering elsewhere — and the
+ * user is told while they can still act. Cleared as soon as signal returns.
+ */
+function startSystemAudioSilenceMonitor() {
+  stopSystemAudioSilenceMonitor();
+  if (!mixingContext || !systemSourceNode) return;
+
+  try {
+    systemAudioAnalyser = mixingContext.createAnalyser();
+    systemAudioAnalyser.fftSize = 256;
+    // Same reasoning as MSIG: dBFS thresholds are meaningless on the 8-bit
+    // fallback API, so without the float probe we simply don't judge.
+    if (typeof systemAudioAnalyser.getFloatTimeDomainData !== 'function') {
+      systemAudioAnalyser = null;
+      return;
+    }
+    systemSourceNode.connect(systemAudioAnalyser);
+    systemAudioFloatBuf = new Float32Array(systemAudioAnalyser.fftSize);
+
+    systemAudioSilenceInterval = setInterval(() => {
+      if (!systemAudioAnalyser || !systemAudioFloatBuf) return;
+      // Only count time while actually recording — a long pause must not age
+      // the episode into a false warning.
+      if (!recordingStoreRef?.isRecording) {
+        systemAudioSilentSince = null;
+        return;
+      }
+
+      systemAudioAnalyser.getFloatTimeDomainData(systemAudioFloatBuf);
+      let peak = 0;
+      for (let i = 0; i < systemAudioFloatBuf.length; i++) {
+        const a = Math.abs(systemAudioFloatBuf[i]);
+        if (a > peak) peak = a;
+      }
+
+      if (toDbfs(peak) > SYS_AUDIO_SILENCE_DBFS) {
+        systemAudioSilentSince = null;
+        if (systemAudioSilenceWarned) {
+          systemAudioSilenceWarned = false;
+          emit('systemAudioSilent', null);
+        }
+        return;
+      }
+
+      if (!systemAudioSilentSince) {
+        systemAudioSilentSince = Date.now();
+        return;
+      }
+      const silentMs = Date.now() - systemAudioSilentSince;
+      if (silentMs < SYS_AUDIO_SILENCE_WARN_MS || systemAudioSilenceWarned) return;
+
+      systemAudioSilenceWarned = true;
+      const silentSeconds = Math.round(silentMs / 1000);
+      emit('systemAudioSilent', { silentSeconds });
+      if (!systemAudioSilenceReported) {
+        systemAudioSilenceReported = true;
+        captureMessage(
+          `system-audio: loopback delivered digital silence for ${silentSeconds}s while recording ` +
+          '(likely wrong Windows output endpoint — loopback binds to the default MULTIMEDIA device, ' +
+          'call audio goes to the default COMMUNICATION device)',
+          'warning'
+        );
+      }
+    }, 1000);
+  } catch (e) {
+    console.warn('Could not start system-audio silence monitoring:', e);
+    systemAudioAnalyser = null;
+  }
+}
+
+function stopSystemAudioSilenceMonitor() {
+  if (systemAudioSilenceInterval) {
+    clearInterval(systemAudioSilenceInterval);
+    systemAudioSilenceInterval = null;
+  }
+  if (systemAudioAnalyser) {
+    try { systemAudioAnalyser.disconnect(); } catch (e) { /* already disconnected */ }
+    systemAudioAnalyser = null;
+  }
+  systemAudioFloatBuf = null;
+  systemAudioSilentSince = null;
+  if (systemAudioSilenceWarned) {
+    systemAudioSilenceWarned = false;
+    emit('systemAudioSilent', null);
+  }
 }
 
 /**
@@ -588,6 +701,9 @@ export function addSystemAudioStream(sysStream) {
       micHealthState.message,
       { systemAudioActive: true }
     );
+    // SASIG: re-arm on every (re)attach — mid-recording enable and BT rebind
+    // both land here, and a rebind is exactly when silence tends to start.
+    startSystemAudioSilenceMonitor();
     console.log('System audio added to recording mix');
     return true;
   } catch (e) {
@@ -625,6 +741,7 @@ export function setSystemAudioActive(active) {
  * Remove system audio from the active recording mix
  */
 export function removeSystemAudioStream() {
+  stopSystemAudioSilenceMonitor();
   if (systemSourceNode) {
     try {
       systemSourceNode.disconnect();
@@ -1624,6 +1741,9 @@ function stopLevelMonitoring() {
     micHealthAudioContext.close().catch(() => {});
     micHealthAudioContext = null;
   }
+
+  stopSystemAudioSilenceMonitor();
+  systemAudioSilenceReported = false;
 
   mixedAnalyser = null;
   micHealthAnalyser = null;

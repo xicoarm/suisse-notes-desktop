@@ -5605,7 +5605,11 @@ ipcMain.handle('systemAudio:checkPermission', () => {
   if (process.platform === 'darwin') return systemPreferences.getMediaAccessStatus('screen');
   return 'granted';
 });
-ipcMain.handle('config:getSystemAudioEnabled', () => false);
+// Return the PERSISTED preference. This handler used to return a hard-coded
+// `false`, so the toggle read back OFF on every launch no matter what the user
+// had chosen (the setter below persisted it correctly — only the getter lied).
+// Users who had switched system audio on saw it silently reset each session.
+ipcMain.handle('config:getSystemAudioEnabled', () => configStore.get('systemAudioEnabled', false));
 ipcMain.handle('config:setSystemAudioEnabled', (event, enabled) => {
   configStore.set('systemAudioEnabled', enabled);
   return { success: true };
