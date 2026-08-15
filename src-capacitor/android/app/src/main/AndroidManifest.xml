@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8" ?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- Recording permissions -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -20,10 +21,18 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
-    <!-- Storage permissions for file picking -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
-    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- NO storage permissions.
+      Upload picking uses a plain HTML <input type="file"> (src/services/filePicker.js),
+      which the Android WebView routes through the system file chooser / photo picker.
+      That grants per-file URI access through the Storage Access Framework WITHOUT any
+      READ_MEDIA_* permission — exactly the permissionless picker Google's policy wants.
+
+      READ_MEDIA_IMAGES / READ_MEDIA_VIDEO are RESTRICTED photo-and-video permissions,
+      allowed only for apps whose core purpose is broad gallery access. Google Play
+      rejected versionCode 34 over exactly this. The tools:node="remove" guards below
+      stop any dependency's manifest merge from re-introducing them. Never re-add these. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" tools:node="remove" />
 
     <!-- Network permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
