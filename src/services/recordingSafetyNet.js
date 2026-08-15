@@ -151,6 +151,21 @@ function handleCaptureWarning(data) {
       icon: 'volume_off',
       timeout: 15000
     });
+  } else if (data.kind === 'recording-truncated') {
+    // The combined file is materially shorter than the session recorded. The
+    // audio that exists is still saved and uploaded — but the user must be told
+    // rather than discovering the gap after the meeting.
+    Notify.create({
+      type: 'warning',
+      message: t('recordingTruncatedWarning', {
+        missing: data.missingSeconds ?? 0,
+        produced: data.producedSeconds ?? 0,
+        expected: data.expectedSeconds ?? 0
+      }),
+      icon: 'content_cut',
+      timeout: 0,
+      actions: [{ label: t('ok', 'OK'), color: 'white' }]
+    });
   } else if (data.kind === 'system-audio-silent') {
     // macOS: AudioTee is running but delivering digital silence — almost always
     // because the meeting app renders to a device that is not the default

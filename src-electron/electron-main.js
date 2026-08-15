@@ -2621,6 +2621,63 @@ const MIN_RECORDING_SIZE = 1024;
  * @param {number} minSize - Minimum acceptable file size in bytes (default: MIN_RECORDING_SIZE)
  * @returns {{valid: boolean, error?: string, size?: number}}
  */
+/**
+ * Truncation guard: does the produced file actually contain the meeting?
+ *
+ * validateAudioOutput checks that a file exists, is big enough and starts with
+ * EBML magic — all of which a recording that silently lost half its chunks
+ * passes. Duration was probed for metadata and then never compared against the
+ * wall clock, so on-device truncation stayed invisible exactly the way it did in
+ * the t.kaufmann case, where a short recording was masked by the wall-clock
+ * timer. The backend's audio-duration guard only catches files that are too
+ * LONG (duplicated audio); nothing anywhere caught one that was too SHORT.
+ *
+ * Conservative on purpose: warn, never block. The audio that exists is still the
+ * user's audio, and a false positive must not cost them a recording. Only a
+ * shortfall beyond BOTH a relative and an absolute floor is reported.
+ */
+const TRUNCATION_MIN_SHORTFALL_SEC = 30;
+const TRUNCATION_MIN_SHORTFALL_RATIO = 0.10;
+
+function checkForTruncation(recordId, producedSec, expectedSec) {
+  try {
+    if (!(producedSec > 0) || !(expectedSec > 0)) return null;
+    const shortfall = expectedSec - producedSec;
+    if (shortfall < TRUNCATION_MIN_SHORTFALL_SEC) return null;
+    if (shortfall < expectedSec * TRUNCATION_MIN_SHORTFALL_RATIO) return null;
+
+    const detail = `produced ${Math.round(producedSec)}s but the session recorded ` +
+      `${Math.round(expectedSec)}s — ${Math.round(shortfall)}s missing`;
+    log.error(`Recording truncated: ${recordId} — ${detail}`);
+    Sentry.captureMessage(`recording: combined file is SHORT — ${detail} (recordId=${recordId})`, 'error');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('system:capture-warning', {
+        kind: 'recording-truncated',
+        recordId,
+        producedSeconds: Math.round(producedSec),
+        expectedSeconds: Math.round(expectedSec),
+        missingSeconds: Math.round(shortfall),
+      });
+    }
+    return { truncated: true, shortfall };
+  } catch (e) {
+    log.warn('Truncation check failed (recording unaffected):', e.message);
+    return null;
+  }
+}
+
+/** Wall-clock seconds this session believes it recorded, from metadata.json. */
+function expectedDurationSec(recordId) {
+  try {
+    const metaPath = path.join(getRecordingPath(recordId), 'metadata.json');
+    if (!fs.existsSync(metaPath)) return 0;
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    return Number(meta.duration) || 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
 function validateAudioOutput(outputPath, minSize = MIN_RECORDING_SIZE) {
   try {
     if (!fs.existsSync(outputPath)) {
@@ -3394,6 +3451,11 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
       } catch (e) {
         console.warn('Could not get audio duration:', e);
       }
+
+      // The probe above used to feed metadata only. Compare it against what the
+      // session believes it recorded, so a file that lost chunks stops passing
+      // silently as a complete recording.
+      checkForTruncation(recordId, durationMs / 1000, expectedDurationSec(recordId));
 
       // P0 Data Loss Fix: Validate session file BEFORE deleting source data
       const ipcSessionValidation = validateAudioOutput(finalPath);
