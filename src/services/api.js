@@ -40,12 +40,17 @@ export const API_ENDPOINTS = {
 
   // User
   userProfile: '/api/user/profile',
-  userSettings: '/api/user/settings',
+  // NOTE: there is deliberately no `userSettings` here. /api/user/settings does
+  // NOT exist on the backend (it serves /api/user/ai-settings and
+  // /api/user/auto-send-settings). The old entry was unused, so it never 404'd
+  // in production — it was a trap for whoever wired it up next. Verified
+  // against the live route list 2026-08-15.
 
   // Minutes
   desktopMinutes: '/api/desktop/minutes',
   userMinutes: '/api/user/minutes',
-  consumeMinutes: '/api/user/minutes/consume',
+  // NOTE: no `consumeMinutes` either — /api/user/minutes/consume does not exist
+  // on the backend. See the comment above.
 
   // Sales
   salesInquiry: '/api/sales/inquiry',
@@ -266,25 +271,6 @@ export const getUserMinutes = async (token) => {
   if (!response.ok) {
     const data = await response.json();
     throw new Error(data.error || 'Failed to fetch minutes');
-  }
-  return response.json();
-};
-
-/**
- * Consume minutes after transcription
- * @param {string} token - Authentication token
- * @param {string} audioFileId - Audio file ID
- * @param {number} durationSeconds - Duration in seconds
- * @returns {Promise<{success: boolean, remainingMinutes: number}>}
- */
-export const consumeMinutes = async (token, audioFileId, durationSeconds) => {
-  const response = await authenticatedRequest(API_ENDPOINTS.consumeMinutes, token, {
-    method: 'POST',
-    body: JSON.stringify({ audioFileId, durationSeconds })
-  });
-  if (!response.ok) {
-    const data = await response.json();
-    throw new Error(data.error || 'Failed to consume minutes');
   }
   return response.json();
 };
