@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.5.7](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.6...v4.5.7) (2026-08-15)
+
+
+### Bug Fixes
+
+* **system-audio:** also catch AudioTee delivering NO data, not just zeros ([6fc1a5a](https://github.com/xicoarm/suisse-notes-desktop/commit/6fc1a5a0ebd61ba85e5d76fe56ba0bcd38b6ee41))
+* **system-audio:** detect silent system-audio capture on macOS ([83f7348](https://github.com/xicoarm/suisse-notes-desktop/commit/83f73482835bad7a92889f73821a30d06b8effa3))
+
 ### [4.5.6](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.5...v4.5.6) (2026-08-14)
 
 **Windows system audio: you now get told when it is recording nothing.**
