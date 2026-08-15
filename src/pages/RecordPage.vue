@@ -894,6 +894,8 @@ const {
   // would record silence), and the live loopback-silence verdict.
   systemAudioOutputRoutingMismatch,
   systemAudioSilent,
+  // Contract audit: recorder-death detail, previously emitted to nobody
+  recordingErrorInfo,
   // P0 Data Loss Fix: Silence detection warning
   silenceWarning,
   // System audio capture error
@@ -957,6 +959,22 @@ const handleMicSwitch = async (newDeviceId) => {
 // MSIG: post-switch signal-probe verdict → precise toast. ok:true confirms
 // audio is really flowing from the chosen device; ok:false is the moment the
 // user must act (the device is connected but silent).
+// The recorder died mid-session (MediaRecorder error). recordingService tears
+// the pipeline down and keeps every already-persisted chunk; say so explicitly
+// instead of letting it look like a normal stop. This emit had no listener at
+// all until the contract audit.
+watch(recordingErrorInfo, (info) => {
+  if (!info) return;
+  recordingErrorInfo.value = null; // consume (transient)
+  $q.notify({
+    type: 'negative',
+    message: t('recordingErrorOccurred', { message: info.message || '' }),
+    icon: 'error_outline',
+    timeout: 0,
+    actions: [{ label: t('ok', 'OK'), color: 'white' }]
+  });
+});
+
 watch(micSwitchEvent, (ev) => {
   if (!ev) return;
   micSwitchEvent.value = null; // consume (transient event)

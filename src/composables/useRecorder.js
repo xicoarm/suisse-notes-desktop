@@ -185,6 +185,15 @@ export function useRecorder() {
     micCaptureError.value = message;
   };
 
+  // The service emits this when the MediaRecorder itself errors and the session
+  // has to be torn down. It was emitted for a UI that never existed — nothing
+  // listened, so a recorder death showed the generic stop path instead of
+  // telling the user their recording ended early and was saved. (Contract audit.)
+  const recordingErrorInfo = ref(null); // null | { message }
+  const handleRecordingError = (data) => {
+    recordingErrorInfo.value = data || { message: '' };
+  };
+
   const handleHealthChange = (health) => {
     recordingHealth.value = health;
   };
@@ -512,6 +521,7 @@ export function useRecorder() {
     recordingService.addEventListener('systemAudioError', handleSystemAudioError);
     recordingService.addEventListener('systemAudioSilent', handleSystemAudioSilent);
     recordingService.addEventListener('micError', handleMicError);
+    recordingService.addEventListener('recordingError', handleRecordingError);
     recordingService.addEventListener('recordingDead', handleRecordingDead);
     recordingService.addEventListener('healthChange', handleHealthChange);
     recordingService.addEventListener('criticalWarning', handleHealthChange);
@@ -568,6 +578,7 @@ export function useRecorder() {
     recordingService.removeEventListener('systemAudioError', handleSystemAudioError);
     recordingService.removeEventListener('systemAudioSilent', handleSystemAudioSilent);
     recordingService.removeEventListener('micError', handleMicError);
+    recordingService.removeEventListener('recordingError', handleRecordingError);
     recordingService.removeEventListener('recordingDead', handleRecordingDead);
     recordingService.removeEventListener('healthChange', handleHealthChange);
     recordingService.removeEventListener('criticalWarning', handleHealthChange);
@@ -617,6 +628,7 @@ export function useRecorder() {
       ? _systemAudioRef.checkOutputRouting
       : async () => null,
     systemAudioSilent,
+    recordingErrorInfo,
     silenceWarning,
     systemAudioCaptureError,
     micCaptureError,
