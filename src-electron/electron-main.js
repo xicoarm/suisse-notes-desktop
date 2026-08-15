@@ -327,6 +327,11 @@ log.info('Environment:', getEnvironmentInfo());
 // Disk space utilities for recording safety
 const { canStartRecording, shouldForceStopRecording, canFinalizeRecording, formatBytes } = require('./disk-utils');
 
+// Signal forensics for the macOS system-audio PCM stream (see pcm-signal.js):
+// AudioTee only captures audio going to the DEFAULT output device, so a capture
+// can be live and completely silent. Nothing measured it before.
+const { createSystemAudioMonitor } = require('./pcm-signal');
+
 // Configuration store for persistent settings
 const configStore = new Store({
   name: 'config',
@@ -5480,9 +5485,75 @@ ipcMain.handle('systemAudio:start', async (event, recordId, offsetMs = 0) => {
     let started = false;
     let startError = null;
 
+    // SASIG (macOS): measure the stream, do not just spool it to disk.
+    //
+    // AudioTee captures every process but ONLY audio going to the DEFAULT output
+    // device. Meeting apps carry their own speaker picker, so pointing Zoom or
+    // Teams at a headset while the system default is elsewhere yields a capture
+    // that looks perfectly healthy and contains digital silence. Nothing measured
+    // these bytes before, and mergeSystemAudio only rejects a zero-BYTE file — so
+    // an all-zeros hour merged silently and the user was never told. This is the
+    // macOS twin of the Windows loopback endpoint split.
+    const monitor = createSystemAudioMonitor({ isRecording: () => isRecordingInProgress });
+    monitor.reset(Date.now());
+
+    const reportSystemAudio = (verdict, now) => {
+      const { silentSeconds } = monitor.state(now);
+      if (verdict === 'warn') {
+        log.warn(`System audio: no usable signal for ${silentSeconds}s — ` +
+                 'the default output device is probably not where the meeting is playing');
+        Sentry.captureMessage(
+          `system-audio: AudioTee produced no usable signal for ${silentSeconds}s while recording ` +
+          '(macOS taps the DEFAULT output device only — the meeting app is likely rendering elsewhere)',
+          'warning'
+        );
+      } else {
+        log.info('System audio: signal returned after a silent stretch');
+      }
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('system:capture-warning', {
+          kind: verdict === 'warn' ? 'system-audio-silent' : 'system-audio-restored',
+          recordId,
+          silentSeconds,
+        });
+      }
+    };
+
+    // Catches the second flavour of silence: AudioTee delivering NOTHING rather
+    // than delivering zeros. Which of the two macOS produces when the meeting
+    // renders to a non-default device cannot be observed from here, so both are
+    // handled identically.
+    const silenceTimer = setInterval(() => {
+      try {
+        const now = Date.now();
+        if (monitor.tick(now) === 'warn') reportSystemAudio('warn', now);
+      } catch (e) {
+        log.warn('System audio silence tick failed (capture unaffected):', e.message);
+      }
+    }, 1000);
+
     proc.stdout.on('data', (data) => {
+      // Persist FIRST, always. Everything below is diagnostics, and diagnostics
+      // must never be able to cost us audio.
       writeStream.write(data);
+
+      // Hard isolation: this analysis runs on macOS only and cannot be executed
+      // on the Windows dev machine, so it ships statically verified. An
+      // exception thrown inside a stdout 'data' handler would be an uncaught
+      // main-process exception mid-recording — a detector for silent data loss
+      // must not become a cause of loud data loss.
+      try {
+        measureSystemAudioChunk(data);
+      } catch (e) {
+        log.warn('System audio signal check failed (capture unaffected):', e.message);
+      }
     });
+
+    const measureSystemAudioChunk = (data) => {
+      const now = Date.now();
+      const verdict = monitor.handleChunk(data, now);
+      if (verdict) reportSystemAudio(verdict, now);
+    };
 
     proc.stderr.on('data', (data) => {
       const text = data.toString('utf8');
@@ -5510,13 +5581,14 @@ ipcMain.handle('systemAudio:start', async (event, recordId, offsetMs = 0) => {
       if (code !== 0 && code !== null) {
         log.warn(`AudioTee exited with code ${code}`);
       }
+      clearInterval(silenceTimer);
       if (activeAudioTee?.process === proc) {
         activeAudioTee.writeStream.end();
         activeAudioTee = null;
       }
     });
 
-    activeAudioTee = { process: proc, writeStream, filePath: pcmPath, recordId };
+    activeAudioTee = { process: proc, writeStream, filePath: pcmPath, recordId, silenceTimer };
 
     // Wait briefly for startup or error
     await new Promise(r => setTimeout(r, 500));
@@ -5543,8 +5615,11 @@ ipcMain.handle('systemAudio:stop', async () => {
 async function stopSystemAudio() {
   if (!activeAudioTee) return { success: true };
   try {
-    const { process: proc, writeStream, filePath } = activeAudioTee;
+    const { process: proc, writeStream, filePath, silenceTimer } = activeAudioTee;
     activeAudioTee = null;
+    // Stop the silence watchdog before the process dies, so teardown can never
+    // emit a warning about a capture that is simply over.
+    if (silenceTimer) clearInterval(silenceTimer);
 
     if (proc && !proc.killed) {
       proc.kill('SIGTERM');

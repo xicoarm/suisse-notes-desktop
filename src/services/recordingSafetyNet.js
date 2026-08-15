@@ -151,6 +151,29 @@ function handleCaptureWarning(data) {
       icon: 'volume_off',
       timeout: 15000
     });
+  } else if (data.kind === 'system-audio-silent') {
+    // macOS: AudioTee is running but delivering digital silence — almost always
+    // because the meeting app renders to a device that is not the default
+    // output. Persistent (timeout 0): the whole point is that this failure was
+    // previously invisible for an entire meeting.
+    recordingService.setSystemAudioActive(false);
+    Notify.create({
+      type: 'warning',
+      message: t('captureWarningSystemAudioSilent', { seconds: data.silentSeconds ?? 90 }),
+      icon: 'volume_off',
+      timeout: 0,
+      group: 'system-audio-silent',
+      actions: [{ label: t('ok', 'OK'), color: 'white' }]
+    });
+  } else if (data.kind === 'system-audio-restored') {
+    recordingService.setSystemAudioActive(true);
+    Notify.create({
+      type: 'positive',
+      message: t('captureWarningSystemAudioRestored'),
+      icon: 'volume_up',
+      timeout: 6000,
+      group: 'system-audio-silent'
+    });
   }
 }
 
