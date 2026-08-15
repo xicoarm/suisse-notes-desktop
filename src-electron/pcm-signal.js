@@ -106,9 +106,85 @@ class SystemAudioSilenceTracker {
   }
 }
 
+/**
+ * Full monitor around the tracker, covering BOTH ways a capture can be silent:
+ *
+ *   1. chunks arrive but contain digital silence
+ *   2. no chunks arrive at all
+ *
+ * Case 2 matters because it cannot be ruled out from here: whether a Core Audio
+ * tap keeps delivering zero-filled buffers when nothing renders to the default
+ * output device, or simply stops delivering, is macOS behaviour that this
+ * project has no Mac to observe. A detector that only handled case 1 would
+ * silently do nothing in case 2 — the exact failure it exists to prevent. So
+ * both are treated as the same verdict.
+ *
+ * Pure and injectable (no Electron, no timers of its own) so the wiring — not
+ * just the arithmetic — is testable on any platform.
+ *
+ * @param {object} opts
+ * @param {() => boolean} opts.isRecording  gate; a paused session is legitimately silent
+ * @returns {{handleChunk: Function, tick: Function, reset: Function, state: Function}}
+ */
+function createSystemAudioMonitor(opts = {}) {
+  const isRecording = opts.isRecording || (() => true);
+  const warnAfterMs = opts.warnAfterMs || DEFAULT_WARN_AFTER_MS;
+  const tracker = new SystemAudioSilenceTracker({
+    warnAfterMs,
+    silencePeak: opts.silencePeak,
+  });
+  let lastDataAt = null;
+  let startedAt = null;
+
+  const reset = (now) => {
+    tracker.reset();
+    lastDataAt = null;
+    startedAt = now ?? null;
+  };
+
+  return {
+    reset,
+    /** @returns {'warn'|'clear'|null} */
+    handleChunk(chunk, now) {
+      lastDataAt = now;
+      if (startedAt === null) startedAt = now;
+      if (!isRecording()) {
+        // Not recording: keep the stream fresh but never age an episode.
+        tracker.silentSince = null;
+        return null;
+      }
+      return tracker.push(chunk, now);
+    },
+    /**
+     * Called on a timer. Detects the "no chunks at all" flavour of silence.
+     * @returns {'warn'|null}
+     */
+    tick(now) {
+      if (!isRecording()) return null;
+      if (startedAt === null) startedAt = now;
+      if (tracker.warned) return null;
+      const since = lastDataAt === null ? startedAt : lastDataAt;
+      if (now - since < warnAfterMs) return null;
+      tracker.warned = true;
+      tracker.silentSince = since;
+      return 'warn';
+    },
+    state(now) {
+      return {
+        silentSeconds: tracker.silentSince === null
+          ? Math.round((now - (lastDataAt ?? startedAt ?? now)) / 1000)
+          : tracker.silentSeconds(now),
+        sawSignal: tracker.sawSignal,
+        receivedData: lastDataAt !== null,
+      };
+    },
+  };
+}
+
 module.exports = {
   peakFromInt16LE,
   SystemAudioSilenceTracker,
+  createSystemAudioMonitor,
   DEFAULT_SILENCE_PEAK,
   DEFAULT_WARN_AFTER_MS,
 };

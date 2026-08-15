@@ -15,6 +15,7 @@ import { describe, expect, it } from 'vitest';
 import {
   peakFromInt16LE,
   SystemAudioSilenceTracker,
+  createSystemAudioMonitor,
 } from '../../src-electron/pcm-signal.js';
 
 /** Mono int16 LE buffer of a sine at the given peak amplitude (0..1). */
@@ -135,5 +136,99 @@ describe('SystemAudioSilenceTracker', () => {
     expect(t.silentSeconds(95_000)).toBe(95);
     t.push(tone(CHUNK_FRAMES, 0.5), 95_200);
     expect(t.silentSeconds(95_400)).toBe(0);
+  });
+});
+
+describe('createSystemAudioMonitor — the wiring, not just the arithmetic', () => {
+  const CH = 9600; // 200 ms at 48 kHz
+  const mk = (over = {}) => {
+    let recording = true;
+    const m = createSystemAudioMonitor({
+      isRecording: () => recording,
+      ...over,
+    });
+    return { m, setRecording: (v) => { recording = v; } };
+  };
+
+  it('warns when AudioTee delivers NOTHING at all (no chunks ever)', () => {
+    // The failure mode that cannot be observed without a Mac: if tapping a
+    // non-default output yields no buffers rather than zero-filled ones, a
+    // chunk-driven detector would never fire. The timer must cover it.
+    const { m } = mk();
+    m.reset(0);
+    let warned = null;
+    for (let now = 1000; now <= 200_000; now += 1000) {
+      warned = m.tick(now) || warned;
+    }
+    expect(warned).toBe('warn');
+    expect(m.state(200_000).receivedData).toBe(false);
+  });
+
+  it('warns only once for a no-data episode', () => {
+    const { m } = mk();
+    m.reset(0);
+    let count = 0;
+    for (let now = 1000; now <= 300_000; now += 1000) if (m.tick(now) === 'warn') count++;
+    expect(count).toBe(1);
+  });
+
+  it('does not warn on no-data before the threshold', () => {
+    const { m } = mk();
+    m.reset(0);
+    for (let now = 1000; now < 89_000; now += 1000) expect(m.tick(now)).toBeNull();
+  });
+
+  it('a healthy stream keeps the no-data timer quiet', () => {
+    const { m } = mk();
+    m.reset(0);
+    let warned = null;
+    for (let now = 200; now <= 300_000; now += 200) {
+      m.handleChunk(tone(CH, 0.3), now);
+      if (now % 1000 === 0) warned = m.tick(now) || warned;
+    }
+    expect(warned).toBeNull();
+    expect(m.state(300_000).sawSignal).toBe(true);
+  });
+
+  it('a stream that stops mid-recording is caught by the timer', () => {
+    const { m } = mk();
+    m.reset(0);
+    let now = 0;
+    for (let i = 0; i < 50; i++) { now += 200; m.handleChunk(tone(CH, 0.3), now); }
+    const stoppedAt = now;
+    let warned = null;
+    for (now = stoppedAt + 1000; now < stoppedAt + 200_000; now += 1000) warned = m.tick(now) || warned;
+    expect(warned).toBe('warn');
+  });
+
+  it('never warns while the recording is paused', () => {
+    const { m, setRecording } = mk();
+    m.reset(0);
+    setRecording(false);
+    let warned = null;
+    for (let now = 1000; now <= 600_000; now += 1000) warned = m.tick(now) || warned;
+    expect(warned).toBeNull();
+  });
+
+  it('a pause does not carry a stale silence episode into the resume', () => {
+    const { m, setRecording } = mk();
+    m.reset(0);
+    let now = 0;
+    setRecording(false);
+    // 10 minutes paused, chunks still flowing as silence
+    for (let i = 0; i < 3000; i++) { now += 200; m.handleChunk(silence(CH), now); }
+    setRecording(true);
+    let warned = null;
+    for (let i = 0; i < 300; i++) { now += 200; warned = m.handleChunk(silence(CH), now) || warned; }
+    expect(warned).toBeNull(); // only 60s of real silence so far
+    for (let i = 0; i < 200; i++) { now += 200; warned = m.handleChunk(silence(CH), now) || warned; }
+    expect(warned).toBe('warn');
+  });
+
+  it('reports silent seconds for the payload the UI renders', () => {
+    const { m } = mk();
+    m.reset(0);
+    m.handleChunk(silence(CH), 200);
+    expect(m.state(95_200).silentSeconds).toBeGreaterThanOrEqual(90);
   });
 });
