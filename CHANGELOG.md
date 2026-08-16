@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.5.8](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.7...v4.5.8) (2026-08-16)
+
+
+### Bug Fixes
+
+* **android:** remove the Play-rejected media permissions from main ([7f0c5e5](https://github.com/xicoarm/suisse-notes-desktop/commit/7f0c5e57dea54e4da67f0095eb1780a213a55f7c))
+* **api:** remove two endpoints the backend does not serve ([56e2f69](https://github.com/xicoarm/suisse-notes-desktop/commit/56e2f69a13748137f95b2ba1b8c96318907f960c))
+* **ios:** stop shipping with App Transport Security disabled ([bc77511](https://github.com/xicoarm/suisse-notes-desktop/commit/bc775114894bd597379e396e003e8a5b2f8cdded))
+* **recording:** detect a combined file that is shorter than the session ([fb72724](https://github.com/xicoarm/suisse-notes-desktop/commit/fb72724a69d6aa8ec92617945c64ad2a35b14eaf))
+* **recording:** make the truncation guard actually fire, and prove it ([3c7b3fc](https://github.com/xicoarm/suisse-notes-desktop/commit/3c7b3fcd8dd5949f001a54fadaeacaa49368ab9d))
+* **ui:** repair strings and an event that were wired to nothing ([ad90aeb](https://github.com/xicoarm/suisse-notes-desktop/commit/ad90aeb3c38757795919b8d6c637e409d012dab6))
+
 ### [4.5.7](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.6...v4.5.7) (2026-08-15)
 
 
