@@ -70,15 +70,28 @@
 	<string>Suisse Notes uses Bluetooth to connect to your recording device for syncing meetings, and to wireless microphones for audio recording.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Suisse Notes uses Bluetooth to connect to your recording device for syncing meetings, and to wireless microphones for audio recording.</string>
-	<!-- App Transport Security - Allow local dev servers, require HTTPS for production -->
+	<!-- App Transport Security.
+	  The old comment here claimed "allow local dev servers, require HTTPS for
+	  production" but the keys did the opposite: NSAllowsArbitraryLoads disables ATS
+	  GLOBALLY, in the shipped app, permitting plaintext HTTP to any host for every
+	  user. The app never needs that — capacitor.config.json sets iosScheme "https",
+	  so the WebView is served over https://localhost, and the API is HTTPS.
+
+	  ATS is now enforced. Cleartext is allowed ONLY for localhost, which is what a
+	  Capacitor live-reload dev server actually needs, and local networking stays on
+	  for device discovery. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-		<key>NSAllowsArbitraryLoadsInWebContent</key>
-		<true/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>localhost</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
 	</dict>
 	<!-- Custom URL scheme for SSO callback (suissenotes://auth/callback?token=...&user=...) -->
 	<!-- The backend's /api/auth/<provider>/login/callback redirects here after OAuth completes. -->

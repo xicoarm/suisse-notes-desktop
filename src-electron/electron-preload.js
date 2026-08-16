@@ -99,9 +99,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
         IPC_TIMEOUTS.combine,
         'Create session file'
       ),
-    combineChunks: (id, ext) =>
+    // expectedDurationSec: the renderer's wall-clock duration, so main can tell
+    // whether the combined file really contains the meeting (truncation guard).
+    combineChunks: (id, ext, expectedDurationSec) =>
       withTimeout(
-        ipcRenderer.invoke('recording:combineChunks', id, ext),
+        ipcRenderer.invoke('recording:combineChunks', id, ext, expectedDurationSec),
         IPC_TIMEOUTS.combine,
         'Combine chunks'
       ),

@@ -331,6 +331,7 @@ const { canStartRecording, shouldForceStopRecording, canFinalizeRecording, forma
 // AudioTee only captures audio going to the DEFAULT output device, so a capture
 // can be live and completely silent. Nothing measured it before.
 const { createSystemAudioMonitor } = require('./pcm-signal');
+const { evaluateTruncation } = require('./recording-integrity');
 
 // Configuration store for persistent settings
 const configStore = new Store({
@@ -2621,6 +2622,50 @@ const MIN_RECORDING_SIZE = 1024;
  * @param {number} minSize - Minimum acceptable file size in bytes (default: MIN_RECORDING_SIZE)
  * @returns {{valid: boolean, error?: string, size?: number}}
  */
+/**
+ * Truncation guard: does the produced file actually contain the meeting?
+ *
+ * validateAudioOutput checks that a file exists, is big enough and starts with
+ * EBML magic — all of which a recording that silently lost half its chunks
+ * passes. Duration was probed for metadata and then never compared against the
+ * wall clock, so on-device truncation stayed invisible exactly the way it did in
+ * the t.kaufmann case, where a short recording was masked by the wall-clock
+ * timer. The backend's audio-duration guard only catches files that are too
+ * LONG (duplicated audio); nothing anywhere caught one that was too SHORT.
+ *
+ * Conservative on purpose: warn, never block. The audio that exists is still the
+ * user's audio, and a false positive must not cost them a recording. Only a
+ * shortfall beyond BOTH a relative and an absolute floor is reported.
+ */
+function checkForTruncation(recordId, producedSec, expectedSec) {
+  try {
+    const verdict = evaluateTruncation(producedSec, expectedSec);
+    // Always log the comparison: a truncation report from the field is only
+    // diagnosable if both numbers are on record, not just the alarm.
+    log.info(`Recording integrity ${recordId}: produced=${Math.round(producedSec || 0)}s ` +
+             `expected=${Math.round(expectedSec || 0)}s verdict=${verdict.truncated ? 'TRUNCATED' : (verdict.reason || 'ok')}`);
+    if (!verdict.truncated) return null;
+
+    const detail = `produced ${Math.round(producedSec)}s but the session recorded ` +
+      `${Math.round(expectedSec)}s — ${Math.round(verdict.shortfallSec)}s missing`;
+    log.error(`Recording truncated: ${recordId} — ${detail}`);
+    Sentry.captureMessage(`recording: combined file is SHORT — ${detail} (recordId=${recordId})`, 'error');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('system:capture-warning', {
+        kind: 'recording-truncated',
+        recordId,
+        producedSeconds: Math.round(producedSec),
+        expectedSeconds: Math.round(expectedSec),
+        missingSeconds: Math.round(verdict.shortfallSec),
+      });
+    }
+    return verdict;
+  } catch (e) {
+    log.warn('Truncation check failed (recording unaffected):', e.message);
+    return null;
+  }
+}
+
 function validateAudioOutput(outputPath, minSize = MIN_RECORDING_SIZE) {
   try {
     if (!fs.existsSync(outputPath)) {
@@ -3395,6 +3440,7 @@ ipcMain.handle('recording:createSessionFile', async (event, recordId, ext) => {
         console.warn('Could not get audio duration:', e);
       }
 
+
       // P0 Data Loss Fix: Validate session file BEFORE deleting source data
       const ipcSessionValidation = validateAudioOutput(finalPath);
       if (!ipcSessionValidation.valid) {
@@ -3463,7 +3509,7 @@ function updateRecordingMetadataOnCompletion(recordId, duration, hasAudioFile) {
 }
 
 // 4. Combine recording chunks - final combination with multiple fallbacks
-ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
+ipcMain.handle('recording:combineChunks', async (event, recordId, ext, expectedDurationSec) => {
   // Validate first (sync, fail fast without acquiring a lock on bogus IDs)
   let validRecordId, validExt;
   try {
@@ -3575,6 +3621,12 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext) => {
 
             // Update metadata.json with completion info
             updateRecordingMetadataOnCompletion(validRecordId, audioDuration, true);
+
+            // Did the file actually capture the meeting? audioDuration is the
+            // PROBED length; expectedDurationSec is the wall clock the renderer
+            // measured. Comparing them is the only way a lost-chunk truncation
+            // becomes visible — every other check passes a short-but-valid file.
+            checkForTruncation(validRecordId, audioDuration, Number(expectedDurationSec) || 0);
 
             return {
               success: true,
