@@ -353,7 +353,10 @@ export const useRecordingStore = defineStore('recording', {
           await window.electronAPI.recording.setInProgress(false);
           await window.electronAPI.recording.setProcessing(true);
 
-          const result = await window.electronAPI.recording.combineChunks(this.recordId, '.webm');
+          // Pass the wall-clock duration so main can tell whether the combined file
+          // actually contains the meeting. Main has no other source for this:
+          // metadata.json only gets a duration AFTER the combine, from the probe.
+          const result = await window.electronAPI.recording.combineChunks(this.recordId, '.webm', this.duration);
 
           await window.electronAPI.recording.setProcessing(false);
 
