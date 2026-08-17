@@ -221,9 +221,11 @@ const scanStrandedRecords = () => {
       prepStore
         .requestDeviceSyncPrep({ recordId: rec.id, title: rec.title, fileName: rec.deviceFilename })
         .then(async (fields) => {
+          const updates = { prepAnswered: true };
           if (fields && Object.keys(fields).length > 0) {
-            await historyStore.updateRecording(rec.id, { prep: fields });
+            updates.prep = fields;
           }
+          await historyStore.updateRecording(rec.id, updates);
           const current = historyStore.recordings.find((r) => r.id === rec.id);
           if (current?.uploadStatus === 'pending_prep') {
             await historyStore.updateRecording(rec.id, { uploadStatus: 'pending' });

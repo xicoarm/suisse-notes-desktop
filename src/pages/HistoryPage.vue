@@ -508,9 +508,11 @@ export default {
         title: recording.title,
         fileName: recording.deviceFilename
       });
+      const updates = { prepAnswered: true };
       if (fields && Object.keys(fields).length > 0) {
-        await historyStore.updateRecording(recording.id, { prep: fields });
+        updates.prep = fields;
       }
+      await historyStore.updateRecording(recording.id, updates);
       const current = historyStore.recordings.find((r) => r.id === recording.id);
       if (current?.uploadStatus === 'pending_prep') {
         await historyStore.updateRecording(recording.id, { uploadStatus: 'pending' });

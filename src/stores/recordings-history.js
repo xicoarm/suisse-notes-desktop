@@ -368,7 +368,7 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
               'retryCount', 'lastRetryAt', 'uploadError', '_serverSynced',
               // Pre-meeting preparation (context/template/pre-fill) — client-only,
               // re-sent on retry uploads; the server never returns it.
-              'prep'
+              'prep', 'prepAnswered'
             ];
             const merged = serverRecordings.map(serverRec => {
               const localRec = cached.find(r => r.id === serverRec.id);
@@ -416,7 +416,9 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
           // reset it to 'pending' so the user can retry.
           let staleFixed = 0;
           for (const rec of this.recordings) {
-            if (rec.uploadStatus === 'uploading') {
+            // Same guard as the desktop branch above: a record currently
+            // being retried in THIS session is not stale.
+            if (rec.uploadStatus === 'uploading' && !_retryingIds.has(rec.id)) {
               rec.uploadStatus = 'pending';
               staleFixed++;
             }
@@ -496,11 +498,15 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
           return this.updateRecording(id, updates);
         }
 
-        // Prevent deviceFilename duplicates (e.g., from repeated recovery of same device file)
+        // Prevent deviceFilename duplicates (e.g., from repeated recovery of same device file).
+        // Merge WITHOUT the caller's id: adopting it would re-key the record
+        // on every sync attempt, and upload dedupe + every retry path key on
+        // a stable id (server botSessionId = "desktop:<recordId>").
         if (recording.deviceFilename) {
           const existingByFilename = this.recordings.find(r => r.deviceFilename === recording.deviceFilename);
           if (existingByFilename) {
-            return this.updateRecording(existingByFilename.id, recording);
+            const { id: _callerId, ...mergeFields } = recording;
+            return this.updateRecording(existingByFilename.id, mergeFields);
           }
         }
 
