@@ -14,10 +14,10 @@
           >
             <img
               src="../assets/logo.png"
-              alt="Suisse Notes"
+              alt="Suisse Meets"
               class="logo-image"
             >
-            <span class="logo-text">Suisse Notes</span>
+            <span class="logo-text">Suisse Meets</span>
           </div>
         </div>
 
@@ -114,10 +114,10 @@
           >
             <img
               src="../assets/logo.png"
-              alt="Suisse Notes"
+              alt="Suisse Meets"
               class="logo-image"
             >
-            <span class="logo-text">Suisse Notes</span>
+            <span class="logo-text">Suisse Meets</span>
           </div>
 
           <!-- Global Recording Indicator -->

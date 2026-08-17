@@ -180,7 +180,7 @@ class ForegroundRecordingService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Suisse Notes")
+            .setContentTitle("Suisse Meets")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)

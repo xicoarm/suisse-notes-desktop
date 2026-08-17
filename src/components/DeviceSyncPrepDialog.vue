@@ -263,7 +263,7 @@ const sections = computed(() => prepStore.sectionsByTemplate[templateId.value] |
 const templateOptions = computed(() => [
   { label: t('prepTemplateAuto'), value: null },
   ...prepStore.templates.map((tpl) => ({
-    label: tpl.isBuiltIn ? `${tpl.name} · Suisse Notes` : tpl.name,
+    label: tpl.isBuiltIn ? `${tpl.name} · Suisse Meets` : tpl.name,
     value: tpl.id
   }))
 ]);

@@ -1,6 +1,6 @@
 {
   "appId": "ch.suissenotes.mobile",
-  "appName": "Suisse Notes",
+  "appName": "Suisse Meets",
   "webDir": "www",
   "bundledWebRuntime": false,
   "server": {

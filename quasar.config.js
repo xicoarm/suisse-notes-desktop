@@ -103,9 +103,11 @@ export default function (ctx) {
       hideSplashscreen: true,
       // Capacitor CLI version (must be installed)
       // version: 6,
-      // App identifier for mobile stores (no dashes allowed in Java package names)
+      // App identifier for mobile stores (no dashes allowed in Java package names).
+      // The appId is a MACHINE IDENTIFIER (store identity) — it must NEVER change
+      // across the rebrand; only the display appName carries the new brand.
       appId: 'ch.suissenotes.mobile',
-      appName: 'Suisse Notes',
+      appName: 'Suisse Meets',
       // iOS-specific settings
       ios: {
         // Enable background audio recording
