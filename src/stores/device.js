@@ -801,9 +801,47 @@ export const useDeviceStore = defineStore('device', {
       const title = this._formatTitleFromFilename(file.file);
       const createdAt = this._parseDateFromFilename(file.file) || new Date(file.creat_time * 1000).toISOString();
       const durationSec = Math.round((file.duration_ms || 0) / 1000);
-      const recordId = uuidv4();
 
-      // Add to history immediately so it's visible in the History tab during transfer
+      // One recordId per DEVICE FILE, not per attempt. The server dedupes
+      // meetings by botSessionId = "desktop:<recordId>" (upload route), so
+      // minting a fresh UUID on every retry made that dedupe unmatchable and
+      // every re-attempt of the same file created — and billed — a brand-new
+      // meeting (observed in prod: 210 duplicate meetings / 20 users in 60
+      // days). Reuse the record and id from any earlier attempt of this file.
+      const existingRec = historyStore.getRecordingByDeviceFilename(file.file);
+
+      if (existingRec && (existingRec.uploadStatus === 'pending_prep' || existingRec.uploadStatus === 'uploading')) {
+        // A live pipeline or an open context prompt still owns this file — a
+        // second pipeline would double-prompt and double-upload it. The
+        // stranded-prep scanner / stale-'uploading' reset releases these
+        // states if their owner died, so this is never a permanent skip.
+        addBreadcrumb({
+          category: 'ble',
+          message: `Skipping ${file.file} — existing record is ${existingRec.uploadStatus}`,
+          level: 'info'
+        });
+        return;
+      }
+
+      if (existingRec && existingRec.uploadStatus === 'uploaded') {
+        // The server already holds this file (e.g. the success response was
+        // lost before syncedFiles was written). Heal the bookkeeping instead
+        // of re-downloading and re-uploading it.
+        await this._addSyncedFile(file.file);
+        addBreadcrumb({
+          category: 'ble',
+          message: `Marked ${file.file} synced — already uploaded as record ${existingRec.id}`,
+          level: 'info'
+        });
+        return;
+      }
+
+      const recordId = existingRec?.id || uuidv4();
+      const prepAlreadyAnswered = existingRec?.prepAnswered === true;
+
+      // Add to history immediately so it's visible in the History tab during
+      // transfer. Idempotent: with a reused id this updates the existing
+      // record in place instead of inserting a duplicate.
       await historyStore.addRecording({
         id: recordId,
         title,
@@ -881,24 +919,30 @@ export const useDeviceStore = defineStore('device', {
         // saved defaults apply automatically. While waiting the record carries
         // uploadStatus 'pending_prep', which is excluded from auto-retry so no
         // path uploads without the answer. App killed while waiting → the
-        // MainLayout watcher re-prompts for stranded 'pending_prep' records.
-        try {
-          const { useMeetingPrepStore } = await import('./meeting-prep');
-          const prepStore = useMeetingPrepStore();
-          await prepStore.initialize();
-          // Start the request FIRST (registers the recordId as in-flight
-          // synchronously) so the stranded-record scanner can never race the
-          // status flip below and double-prompt.
-          const prepPromise = prepStore.requestDeviceSyncPrep({ recordId, title, fileName: file.file });
-          await historyStore.updateRecording(recordId, { uploadStatus: 'pending_prep' });
-          const prepFields = await prepPromise;
-          if (prepFields && Object.keys(prepFields).length > 0) {
-            await historyStore.updateRecording(recordId, { prep: prepFields });
+        // stranded-record scanner in DeviceSyncPrepDialog re-prompts.
+        // Asked once per FILE: a re-attempt after a failed upload reuses the
+        // stored answer (prepAnswered) instead of prompting the user again.
+        if (!prepAlreadyAnswered) {
+          try {
+            const { useMeetingPrepStore } = await import('./meeting-prep');
+            const prepStore = useMeetingPrepStore();
+            await prepStore.initialize();
+            // Start the request FIRST (registers the recordId as in-flight
+            // synchronously) so the stranded-record scanner can never race the
+            // status flip below and double-prompt.
+            const prepPromise = prepStore.requestDeviceSyncPrep({ recordId, title, fileName: file.file });
+            await historyStore.updateRecording(recordId, { uploadStatus: 'pending_prep' });
+            const prepFields = await prepPromise;
+            const prepUpdates = { prepAnswered: true };
+            if (prepFields && Object.keys(prepFields).length > 0) {
+              prepUpdates.prep = prepFields;
+            }
+            await historyStore.updateRecording(recordId, prepUpdates);
+          } catch (prepError) {
+            console.warn('[DeviceSync] prep prompt failed — continuing without prep:', prepError);
+          } finally {
+            await historyStore.updateRecording(recordId, { uploadStatus: 'pending' });
           }
-        } catch (prepError) {
-          console.warn('[DeviceSync] prep prompt failed — continuing without prep:', prepError);
-        } finally {
-          await historyStore.updateRecording(recordId, { uploadStatus: 'pending' });
         }
 
         // Phase 3: Upload to server
