@@ -12,53 +12,14 @@ const Sentry = require('@sentry/electron/main');
 const { machineIdSync } = require('node-machine-id');
 const { uploadViaPresignedSas, abortDirectUpload, FATAL_HTTP_STATUSES } = require('./upload-direct');
 
-// === Rebrand userData migration ("Suisse Notes" → "Suisse Meets") ===
-// Electron derives userData from productName, so the rebrand silently moves it
-// from <appData>/Suisse Notes to <appData>/Suisse Meets. Recordings, auth
-// session, recording history, and crash-recovery state all live there — on the
-// first launch after the update, move the old directory to the new location.
-// Must run before ANYTHING touches userData (Sentry/crashpad, electron-store,
-// electron-log, single-instance lock), hence synchronous at module top.
-(function migrateUserDataAcrossRebrand() {
-  // E2E harness runs pin their own isolated userData (see the E2E hooks block
-  // below) — a test run must never touch, let alone rename, the real profile.
-  if (process.env.SUISSE_TEST_USERDATA) return;
-  const pinUserData = (dir) => {
-    app.setPath('userData', dir);
-    // sessionData (Chromium profile: Local Storage, IndexedDB) follows userData
-    // by default, but pin it explicitly so renderer storage never splits off.
-    try { app.setPath('sessionData', dir); } catch { /* pre-22 Electron: sessionData IS userData */ }
-  };
-  try {
-    const oldDir = path.join(app.getPath('appData'), 'Suisse Notes');
-    const newDir = app.getPath('userData'); // <appData>/Suisse Meets
-    if (!fs.existsSync(oldDir) || path.resolve(oldDir) === path.resolve(newDir)) return;
-    if (fs.existsSync(newDir)) {
-      // Adopt the new dir only if it's still empty (e.g. a bare folder Chromium
-      // left behind); anything else is real post-rename data — never merge,
-      // never delete. Fall back to the old dir so no recording is stranded.
-      let entries = null;
-      try { entries = fs.readdirSync(newDir); } catch { /* unreadable → treat as non-empty */ }
-      if (entries && entries.length === 0) {
-        fs.rmdirSync(newDir);
-      } else {
-        pinUserData(oldDir);
-        return;
-      }
-    }
-    try {
-      fs.renameSync(oldDir, newDir); // atomic on the same volume (appData is)
-    } catch {
-      // Rename blocked (old version still running, AV/backup holding a lock):
-      // keep using the old path this launch; the rename retries on next start.
-      // If the blocker is a still-running old instance, the single-instance
-      // lock lives in that same dir, so this launch exits gracefully anyway.
-      pinUserData(oldDir);
-    }
-  } catch {
-    // Never block startup over migration — Electron defaults still work.
-  }
-})();
+// === App identity pinning (display "Suisse Meets", machine "Suisse Notes") ===
+// Keeps userData at %APPDATA%\Suisse Notes and the macOS safeStorage Keychain
+// service at "Suisse Notes Safe Storage" across the rebrand — nothing moves,
+// no one is logged out; only the display name changes. Full rationale in
+// src-electron/app-identity.js. Must run before ANYTHING touches userData or
+// safeStorage (Sentry/crashpad, electron-store, electron-log, the
+// single-instance lock), hence synchronous at module top.
+require('./app-identity').pinAppIdentity(app);
 
 // Trust the OS certificate store from the main process. Must run before any
 // outbound HTTPS (auto-update, uploads, Sentry) so corporate / TLS-inspection
