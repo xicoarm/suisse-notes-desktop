@@ -13,7 +13,7 @@
  * accumulation) — the same bytes a real recording writes. If chunks keep
  * accumulating for ~5h, the recorder engine handles 5h meetings, full stop.
  *
- * Usage: SUISSE_E2E_PACKAGED_EXE="<win-unpacked>/Suisse Notes.exe" node verify-longrun.js
+ * Usage: SUISSE_E2E_PACKAGED_EXE="<win-unpacked>/Suisse Meets.exe" node verify-longrun.js
  */
 const fs = require('fs');
 const path = require('path');
@@ -21,7 +21,7 @@ const { buildScenario } = require('./lib/audio');
 const { startMockBackend } = require('./lib/mock-backend');
 const { AppDriver, sleep } = require('./lib/app-driver');
 
-const EXE = 'C:/Users/arega/projects/Suisse_Notes_Desktop/dist/electron/Packaged/win-unpacked/Suisse Notes.exe';
+const EXE = 'C:/Users/arega/projects/Suisse_Notes_Desktop/dist/electron/Packaged/win-unpacked/Suisse Meets.exe';
 const TARGET_SECONDS = 18900; // 5h15m
 const PROGRESS = path.join(__dirname, 'work', 'longrun-progress.jsonl');
 

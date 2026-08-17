@@ -100,7 +100,7 @@ jobs:
           $content = $content -replace '(?<=sha512: )\S+', $base64Hash
           $content = $content -replace '(?<=size: )\d+', $size
           # Fix electron-builder bug: filenames use dots but yml references dashes
-          $content = $content -replace 'Suisse-Notes-Setup-', 'Suisse.Notes.Setup.'
+          $content = $content -replace 'Suisse-Meets-Setup-', 'Suisse.Meets.Setup.'
           Set-Content -Path $ymlPath -Value $content -NoNewline
 
           echo "=== Updated latest.yml ==="
@@ -119,6 +119,21 @@ jobs:
             Write-Error "FATAL: $yml is malformed! Missing version or sha512."
             exit 1
           }
+          # Every artifact the manifest references must match a built file AS IT
+          # WILL BE NAMED ON GITHUB (GitHub replaces spaces with dots on upload;
+          # local files keep spaces). A mismatch (e.g. the dots-vs-dashes fixup
+          # above no longer matching the productName) means installed clients
+          # download a 404 and auto-update silently breaks for everyone.
+          $refs = Select-String -Path $yml -Pattern '(?:url|path):\s*(\S+)' -AllMatches |
+            ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+          $githubNames = (Get-ChildItem "dist/electron/Packaged" -File).Name | ForEach-Object { $_ -replace ' ', '.' }
+          foreach ($f in $refs) {
+            if ($githubNames -notcontains $f) {
+              Write-Error "FATAL: latest.yml references '$f' but no built artifact will have that name on GitHub. Auto-update would 404. Built: $($githubNames -join ', ')"
+              exit 1
+            }
+          }
+          Write-Host "All $($refs.Count) manifest-referenced artifacts exist."
           Write-Host "latest.yml OK:"
           Write-Host $content
 
@@ -279,11 +294,11 @@ jobs:
           echo "=== latest-mac.yml (before) ==="
           cat latest-mac.yml
 
-          # electron-builder bug (#2706): productName "Suisse Notes" creates files
-          # with dots (Suisse.Notes-) but latest-mac.yml references dashes (Suisse-Notes-).
+          # electron-builder bug (#2706): productName "Suisse Meets" creates files
+          # with dots (Suisse.Meets-) but latest-mac.yml references dashes (Suisse-Meets-).
           # Fix: unconditionally replace dashes with dots in latest-mac.yml to match files.
           # This is safe because the actual files ALWAYS use dots on our builds.
-          sed -i '' 's/Suisse-Notes-/Suisse.Notes-/g' latest-mac.yml
+          sed -i '' 's/Suisse-Meets-/Suisse.Meets-/g' latest-mac.yml
 
           echo "=== latest-mac.yml (after) ==="
           cat latest-mac.yml
@@ -302,6 +317,23 @@ jobs:
           fi
           echo "latest-mac.yml OK:"
           cat dist/electron/Packaged/latest-mac.yml
+          echo ""
+          echo "=== Verifying every artifact referenced by latest-mac.yml exists ==="
+          # Compare against built filenames AS THEY WILL BE NAMED ON GITHUB
+          # (GitHub replaces spaces with dots on upload). A mismatch (fixup above
+          # no longer matching productName) means installed clients download a
+          # 404 and macOS auto-update silently breaks.
+          LOCAL_AS_GITHUB=$(ls -1 dist/electron/Packaged | tr ' ' '.')
+          REFS=$(grep -E '^\s*-?\s*(url|path):' dist/electron/Packaged/latest-mac.yml | awk '{print $NF}' | sort -u)
+          for f in $REFS; do
+            if ! echo "$LOCAL_AS_GITHUB" | grep -qxF "$f"; then
+              echo "FATAL: latest-mac.yml references '$f' but no built artifact will have that name on GitHub. Auto-update would 404."
+              echo "Built artifacts (as GitHub will name them):"
+              echo "$LOCAL_AS_GITHUB"
+              exit 1
+            fi
+          done
+          echo "All manifest-referenced artifacts exist."
           echo ""
           echo "=== Checking zip files for auto-update ==="
           ZIP_COUNT=$(find dist/electron/Packaged -name "*.zip" | wc -l)

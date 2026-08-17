@@ -2,7 +2,7 @@
   "name": "suisse-notes-desktop",
   "version": "4.5.8",
   "description": "Desktop app for recording and transcribing meetings",
-  "productName": "Suisse Notes",
+  "productName": "Suisse Meets",
   "author": "Suisse IT GmbH",
   "private": true,
   "scripts": {

@@ -12,6 +12,54 @@ const Sentry = require('@sentry/electron/main');
 const { machineIdSync } = require('node-machine-id');
 const { uploadViaPresignedSas, abortDirectUpload, FATAL_HTTP_STATUSES } = require('./upload-direct');
 
+// === Rebrand userData migration ("Suisse Notes" → "Suisse Meets") ===
+// Electron derives userData from productName, so the rebrand silently moves it
+// from <appData>/Suisse Notes to <appData>/Suisse Meets. Recordings, auth
+// session, recording history, and crash-recovery state all live there — on the
+// first launch after the update, move the old directory to the new location.
+// Must run before ANYTHING touches userData (Sentry/crashpad, electron-store,
+// electron-log, single-instance lock), hence synchronous at module top.
+(function migrateUserDataAcrossRebrand() {
+  // E2E harness runs pin their own isolated userData (see the E2E hooks block
+  // below) — a test run must never touch, let alone rename, the real profile.
+  if (process.env.SUISSE_TEST_USERDATA) return;
+  const pinUserData = (dir) => {
+    app.setPath('userData', dir);
+    // sessionData (Chromium profile: Local Storage, IndexedDB) follows userData
+    // by default, but pin it explicitly so renderer storage never splits off.
+    try { app.setPath('sessionData', dir); } catch { /* pre-22 Electron: sessionData IS userData */ }
+  };
+  try {
+    const oldDir = path.join(app.getPath('appData'), 'Suisse Notes');
+    const newDir = app.getPath('userData'); // <appData>/Suisse Meets
+    if (!fs.existsSync(oldDir) || path.resolve(oldDir) === path.resolve(newDir)) return;
+    if (fs.existsSync(newDir)) {
+      // Adopt the new dir only if it's still empty (e.g. a bare folder Chromium
+      // left behind); anything else is real post-rename data — never merge,
+      // never delete. Fall back to the old dir so no recording is stranded.
+      let entries = null;
+      try { entries = fs.readdirSync(newDir); } catch { /* unreadable → treat as non-empty */ }
+      if (entries && entries.length === 0) {
+        fs.rmdirSync(newDir);
+      } else {
+        pinUserData(oldDir);
+        return;
+      }
+    }
+    try {
+      fs.renameSync(oldDir, newDir); // atomic on the same volume (appData is)
+    } catch {
+      // Rename blocked (old version still running, AV/backup holding a lock):
+      // keep using the old path this launch; the rename retries on next start.
+      // If the blocker is a still-running old instance, the single-instance
+      // lock lives in that same dir, so this launch exits gracefully anyway.
+      pinUserData(oldDir);
+    }
+  } catch {
+    // Never block startup over migration — Electron defaults still work.
+  }
+})();
+
 // Trust the OS certificate store from the main process. Must run before any
 // outbound HTTPS (auto-update, uploads, Sentry) so corporate / TLS-inspection
 // roots are honoured. See os-ca.js for the full rationale.
@@ -1242,7 +1290,7 @@ function createRecordingTray() {
       tray = new Tray(icon);
     }
 
-    tray.setToolTip('Suisse Notes - Recording...');
+    tray.setToolTip('Suisse Meets - Recording...');
 
     // Context menu for tray
     const contextMenu = Menu.buildFromTemplate([
@@ -1277,7 +1325,7 @@ function createRecordingTray() {
       if (tray && recordingStartTime) {
         const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
         const duration = formatDuration(elapsed);
-        tray.setToolTip(`Suisse Notes - Recording: ${duration}`);
+        tray.setToolTip(`Suisse Meets - Recording: ${duration}`);
       }
     }, 1000);
 
@@ -1398,7 +1446,9 @@ function createWindow() {
 // App ready
 app.whenReady().then(() => {
   // Set the App User Model ID for Windows notifications
-  // This ensures notifications show "Suisse Notes" instead of "electron.app.electron"
+  // This ensures notifications show "Suisse Meets" instead of "electron.app.electron".
+  // The AUMID must keep matching appId (com.suisse-notes.desktop) — it is an
+  // identifier, not a display string, and changing it breaks the NSIS shortcut link.
   if (process.platform === 'win32') {
     app.setAppUserModelId('com.suisse-notes.desktop');
   }
@@ -1650,7 +1700,7 @@ app.whenReady().then(() => {
     dialog.showMessageBox(mainWindow, {
       type: 'info',
       title: 'Move to Applications',
-      message: 'Suisse Notes works best from the Applications folder.',
+      message: 'Suisse Meets works best from the Applications folder.',
       detail: 'Move it there now so updates install automatically and everything runs smoothly.',
       buttons: ['Move to Applications', 'Not Now'],
       defaultId: 0
@@ -1826,7 +1876,7 @@ autoUpdater.on('error', (err) => {
       dialog.showMessageBox(mainWindow, {
         type: 'info',
         title: 'Move to Applications',
-        message: 'Suisse Notes works best from the Applications folder.',
+        message: 'Suisse Meets works best from the Applications folder.',
         detail: 'Move it there now so updates install automatically and everything runs smoothly.',
         buttons: ['Move to Applications', 'Not Now'],
         defaultId: 0
@@ -1949,7 +1999,7 @@ ipcMain.handle('auth:login', async (event, email, password) => {
       // Server responded with error
       errorMessage = error.response.data?.error || error.response.data?.message || `Server error: ${error.response.status}`;
     } else if (error.code === 'ECONNREFUSED') {
-      errorMessage = 'Could not connect to Suisse Notes server';
+      errorMessage = 'Could not connect to Suisse Meets server';
     } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
       errorMessage = 'Connection timed out. Please check your internet connection.';
     } else if (error.code === 'ENOTFOUND') {
@@ -2022,7 +2072,7 @@ ipcMain.handle('auth:register', async (event, email, password, name) => {
         errorMessage = error.response.data?.error || `Server error: ${error.response.status}`;
       }
     } else if (error.code === 'ECONNREFUSED') {
-      errorMessage = 'Could not connect to Suisse Notes server';
+      errorMessage = 'Could not connect to Suisse Meets server';
     } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
       errorMessage = 'Connection timed out. Please check your internet connection.';
     } else if (error.code === 'ENOTFOUND') {
@@ -5012,7 +5062,7 @@ ipcMain.handle('app:getUserDataPath', () => {
 
 // Open external URL in default browser
 // Security: Only allow specific trusted domains to prevent malicious URL opening
-const ALLOWED_EXTERNAL_DOMAINS = ['app.suisse-notes.ch', 'suisse-notes.ch', 'suisse-ai.ch', 'suisse-it.ch'];
+const ALLOWED_EXTERNAL_DOMAINS = ['app.suisse-notes.ch', 'suisse-notes.ch', 'app.suisse-meets.ch', 'suisse-meets.ch', 'suisse-ai.ch', 'suisse-it.ch'];
 
 ipcMain.handle('shell:openExternal', async (event, url) => {
   try {
