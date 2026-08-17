@@ -89,3 +89,12 @@ keystore.properties
 
 # Local-only build artifacts (AABs/APKs/DMGs) and internal planning docs
 artifacts/
+
+# Local-only working files (never commit: public repo + machine-local state)
+.claude/
+temp/
+.sentry-tmp/
+# LLM working guides contain internal infra details (IPs, ssh aliases) - keep out of the public repo
+CLAUDE.md
+AGENTS.md
+CLAUDE_CONTEXT.md
