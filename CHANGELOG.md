@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [4.6.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.8...v4.6.0) (2026-08-18)
+
+
+### Features
+
+* **rebrand:** rename product to Suisse Meets across desktop, iOS, and Android ([dd25077](https://github.com/xicoarm/suisse-notes-desktop/commit/dd250770a68443200069eeb5aa1ab121fe1414f1))
+* **rebrand:** Suisse Meets branding on mobile and in-app surfaces ([de808e8](https://github.com/xicoarm/suisse-notes-desktop/commit/de808e8760b18cb425600097aea1a16cd6f33e8f))
+* **rebrand:** Suisse Meets on desktop — identity-pinned, new logo everywhere ([89052ca](https://github.com/xicoarm/suisse-notes-desktop/commit/89052ca28f005b98ce8242b62c27b2c27676a586))
+
+
+### Bug Fixes
+
+* **ble:** stable recordId per device file — stop duplicate meetings on re-sync ([4656d8c](https://github.com/xicoarm/suisse-notes-desktop/commit/4656d8c8a9e13aa1f0c409caced6d1ad33d236b1))
+* **build:** embed the app icon + metadata into the Windows executable ([0ed92c5](https://github.com/xicoarm/suisse-notes-desktop/commit/0ed92c57f12937d42500c6ef059672bfb9d5ddc1))
+
 ### [4.5.8](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.7...v4.5.8) (2026-08-16)
 
 
