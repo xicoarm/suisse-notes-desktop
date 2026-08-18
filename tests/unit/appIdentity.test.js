@@ -18,10 +18,11 @@ const {
 // every macOS user is force logged out. These tests pin that contract.
 // ---------------------------------------------------------------------------
 
-function fakeApp({ appDataDir = 'C:\\Users\\u\\AppData\\Roaming', sessionDataThrows = false } = {}) {
+function fakeApp({ appDataDir = 'C:\\Users\\u\\AppData\\Roaming', sessionDataThrows = false, isPackaged = false } = {}) {
   const calls = { setName: [], setPath: [] };
   return {
     calls,
+    isPackaged,
     setName(n) { calls.setName.push(n); },
     getPath(key) {
       if (key === 'appData') return appDataDir;
@@ -71,12 +72,27 @@ describe('app-identity: machine identity survives the rebrand', () => {
     expect(app.calls.setPath).toEqual([['userData', dir]]);
   });
 
-  it('honors SUISSE_TEST_USERDATA from the environment', () => {
-    const app = fakeApp();
+  it('honors SUISSE_TEST_USERDATA in unpackaged (dev/harness) runs', () => {
+    const app = fakeApp({ isPackaged: false });
     const dir = pinAppIdentity(app, { SUISSE_TEST_USERDATA: 'X:\\e2e\\profile' });
     expect(dir).toBe('X:\\e2e\\profile');
     expect(app.calls.setPath[0]).toEqual(['userData', 'X:\\e2e\\profile']);
     // Name is still pinned even under test — safeStorage behavior must match prod.
     expect(app.calls.setName).toEqual([INTERNAL_APP_NAME]);
+  });
+
+  it('IGNORES SUISSE_TEST_USERDATA in a plain packaged launch (no E2E gate)', () => {
+    const app = fakeApp({ isPackaged: true });
+    const dir = pinAppIdentity(app, { SUISSE_TEST_USERDATA: 'X:\\evil\\redirect' });
+    expect(dir).toBe(path.join('C:\\Users\\u\\AppData\\Roaming', INTERNAL_APP_NAME));
+  });
+
+  it('honors SUISSE_TEST_USERDATA in a packaged run WITH the E2E gate open', () => {
+    const app = fakeApp({ isPackaged: true });
+    const dir = pinAppIdentity(app, {
+      SUISSE_TEST_USERDATA: 'X:\\e2e\\profile',
+      SUISSE_E2E_HOOKS: '1',
+    });
+    expect(dir).toBe('X:\\e2e\\profile');
   });
 });

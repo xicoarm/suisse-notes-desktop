@@ -156,8 +156,13 @@ export default function (ctx) {
           target: 'nsis',
           icon: 'src-electron/icons/icon.ico',
           publisherName: 'Suisse IT GmbH',
-          // Signing handled post-build by SSL.com eSigner in CI
-          signAndEditExecutable: false
+          // MUST stay true: this flag also gates the rcedit step that embeds
+          // the icon + version metadata into the exe. With it false, every
+          // build shipped with Electron's default atom icon on the executable
+          // (and "Electron" file properties). No signing happens here anyway —
+          // CI builds with -P never and no certs; SSL.com eSigner signs the
+          // finished installer afterwards, so edit-then-sign is the right order.
+          signAndEditExecutable: true
         },
         nsis: {
           oneClick: true,  // Silent auto-updates (no wizard prompts)

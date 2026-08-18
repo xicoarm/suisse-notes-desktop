@@ -54,9 +54,14 @@ function pinAppIdentity(app, env = process.env) {
   // paths so nothing re-derives from the display name in between.
   app.setName(INTERNAL_APP_NAME);
 
+  // SUISSE_TEST_USERDATA is honored under the SAME gate as the E2E hooks
+  // block: never in a plain packaged production launch. Keeps the pre-rebrand
+  // guarantee that an env var can't redirect a customer install's profile.
+  const testOverrideAllowed = !app.isPackaged || env.SUISSE_E2E_HOOKS === '1';
+
   const dir = resolveUserDataDir({
     appDataDir: app.getPath('appData'),
-    testUserDataDir: env.SUISSE_TEST_USERDATA,
+    testUserDataDir: testOverrideAllowed ? env.SUISSE_TEST_USERDATA : undefined,
   });
 
   app.setPath('userData', dir);

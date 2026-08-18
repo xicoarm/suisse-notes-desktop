@@ -96,7 +96,7 @@ hiccuped. This is the "record first, reconcile later" invariant.
 | B1 | Start/stop | Pick mic → Record 2 min speech → Stop | File finalizes; appears in History; uploads | `Meeting` row created; `durationSeconds ≈ 120` |
 | B2 | Pause/resume | Record → Pause 20s → Resume → Stop | Single continuous file; paused span excluded; no gap/dup at seam | transcript continuous, no repeated words at seam |
 | B3 | Mic selection | Switch mic in dropdown before recording | Chosen device is captured (verify label in `main.log`) | — |
-| B4 | Chunk persistence | Record 1 min; watch `%APPDATA%\Suisse Meets\recordings\` (pre-rebrand installs migrate from `%APPDATA%\Suisse Notes\` on first launch) | New chunk file every ~3s (fsync per chunk) | files grow monotonically |
+| B4 | Chunk persistence | Record 1 min; watch `%APPDATA%\Suisse Notes\recordings\` (the folder name is a pinned MACHINE identifier — the rebranded app keeps it forever via src-electron/app-identity.js; there is NO migration) | New chunk file every ~3s (fsync per chunk) | files grow monotonically |
 | B5 | Long meeting | Record ≥60 min (or trust s7 endurance) | No drift between wall-clock and audio length; no memory growth | `durationSeconds` matches audio |
 
 ### C. Dead-mic / Bluetooth failover (the Angela class — MSIG)
@@ -246,7 +246,7 @@ curl -s -H "Authorization: Bearer <token>" https://app.suisse-notes.ch/api/custo
 curl -s -H "Authorization: Bearer <token>" https://app.suisse-notes.ch/api/custom-spelling/user | jq
 ```
 
-Log greps (client-side, `%APPDATA%\Suisse Meets\logs\main.log`):
+Log greps (client-side, `%APPDATA%\Suisse Notes\logs\main.log` — pinned machine identifier, see app-identity.js):
 - MSIG: `grep -E 'ZERO_SIGNAL|LOW_LEVEL|switch|rebind' main.log`
 - Upload: `grep -E 'upload|SAS|legacy|407|terminal' main.log`
 - System audio: `grep -E 'AudioTee|amix|loopback|desktopCapturer' main.log`
