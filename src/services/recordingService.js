@@ -53,6 +53,7 @@ let durationInterval = null;
 let levelInterval = null;
 let micHealthInterval = null;
 let stateVerificationInterval = null;
+let startRecordingPromise = null;
 
 // System audio state (persists across navigation)
 let systemAudioActive = false;
@@ -1301,6 +1302,22 @@ export async function startRecording(options = {}) {
     return { success: false, error: 'Recording already in progress' };
   }
 
+  // React/Vue state updates are async, and the MediaRecorder is only assigned
+  // after permissions + stream setup. Coalesce rapid double-taps during that
+  // window so only one capture pipeline can be created.
+  if (startRecordingPromise) {
+    return startRecordingPromise;
+  }
+
+  startRecordingPromise = startRecordingInternal(options);
+  try {
+    return await startRecordingPromise;
+  } finally {
+    startRecordingPromise = null;
+  }
+}
+
+async function startRecordingInternal(options = {}) {
   const {
     recordingStore,
     authStore,
@@ -2187,4 +2204,3 @@ export function cleanup(stopSystemAudio) {
 
   emit('stateChange', { isRecording: false, isPaused: false });
 }
-

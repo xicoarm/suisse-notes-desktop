@@ -37,6 +37,8 @@ class MockAudioContext {
     this.state = 'running';
     return Promise.resolve();
   }
+
+  addEventListener() {}
 }
 
 class MockMediaRecorder {
@@ -75,6 +77,20 @@ class MockMediaRecorder {
 
 MockMediaRecorder.isTypeSupported = () => true;
 
+class MockMediaStream {
+  constructor(track) {
+    this.track = track;
+  }
+
+  getAudioTracks() {
+    return [this.track];
+  }
+
+  getTracks() {
+    return [this.track];
+  }
+}
+
 function createMockRecordingStore() {
   return {
     startRecording: vi.fn().mockResolvedValue({ success: true }),
@@ -83,6 +99,7 @@ function createMockRecordingStore() {
     setError: vi.fn(),
     updateDuration: vi.fn(),
     handleRecordingDeath: vi.fn(),
+    reset: vi.fn(),
     chunkSaveErrors: 0,
     chunkSaveErrorWarning: false,
     isRecording: false,
@@ -105,10 +122,7 @@ function createTrack(settings = {}) {
 }
 
 function createStream(track) {
-  return {
-    getAudioTracks: () => [track],
-    getTracks: () => [track]
-  };
+  return new MockMediaStream(track);
 }
 
 describe('recordingService microphone health', () => {
@@ -116,6 +130,7 @@ describe('recordingService microphone health', () => {
     vi.clearAllMocks();
 
     global.MediaRecorder = MockMediaRecorder;
+    global.MediaStream = MockMediaStream;
     global.window.AudioContext = MockAudioContext;
     global.window.webkitAudioContext = MockAudioContext;
 
@@ -187,5 +202,38 @@ describe('recordingService microphone health', () => {
     expect(health.micActive).toBe(true);
     expect(health.inputDeviceId).toBe('selected-mic-id');
     expect(health.actualDeviceId).toBe('actual-mic-id');
+  });
+
+  it('coalesces concurrent start requests before MediaRecorder exists', async () => {
+    const recordingStore = createMockRecordingStore();
+    const micTrack = createTrack({ deviceId: 'race-mic-id' });
+    const micStream = createStream(micTrack);
+    const pendingMicRequests = [];
+
+    global.navigator.mediaDevices.getUserMedia.mockImplementation(() => (
+      new Promise((resolve) => pendingMicRequests.push(resolve))
+    ));
+
+    const options = {
+      recordingStore,
+      authStore: null,
+      deviceId: 'race-mic-id',
+      systemAudioEnabled: false,
+      captureSystemAudio: null,
+      isAutoSplitting: { value: false },
+      maxRecordingSeconds: null
+    };
+
+    const firstStart = recordingService.startRecording(options);
+    const secondStart = recordingService.startRecording(options);
+
+    pendingMicRequests.forEach((resolve) => resolve(micStream));
+
+    const [firstResult, secondResult] = await Promise.all([firstStart, secondStart]);
+
+    expect(firstResult.success).toBe(true);
+    expect(secondResult.success).toBe(true);
+    expect(global.navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
+    expect(recordingStore.startRecording).toHaveBeenCalledTimes(1);
   });
 });

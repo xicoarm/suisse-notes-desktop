@@ -26,8 +26,6 @@ import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.annotation.Permission
 import com.getcapacitor.annotation.PermissionCallback
 import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.nio.ByteBuffer
 
 /**
@@ -51,9 +49,17 @@ class BackgroundRecordingPlugin : Plugin() {
 
     companion object {
         private const val TAG = "BackgroundRecording"
+        private const val DEFAULT_AUDIO_FRAME_DURATION_US = 20_000L
+        private const val MAX_REASONABLE_SAMPLE_DELTA_US = 1_000_000L
+        private const val SAMPLE_BUFFER_SIZE = 1024 * 1024
     }
 
     private var pendingCall: PluginCall? = null
+
+    private data class WebMRemuxResult(
+        val chunkCount: Int,
+        val durationUs: Long
+    )
 
     // Broadcast receiver for recording death events from the foreground service
     private val recordingDeadReceiver = object : BroadcastReceiver() {
@@ -332,10 +338,9 @@ class BackgroundRecordingPlugin : Plugin() {
         val isWebM = chunkFiles.first().extension == "webm"
 
         if (isWebM) {
-            // WebM chunks: simple binary concatenation
-            // WebM chunks from the same MediaRecorder session can be concatenated because
-            // the first chunk contains the WebM/EBML header and subsequent chunks contain
-            // Cluster elements that append naturally.
+            // WebM chunks from Android/Chromium can contain fresh EBML headers and
+            // timestamps starting at zero. Binary concatenation creates malformed files
+            // with repeated audio, so remux samples onto one monotonic timeline.
             val outputFile = File(documentsDir, "recordings/$recordId/combined.webm")
 
             if (outputFile.exists()) {
@@ -344,33 +349,18 @@ class BackgroundRecordingPlugin : Plugin() {
             outputFile.parentFile?.mkdirs()
 
             try {
-                var loadedChunkCount = 0
-                FileOutputStream(outputFile).use { out ->
-                    for (chunk in chunkFiles) {
-                        FileInputStream(chunk).use { input ->
-                            input.copyTo(out, bufferSize = 8192)
-                        }
-                        loadedChunkCount++
-                    }
-                }
-
-                if (loadedChunkCount == 0) {
-                    outputFile.delete()
-                    call.reject("Could not read any audio chunks")
-                    return
-                }
+                val remuxResult = remuxWebMChunks(chunkFiles, outputFile)
 
                 val fileSize = outputFile.length()
                 val relativePath = "recordings/$recordId/combined.webm"
-                // Estimate duration from chunk count (WebM chunks are ~3s each from MediaRecorder)
-                val estimatedDuration = loadedChunkCount * 3.0
+                val durationSeconds = remuxResult.durationUs / 1_000_000.0
 
                 val result = JSObject().apply {
                     put("success", true)
                     put("outputPath", relativePath)
                     put("fileSize", fileSize)
-                    put("chunkCount", loadedChunkCount)
-                    put("duration", estimatedDuration)
+                    put("chunkCount", remuxResult.chunkCount)
+                    put("duration", durationSeconds)
                 }
                 call.resolve(result)
 
@@ -491,6 +481,133 @@ class BackgroundRecordingPlugin : Plugin() {
                 if (outputFile.exists()) outputFile.delete()
                 Log.e(TAG, "Failed to combine chunks", e)
                 call.reject("Failed to combine chunks: ${e.message}")
+            }
+        }
+    }
+
+    private fun remuxWebMChunks(chunkFiles: List<File>, outputFile: File): WebMRemuxResult {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+            throw IllegalStateException("WebM remuxing requires Android 5.0 or newer")
+        }
+
+        var muxer: MediaMuxer? = null
+        var muxerStarted = false
+        var outputTrackIndex = -1
+        var loadedChunkCount = 0
+        var timeOffsetUs = 0L
+        var lastWrittenPtsUs = -1L
+        var frameDurationUs = DEFAULT_AUDIO_FRAME_DURATION_US
+        val buffer = ByteBuffer.allocate(SAMPLE_BUFFER_SIZE)
+        val bufferInfo = MediaCodec.BufferInfo()
+
+        try {
+            muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM)
+
+            for (chunkFile in chunkFiles) {
+                val extractor = MediaExtractor()
+                try {
+                    extractor.setDataSource(chunkFile.absolutePath)
+
+                    var audioTrackIdx = -1
+                    for (i in 0 until extractor.trackCount) {
+                        val format = extractor.getTrackFormat(i)
+                        val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+                        if (mime.startsWith("audio/")) {
+                            audioTrackIdx = i
+                            break
+                        }
+                    }
+
+                    if (audioTrackIdx < 0) {
+                        Log.w(TAG, "Skipping WebM chunk with no audio track: ${chunkFile.name}")
+                        continue
+                    }
+
+                    extractor.selectTrack(audioTrackIdx)
+                    val format = extractor.getTrackFormat(audioTrackIdx)
+
+                    if (!muxerStarted) {
+                        outputTrackIndex = muxer.addTrack(format)
+                        muxer.start()
+                        muxerStarted = true
+                    }
+
+                    var firstSampleTimeUs: Long? = null
+                    var previousSampleTimeUs = -1L
+                    var samplesWritten = 0
+
+                    while (true) {
+                        buffer.clear()
+                        val sampleSize = extractor.readSampleData(buffer, 0)
+                        if (sampleSize < 0) break
+
+                        var sampleTimeUs = extractor.sampleTime
+                        if (sampleTimeUs < 0) {
+                            sampleTimeUs = if (previousSampleTimeUs >= 0) {
+                                previousSampleTimeUs + frameDurationUs
+                            } else {
+                                0L
+                            }
+                        }
+
+                        if (firstSampleTimeUs == null) {
+                            firstSampleTimeUs = sampleTimeUs
+                        }
+
+                        if (previousSampleTimeUs >= 0) {
+                            val sampleDeltaUs = sampleTimeUs - previousSampleTimeUs
+                            if (sampleDeltaUs in 1 until MAX_REASONABLE_SAMPLE_DELTA_US) {
+                                frameDurationUs = sampleDeltaUs
+                            }
+                        }
+
+                        val chunkStartUs = firstSampleTimeUs ?: sampleTimeUs
+                        val normalizedPtsUs = (sampleTimeUs - chunkStartUs).coerceAtLeast(0L)
+                        var outputPtsUs = timeOffsetUs + normalizedPtsUs
+                        if (outputPtsUs <= lastWrittenPtsUs) {
+                            outputPtsUs = lastWrittenPtsUs + frameDurationUs
+                        }
+
+                        bufferInfo.set(0, sampleSize, outputPtsUs, extractor.sampleFlags)
+                        muxer.writeSampleData(outputTrackIndex, buffer, bufferInfo)
+
+                        lastWrittenPtsUs = outputPtsUs
+                        previousSampleTimeUs = sampleTimeUs
+                        samplesWritten++
+                        extractor.advance()
+                    }
+
+                    if (samplesWritten > 0) {
+                        loadedChunkCount++
+                        timeOffsetUs = lastWrittenPtsUs + frameDurationUs
+                    } else {
+                        Log.w(TAG, "Skipping empty WebM chunk: ${chunkFile.name}")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error remuxing WebM chunk ${chunkFile.name}: ${e.message}")
+                    continue
+                } finally {
+                    extractor.release()
+                }
+            }
+
+            if (!muxerStarted || loadedChunkCount == 0) {
+                throw IllegalStateException("Could not read any audio chunks")
+            }
+
+            muxer.stop()
+            muxer.release()
+            muxer = null
+
+            return WebMRemuxResult(
+                chunkCount = loadedChunkCount,
+                durationUs = (lastWrittenPtsUs + frameDurationUs).coerceAtLeast(0L)
+            )
+        } finally {
+            try {
+                muxer?.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to release WebM muxer: ${e.message}")
             }
         }
     }
