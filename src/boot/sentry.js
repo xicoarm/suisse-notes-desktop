@@ -153,7 +153,7 @@ async function initElectronRenderer(app, router) {
           maskAllText: false,
           maskAllInputs: true,
           blockAllMedia: false,
-          networkDetailAllowUrls: [/suisse-notes\.ch/],
+          networkDetailAllowUrls: [/suisse-(notes|meets)\.ch/],
           networkCaptureBodies: false,
         }),
       ],
