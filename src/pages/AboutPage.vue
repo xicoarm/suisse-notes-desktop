@@ -290,7 +290,7 @@ const goToUpload = () => {
 };
 
 const openCalendarSettings = async () => {
-  const url = 'https://app.suisse-notes.ch/settings/integrations';
+  const url = 'https://app.suisse-meets.ch/settings/integrations';
 
   if (isElectron()) {
     let finalUrl = url;

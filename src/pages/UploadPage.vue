@@ -473,7 +473,7 @@
               <span>{{ $t('transcriptUrlLabel') }}</span>
             </div>
             <div class="url-value">
-              <code>https://app.suisse-notes.ch/meeting/audio/{{ currentAudioFileId }}</code>
+              <code>https://app.suisse-meets.ch/meeting/audio/{{ currentAudioFileId }}</code>
               <q-btn
                 flat
                 round

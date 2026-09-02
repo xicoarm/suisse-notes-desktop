@@ -21,7 +21,7 @@ export function useShareLink() {
   const generateTranscriptUrl = async (audioFileId) => {
     if (!audioFileId) return '';
 
-    let url = `https://app.suisse-notes.ch/meeting/audio/${audioFileId}`;
+    let url = `https://app.suisse-meets.ch/meeting/audio/${audioFileId}`;
 
     if (isElectron()) {
       try {

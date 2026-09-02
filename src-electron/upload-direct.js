@@ -259,7 +259,7 @@ function probeDurationSeconds(ffmpeg, filePath) {
  * Main entry point.
  *
  * @param {object} opts
- * @param {string} opts.apiBaseUrl - e.g. https://app.suisse-notes.ch
+ * @param {string} opts.apiBaseUrl - e.g. https://app.suisse-meets.ch
  * @param {string} opts.authToken
  * @param {string} opts.recordId
  * @param {string} opts.filePath
