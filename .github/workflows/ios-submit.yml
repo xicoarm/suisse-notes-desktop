@@ -1,0 +1,54 @@
+name: iOS Submit to App Store
+
+# Creates the App Store version, attaches an already-uploaded TestFlight build,
+# sets the release notes and submits for review — using the App Store Connect
+# API credentials that already live in this repo's secrets. No browser needed.
+#
+# It never touches the store listing (name, descriptions, screenshots, pricing).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Marketing version, must match MARKETING_VERSION (e.g. 3.9.36)'
+        required: true
+        type: string
+      build:
+        description: 'CFBundleVersion of the TestFlight build (e.g. 2609021248)'
+        required: true
+        type: string
+      submit:
+        description: 'Actually submit for review (unchecked = prepare only)'
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Write release notes
+        run: |
+          cat > /tmp/release-notes.txt <<'NOTES'
+          Die App verbindet sich neu mit app.suisse-meets.ch. Anmeldung mit Google und Microsoft, Aufnahme, Upload und Transkription funktionieren unverändert. Bereits geteilte Links und ältere App-Versionen bleiben weiterhin gültig.
+          NOTES
+          cat /tmp/release-notes.txt
+
+      - name: Create version, attach build, submit
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          ASC_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+        run: |
+          node scripts/asc-submit.js \
+            --app 6758680707 \
+            --version "${{ inputs.version }}" \
+            --build "${{ inputs.build }}" \
+            --notes-file /tmp/release-notes.txt \
+            ${{ inputs.submit && '--submit' || '' }}
