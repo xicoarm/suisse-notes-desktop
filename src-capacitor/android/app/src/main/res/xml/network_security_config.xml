@@ -10,6 +10,8 @@
 
     <!-- Production API - HTTPS only -->
     <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">app.suisse-meets.ch</domain>
+        <domain includeSubdomains="true">suisse-meets.ch</domain>
         <domain includeSubdomains="true">app.suisse-notes.ch</domain>
         <domain includeSubdomains="true">suisse-notes.ch</domain>
         <trust-anchors>
