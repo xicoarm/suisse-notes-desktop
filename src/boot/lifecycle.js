@@ -34,7 +34,7 @@ let onCriticalBattery = null;
  * Accepted shapes:
  *   suissenotes://auth/callback?token=<jwt>&user=<base64url-json>     (Phase 1, custom scheme)
  *   suissenotes://auth/callback?error=<message>
- *   https://app.suisse-notes.ch/sso/handoff?...                       (Phase 2, Universal Link / App Link — same params)
+ *   https://app.suisse-meets.ch/sso/handoff?...                       (Phase 2, Universal Link / App Link — same params)
  * Returns: { token, user } | { error } | null
  */
 function parseSSOCallbackUrl(rawUrl) {
@@ -50,7 +50,7 @@ function parseSSOCallbackUrl(rawUrl) {
     && parsed.host === 'auth'
     && parsed.pathname.replace(/\/$/, '') === '/callback';
   const isUniversalLink = parsed.protocol === 'https:'
-    && parsed.host === 'app.suisse-notes.ch'
+    && (parsed.host === 'app.suisse-meets.ch' || parsed.host === 'app.suisse-notes.ch')
     && parsed.pathname.startsWith('/sso/');
   if (!isCustomScheme && !isUniversalLink) return null;
 

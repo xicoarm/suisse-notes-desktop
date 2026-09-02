@@ -22,7 +22,7 @@ import { captureMessage } from '../boot/sentry';
 const SSOAuth = registerPlugin('SSOAuth');
 
 /**
- * Parse a suissenotes://auth/callback URL or https://app.suisse-notes.ch/sso/...
+ * Parse a suissenotes://auth/callback URL or https://app.suisse-meets.ch/sso/...
  * Universal Link into { token, user } | { error } | null.
  * Mirrors the implementation in src/boot/lifecycle.js — kept in sync.
  */
@@ -35,7 +35,7 @@ export function parseSSOCallbackUrl(rawUrl) {
     && parsed.host === 'auth'
     && parsed.pathname.replace(/\/$/, '') === '/callback';
   const isUniversalLink = parsed.protocol === 'https:'
-    && parsed.host === 'app.suisse-notes.ch'
+    && (parsed.host === 'app.suisse-meets.ch' || parsed.host === 'app.suisse-notes.ch')
     && parsed.pathname.startsWith('/sso/');
   if (!isCustomScheme && !isUniversalLink) return null;
 

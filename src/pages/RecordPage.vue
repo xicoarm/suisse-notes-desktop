@@ -769,7 +769,7 @@
 
             <!-- URL Display with Copy -->
             <div class="url-compact">
-              <code>https://app.suisse-notes.ch/meeting/audio/{{ currentAudioFileId }}</code>
+              <code>https://app.suisse-meets.ch/meeting/audio/{{ currentAudioFileId }}</code>
               <q-btn
                 flat
                 dense
@@ -2063,7 +2063,7 @@ const startAutoUpload = async () => {
 const handleUploadError = async (errorMessage, ownerUserId = null) => {
   // Make "Insufficient minutes" error more user-friendly
   if (errorMessage && errorMessage.includes('Insufficient minutes')) {
-    recordingStore.uploadError ='No recording minutes remaining. Please upgrade your plan or purchase more minutes at app.suisse-notes.ch';
+    recordingStore.uploadError ='No recording minutes remaining. Please upgrade your plan or purchase more minutes at app.suisse-meets.ch';
     // Refresh minutes display
     const authStore = (await import('../stores/auth')).useAuthStore();
     const { useMinutesStore } = await import('../stores/minutes');

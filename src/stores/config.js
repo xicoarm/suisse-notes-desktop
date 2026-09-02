@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { isElectron } from '../utils/platform';
 
 // Hardcoded production URL - no user configuration
-const API_URL = 'https://app.suisse-notes.ch';
+const API_URL = 'https://app.suisse-meets.ch';
 
 export const useConfigStore = defineStore('config', {
   state: () => ({

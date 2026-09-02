@@ -19,7 +19,7 @@ export const Environments = {
 
 // Environment-specific API URLs
 const API_URLS = {
-  [Environments.PRODUCTION]: 'https://app.suisse-notes.ch',
+  [Environments.PRODUCTION]: 'https://app.suisse-meets.ch',
   [Environments.STAGING]: 'https://staging.suisse-notes.ch',
   [Environments.DEVELOPMENT]: 'http://localhost:3000'
 };

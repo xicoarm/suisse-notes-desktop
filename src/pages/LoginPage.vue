@@ -224,13 +224,13 @@
           >suisse-it.ch</a>
           <span class="link-divider">•</span>
           <a
-            href="https://app.suisse-notes.ch/privacy"
+            href="https://app.suisse-meets.ch/privacy"
             target="_blank"
             rel="noopener"
           >{{ $t('privacy') }}</a>
           <span class="link-divider">•</span>
           <a
-            href="https://app.suisse-notes.ch/terms"
+            href="https://app.suisse-meets.ch/terms"
             target="_blank"
             rel="noopener"
           >{{ $t('terms') }}</a>
@@ -430,7 +430,7 @@ const handleMicrosoftLogin = () => startSSOFlow('microsoft');
 const handleGoogleLogin = () => startSSOFlow('google');
 
 const openForgotPassword = async () => {
-  const url = 'https://app.suisse-notes.ch/forgot-password';
+  const url = 'https://app.suisse-meets.ch/forgot-password';
 
   if (isElectron() && window.electronAPI?.shell?.openExternal) {
     window.electronAPI.shell.openExternal(url);
