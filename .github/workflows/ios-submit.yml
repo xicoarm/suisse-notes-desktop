@@ -45,6 +45,8 @@ jobs:
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
           ASC_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+          ASC_DEMO_USER: ${{ secrets.ASC_DEMO_USER }}
+          ASC_DEMO_PASS: ${{ secrets.ASC_DEMO_PASS }}
         run: |
           node scripts/asc-submit.js \
             --app 6758680707 \

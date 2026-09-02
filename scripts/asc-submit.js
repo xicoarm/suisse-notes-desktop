@@ -154,6 +154,29 @@ async function main() {
     }
   }
 
+  // ---- 5b. App Review demo credentials (the field that got Play rejected) --
+  {
+    const det = await api('GET', `/v1/appStoreVersions/${versionId}/appStoreReviewDetail`).catch(() => null);
+    if (det && det.data) {
+      const a = det.data.attributes || {};
+      console.log(`review demo account: required=${a.demoAccountRequired} name="${a.demoAccountName || ''}"`);
+      const wantName = process.env.ASC_DEMO_USER;
+      const wantPass = process.env.ASC_DEMO_PASS;
+      if (wantName && wantPass && (a.demoAccountName !== wantName || !a.demoAccountRequired)) {
+        await api('PATCH', `/v1/appStoreReviewDetails/${det.data.id}`, {
+          data: {
+            type: 'appStoreReviewDetails',
+            id: det.data.id,
+            attributes: { demoAccountRequired: true, demoAccountName: wantName, demoAccountPassword: wantPass },
+          },
+        });
+        console.log(`review demo account CORRECTED to ${wantName}`);
+      }
+    } else {
+      console.log('no appStoreReviewDetail on this version yet');
+    }
+  }
+
   if (!doSubmit) {
     console.log('\nPREPARED but NOT submitted (pass --submit to send for review).');
     return;
