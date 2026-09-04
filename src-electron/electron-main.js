@@ -88,6 +88,7 @@ function isTransientNetworkError(err, message) {
 }
 
 Sentry.init({
+  enabled: process.env.SUISSE_E2E_HOOKS !== '1',
   dsn: 'https://185912b1585eb5138079ae189a6d41ec@o4510659364716544.ingest.de.sentry.io/4510659366748240',
   // E2E test runs drive the *packaged* app with SUISSE_E2E_HOOKS=1. Without this
   // guard those runs would tag events `production` and masquerade as real-user
@@ -323,6 +324,22 @@ let skipAutoUpdate = false;
 // env var, so real users are unaffected; and the hooks themselves are benign
 // (feed a WAV as the mic, isolate userData, open a local CDP port).
 if (!app.isPackaged || process.env.SUISSE_E2E_HOOKS === '1') {
+  if (process.env.SUISSE_TEST_NETWORK_ISOLATION === '1') {
+    const loopback = value => {
+      try { return ['localhost', '127.0.0.1', '[::1]'].includes(new URL(value).hostname); }
+      catch (_) { return false; }
+    };
+    if (process.env.SUISSE_E2E_HOOKS !== '1' || !process.env.SUISSE_TEST_USERDATA || !loopback(process.env.API_BASE_URL)) {
+      throw new Error('Synthetic network isolation requires a test profile and loopback API');
+    }
+    app.on('session-created', testSession => {
+      testSession.webRequest.onBeforeRequest((details, callback) => {
+        const remote = /^(https?|wss?):/.test(details.url) && !loopback(details.url);
+        if (remote) console.warn('Synthetic test blocked remote request:', new URL(details.url).origin);
+        callback({ cancel: remote });
+      });
+    });
+  }
   if (process.env.SUISSE_TEST_USERDATA) {
     app.setPath('userData', process.env.SUISSE_TEST_USERDATA);
   }

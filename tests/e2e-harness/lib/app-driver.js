@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const { spawn, execSync } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
@@ -38,7 +38,7 @@ function installSyntheticCaptureProbe() {
     try {
       if (!observed.has(this)) {
         observed.add(this);
-        const entry = { id: ++nextId, ref: new WeakRef(this), events: 0, bytes: 0, emptyEvents: 0, firstDataAt: null, lastDataAt: null };
+        const entry = { id: ++nextId, ref: new WeakRef(this), events: 0, bytes: 0, emptyEvents: 0, firstDataAt: null, lastDataAt: null, startedAt: null, stoppedAt: null };
         entries.set(entry.id, entry);
         // Bound diagnostic bookkeeping during extended/multi-recording runs.
         if (entries.size > 20) entries.delete(entries.keys().next().value);
@@ -46,6 +46,8 @@ function installSyntheticCaptureProbe() {
           this.addEventListener(type, event => {
             try {
               const now = performance.now();
+              if (type === 'start') entry.startedAt = event.timeStamp;
+              if (type === 'stop') entry.stoppedAt = event.timeStamp;
               const size = type === 'dataavailable' ? event.data?.size || 0 : null;
               if (type === 'dataavailable') {
                 entry.events++; entry.bytes += size;
@@ -65,7 +67,7 @@ function installSyntheticCaptureProbe() {
     snapshot: () => ({ at: performance.now(), visibility: document.visibilityState, recorders: [...entries.values()].map(entry => {
       const recorder = entry.ref.deref();
       const counts = { id: entry.id, events: entry.events, bytes: entry.bytes, emptyEvents: entry.emptyEvents,
-        firstDataAt: entry.firstDataAt, lastDataAt: entry.lastDataAt };
+        firstDataAt: entry.firstDataAt, lastDataAt: entry.lastDataAt, startedAt: entry.startedAt, stoppedAt: entry.stoppedAt };
       return { ...counts, state: recorder?.state || 'released', tracks: recorder?.stream?.getAudioTracks().map(track => ({
         readyState: track.readyState, enabled: track.enabled, muted: track.muted,
       })) || [] };
@@ -91,6 +93,7 @@ class AppDriver {
     this.userDataDir = opts.userDataDir || path.join(WORK_DIR, 'userdata', opts.name || 'default');
     this.env = opts.env || {};                   // extra env (e.g. VITE_SUISSE_MAX_DURATION_SECONDS)
     this.packagedExe = opts.packagedExe || null; // drive the built .exe instead of quasar dev
+    this.appDir = opts.appDir || process.env.SUISSE_E2E_APP_DIR || null;
     this.proc = null;
     this.browser = null;
     this.page = null;
@@ -261,7 +264,7 @@ class AppDriver {
       SUISSE_TEST_USERDATA: this.userDataDir,
       SUISSE_TEST_CDP_PORT: String(this.cdpPort),
       ...(this.fakeAudioWav ? { SUISSE_TEST_FAKE_AUDIO: this.fakeAudioWav } : {}),
-      ...(packagedExe ? { SUISSE_E2E_HOOKS: '1' } : {}),
+      ...((packagedExe || this.fakeAudioWav || this.appDir) ? { SUISSE_E2E_HOOKS: '1' } : {}),
       ...this.env,
     };
 
@@ -269,12 +272,27 @@ class AppDriver {
     this.beginDiagnostics(env);
     // Diagnostics live outside userdata and survive both fresh profiles and
     // close({ keepProfile: false }). Every launch gets a distinct directory.
-    if (freshProfile) fs.rmSync(this.userDataDir, { recursive: true, force: true });
+    if (freshProfile && fs.existsSync(this.userDataDir)) {
+      // Keep every previous run, including failures, before starting afresh.
+      // Move only this verified test profile into a unique evidence directory.
+      const evidenceRoot = path.resolve(WORK_DIR, 'evidence');
+      fs.mkdirSync(evidenceRoot, { recursive: true });
+      const evidence = fs.mkdtempSync(path.join(evidenceRoot, path.basename(this.userDataDir) + '-'));
+      const destination = path.resolve(evidence, 'userdata');
+      if (!destination.startsWith(evidenceRoot + path.sep)) throw new Error('Invalid evidence path');
+      fs.renameSync(path.resolve(this.userDataDir), destination);
+      this.writeDiagnostic('driver', 'Previous profile preserved at ' + destination);
+    }
     fs.mkdirSync(this.userDataDir, { recursive: true });
 
-    if (packagedExe) {
+    const childOptions = { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' };
+    if (this.appDir) {
+      const appDirectory = path.resolve(this.appDir);
+      if (!fs.existsSync(path.join(appDirectory, 'package.json'))) throw new Error('Build the Electron app before using SUISSE_E2E_APP_DIR');
+      this.proc = spawn(require('electron'), [appDirectory], childOptions);
+    } else if (packagedExe) {
       // Spawn the packaged app directly (no shell, no dev server).
-      this.proc = spawn(packagedExe, [], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      this.proc = spawn(packagedExe, [], childOptions);
     } else {
       // shell:true — Node 20+ on Windows refuses to spawn .cmd shims directly
       // (CVE-2024-27980 hardening); the whole tree is killed via taskkill /T.
@@ -283,6 +301,8 @@ class AppDriver {
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: true,
+        windowsHide: true,
+        detached: process.platform !== 'win32',
       });
     }
     const captureOutput = channel => data => {
@@ -628,7 +648,10 @@ class AppDriver {
     try { this.browser?.disconnect(); } catch (e) { /* ignore */ }
     if (this.proc && !this.proc.killed) {
       // Kill the whole quasar/electron tree
-      try { execSync(`taskkill /pid ${this.proc.pid} /T /F`, { stdio: 'ignore' }); } catch (e) { /* already gone */ }
+      try {
+        if (process.platform === 'win32') execFileSync('taskkill', ['/pid', String(this.proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+        else process.kill(-this.proc.pid, 'SIGKILL'); // only our detached process group
+      } catch (e) { /* already gone */ }
     }
     this.proc = null;
     if (!keepProfile) fs.rmSync(this.userDataDir, { recursive: true, force: true });

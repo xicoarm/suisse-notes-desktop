@@ -756,6 +756,7 @@ const SCENARIOS = {
   's10-upload-custody': s10UploadCustody,
   's7-endurance': s7Endurance,
   's8-sysaudio': s8SysAudio,
+  's11-capture-qualification': async () => report('s11-capture-qualification', await require('./qualification').runCaptureQualification()),
 };
 
 (async () => {
