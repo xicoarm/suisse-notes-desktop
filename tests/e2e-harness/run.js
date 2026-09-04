@@ -759,6 +759,7 @@ const SCENARIOS = {
   's11-capture-qualification': async () => report('s11-capture-qualification', await require('./qualification').runCaptureQualification()),
   's12-device-qualification': async () => report('s12-device-qualification', await require('./device-qualification').runDeviceQualification()),
   's13-coded-endurance': async () => report('s13-coded-endurance', await require('./endurance-qualification').runCodedEndurance()),
+  's14-system-audio-qualification': async () => (await require('./windows-loopback-qualification').runSystemAudioQualification()).pass,
 };
 
 (async () => {
