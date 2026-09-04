@@ -9,9 +9,12 @@ const { spawn, execFileSync } = require('child_process');
 
 const repository = path.resolve(__dirname, '../../..');
 const work = path.join(repository, 'tests/e2e-harness/work');
-const diagnostics = path.join(work, 'ci');
 const bundle = path.join(repository, 'dist/electron/UnPackaged');
-const scenario = 's11-capture-qualification';
+const scenario = process.argv[2] || 's11-capture-qualification';
+if (!['s11-capture-qualification', 's12-device-qualification'].includes(scenario)) {
+  throw new Error('Unknown hosted qualification scenario');
+}
+const diagnostics = path.join(work, 'ci', scenario);
 const timeoutMs = 20 * 60 * 1000;
 fs.mkdirSync(diagnostics, { recursive: true });
 

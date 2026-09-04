@@ -1,6 +1,6 @@
 # Desktop audio reliability review — 4 September 2026
 
-Status: implementation and evidence are on local branch `fix/desktop-audio-reliability`; latest implementation commit `427a06a`, no release or production deployment. This is not a certification of lossless capture. Physical failure, forced shutdown, a disconnected microphone, and audio that never reaches the capture process cannot be repaired by software after the fact.
+Status: implementation and evidence are on review branch `fix/desktop-audio-reliability`, with [draft PR #4](https://github.com/xicoarm/suisse-notes-desktop/pull/4). No release or production deployment. This is not a certification of lossless capture. Physical failure, forced shutdown, a disconnected microphone, and audio that never reaches the capture process cannot be repaired by software after the fact.
 
 ## Scope and evidence
 
@@ -109,11 +109,78 @@ The Azure configuration was checked read-only through the backend’s configured
 6. **Durability has physical boundaries:** filesystem flush reduces crash loss but cannot guarantee a failing drive honors it. Windows Node does not expose directory fsync. A user-forced sleep/shutdown can override an idle-sleep blocker. Audio from a disconnected/muted source never reached the recorder. [Electron power blocker](https://www.electronjs.org/docs/latest/api/power-save-blocker), [power events](https://www.electronjs.org/docs/latest/api/power-monitor)
 7. **Unexplained empty capture:** one real-Electron synthetic run persisted no chunks. A subsequent instrumented run succeeded, but cannot establish the earlier cause. Preserve the failed evidence and investigate with recorder-event, WebAudio and disk-progress diagnostics before release.
 
-## Validation and release gate
+## Autonomous qualification follow-up — 5 September
+
+The user has no independent testers. Native synthetic qualification now runs on
+GitHub-hosted Windows x64, Intel Mac and Apple Silicon Mac, with retained evidence
+and explicit failures. It builds the real Electron application, feeds numbered
+audio through native capture, checks decoded continuity and compares the mock
+upload's SHA-256 with the retained local file. These jobs do not qualify physical
+microphones, Bluetooth/USB drivers, signed AudioTee helpers or macOS permission
+prompts. The stricter oracle detects interior omissions even when output duration
+looks correct; the earlier sparse-pilot results below cannot make that claim.
+
+Implementation `827cd84` adds bounded AudioContext readiness/recovery waits,
+generation checks against late recovery work, earlier initial-persistence stall
+warnings, and retained recorder/chunk diagnostics. An empty recorder event no
+longer counts as a successful flush. Implementation `28a60cb` adds the portable
+coded oracle, four native capture scenarios, credential/network isolation and
+three-platform hosted workflow. All 232 unit tests passed locally, and
+[standard CI](https://github.com/xicoarm/suisse-notes-desktop/actions/runs/33923939027)
+passed on Ubuntu, Windows and macOS. This is not installer/signing qualification.
+
+The first [native capture run](https://github.com/xicoarm/suisse-notes-desktop/actions/runs/33923939089)
+tests PR head `28a60cb` through GitHub's merge commit
+`04788b5d99402c31fe988f81fe6fdf0d4b9a75b5`. Windows passed all four strict cases:
+baseline, renderer JavaScript stall, delayed Blob conversion, and source rotation
+with a socket cut during upload. Both Mac architectures failed all four audio-content
+checks: retained output is digital silence, and Chromium reports that its fake
+capture service cannot read the fixture WAV. This is a test-input access failure
+being investigated, not a Mac pass. Commit `799e79f` restricts a Chromium
+AudioServiceSandbox exception to native Mac synthetic launches using a real
+fixture file and isolated loopback APIs. Production sandbox defaults are
+unchanged; the test therefore does not qualify the production audio-service
+sandbox. The E2E HTML additionally allows its validated mock origin through CSP.
+A corrected fixture run is pending at this checkpoint.
+
+The same four cases on the local Windows laptop passed renderer stall and
+rotation/network interruption, but failed baseline and delayed-Blob capture.
+Baseline had the expected total duration but missing numbered audio around
+32 seconds. The delayed-Blob case had additional duration loss and missing audio
+around 53 seconds. Offline comparison proves that the original chunks and final
+file have identical encoded packet sequences and identical decoded PCM: saving,
+remuxing and uploading did not introduce these silent gaps. Original packets
+already contain silence and irregular timestamps. The cause upstream of chunk
+persistence remains under investigation. Two controls on the same compiled
+`28a60cb` bundle passed with echo cancellation, noise suppression and automatic
+gain control explicitly disabled: baseline decoded 46.08 seconds and delayed
+Blob conversion decoded 46.14 seconds, each with 93 identified frames and no
+timestamp warnings. The actual source settings were 44.1 kHz stereo, compared
+with the processed path's resampling behavior, so this does not isolate a single
+processing feature. Production processing defaults and oracle thresholds remain
+unchanged. Do not infer that these controls or a cloud pass resolve the original
+failure. The controls are committed as `cbf4ecb` and preserve their actual settings
+and compiled bundle hash in the result JSON.
+
+Commit `7fd676a` persists microphone disconnection and zero-signal warning kinds,
+retries failed metadata writes, and dismisses an indefinite silent-microphone
+notice when input becomes healthy. Earlier warning evidence remains in metadata.
+Fifty-two related unit tests passed; synthetic device recovery will additionally
+assert these behaviors through the real application. The subsequent complete
+suite passed all 240 tests across 25 files at 00:15 local on 5 September.
+
+Local evidence is retained under `tests/e2e-harness/work/qualification`,
+`tests/e2e-harness/work/logs` and
+`tests/e2e-harness/work/oracle-investigation-RTOAjM`; downloaded CI artifacts are
+under ignored `work/ci-audio/33923939089`. The test-only commit `f4921e0` additionally
+adds repeated synthetic device loss/reconnect and digital-silence qualification;
+its actual run remains pending at this checkpoint.
+
+## Earlier validation and release gate
 
 Automated final full-suite result: 205 tests passed across 23 files (`npx vitest run --maxWorkers=2 --minWorkers=1`). This includes the macOS recording-ID, preparing-state, independent elapsed-time, pause, system-clock-change and failed-write retry/quit-protection, late final-stop, discard, stale-error and successful-upload retention regressions. An earlier full-suite run competing with Electron startup exceeded the existing five-second auth-test timeout; the final run with bounded workers passed without increasing that timeout. Coverage includes delayed final saves, blob order, retained failed writes, failed remux/retry, late source chunks, same-size final-file corruption, chunk gaps, PCM-only recovery, atomic-replacement failures, unsafe deletion paths, device-switch races/mute/graph failures, loopback rebind ownership, AudioTee late stdout/pause/disk failure/termination escalation, verification flags and owner matching. The pre-existing store stop-phase test was corrected to expect the actual completed state, stopped.
 
-Expanded lint over app, Electron and harness/unit sources: zero errors, 50 warnings (unused names and existing Vue formatting/security warnings). Electron production compilation with `npx quasar build -m electron --skip-pkg` passed; publishing was disabled. This is compilation, not a signed installer or macOS build. Shared renderer modules also serve Capacitor; no mobile release or device validation was performed. CI now runs unit tests on Ubuntu, Windows and macOS, but the remote jobs have not run because no branch was pushed.
+Expanded lint over app, Electron and harness/unit sources: zero errors, 50 warnings (unused names and existing Vue formatting/security warnings). Electron production compilation with `npx quasar build -m electron --skip-pkg` passed; publishing was disabled. This is compilation, not a signed installer or macOS build. Shared renderer modules also serve Capacitor; no mobile release or device validation was performed. These are the earlier local results; see the autonomous follow-up above for subsequent remote CI.
 
 Windows real-Electron baseline passed: 233.22 seconds decoded, zero sustained energy holes, 21/23 pilot detections, one upload attempt. Two unmatched short pilot pulses are documented by the verifier as codec/jitter diagnostics; this is not proof of sample-perfect recording.
 

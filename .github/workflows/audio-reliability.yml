@@ -17,7 +17,7 @@ jobs:
   synthetic-capture:
     name: Synthetic capture / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -62,12 +62,18 @@ jobs:
         run: node scripts/prepare-ffmpeg.js
 
       - name: Build an unsigned Electron test bundle
+        id: build
         timeout-minutes: 10
         run: npx quasar build -m electron --skip-pkg
 
       - name: Qualify the synthetic capture pipeline
         timeout-minutes: 23
         run: node tests/e2e-harness/ci/run-qualification.js
+
+      - name: Qualify synthetic device loss and signal recovery
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 23
+        run: node tests/e2e-harness/ci/run-qualification.js s12-device-qualification
 
       # Keep failed captures and their original chunks, not just a verdict.
       # The harness uses generated audio and fake credentials against localhost.

@@ -89,6 +89,8 @@ keystore.properties
 
 # Local-only build artifacts (AABs/APKs/DMGs) and internal planning docs
 artifacts/
+# Local test logs and downloaded synthetic CI evidence (never source files)
+/work/
 
 # Local-only working files (never commit: public repo + machine-local state)
 .claude/
