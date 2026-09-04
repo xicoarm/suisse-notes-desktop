@@ -251,7 +251,7 @@ export function useSystemAudio() {
   // reliable signal: re-acquire the loopback (it binds to the CURRENT default
   // output) and hot-swap the fresh track into the live recording mix.
   let rebindTimer = null;
-  let rebindInProgress = false;
+  let activeRebind = null;
   let monitorInstalled = false;
 
   const _onDeviceChange = () => scheduleLoopbackRebind('devicechange');
@@ -269,6 +269,9 @@ export function useSystemAudio() {
   };
 
   const removeRebindMonitor = () => {
+    // Acquisitions cannot be cancelled, but a detached monitor no longer owns
+    // their result. A subsequent capture may start its own rebind immediately.
+    activeRebind = null;
     if (!monitorInstalled) return;
     monitorInstalled = false;
     if (_activeMonitorRemove === removeRebindMonitor) _activeMonitorRemove = null;
@@ -301,19 +304,23 @@ export function useSystemAudio() {
   };
 
   const rebindLoopback = async (reason) => {
-    if (rebindInProgress || !systemAudioStream.value) return;
+    if (activeRebind?.generation === captureGeneration || !systemAudioStream.value) return;
     // Only the instance that currently OWNS the monitor may rebind — a stale
     // instance (superseded by a RecordPage remount) must never re-acquire a
     // loopback and push it into someone else's recording mix.
     if (_activeMonitorRemove !== removeRebindMonitor) return;
-    rebindInProgress = true;
+    // The same composable can stop and restart while acquisition is pending.
+    // Monitor ownership alone does not distinguish those recording sessions.
+    const operation = { generation: captureGeneration };
+    activeRebind = operation;
     try {
       // Acquire the new binding BEFORE touching the old stream: if this
       // fails we keep whatever the old endpoint still delivers.
       const newStream = await acquireLoopbackStream();
 
-      if (!systemAudioStream.value || _activeMonitorRemove !== removeRebindMonitor) {
-        // Capture was stopped while we were acquiring — discard.
+      if (operation !== activeRebind || operation.generation !== captureGeneration ||
+          !systemAudioStream.value || _activeMonitorRemove !== removeRebindMonitor) {
+        // Capture was stopped or superseded while we were acquiring — discard.
         newStream.getTracks().forEach(t => t.stop());
         return;
       }
@@ -334,9 +341,12 @@ export function useSystemAudio() {
         diag('info', `loopback rebound after ${reason} (no active recording mix to attach to)`);
       }
     } catch (e) {
-      diag('error', `loopback rebind failed (${e.name || 'Error'}: ${e.message}) — keeping previous capture`);
+      if (operation === activeRebind && operation.generation === captureGeneration) {
+        diag('error', `loopback rebind failed (${e.name || 'Error'}: ${e.message}) — keeping previous capture`);
+      }
     } finally {
-      rebindInProgress = false;
+      // A stale completion must not unlock a newer acquisition.
+      if (operation === activeRebind) activeRebind = null;
     }
   };
 

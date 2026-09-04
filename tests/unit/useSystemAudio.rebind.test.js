@@ -45,6 +45,12 @@ function makeLoopbackStream() {
   return new FakeMediaStream([makeTrack('audio'), makeTrack('video')]);
 }
 
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
 describe('useSystemAudio — Windows loopback rebind on devicechange', () => {
   let deviceChangeListeners;
   let mediaDevices;
@@ -194,6 +200,80 @@ describe('useSystemAudio — Windows loopback rebind on devicechange', () => {
     expect(addSystemAudioStream).not.toHaveBeenCalled();
     late.getAudioTracks().forEach(track => expect(track.stop).toHaveBeenCalled());
     await replacement.stopCapture();
+  });
+
+  it('disposes a pending rebind after the same instance stops and starts another recording', async () => {
+    const initial = await startCapture();
+    const pending = deferred();
+    mediaDevices.getUserMedia.mockReturnValueOnce(pending.promise);
+    fireDeviceChange();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+
+    await sysAudio.stopCapture();
+    const replacement = await sysAudio.startCapture('rec-2');
+    expect(replacement).toBeTruthy();
+    const late = makeLoopbackStream();
+    pending.resolve(late);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(addSystemAudioStream).not.toHaveBeenCalled();
+    expect(sysAudio.systemAudioStream.value).toBe(replacement);
+    late.getTracks().forEach(track => expect(track.stop).toHaveBeenCalledOnce());
+    initial.getAudioTracks().forEach(track => expect(track.stop).toHaveBeenCalledOnce());
+    replacement.getAudioTracks().forEach(track => expect(track.stop).not.toHaveBeenCalled());
+    await sysAudio.stopCapture();
+  });
+
+  it.each(['resolve', 'reject'])('keeps the new generation rebind independent when an older acquisition will %s', async (outcome) => {
+    await startCapture();
+    const previous = deferred();
+    const sources = window.electronAPI.systemAudio.getSources;
+    sources.mockReturnValueOnce(previous.promise);
+    fireDeviceChange();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(sources).toHaveBeenCalledTimes(2);
+
+    await sysAudio.stopCapture();
+    const replacement = await sysAudio.startCapture('rec-2');
+    const current = deferred();
+    sources.mockReturnValueOnce(current.promise);
+    fireDeviceChange();
+    await vi.advanceTimersByTimeAsync(1500);
+    // The unresolved request from rec-1 must not prevent rec-2 from rebinding.
+    expect(sources).toHaveBeenCalledTimes(4);
+
+    const late = makeLoopbackStream();
+    const screenSources = [{ id: 'screen:0:0', name: 'Entire Screen' }];
+    if (outcome === 'resolve') {
+      mediaDevices.getUserMedia.mockResolvedValueOnce(late);
+      previous.resolve(screenSources);
+    } else {
+      previous.reject(new Error('previous device disappeared'));
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    expect(addSystemAudioStream).not.toHaveBeenCalled();
+    expect(sysAudio.systemAudioStream.value).toBe(replacement);
+    if (outcome === 'resolve') {
+      late.getTracks().forEach(track => expect(track.stop).toHaveBeenCalledOnce());
+    }
+
+    // Settling rec-1 must not release rec-2's in-flight ownership and allow a
+    // second acquisition to race the one already waiting for screen sources.
+    fireDeviceChange();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(sources).toHaveBeenCalledTimes(4);
+    current.resolve(screenSources);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(addSystemAudioStream).toHaveBeenCalledTimes(1);
+    expect(toRaw(sysAudio.systemAudioStream.value)).toBe(addSystemAudioStream.mock.calls[0][0]);
+
+    // The current operation releases its own ownership after completion.
+    fireDeviceChange();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(sources).toHaveBeenCalledTimes(5);
+    expect(addSystemAudioStream).toHaveBeenCalledTimes(2);
+    await sysAudio.stopCapture();
   });
 
   it('does not rebind while capture was never started', async () => {
