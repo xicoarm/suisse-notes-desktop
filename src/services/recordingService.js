@@ -142,6 +142,7 @@ let stopInFlightPromise = null;
 let chunkWriter = null;
 let splitInFlightPromise = null;
 let recorderStopObserved = false;
+let finalStopPending = false;
 // Auto-split ref captured at start so verifyRecordingState can tell an
 // intentional split-pause from a stuck recorder (see verifyRecordingState).
 let isAutoSplittingRef = null;
@@ -2228,7 +2229,7 @@ export async function startRecording(options = {}) {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     return { success: false, error: 'Recording already in progress' };
   }
-  if (stopInFlightPromise || chunkWriter?.pendingCount) {
+  if (stopInFlightPromise || finalStopPending || chunkWriter?.pendingCount) {
     return { success: false, error: 'The previous recording still has unsaved audio. Retry saving it before starting another recording.' };
   }
   startInProgress = true;
@@ -2467,9 +2468,10 @@ async function startRecordingInternal(options) {
       const saved = writer.enqueue(event.data);
       saved.then(result => waiters.forEach(resolve => resolve(result)));
     };
-    mediaRecorder.onstop = () => { recorderStopObserved = true; };
+    mediaRecorder.onstop = () => { if (myGeneration === recorderGeneration) { recorderStopObserved = true; finalStopPending = false; } };
 
     mediaRecorder.onerror = (event) => {
+      if (myGeneration !== recorderGeneration) return; // A discarded recorder cannot fail the next session.
       console.error('MediaRecorder error:', event.error);
       const message = event.error?.message || 'Recording error';
       recordingStore.setError(message);
@@ -2771,9 +2773,10 @@ async function stopRecordingInternal(recordingStore, stopSystemAudio) {
   const expectedDurationSec = getWallClockSeconds();
   stopDurationTracking();
   const recorder = mediaRecorder;
+  const stopGeneration = recorderGeneration;
   const writer = chunkWriter;
   const retryingSave = !recorder;
-  let stopError = null;
+  let stopError = finalStopPending ? 'The recorder has not delivered its final audio yet. Wait and retry; saved chunks remain available for recovery.' : null;
   if (splitInFlightPromise) await splitInFlightPromise;
 
   if (recorder && !recorderStopObserved) {
@@ -2784,7 +2787,7 @@ async function stopRecordingInternal(recordingStore, stopSystemAudio) {
         stopError = 'The recorder did not confirm its final audio. Saved chunks are preserved for recovery.';
         resolve();
       }, 10000);
-      recorder.onstop = () => { recorderStopObserved = true; clearTimeout(timeout); resolve(); };
+      recorder.onstop = () => { if (stopGeneration === recorderGeneration) { recorderStopObserved = true; finalStopPending = false; } clearTimeout(timeout); resolve(); };
       if (recorder.state !== 'inactive') {
         try { recorder.stop(); }
         catch (error) { stopError = error.message; clearTimeout(timeout); resolve(); }
@@ -2796,6 +2799,11 @@ async function stopRecordingInternal(recordingStore, stopSystemAudio) {
     });
   }
 
+  if (stopGeneration !== recorderGeneration) return { success: false, cancelled: true, error: 'Recording was discarded' };
+  if (recorder && !recorderStopObserved) {
+    finalStopPending = true;
+    stopError = stopError || 'The recorder has not confirmed its final audio. Saved chunks remain available for recovery.';
+  }
   // Releasing capture resources must not clear the unsaved-blob queue.
   cleanup();
   if (stopSystemAudio) {
@@ -2807,11 +2815,14 @@ async function stopRecordingInternal(recordingStore, stopSystemAudio) {
     const error = saved.error || stopError;
     recordingStore.setError(error);
     if (isElectron()) {
-      await window.electronAPI?.recording?.setUnsavedAudio?.(!saved.success ? recordingStore.recordId : null);
+      if (finalStopPending) {
+        await window.electronAPI?.recording?.saveMetadata?.(recordingStore.recordId, { captureWarnings: ['final-stop-unconfirmed'] }).catch(() => {});
+      }
+      await window.electronAPI?.recording?.setUnsavedAudio?.(!saved.success || finalStopPending ? recordingStore.recordId : null);
       await window.electronAPI?.recording?.setInProgress(false);
       await window.electronAPI?.recording?.setProcessing(false);
     }
-    return { success: false, error, diskFull: saved.diskFull, unsavedAudio: !saved.success, partialRecovery: true, recordId: recordingStore.recordId };
+    return { success: false, error, diskFull: saved.diskFull, unsavedAudio: !saved.success || finalStopPending, partialRecovery: true, recordId: recordingStore.recordId };
   }
   if (!recordingStore.recordId) return { success: false, error: 'No active recording' };
   await window.electronAPI?.recording?.setUnsavedAudio?.(null);
@@ -2823,6 +2834,7 @@ async function stopRecordingInternal(recordingStore, stopSystemAudio) {
  * Used when user wants to discard the recording entirely
  */
 export async function cancelRecording(recordingStore, stopSystemAudio) {
+  recorderGeneration++; // Late events from an explicitly discarded recorder must never write again.
   // This is the explicit discard path. Drain any active write before the caller
   // deletes the recording directory so a late write cannot resurrect it.
   // Stop level monitoring, duration tracking, auth keepalive
@@ -2850,6 +2862,7 @@ export async function cancelRecording(recordingStore, stopSystemAudio) {
   mediaRecorder = null;
   if (chunkWriter) await chunkWriter.drain();
   chunkWriter = null;
+  finalStopPending = false;
   await window.electronAPI?.recording?.setUnsavedAudio?.(null);
 
   // Clean up all audio streams and contexts

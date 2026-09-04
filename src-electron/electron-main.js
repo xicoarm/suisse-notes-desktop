@@ -3044,7 +3044,11 @@ ipcMain.handle('recording:saveMetadata', async (event, recordId, metadata) => {
     // Main-process integrity warnings survive later renderer metadata updates.
     let existing = {};
     try { existing = JSON.parse(fs.readFileSync(metadataPath, 'utf8')); } catch (_) { /* first save */ }
-    writeFileWithSync(metadataPath, JSON.stringify({ ...existing, ...metadata, captureWarnings: existing.captureWarnings || metadata.captureWarnings || [] }, null, 2));
+    const captureWarnings = [...new Set([
+      ...(Array.isArray(existing.captureWarnings) ? existing.captureWarnings : []),
+      ...(Array.isArray(metadata.captureWarnings) ? metadata.captureWarnings : []),
+    ])];
+    writeFileWithSync(metadataPath, JSON.stringify({ ...existing, ...metadata, captureWarnings }, null, 2));
 
     return { success: true };
   } catch (error) {

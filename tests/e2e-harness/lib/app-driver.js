@@ -39,6 +39,9 @@ class AppDriver {
     this.browser = null;
     this.page = null;
     this.log = [];
+    this.diagnosticsDir = null;
+    this.rendererListeners = new Map();
+    this.diagnosticWriteErrorReported = false;
   }
 
   assertTestProfile() {
@@ -51,10 +54,63 @@ class AppDriver {
     return path.join(this.userDataDir, 'recordings');
   }
 
+  beginDiagnostics(env) {
+    // This driver is also used by live-backend scripts. Persist diagnostics
+    // only for fake audio against a local mock API in the isolated profile.
+    const isLocal = value => {
+      try { return ['localhost', '127.0.0.1', '[::1]'].includes(new URL(value).hostname); }
+      catch (_) { return false; }
+    };
+    this.diagnosticsDir = null;
+    this.diagnosticWriteErrorReported = false;
+    this.log = [];
+    if (!env.SUISSE_TEST_FAKE_AUDIO || !isLocal(env.API_BASE_URL) || !isLocal(env.VITE_API_URL) ||
+        path.resolve(env.SUISSE_TEST_USERDATA) !== path.resolve(this.userDataDir)) return;
+    const logsRoot = path.join(WORK_DIR, 'logs');
+    fs.mkdirSync(logsRoot, { recursive: true });
+    const profile = path.basename(path.resolve(this.userDataDir)).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    this.diagnosticsDir = fs.mkdtempSync(path.join(logsRoot, `${profile}-${stamp}-`));
+    this.writeDiagnostic('driver', 'Starting synthetic capture; profile=' + this.userDataDir);
+  }
+
+  writeDiagnostic(channel, message) {
+    if (!this.diagnosticsDir) return;
+    // Append during the run, not just after success: renderer/process crashes
+    // and harness termination must leave their last observations available.
+    try {
+      fs.appendFileSync(path.join(this.diagnosticsDir, channel + '.log'),
+        JSON.stringify({ time: new Date().toISOString(), message: String(message) }) + '\n');
+    } catch (error) {
+      // A diagnostic disk error must not prevent app cleanup or create the
+      // very recording interruption this harness is trying to investigate.
+      if (!this.diagnosticWriteErrorReported) this.log.push('[harness] Diagnostic write failed: ' + error.message);
+      this.diagnosticWriteErrorReported = true;
+    }
+  }
+
+  observeRenderer(page) {
+    if (!this.diagnosticsDir || this.rendererListeners.has(page)) return;
+    const onConsole = message => this.writeDiagnostic('renderer',
+      `${page.url()} [${message.type()}] ${message.text()}`);
+    const onPageError = error => this.writeDiagnostic('renderer',
+      `${page.url()} [pageerror] ${error.stack || error.message || error}`);
+    page.on('console', onConsole);
+    page.on('pageerror', onPageError);
+    this.rendererListeners.set(page, { onConsole, onPageError });
+    this.writeDiagnostic('driver', 'Observing renderer ' + page.url());
+  }
+
+  detachRendererDiagnostics() {
+    for (const [page, handlers] of this.rendererListeners) {
+      page.off('console', handlers.onConsole);
+      page.off('pageerror', handlers.onPageError);
+    }
+    this.rendererListeners.clear();
+  }
+
   async launch({ freshProfile = true } = {}) {
     this.assertTestProfile();
-    if (freshProfile) fs.rmSync(this.userDataDir, { recursive: true, force: true });
-    fs.mkdirSync(this.userDataDir, { recursive: true });
 
     // Packaged-build mode (opts.packagedExe or SUISSE_E2E_PACKAGED_EXE): drive
     // the built .exe instead of `quasar dev`. Removes the dev-server HMR/websocket
@@ -73,6 +129,13 @@ class AppDriver {
       ...this.env,
     };
 
+    this.detachRendererDiagnostics();
+    this.beginDiagnostics(env);
+    // Diagnostics live outside userdata and survive both fresh profiles and
+    // close({ keepProfile: false }). Every launch gets a distinct directory.
+    if (freshProfile) fs.rmSync(this.userDataDir, { recursive: true, force: true });
+    fs.mkdirSync(this.userDataDir, { recursive: true });
+
     if (packagedExe) {
       // Spawn the packaged app directly (no shell, no dev server).
       this.proc = spawn(packagedExe, [], { env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -86,8 +149,13 @@ class AppDriver {
         shell: true,
       });
     }
-    this.proc.stdout.on('data', d => this.log.push(d.toString()));
-    this.proc.stderr.on('data', d => this.log.push(d.toString()));
+    const captureOutput = channel => data => {
+      const message = data.toString();
+      this.log.push(message);
+      this.writeDiagnostic(channel, message);
+    };
+    this.proc.stdout.on('data', captureOutput('stdout'));
+    this.proc.stderr.on('data', captureOutput('stderr'));
 
     // Wait for the CDP endpoint (quasar dev + electron start takes a while)
     const deadline = Date.now() + 180_000;
@@ -126,6 +194,7 @@ class AppDriver {
         this.page = pages.find(p => !p.url().startsWith('devtools://') && p.url() !== 'about:blank')
           || pages.find(p => !p.url().startsWith('devtools://'));
         if (!this.page) { await sleep(1500); continue; }
+        this.observeRenderer(this.page);
         seenUrls.add(this.page.url());
         // Fresh profiles land on the WELCOME page ("Anmelden" / "LOSLEGEN")
         // before any login form exists — click through it like a user.
@@ -412,6 +481,14 @@ class AppDriver {
 
   async close({ keepProfile = true } = {}) {
     this.assertTestProfile();
+    this.writeDiagnostic('driver', 'Closing synthetic app; keepProfile=' + keepProfile);
+    // Save the complete buffered child output before disconnect/kill; streamed
+    // channel logs above additionally survive a crash before close is reached.
+    if (this.diagnosticsDir) {
+      try { fs.writeFileSync(path.join(this.diagnosticsDir, 'child-combined.log'), this.log.join('')); }
+      catch (error) { this.log.push('[harness] Final diagnostic write failed: ' + error.message); }
+    }
+    this.detachRendererDiagnostics();
     try { this.browser?.disconnect(); } catch (e) { /* ignore */ }
     if (this.proc && !this.proc.killed) {
       // Kill the whole quasar/electron tree

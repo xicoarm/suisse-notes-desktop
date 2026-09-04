@@ -267,6 +267,74 @@ describe('recordingService mic signal forensics (MSIG)', () => {
     expect(store.stopRecording).toHaveBeenCalledTimes(1);
   });
 
+  it('retains a late final blob and protects it from new recording or shutdown until saved', async () => {
+    const store = createMockRecordingStore(); await startHealthyRecording(store);
+    const previousApi = window.electronAPI;
+    const setUnsavedAudio = vi.fn().mockResolvedValue({ success: true });
+    window.electronAPI = { recording: {
+      setUnsavedAudio, setInProgress: vi.fn(), setProcessing: vi.fn(), saveMetadata: vi.fn().mockResolvedValue({ success: true })
+    } };
+    try {
+      const recorder = MockMediaRecorder.last;
+      recorder.stop = () => {
+        recorder.state = 'inactive';
+        setTimeout(() => {
+          recorder.ondataavailable({ target: recorder, data: { size: 3, arrayBuffer: async () => new Uint8Array([4, 5, 6]).buffer } });
+          recorder.onstop();
+        }, 11000);
+      };
+      const stopping = recordingService.stopRecording(store);
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(await stopping).toMatchObject({ success: false, unsavedAudio: true });
+      expect(setUnsavedAudio).toHaveBeenLastCalledWith('rec-test');
+      expect((await recordingService.startRecording({})).success).toBe(false);
+      expect((await recordingService.stopRecording(store)).success).toBe(false);
+      expect(setUnsavedAudio).toHaveBeenLastCalledWith('rec-test');
+      expect(store.stopRecording).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1100);
+      expect((await recordingService.stopRecording(store)).success).toBe(true);
+      expect(store.saveChunk).toHaveBeenCalledWith([4, 5, 6]);
+      expect(setUnsavedAudio).toHaveBeenLastCalledWith(null);
+    } finally { window.electronAPI = previousApi; }
+  });
+
+  it('ignores a discarded recorder’s late data and stop event after a new recording starts', async () => {
+    const oldStore = createMockRecordingStore(); await startHealthyRecording(oldStore);
+    const old = MockMediaRecorder.last;
+    old.stop = () => {
+      old.state = 'inactive';
+      setTimeout(() => {
+        old.ondataavailable({ target: old, data: { size: 1, arrayBuffer: async () => new Uint8Array([9]).buffer } });
+        old.onstop?.();
+      }, 11000);
+    };
+    const stopping = recordingService.stopRecording(oldStore);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect((await stopping).success).toBe(false);
+    await recordingService.cancelRecording(oldStore);
+    const nextStore = createMockRecordingStore(); await startHealthyRecording(nextStore);
+    const next = MockMediaRecorder.last;
+    const stopNext = vi.spyOn(next, 'stop');
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(oldStore.saveChunk).not.toHaveBeenCalled();
+    expect(nextStore.saveChunk).not.toHaveBeenCalled();
+    expect((await recordingService.stopRecording(nextStore)).success).toBe(true);
+    expect(stopNext).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let a discarded recorder’s error stop the next recording', async () => {
+    const oldStore = createMockRecordingStore(); await startHealthyRecording(oldStore);
+    const old = MockMediaRecorder.last;
+    await recordingService.cancelRecording(oldStore);
+    const nextStore = createMockRecordingStore(); await startHealthyRecording(nextStore);
+    const next = MockMediaRecorder.last;
+    old.onerror({ error: new Error('late error from discarded recorder') });
+    expect(next.state).toBe('recording');
+    expect(nextStore.setError).not.toHaveBeenCalled();
+    expect(oldStore.setError).not.toHaveBeenCalled();
+    await recordingService.stopRecording(nextStore);
+  });
+
   it('protects failed in-memory audio until the same bytes are saved on retry', async () => {
     const store = createMockRecordingStore(); await startHealthyRecording(store);
     const previousApi = window.electronAPI;
