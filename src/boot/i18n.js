@@ -137,6 +137,8 @@ const messages = {
     // History Page
     historyTitle: 'Recording History',
     historySubtitle: 'View and manage your past recordings',
+    historyCaptureWarningLabel: 'Review audio',
+    historyCaptureWarningDescription: 'A warning occurred during recording. Listen to the audio and check that the important parts are present.',
     noRecordings: 'No recordings yet',
     startRecording: 'Start your first recording',
     statsTotal: 'Total',
@@ -635,6 +637,8 @@ const messages = {
     // History Page
     historyTitle: 'Aufnahmeverlauf',
     historySubtitle: 'Frühere Aufnahmen anzeigen und verwalten',
+    historyCaptureWarningLabel: 'Audio prüfen',
+    historyCaptureWarningDescription: 'Während der Aufnahme wurde eine Warnung erkannt. Hören Sie die Aufnahme an und prüfen Sie, ob alle wichtigen Inhalte enthalten sind.',
     noRecordings: 'Noch keine Aufnahmen',
     startRecording: 'Starten Sie Ihre erste Aufnahme',
     statsTotal: 'Gesamt',
@@ -1133,6 +1137,8 @@ const messages = {
     // History Page
     historyTitle: 'Historique des enregistrements',
     historySubtitle: 'Afficher et gérer vos enregistrements passés',
+    historyCaptureWarningLabel: 'Vérifier l’audio',
+    historyCaptureWarningDescription: 'Un avertissement a été détecté pendant l’enregistrement. Écoutez l’audio et vérifiez que les passages importants sont présents.',
     noRecordings: "Pas encore d'enregistrements",
     startRecording: 'Commencez votre premier enregistrement',
     statsTotal: 'Total',
@@ -1631,6 +1637,8 @@ const messages = {
     // History Page
     historyTitle: 'Cronologia registrazioni',
     historySubtitle: 'Visualizza e gestisci le tue registrazioni passate',
+    historyCaptureWarningLabel: 'Verifica audio',
+    historyCaptureWarningDescription: 'È stato rilevato un avviso durante la registrazione. Ascolta l’audio e verifica che le parti importanti siano presenti.',
     noRecordings: 'Nessuna registrazione',
     startRecording: 'Inizia la tua prima registrazione',
     statsTotal: 'Totale',

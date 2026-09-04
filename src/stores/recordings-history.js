@@ -300,35 +300,36 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
 
       if (isElectron()) {
         // Desktop: the local electron-store holds recordings made on THIS
-        // machine. On a foreground load we (re)read them; on a background
-        // refresh the in-memory local list is already current (kept by
-        // add/update/delete), so we skip the reload and only re-pull the
-        // server side.
-        if (!background) {
-          try {
-            this.loading = true;
-            this.recordings = await window.electronAPI.history.getAll(userId);
-            this.defaultStoragePreference =
-              await window.electronAPI.history.getDefaultStoragePreference();
-            this.loaded = true;
+        // machine. Refresh local metadata-backed warnings on every visit,
+        // including background refreshes after recording or crash recovery.
+        try {
+          if (!background) this.loading = true;
+          const localRecordings = await window.electronAPI.history.getAll(userId);
+          const localIds = new Set(localRecordings.map(recording => recording.id));
+          // Keep previously fetched remote entries visible during an offline
+          // background refresh; the server merge below will replace them.
+          const remoteRecordings = background
+            ? this.recordings.filter(recording => recording._serverOnly && !localIds.has(recording.id))
+            : [];
+          this.recordings = [...localRecordings, ...remoteRecordings];
+          this.defaultStoragePreference =
+            await window.electronAPI.history.getDefaultStoragePreference();
+          this.loaded = true;
 
-            // Heal entries stranded in 'uploading' by a crash/kill/forced
-            // logout (mobile has the same fix in its branch below). Stranded
-            // entries are invisible to every retry path — auto-retry only
-            // touches 'failed'/'pending' — so they'd spin forever.
-            for (const rec of this.recordings) {
-              if (rec.uploadStatus === 'uploading' && !_retryingIds.has(rec.id)) {
-                rec.uploadStatus = 'pending';
-                window.electronAPI.history
-                  .update(rec.id, { uploadStatus: 'pending' }, userId)
-                  .catch((e) => console.warn('Could not persist stale-uploading reset:', e));
-              }
+          // Heal entries stranded in 'uploading' by a crash/kill/forced
+          // logout on initial load. A revisit can include a live upload.
+          for (const rec of this.recordings) {
+            if (!background && rec.uploadStatus === 'uploading' && !_retryingIds.has(rec.id)) {
+              rec.uploadStatus = 'pending';
+              window.electronAPI.history
+                .update(rec.id, { uploadStatus: 'pending' }, userId)
+                .catch((e) => console.warn('Could not persist stale-uploading reset:', e));
             }
-          } catch (error) {
-            console.error('Error loading recordings history:', error);
-          } finally {
-            this.loading = false;
           }
+        } catch (error) {
+          console.error('Error loading recordings history:', error);
+        } finally {
+          if (!background) this.loading = false;
         }
         // Merge the server-side history so recordings made on the user's OTHER
         // devices (iPhone, iPad, another Mac) also appear here. Desktop used to
@@ -583,7 +584,8 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
           const result = await window.electronAPI.history.update(id, updates, userId);
           if (result.success) {
             if (index !== -1) {
-              this.recordings[index] = { ...this.recordings[index], ...updates };
+              // Main also merges persisted capture warnings into this entry.
+              this.recordings[index] = { ...this.recordings[index], ...updates, ...(result.recording || {}) };
             }
             return { success: true };
           }

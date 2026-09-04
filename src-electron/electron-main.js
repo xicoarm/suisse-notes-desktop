@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const { writeFileAtomic, writeFileAtomicSync, publishFile, concatenateFiles, archiveChunkBatch, listChunkBatches } = require('./durable-files');
 const { createRecordingPersistence, readFinalizedRecording, listSessions } = require('./recording-persistence');
+const { withCaptureWarnings, hydrateHistoryCaptureWarnings } = require('./recording-history-warnings');
 const { createPcmCapture } = require('./pcm-capture');
 const { tokenUserId, canUploadForUser, verifiedUploadResult } = require('./upload-safety');
 const { pathToFileURL } = require('url');
@@ -689,7 +690,7 @@ async function recoverOrphanedRecordings() {
             const matchingActive = activeSession?.recordId === dir ? activeSession : null;
             const userId = metadataUserId || matchingActive?.userId || 'unknown';
             const createdAt = metadataStartedAt || matchingActive?.startedAt || new Date().toISOString();
-            recordings.push({
+            recordings.push(withCaptureWarnings({
               id: dir,
               userId,
               createdAt,
@@ -699,7 +700,7 @@ async function recoverOrphanedRecordings() {
               uploadStatus: 'pending',
               storagePreference: 'keep',
               recovered: true
-            });
+            }, getRecordingsPath()));
             historyStore.set('recordings', recordings);
             log.info(`Added recovered recording to history: ${dir} (userId: ${userId})`);
             recoveredForUpload.push({ recordId: dir, filePath: result.outputPath, metadata: { duration: String(metadataDuration || 0) } });
@@ -720,14 +721,14 @@ async function recoverOrphanedRecordings() {
             // recording the user chose not to send.
             const TERMINAL_STATUSES = ['completed', 'uploaded', 'skipped', 'cancelled', 'pending_verification'];
             const terminal = TERMINAL_STATUSES.includes(existing.uploadStatus);
-            recordings[existingIndex] = {
+            recordings[existingIndex] = withCaptureWarnings({
               ...existing,
               filePath: existing.filePath || result.outputPath,
               fileSize: existing.fileSize > 0 ? existing.fileSize : recoveredFileSize,
               duration: existing.duration > 0 ? existing.duration : metadataDuration,
               uploadStatus: terminal ? existing.uploadStatus : 'pending',
               recovered: true
-            };
+            }, getRecordingsPath());
             historyStore.set('recordings', recordings);
             log.info(`Updated stuck history entry for recovered recording: ${dir} (status ${existing.uploadStatus} -> ${recordings[existingIndex].uploadStatus}, filePath ${existing.filePath ? 'kept' : 'set'})`);
             if (!terminal) {
@@ -3293,6 +3294,12 @@ function updateRecordingMetadataOnCompletion(recordId, duration, hasAudioFile) {
     metadata.version = metadata.version || 1;
 
     writeFileWithSync(metadataPath, JSON.stringify(metadata, null, 2));
+    const recordings = historyStore.get('recordings', []);
+    const index = recordings.findIndex(recording => recording.id === recordId);
+    if (index !== -1) {
+      recordings[index] = withCaptureWarnings(recordings[index], getRecordingsPath());
+      historyStore.set('recordings', recordings);
+    }
     log.info('Recording metadata updated on completion:', recordId);
   } catch (error) {
     log.error('Failed to update recording metadata on completion:', error);
@@ -4447,9 +4454,14 @@ ipcMain.handle('shell:showItemInFolder', async (event, filePath) => {
 ipcMain.handle('history:getAll', async (event, userId) => {
   try {
     const recordings = historyStore.get('recordings', []);
+    const hydrated = hydrateHistoryCaptureWarnings(recordings, userId, getRecordingsPath());
+    if (hydrated.some((recording, index) => recording !== recordings[index])) {
+      try { historyStore.set('recordings', hydrated); }
+      catch (error) { log.warn('Could not cache capture warnings in history:', error.message); }
+    }
     // CRITICAL: Filter by userId to prevent cross-account data leaks
     const userRecordings = userId
-      ? recordings.filter(r => r.userId === userId)
+      ? hydrated.filter(r => r.userId === userId)
       : [];
     // Sort by date, newest first
     return userRecordings.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -4468,7 +4480,7 @@ ipcMain.handle('history:add', async (event, recording) => {
     const recordings = historyStore.get('recordings', []);
 
     // Create history entry with userId
-    const historyEntry = {
+    const historyEntry = withCaptureWarnings({
       id: recording.id,
       userId: validUserId,  // CRITICAL: Associate with validated user
       createdAt: recording.createdAt || new Date().toISOString(),
@@ -4478,8 +4490,9 @@ ipcMain.handle('history:add', async (event, recording) => {
       uploadStatus: recording.uploadStatus || 'pending',  // pending, uploaded, failed
       storagePreference: recording.storagePreference || 'keep',
       transcriptionId: recording.transcriptionId || null,
-      audioFileId: recording.audioFileId || null
-    };
+      audioFileId: recording.audioFileId || null,
+      captureWarnings: recording.captureWarnings
+    }, getRecordingsPath());
 
     recordings.push(historyEntry);
     historyStore.set('recordings', recordings);
@@ -4506,7 +4519,7 @@ ipcMain.handle('history:update', async (event, id, updates, userId) => {
 
     // Don't allow changing userId
     const { userId: _, ...safeUpdates } = updates;
-    recordings[index] = { ...recordings[index], ...safeUpdates };
+    recordings[index] = withCaptureWarnings({ ...recordings[index], ...safeUpdates }, getRecordingsPath(), recordings[index].captureWarnings);
     historyStore.set('recordings', recordings);
 
     return { success: true, recording: recordings[index] };

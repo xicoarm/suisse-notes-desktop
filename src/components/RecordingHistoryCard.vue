@@ -12,6 +12,23 @@
             {{ statusLabel }}
           </span>
           <span
+            v-if="hasCaptureWarnings"
+            class="capture-warning-badge"
+            data-test="history-capture-warning"
+            :data-record-id="recording.id"
+            tabindex="0"
+            :title="$t('historyCaptureWarningDescription')"
+            :aria-label="$t('historyCaptureWarningDescription')"
+            @click.stop
+          >
+            <q-icon
+              name="hearing"
+              size="12px"
+            />
+            {{ $t('historyCaptureWarningLabel') }}
+            <q-tooltip>{{ $t('historyCaptureWarningDescription') }}</q-tooltip>
+          </span>
+          <span
             v-if="recording.source === 'device'"
             class="source-badge device"
           >
@@ -386,6 +403,8 @@ export default {
     const linkLoading = ref(false);
     const exporting = ref(false);
     const isDesktop = isElectron();
+    const hasCaptureWarnings = computed(() => isDesktop && Array.isArray(props.recording.captureWarnings) &&
+      props.recording.captureWarnings.some(kind => typeof kind === 'string' && kind.trim()));
 
     // A recording is "recoverable" once it has a cloud copy. Deleting it then
     // only drops the local file — the cloud copy is still available. Without a
@@ -551,6 +570,7 @@ export default {
       openFileLocation,
       onExport,
       isDesktop,
+      hasCaptureWarnings,
       onDelete,
       confirmDelete
     };
@@ -638,6 +658,7 @@ export default {
 
 .card-title {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-bottom: 4px;
@@ -647,6 +668,18 @@ export default {
     font-size: 12px;
     color: #1e293b;
   }
+}
+
+.capture-warning-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: #fef3c7;
+  color: #78350f;
+  font-size: 10px;
+  font-weight: 600;
 }
 
 .view-transcript-link {

@@ -321,6 +321,31 @@ async function deviceCase(kind) {
     result.staleSilentToastAfterRecovery = result.fixture.samples.some(sample =>
       sample.sourceSeconds >= recoveryCheckAt && sample.badge === sample.labels.healthy && sample.notifications.includes(sample.labels.silentToast));
     if (result.staleSilentToastAfterRecovery) result.problems.push('The silent-microphone toast remained visible after healthy recovery');
+    result.historyReload = await app.evalTimed(async rid => {
+      const pinia = window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia;
+      const history = pinia?._s?.get('recordings-history');
+      if (!history) throw new Error('Desktop history store is unavailable');
+      await history.loadRecordings();
+      const entry = history.recordings.find(recording => recording.id === rid);
+      return { loaded: history.loaded, captureWarnings: entry?.captureWarnings || [] };
+    }, recordId);
+    if (!result.historyReload.captureWarnings.includes(expectedWarning)) result.problems.push('Reloading desktop history lost the persisted capture warning');
+    await app.navigate('/history');
+    const warningSelector = `[data-test="history-capture-warning"][data-record-id="${recordId}"]`;
+    try {
+      await app.page.waitForSelector(warningSelector, { visible: true, timeout: 15000 });
+    } finally {
+      result.screenshots.push(await app.screenshot(name + '-history-warning'));
+    }
+    result.historyWarningUi = await app.evalTimed(({ rid, selector }) => {
+      const pinia = window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia;
+      const entry = pinia?.state?.value?.['recordings-history']?.recordings?.find(recording => recording.id === rid);
+      const badge = document.querySelector(selector);
+      return { captureWarnings: entry?.captureWarnings || [], text: badge?.textContent?.trim(), description: badge?.getAttribute('title') };
+    }, { rid: recordId, selector: warningSelector });
+    if (!result.historyWarningUi.captureWarnings.includes(expectedWarning) || !result.historyWarningUi.text || !result.historyWarningUi.description) {
+      result.problems.push('The History page does not retain and explain the capture warning');
+    }
     result.pass = result.problems.length === 0;
   } catch (error) {
     result.problems.push(error.stack || error.message);
