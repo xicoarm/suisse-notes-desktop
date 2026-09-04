@@ -11,8 +11,7 @@ const { verifyCodedAudio } = require('./lib/coded-audio');
 
 const LIMITATIONS = [
   'Synthetic microphone tracks and enumeration qualify application recovery; physical USB/Bluetooth drivers, codec changes and macOS permissions are not exercised.',
-  'Microphone loss and zero-signal episodes currently have no dedicated persisted captureWarnings entry. Passing live warning assertions does not establish a durable gap history.',
-  'A failed microphone signal probe creates a persistent silent-input toast; current recovery does not dismiss it. Healthy assertions below concern the live health indicator, not every notification.',
+  'Planned zero intervals contain no supplied audio; this suite does not claim to recover audio that never reached the app.',
 ];
 
 function evidence(file, result) {
@@ -220,6 +219,8 @@ function assessLiveBehavior(kind, fixture, problems) {
 async function deviceCase(kind) {
   const name = 's12-' + kind;
   const seconds = kind === 'reconnect' ? 120 : 90;
+  const expectedWarning = kind === 'reconnect' ? 'microphone-disconnected' : 'microphone-zero-signal';
+  const recoveryCheckAt = kind === 'reconnect' ? 98 : 68;
   // Padding prevents fake-device EOF/looping during stop. Faults lie strictly
   // inside planned zeros, so the coded oracle needs no missing-frame waiver.
   const plan = kind === 'reconnect'
@@ -261,6 +262,14 @@ async function deviceCase(kind) {
       }
       if (screenshotIndex < screenshotAt.length && elapsed >= screenshotAt[screenshotIndex]) {
         result.screenshots.push(await app.screenshot(name + '-' + screenshotAt[screenshotIndex++]));
+      }
+      if (!result.warningAfterRecovery && elapsed >= recoveryCheckAt) {
+        const metadata = JSON.parse(fs.readFileSync(path.join(recordDir, 'metadata.json'), 'utf8'));
+        result.warningAfterRecovery = { sourceSeconds: elapsed, captureWarnings: metadata.captureWarnings || [],
+          lastMicrophoneWarning: metadata.lastMicrophoneWarning || null };
+        if (!result.warningAfterRecovery.captureWarnings.includes(expectedWarning)) {
+          result.problems.push(`Missing persisted ${expectedWarning} warning after microphone recovery`);
+        }
       }
       result.progress.push({ sourceSeconds: elapsed, disk: app.captureDiskProgress() });
       evidence(file, result);
@@ -308,8 +317,10 @@ async function deviceCase(kind) {
     }
     const metadata = JSON.parse(fs.readFileSync(path.join(recordDir, 'metadata.json'), 'utf8'));
     result.captureWarnings = metadata.captureWarnings || [];
-    result.staleSilentToastAfterRecovery = kind === 'zero-input' && result.fixture.samples.some(sample =>
-      sample.sourceSeconds >= 68 && sample.badge === sample.labels.healthy && sample.notifications.includes(sample.labels.silentToast));
+    if (!result.captureWarnings.includes(expectedWarning)) result.problems.push(`Finalization/upload lost the ${expectedWarning} warning`);
+    result.staleSilentToastAfterRecovery = result.fixture.samples.some(sample =>
+      sample.sourceSeconds >= recoveryCheckAt && sample.badge === sample.labels.healthy && sample.notifications.includes(sample.labels.silentToast));
+    if (result.staleSilentToastAfterRecovery) result.problems.push('The silent-microphone toast remained visible after healthy recovery');
     result.pass = result.problems.length === 0;
   } catch (error) {
     result.problems.push(error.stack || error.message);
