@@ -327,7 +327,9 @@ async function deviceCase(kind) {
       if (!history) throw new Error('Desktop history store is unavailable');
       await history.loadRecordings();
       const entry = history.recordings.find(recording => recording.id === rid);
-      return { loaded: history.loaded, captureWarnings: entry?.captureWarnings || [] };
+      // CDP serializes a Vue reactive array as an indexed object. Copy the
+      // strings in the renderer so the assertion receives an ordinary array.
+      return { loaded: history.loaded, captureWarnings: Array.from(entry?.captureWarnings || []) };
     }, recordId);
     if (!result.historyReload.captureWarnings.includes(expectedWarning)) result.problems.push('Reloading desktop history lost the persisted capture warning');
     await app.navigate('/history');
@@ -341,11 +343,24 @@ async function deviceCase(kind) {
       const pinia = window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia;
       const entry = pinia?.state?.value?.['recordings-history']?.recordings?.find(recording => recording.id === rid);
       const badge = document.querySelector(selector);
-      return { captureWarnings: entry?.captureWarnings || [], text: badge?.textContent?.trim(), description: badge?.getAttribute('title') };
+      return { captureWarnings: Array.from(entry?.captureWarnings || []), text: badge?.textContent?.trim(), description: badge?.getAttribute('title') };
     }, { rid: recordId, selector: warningSelector });
     if (!result.historyWarningUi.captureWarnings.includes(expectedWarning) || !result.historyWarningUi.text || !result.historyWarningUi.description) {
       result.problems.push('The History page does not retain and explain the capture warning');
     }
+    // Even an accepted upload cannot make permanent local deletion the
+    // default. Exercise the real dialog and cancel without deleting evidence.
+    await app.page.click(`[data-test="history-expand"][data-record-id="${recordId}"]`);
+    const deleteSelector = `[data-test="history-delete"][data-record-id="${recordId}"]`;
+    await app.page.waitForSelector(deleteSelector, { visible: true, timeout: 10000 });
+    await app.page.click(deleteSelector);
+    await app.page.waitForSelector('[data-test="history-delete-file"]', { visible: true, timeout: 10000 });
+    result.localDeletionSelectedByDefault = await app.evalTimed(() =>
+      document.querySelector('[data-test="history-delete-file"]')?.getAttribute('aria-checked'));
+    if (result.localDeletionSelectedByDefault !== 'false') result.problems.push('The desktop delete dialog preselects permanent local audio deletion');
+    result.screenshots.push(await app.screenshot(name + '-delete-keeps-audio'));
+    await app.page.click('[data-test="history-delete-cancel"]');
+    if (!fs.existsSync(output)) result.problems.push('Opening and cancelling the history delete dialog removed the local audio');
     result.pass = result.problems.length === 0;
   } catch (error) {
     result.problems.push(error.stack || error.message);
