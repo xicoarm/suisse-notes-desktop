@@ -72,6 +72,7 @@ const TRANSIENT_NETWORK_CODES = new Set([
   'ETIMEDOUT',      // TCP connect/read timeout
   'ECONNABORTED',   // axios cancelled the request (its own timeout fired)
   'ECONNRESET',     // connection dropped mid-transfer
+  'EPIPE',          // peer closed the connection while we were writing
   'ENETUNREACH',    // no route to host
   'EAI_AGAIN'       // transient DNS failure
 ]);
@@ -4096,6 +4097,7 @@ async function uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, a
                           error.code === 'ENETUNREACH' ||
                           error.code === 'EAI_AGAIN' ||
                           error.code === 'ECONNRESET' ||
+                          error.code === 'EPIPE' ||
                           (error.message && error.message.includes('socket hang up')) ||
                           (error.response && error.response.status >= 500);
 
@@ -4112,7 +4114,7 @@ async function uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, a
           errorMessage = 'Upload timed out. Please try again.';
         } else if (error.code === 'ENOTFOUND' || error.code === 'ENETUNREACH') {
           errorMessage = 'No internet connection. Please check your network.';
-        } else if (error.code === 'ECONNRESET' || (error.message && error.message.includes('socket hang up'))) {
+        } else if (error.code === 'ECONNRESET' || error.code === 'EPIPE' || (error.message && error.message.includes('socket hang up'))) {
           errorMessage = 'Connection was interrupted. Please try again.';
         } else {
           errorMessage = error.message || 'Unknown error';
