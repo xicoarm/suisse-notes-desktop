@@ -199,6 +199,7 @@ async function runCodedEndurance(opts = {}) {
       'Local mock upload success above five hours does not prove production acceptance; the deployed backend has a five-hour limit.',
       'Shortened smoke runs do not qualify five hours; natural rotation is asserted only after crossing 4h55.',
       'Synthetic native microphone capture; physical Bluetooth/USB and macOS system audio are outside this scenario.',
+      'Progress metrics are thirty-second snapshots; sampled event/persistence ages do not rule out shorter intervening stalls.',
     ], metrics: { samples: 0, maxPersistGapS: 0, maxNativeEventGapS: 0, maxRendererHeapMB: null, maxHarnessRssMB: 0,
       minFreeBytes: null, firstRotationElapsedS: null, maxBatchesDuringCapture: 0, phaseCounts: {} }, recentSamples: [], evidenceDir, summaryPath, progressPath };
   let mock = null, app = null, started = null, lastChunkCount = -1, lastPersistObservedAt = null;
@@ -243,7 +244,7 @@ async function runCodedEndurance(opts = {}) {
       }, undefined, 10000);
       const disk = app.captureDiskProgress();
       const elapsedS = (sampledAt - started) / 1000;
-      const monotonicPersistGapS = (sampledAt - lastPersistObservedAt) / 1000;
+      const observedNoProgressS = disk.chunkCount !== lastChunkCount ? 0 : (sampledAt - lastPersistObservedAt) / 1000;
       const wallPersistGapS = disk.lastChunkAt ? Math.max(0, (Date.now() - Date.parse(disk.lastChunkAt)) / 1000) : null;
       if (disk.chunkCount !== lastChunkCount) { lastChunkCount = disk.chunkCount; lastPersistObservedAt = sampledAt; }
       const recorder = renderer.capture?.recorders?.at(-1);
@@ -251,7 +252,7 @@ async function runCodedEndurance(opts = {}) {
       const rssMB = process.memoryUsage().rss / 1048576;
       const freeBytes = availableBytes(evidenceDir);
       const minimumFinalizationFreeBytes = CRITICAL_FREE_BYTES + (recorder?.bytes || 0) * 3;
-      const sample = { elapsedS, renderer, disk, wallPersistGapS, monotonicPersistGapS, nativeGapS, harnessRssMB: rssMB, freeBytes, minimumFinalizationFreeBytes };
+      const sample = { elapsedS, renderer, disk, wallPersistGapS, observedNoProgressS, nativeGapS, harnessRssMB: rssMB, freeBytes, minimumFinalizationFreeBytes };
       result.metrics.samples++;
       result.metrics.maxPersistGapS = Math.max(result.metrics.maxPersistGapS, wallPersistGapS || 0);
       result.metrics.maxNativeEventGapS = Math.max(result.metrics.maxNativeEventGapS, nativeGapS);
