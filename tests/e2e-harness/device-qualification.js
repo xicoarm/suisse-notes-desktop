@@ -355,6 +355,11 @@ async function deviceCase(kind) {
     await app.page.waitForSelector(deleteSelector, { visible: true, timeout: 10000 });
     await app.page.click(deleteSelector);
     await app.page.waitForSelector('[data-test="history-delete-file"]', { visible: true, timeout: 10000 });
+    const waitForDialogAnimation = () => app.page.waitForFunction(() => {
+      const dialog = document.querySelector('[data-test="history-delete-file"]')?.closest('.q-dialog__inner');
+      return dialog && !dialog.getAnimations({ subtree: true }).some(animation => animation.pending || animation.playState === 'running');
+    }, { timeout: 10000 });
+    await waitForDialogAnimation();
     result.localDeletionSelectedByDefault = await app.evalTimed(() =>
       document.querySelector('[data-test="history-delete-file"]')?.getAttribute('aria-checked'));
     if (result.localDeletionSelectedByDefault !== 'false') result.problems.push('The desktop delete dialog preselects permanent local audio deletion');
@@ -364,12 +369,17 @@ async function deviceCase(kind) {
       document.querySelector('[data-test="history-delete-file"]')?.getAttribute('aria-checked'));
     if (result.localDeletionCanBeSelected !== 'true') result.problems.push('Explicit local deletion cannot be selected in its confirmation dialog');
     await app.page.click('[data-test="history-delete-cancel"]');
+    // Quasar keeps the modal overlay during its closing transition. A click
+    // before it disappears is consumed by that overlay, not a fresh opening.
+    await app.page.waitForSelector('[data-test="history-delete-file"]', { hidden: true, timeout: 10000 });
     await app.page.click(deleteSelector);
     await app.page.waitForSelector('[data-test="history-delete-file"]', { visible: true, timeout: 10000 });
+    await waitForDialogAnimation();
     result.localDeletionSelectedOnReopen = await app.evalTimed(() =>
       document.querySelector('[data-test="history-delete-file"]')?.getAttribute('aria-checked'));
     if (result.localDeletionSelectedOnReopen !== 'false') result.problems.push('Reopening the desktop delete dialog retained a prior permanent-deletion selection');
     await app.page.click('[data-test="history-delete-cancel"]');
+    await app.page.waitForSelector('[data-test="history-delete-file"]', { hidden: true, timeout: 10000 });
     if (!fs.existsSync(output)) result.problems.push('Opening and cancelling the history delete dialog removed the local audio');
     result.pass = result.problems.length === 0;
   } catch (error) {
