@@ -38,8 +38,26 @@ async function installDelay(app) {
   });
 }
 
-async function captureCase(kind, seconds) {
-  const name = 's11-' + kind;
+async function installProcessingControl(app) {
+  await app.evalTimed(() => {
+    const original = navigator.mediaDevices.getUserMedia;
+    const flags = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+    window.__qualificationProcessingControl = { flags, calls: [] };
+    navigator.mediaDevices.getUserMedia = async function (constraints) {
+      const requested = constraints?.audio ? { ...constraints,
+        audio: { ...(typeof constraints.audio === 'object' ? constraints.audio : {}), ...flags } } : constraints;
+      const stream = await Reflect.apply(original, this, [requested]);
+      if (requested?.audio) window.__qualificationProcessingControl.calls.push({
+        requestedAudio: requested.audio,
+        actualAudioSettings: stream.getAudioTracks().map(track => track.getSettings()),
+      });
+      return stream;
+    };
+  });
+}
+
+async function captureCase(kind, seconds, opts = {}) {
+  const name = 's11-' + kind + (opts.processingDisabled ? '-processing-disabled' : '');
   const reference = buildCodedScenario(name, [{ type: 'speech', seconds: seconds + 25 }]);
   const mock = await startMockBackend();
   const app = new AppDriver({ name, apiUrl: mock.url, fakeAudioWav: reference.wavPath,
@@ -49,11 +67,26 @@ async function captureCase(kind, seconds) {
   try {
     await app.launch();
     await app.login();
+    if (opts.bundleSha || process.env.SUISSE_E2E_BUNDLE_SHA) {
+      result.bundle = { gitSha: opts.bundleSha || process.env.SUISSE_E2E_BUNDLE_SHA,
+        appDirectory: app.appDir,
+        electronMainSha256: app.appDir ? await sha256(path.join(app.appDir, 'electron-main.js')) : null };
+    }
     const apiUrl = await app.evalTimed(() => window.electronAPI.config.getApiUrl());
     if (apiUrl !== mock.url) throw new Error('The app is not using the local test backend');
+    if (opts.processingDisabled) await installProcessingControl(app);
     if (kind === 'blob-delay') await installDelay(app);
     if (kind === 'rotation-and-network-cut') mock.setMode('upload-cut-50');
     await app.startRecording();
+    if (opts.processingDisabled) {
+      result.processingControl = await app.evalTimed(() => window.__qualificationProcessingControl);
+      const calls = result.processingControl?.calls || [];
+      if (!calls.length || calls.some(call => !call.actualAudioSettings.length || call.actualAudioSettings.some(settings =>
+        ['echoCancellation', 'noiseSuppression', 'autoGainControl'].some(flag => settings[flag] !== false)))) {
+        result.problems.push('Processing-disabled control was not confirmed by microphone track settings');
+      }
+      result.notes.push('Test-only control: echo cancellation, noise suppression and automatic gain disabled; native getUserMedia, WebAudio mixing and MediaRecorder remain in use.');
+    }
     const recordId = await app.getRecordId();
     const started = performance.now();
     let blocked = false;
