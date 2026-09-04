@@ -17,6 +17,62 @@ const WORK_DIR = path.join(__dirname, '..', 'work');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+function diagnosticDeadline(promise, ms = 3000) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Diagnostic sample timed out')), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+// Runs only in synthetic/local test pages. Wrapping start observes both an
+// already-constructed recorder and future instances, without replacing their
+// native handlers, constructor, capture stream, or recording implementation.
+function installSyntheticCaptureProbe() {
+  if (window.__suisseCaptureDiagnostics || !window.MediaRecorder) return;
+  const entries = new Map();
+  const observed = new WeakSet();
+  let nextId = 0;
+  const nativeStart = MediaRecorder.prototype.start;
+  MediaRecorder.prototype.start = function (...args) {
+    try {
+      if (!observed.has(this)) {
+        observed.add(this);
+        const entry = { id: ++nextId, ref: new WeakRef(this), events: 0, bytes: 0, emptyEvents: 0, firstDataAt: null, lastDataAt: null };
+        entries.set(entry.id, entry);
+        // Bound diagnostic bookkeeping during extended/multi-recording runs.
+        if (entries.size > 20) entries.delete(entries.keys().next().value);
+        for (const type of ['start', 'dataavailable', 'pause', 'resume', 'stop', 'error']) {
+          this.addEventListener(type, event => {
+            try {
+              const now = performance.now();
+              const size = type === 'dataavailable' ? event.data?.size || 0 : null;
+              if (type === 'dataavailable') {
+                entry.events++; entry.bytes += size;
+                if (!size) entry.emptyEvents++;
+                entry.firstDataAt ??= now; entry.lastDataAt = now;
+              }
+              console.debug('[synthetic-capture] ' + JSON.stringify({ id: entry.id, event: type, at: now,
+                state: event.target?.state, bytes: size, error: event.error?.name || null }));
+            } catch (_) { /* diagnostics must never throw into capture */ }
+          });
+        }
+      }
+    } catch (_) { /* native start must still run unchanged */ }
+    return Reflect.apply(nativeStart, this, args);
+  };
+  window.__suisseCaptureDiagnostics = {
+    snapshot: () => ({ at: performance.now(), visibility: document.visibilityState, recorders: [...entries.values()].map(entry => {
+      const recorder = entry.ref.deref();
+      const counts = { id: entry.id, events: entry.events, bytes: entry.bytes, emptyEvents: entry.emptyEvents,
+        firstDataAt: entry.firstDataAt, lastDataAt: entry.lastDataAt };
+      return { ...counts, state: recorder?.state || 'released', tracks: recorder?.stream?.getAudioTracks().map(track => ({
+        readyState: track.readyState, enabled: track.enabled, muted: track.muted,
+      })) || [] };
+    }) }),
+  };
+}
+
 async function fetchJson(url) {
   return new Promise((resolve, reject) => {
     http.get(url, (res) => {
@@ -89,7 +145,7 @@ class AppDriver {
     }
   }
 
-  observeRenderer(page) {
+  async observeRenderer(page) {
     if (!this.diagnosticsDir || this.rendererListeners.has(page)) return;
     const onConsole = message => this.writeDiagnostic('renderer',
       `${page.url()} [${message.type()}] ${message.text()}`);
@@ -97,12 +153,92 @@ class AppDriver {
       `${page.url()} [pageerror] ${error.stack || error.message || error}`);
     page.on('console', onConsole);
     page.on('pageerror', onPageError);
-    this.rendererListeners.set(page, { onConsole, onPageError });
+    const observer = { onConsole, onPageError, closed: false, contexts: new Map(), cdp: null, timer: null, sampling: false };
+    this.rendererListeners.set(page, observer);
     this.writeDiagnostic('driver', 'Observing renderer ' + page.url());
+    try {
+      await diagnosticDeadline(page.evaluateOnNewDocument(installSyntheticCaptureProbe));
+      await diagnosticDeadline(page.evaluate(installSyntheticCaptureProbe));
+    } catch (error) { this.writeDiagnostic('driver', 'Recorder probe unavailable: ' + error.message); }
+    try {
+      const cdp = await diagnosticDeadline(page.target().createCDPSession());
+      if (observer.closed) { await cdp.detach().catch(() => {}); return; }
+      observer.cdp = cdp;
+      for (const type of ['contextCreated', 'contextChanged']) {
+        cdp.on('WebAudio.' + type, ({ context }) => {
+          if (observer.closed) return;
+          observer.contexts.set(context.contextId, context);
+          this.writeDiagnostic('webaudio', JSON.stringify({ event: type, context }));
+        });
+      }
+      cdp.on('WebAudio.contextWillBeDestroyed', ({ contextId }) => {
+        observer.contexts.delete(contextId);
+        if (!observer.closed) this.writeDiagnostic('webaudio', JSON.stringify({ event: 'contextWillBeDestroyed', contextId }));
+      });
+      await diagnosticDeadline(cdp.send('WebAudio.enable'));
+    } catch (error) { this.writeDiagnostic('driver', 'WebAudio diagnostics unavailable: ' + error.message); }
+    if (observer.closed) return;
+    const sample = async () => {
+      if (observer.closed || observer.sampling) return;
+      observer.sampling = true;
+      try {
+        this.writeDiagnostic('progress', JSON.stringify({ disk: this.captureDiskProgress() }));
+        const jobs = [diagnosticDeadline(page.evaluate(() => {
+          const pinia = window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia;
+          const state = pinia?.state?.value?.recording;
+          return { capture: window.__suisseCaptureDiagnostics?.snapshot(), store: state ? {
+            phase: state.phase, duration: state.duration, chunkIndex: state.chunkIndex,
+            chunkSaveErrors: state.chunkSaveErrors, recordingInterrupted: state.recordingInterrupted,
+          } : null };
+        })).then(value => { if (!observer.closed) this.writeDiagnostic('progress', JSON.stringify(value)); })];
+        for (const context of observer.contexts.values()) {
+          if (context.contextState === 'closed' || !observer.cdp) continue;
+          jobs.push(diagnosticDeadline(observer.cdp.send('WebAudio.getRealtimeData', { contextId: context.contextId }))
+            .then(value => { if (!observer.closed) this.writeDiagnostic('webaudio', JSON.stringify({
+              event: 'sample', contextId: context.contextId, contextState: context.contextState, ...value,
+            })); }));
+        }
+        const results = await Promise.allSettled(jobs);
+        for (const result of results) {
+          if (result.status === 'rejected' && !observer.closed) this.writeDiagnostic('driver', result.reason?.message || 'Diagnostic sample failed');
+        }
+      } catch (error) { if (!observer.closed) this.writeDiagnostic('driver', 'Progress diagnostics failed: ' + error.message); }
+      finally { observer.sampling = false; }
+    };
+    observer.timer = setInterval(() => { void sample(); }, 5000);
+    observer.timer.unref?.();
+    void sample();
+  }
+
+  captureDiskProgress() {
+    this.assertTestProfile();
+    const activePath = path.join(this.userDataDir, 'active-recording.json');
+    if (!fs.existsSync(activePath)) return { active: false };
+    const active = JSON.parse(fs.readFileSync(activePath, 'utf8')).activeSession;
+    if (!active || !/^[a-f0-9-]{36}$/i.test(active.recordId || '')) return { active: false };
+    const result = { active: true, recordId: active.recordId, chunkCount: active.chunkCount, lastChunkAt: active.lastChunkAt, sourceFiles: 0, sourceBytes: 0, finalBytes: null };
+    const walk = directory => {
+      if (!fs.existsSync(directory)) return;
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const filename = path.join(directory, entry.name);
+        // Dirent checks exclude links; inspect file metadata, never audio data.
+        if (entry.isDirectory()) walk(filename);
+        else if (entry.isFile() && /\.(webm|pcm|wav|m4a)$/.test(entry.name)) {
+          const size = fs.statSync(filename).size;
+          if (/^audio\.(webm|wav|m4a)$/.test(entry.name)) result.finalBytes = size;
+          else { result.sourceFiles++; result.sourceBytes += size; }
+        }
+      }
+    };
+    walk(path.join(this.recordingsDir, active.recordId));
+    return result;
   }
 
   detachRendererDiagnostics() {
     for (const [page, handlers] of this.rendererListeners) {
+      handlers.closed = true;
+      if (handlers.timer) clearInterval(handlers.timer);
+      if (handlers.cdp) handlers.cdp.detach().catch(() => {});
       page.off('console', handlers.onConsole);
       page.off('pageerror', handlers.onPageError);
     }
@@ -194,7 +330,7 @@ class AppDriver {
         this.page = pages.find(p => !p.url().startsWith('devtools://') && p.url() !== 'about:blank')
           || pages.find(p => !p.url().startsWith('devtools://'));
         if (!this.page) { await sleep(1500); continue; }
-        this.observeRenderer(this.page);
+        await this.observeRenderer(this.page);
         seenUrls.add(this.page.url());
         // Fresh profiles land on the WELCOME page ("Anmelden" / "LOSLEGEN")
         // before any login form exists — click through it like a user.
