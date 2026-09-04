@@ -757,6 +757,7 @@ const SCENARIOS = {
   's7-endurance': s7Endurance,
   's8-sysaudio': s8SysAudio,
   's11-capture-qualification': async () => report('s11-capture-qualification', await require('./qualification').runCaptureQualification()),
+  's12-device-qualification': async () => report('s12-device-qualification', await require('./device-qualification').runDeviceQualification()),
 };
 
 (async () => {
