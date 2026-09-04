@@ -25,6 +25,24 @@ function diagnosticDeadline(promise, ms = 3000) {
   ]).finally(() => clearTimeout(timer));
 }
 
+function macFakeAudioLaunchArgs(env, platform = process.platform) {
+  if (platform !== 'darwin' || env.SUISSE_E2E_HOOKS !== '1' ||
+      env.SUISSE_TEST_NETWORK_ISOLATION !== '1' || !env.SUISSE_TEST_FAKE_AUDIO) return [];
+  const isLoopback = value => {
+    try {
+      const url = new URL(value);
+      return url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+    } catch (_) { return false; }
+  };
+  if (!isLoopback(env.API_BASE_URL) || !isLoopback(env.VITE_API_URL)) return [];
+  try { if (!fs.statSync(env.SUISSE_TEST_FAKE_AUDIO).isFile()) return []; }
+  catch (_) { return []; }
+  // Chromium 120's sandboxed macOS audio service cannot open the fake WAV.
+  // Only this synthetic native launch gets an audio-service exception; do not
+  // disable renderer/global sandboxing or change the production app defaults.
+  return ['--disable-features=AudioServiceSandbox'];
+}
+
 // Runs only in synthetic/local test pages. Wrapping start observes both an
 // already-constructed recorder and future instances, without replacing their
 // native handlers, constructor, capture stream, or recording implementation.
@@ -286,13 +304,15 @@ class AppDriver {
     fs.mkdirSync(this.userDataDir, { recursive: true });
 
     const childOptions = { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' };
+    const nativeArgs = (this.appDir || packagedExe) ? macFakeAudioLaunchArgs(env) : [];
+    if (nativeArgs.length) this.writeDiagnostic('driver', 'Synthetic macOS fake WAV: AudioServiceSandbox disabled for this native test launch only');
     if (this.appDir) {
       const appDirectory = path.resolve(this.appDir);
       if (!fs.existsSync(path.join(appDirectory, 'package.json'))) throw new Error('Build the Electron app before using SUISSE_E2E_APP_DIR');
-      this.proc = spawn(require('electron'), [appDirectory], childOptions);
+      this.proc = spawn(require('electron'), [...nativeArgs, appDirectory], childOptions);
     } else if (packagedExe) {
       // Spawn the packaged app directly (no shell, no dev server).
-      this.proc = spawn(packagedExe, [], childOptions);
+      this.proc = spawn(packagedExe, nativeArgs, childOptions);
     } else {
       // shell:true — Node 20+ on Windows refuses to spawn .cmd shims directly
       // (CVE-2024-27980 hardening); the whole tree is killed via taskkill /T.
