@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import vm from 'node:vm';
 
 const require = createRequire(import.meta.url);
 const { buildCodedScenario, verifyCodedAudio, SAMPLE_RATE } = require('../e2e-harness/lib/coded-audio');
@@ -43,6 +44,63 @@ function matchEnergy(data) {
   expect(Math.abs(energy(output) / energy(region(0, 12)) - 1)).toBeLessThan(0.0001);
   return output;
 }
+
+// Exercise the real grouping/verification code with exact window identities,
+// avoiding codec-dependent timing when testing numerical boundary behavior.
+function boundaryOracle() {
+  const module = { exports: {} };
+  const source = fs.readFileSync(require.resolve('../e2e-harness/lib/coded-audio'), 'utf8');
+  vm.runInNewContext(source + `
+    module.exports.boundaryHarness = {
+      createAnalyzer,
+      setWindowDecoder(fn) { decodeWindow = fn; },
+      verifyAnalysis(analysis, scenario) {
+        analyzeCodedAudio = async () => analysis;
+        return verifyCodedAudio('', scenario);
+      }
+    };
+  `, { module, require, Buffer, Float32Array });
+  return module.exports.boundaryHarness;
+}
+
+describe('oracle numerical timing boundaries', () => {
+  it.each([0, 185, 850])('keeps an exact 120ms same-ID gap together at window offset %s', base => {
+    const oracle = boundaryOracle();
+    const valid = new Set([base, base + 1, base + 7, base + 8]);
+    oracle.setWindowDecoder((samples, offset) => valid.has(offset / 160) ? 6 : null);
+    const analyzer = oracle.createAnalyzer();
+    analyzer.feed(Buffer.alloc(((base + 8) * 160 + 640) * 4));
+    const result = analyzer.finish();
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0].windows).toBe(4);
+  });
+
+  it.each([0, 185, 850])('still splits a 140ms same-ID gap at window offset %s', base => {
+    const oracle = boundaryOracle();
+    const valid = new Set([base, base + 1, base + 8, base + 9]);
+    oracle.setWindowDecoder((samples, offset) => valid.has(offset / 160) ? 6 : null);
+    const analyzer = oracle.createAnalyzer();
+    analyzer.feed(Buffer.alloc(((base + 9) * 160 + 640) * 4));
+    expect(analyzer.finish().groups).toHaveLength(2);
+  });
+
+  it.each([[1.24, 1.54], [4.62, 4.92], [17.76, 18.06]])(
+    'accepts an exact 300ms interior span from %s to %s, but rejects 280ms', async (start, end) => {
+      const oracle = boundaryOracle();
+      const center = (start + end) / 2;
+      const groups = Array.from({ length: 5 }, (_, id) => ({ id,
+        start: center + (id - 2) * 0.5 - 0.2,
+        end: center + (id - 2) * 0.5 + 0.2, windows: 16 }));
+      groups[2] = { id: 2, start, end, windows: 16 };
+      const reference = { coded: { version: 1, frameSeconds: 0.5 }, timeline: [{ type: 'speech', start: 0, end: 2.5 }] };
+      const analysis = { durationS: end + 1, groups, decoderWarnings: null, rejectedGroups: 0 };
+      expect((await oracle.verifyAnalysis(analysis, reference)).problems).toEqual([]);
+      groups[2] = { id: 2, start: start + 0.01, end: end - 0.01, windows: 15 };
+      const tooShort = await oracle.verifyAnalysis(analysis, reference);
+      expect(tooShort.pass).toBe(false);
+      expect(tooShort.problems).toEqual(['INCOMPLETE OR REPEATED FRAME 2: identifiable span 0.280s']);
+    });
+});
 
 describe('numbered-frame synthetic audio oracle', () => {
   beforeAll(() => {

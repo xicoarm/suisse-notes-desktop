@@ -17,6 +17,9 @@ const ANALYSIS_RATE = 8000;
 const FRAME_SECONDS = 0.5;
 const WINDOW_SECONDS = 0.08;
 const HOP_SECONDS = 0.02;
+// One nanosecond absorbs timestamp subtraction roundoff, including long
+// recordings, without widening any boundary by even one analysis sample.
+const TIMING_EPSILON_SECONDS = 1e-9;
 const BASE_FREQUENCIES = [275, 875, 1475, 2075, 2675, 3275];
 const FREQUENCY_STEP = 25;
 const MULTIPLIER = 40503;
@@ -173,7 +176,7 @@ function createAnalyzer() {
         const id = decodeWindow(samples, offset);
         const time = (sampleBase + offset + WINDOW / 2) / ANALYSIS_RATE;
         if (id !== null) {
-          if (!active || active.id !== id || time - active.end > 0.12) {
+          if (!active || active.id !== id || time - active.end > 0.12 + TIMING_EPSILON_SECONDS) {
             finishGroup(); active = { id, start: time, end: time, windows: 1 };
           } else { active.end = time; active.windows++; }
         }
@@ -224,7 +227,7 @@ async function verifyCodedAudio(filePath, scenario, expectations = {}) {
     id * frameSeconds < segment.end && ['speech', 'quiet'].includes(segment.type));
   if (expectations.expectedDurationS !== undefined) {
     const tolerance = expectations.durationToleranceS ?? 1.5;
-    if (Math.abs(analysis.durationS - expectations.expectedDurationS) > tolerance) {
+    if (Math.abs(analysis.durationS - expectations.expectedDurationS) > tolerance + TIMING_EPSILON_SECONDS) {
       problems.push(`DURATION: ${analysis.durationS.toFixed(3)}s versus expected ${expectations.expectedDurationS.toFixed(3)}s (tolerance ${tolerance}s)`);
     }
   }
@@ -246,13 +249,13 @@ async function verifyCodedAudio(filePath, scenario, expectations = {}) {
         const expectedStep = (group.id - previous.id) * frameSeconds;
         // Ignore partial boundary frames. Interior timing catches a shortened
         // or elongated fragment even when its numbered frame still appears.
-        if (i > 1 && i < groups.length - 1 && Math.abs(actualStep - expectedStep) > WINDOW_SECONDS + HOP_SECONDS + expectedStep * 0.003) {
+        if (i > 1 && i < groups.length - 1 && Math.abs(actualStep - expectedStep) > WINDOW_SECONDS + HOP_SECONDS + expectedStep * 0.003 + TIMING_EPSILON_SECONDS) {
           problems.push(`INTERIOR TIMING: frames ${previous.id}→${group.id}, ${actualStep.toFixed(3)}s versus ${expectedStep.toFixed(3)}s`);
         }
       }
     }
     const span = group.end - group.start;
-    if ((i > 0 && i < groups.length - 1 && span < frameSeconds - 2 * WINDOW_SECONDS - 2 * HOP_SECONDS) || span > frameSeconds + 0.12) {
+    if ((i > 0 && i < groups.length - 1 && span < frameSeconds - 2 * WINDOW_SECONDS - 2 * HOP_SECONDS - TIMING_EPSILON_SECONDS) || span > frameSeconds + 0.12 + TIMING_EPSILON_SECONDS) {
       problems.push(`INCOMPLETE OR REPEATED FRAME ${group.id}: identifiable span ${span.toFixed(3)}s`);
     }
     previous = group;
