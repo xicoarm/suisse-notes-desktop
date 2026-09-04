@@ -679,9 +679,18 @@ export const useRecordingStore = defineStore('recording', {
             }
 
             if (result.success) {
-              // Track integrity
+              // Only acknowledged writes advance integrity, inside this
+              // serialized save loop with no await between its updates.
               if (this.integrity) {
-                this.integrity = addChunkToRecordingIntegrity(this.integrity, chunkIntegrity);
+                if (isElectron()) {
+                  // Keep long desktop recordings linear instead of copying
+                  // the entire growing array for every saved chunk.
+                  this.integrity.chunks.push(chunkIntegrity);
+                  this.integrity.totalSize += chunkIntegrity.size;
+                } else {
+                  // Mobile metadata writes retain a snapshot across an await.
+                  this.integrity = addChunkToRecordingIntegrity(this.integrity, chunkIntegrity);
+                }
               }
               this.chunkIndex++;
               return { success: true };
