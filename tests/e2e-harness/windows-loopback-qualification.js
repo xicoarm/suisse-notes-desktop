@@ -204,7 +204,13 @@ async function runSystemAudioQualification() {
     await app.evalTimed(installLoopbackFixture, { apiUrl: mock.url });
     await app.login();
     if (!(await app.evalTimed(() => window.__windowsLoopbackQualification?.snapshot()))) throw new Error('Microphone interception was lost during login');
+    result.systemAudioSupport = await app.evalTimed(() => window.electronAPI.systemAudio.isSupported());
+    if (result.systemAudioSupport.platform !== 'win32' || !result.systemAudioSupport.supported) throw new Error('Native Windows system audio is not supported in this app');
     await app.evalTimed(async () => { await window.electronAPI.systemAudio.setEnabled(true); });
+    // RecordPage renders record-start before its async microphone enumeration
+    // and loadSystemAudioState complete. The toggle is gated by isSupported,
+    // so login readiness alone does not imply this control exists yet.
+    await app.page.waitForSelector('[data-test=system-audio-toggle]', { visible: true, timeout: 20000 });
     for (let attempt = 0; attempt < 3; attempt++) {
       if (await app.evalTimed(() => Boolean(document.querySelector('.system-audio-active')))) break;
       await app.page.click('[data-test=system-audio-toggle]'); await sleep(500);
