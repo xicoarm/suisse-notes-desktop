@@ -4,6 +4,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      run_endurance:
+        description: Run the real 5h05 native endurance matrix instead of the short suites
+        type: boolean
+        required: false
+        default: false
 
 # This workflow never signs, publishes, pushes, or creates a release.
 permissions:
@@ -15,6 +21,7 @@ concurrency:
 
 jobs:
   synthetic-capture:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.run_endurance }}
     name: Synthetic capture / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -88,3 +95,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
           compression-level: 1
+
+  manual-endurance:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_endurance }}
+    uses: ./.github/workflows/audio-endurance.yml

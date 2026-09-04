@@ -11,11 +11,12 @@ const repository = path.resolve(__dirname, '../../..');
 const work = path.join(repository, 'tests/e2e-harness/work');
 const bundle = path.join(repository, 'dist/electron/UnPackaged');
 const scenario = process.argv[2] || 's11-capture-qualification';
-if (!['s11-capture-qualification', 's12-device-qualification'].includes(scenario)) {
+if (!['s11-capture-qualification', 's12-device-qualification', 's13-coded-endurance'].includes(scenario)) {
   throw new Error('Unknown hosted qualification scenario');
 }
 const diagnostics = path.join(work, 'ci', scenario);
-const timeoutMs = 20 * 60 * 1000;
+const endurance = scenario === 's13-coded-endurance';
+const timeoutMs = (endurance ? 330 : 20) * 60 * 1000;
 fs.mkdirSync(diagnostics, { recursive: true });
 
 function log(message) {
@@ -31,13 +32,14 @@ function assertLocalUrl(value) {
   }
 }
 
-function childEnvironment() {
+function childEnvironment(bundleSha) {
   const environment = {};
   for (const [key, value] of Object.entries(process.env)) {
     // Do not pass runner tokens, signing credentials, or external-service
     // credentials into the app, its synthetic profile, or diagnostic logs.
     if (/(^|_)(TOKEN|SECRET|PASSWORD|API_KEY)(_|$)/i.test(key) || /^(APPLE_|CSC_)/i.test(key)) continue;
     if (['NODE_OPTIONS', 'ELECTRON_RUN_AS_NODE', 'SUISSE_E2E_PACKAGED_EXE', 'SUISSE_TEST_USERDATA', 'SUISSE_TEST_FAKE_AUDIO'].includes(key)) continue;
+    if (endurance && key === 'VITE_SUISSE_MAX_DURATION_SECONDS') continue;
     environment[key] = value;
   }
   return {
@@ -47,6 +49,8 @@ function childEnvironment() {
     SUISSE_E2E_HOOKS: '1',
     SUISSE_TEST_NETWORK_ISOLATION: '1',
     SUISSE_E2E_APP_DIR: bundle,
+    SUISSE_E2E_BUNDLE_SHA: bundleSha,
+    ...(endurance ? { SUISSE_ENDURANCE_SECONDS: '18300', SUISSE_ENDURANCE_PROCESSING_DISABLED: '0' } : {}),
     CSC_IDENTITY_AUTO_DISCOVERY: 'false',
     SENTRY_AUTH_TOKEN: '',
     GH_TOKEN: '',
@@ -88,6 +92,9 @@ async function main() {
   assertLocalUrl(process.env.API_BASE_URL);
   assertLocalUrl(process.env.VITE_API_URL);
   if (process.env.SUISSE_E2E_PACKAGED_EXE) throw new Error('A packaged release executable cannot be used by this job');
+  if (endurance && (process.env.SUISSE_ENDURANCE_SECONDS !== '18300' || process.env.SUISSE_ENDURANCE_PROCESSING_DISABLED !== '0' || process.env.VITE_SUISSE_MAX_DURATION_SECONDS)) {
+    throw new Error('Hosted endurance requires exactly 18300 seconds, default processing, and no accelerated rotation override');
+  }
   if (path.resolve(repository, process.env.SUISSE_E2E_APP_DIR || '') !== bundle) throw new Error('Unexpected Electron bundle directory');
   const bundlePackage = JSON.parse(fs.readFileSync(path.join(bundle, 'package.json'), 'utf8'));
   const mainEntry = path.resolve(bundle, bundlePackage.main);
@@ -100,11 +107,14 @@ async function main() {
     node: process.version, electron: require('electron/package.json').version,
     runnerImage: process.env.ImageOS || null, runnerImageVersion: process.env.ImageVersion || null,
     scope: 'Generated microphone input through native Electron; local mock upload only. Hardware capture, AudioTee, TCC, and Bluetooth/USB are not qualified.',
+    ...(endurance ? { captureSeconds: 18300, naturalRotationSeconds: 17700, processingDisabled: false,
+      productionBackendQualified: false, referenceGeneration: { generator: 'tests/e2e-harness/lib/coded-audio.js',
+        firstFrameId: 0, randomSeed: null, plan: [{ type: 'speech', seconds: 18325 }] } } : {}),
   };
   fs.writeFileSync(path.join(diagnostics, 'manifest.json'), JSON.stringify(manifest, null, 2));
   log(`Starting ${scenario} on ${manifest.platform}/${manifest.architecture}; ${timeoutMs / 60000}-minute deadline`);
   const child = spawn(process.execPath, [path.join(repository, 'tests/e2e-harness/run.js'), scenario, '--keep'], {
-    cwd: repository, env: childEnvironment(), windowsHide: true,
+    cwd: repository, env: childEnvironment(manifest.commit), windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   for (const [name, stream] of [['stdout', child.stdout], ['stderr', child.stderr]]) {
@@ -123,7 +133,15 @@ async function main() {
     child.once('error', reject);
     child.once('close', (code, signal) => resolve({ code, signal }));
   }).finally(() => clearTimeout(deadline));
-  const passed = !timedOut && result.code === 0;
+  let passed = !timedOut && result.code === 0;
+  if (endurance && passed) {
+    // A zero exit code from a shortened local smoke must never qualify this job.
+    try {
+      const evidence = JSON.parse(fs.readFileSync(path.join(work, 'result_s13-coded-endurance.json'), 'utf8'));
+      passed = evidence.fiveHourQualificationPassed === true && evidence.requestedSeconds === 18300;
+    } catch (error) { passed = false; log('Missing or unreadable endurance result: ' + error.message); }
+    if (!passed) log('Endurance result did not prove the required real 5h05 capture');
+  }
   fs.writeFileSync(path.join(diagnostics, 'exit.json'), JSON.stringify({ ...result, timedOut, passed, finishedAt: new Date().toISOString() }, null, 2));
   log(passed ? 'Synthetic qualification passed' : 'Synthetic qualification failed; review the retained profiles, audio, and logs');
   if (process.env.GITHUB_STEP_SUMMARY) {
@@ -131,7 +149,8 @@ async function main() {
       `### Synthetic audio qualification: ${passed ? 'passed' : 'failed'}\n\n` +
       `Native ${manifest.platform}/${manifest.architecture}, Electron ${manifest.electron}. ` +
       `The artifact contains generated audio, original chunks, test profiles and diagnostics. ` +
-      `This is not a test of physical microphones, Bluetooth/USB, AudioTee, or macOS privacy permissions.\n`);
+      `This is not a test of physical microphones, Bluetooth/USB, AudioTee, or macOS privacy permissions.\n` +
+      (endurance ? '\nThe requested capture is 5h05 at normal speed with the default 4h55 source rotation. Local mock acceptance beyond five hours does not prove acceptance by the production backend, whose limit is five hours. Regenerable input WAVs are excluded; their metadata and generator revision are retained.\n' : ''));
   }
   process.exitCode = passed ? 0 : 1;
 }
