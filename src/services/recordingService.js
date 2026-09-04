@@ -80,6 +80,7 @@ let micMuted = false;
 
 // Recording store reference (set during startRecording, used by switchMicrophoneStream)
 let recordingStoreRef = null;
+let micWarningPersistence = new Map();
 
 // DREC-3: mic device-disconnect auto-recovery. When a mic track ends mid-
 // recording (USB unplug, Bluetooth drop/codec switch, battery death) we schedule
@@ -415,6 +416,7 @@ function updateMicHealthState(status, reasonCode = null, message = null, updates
   ].some((key) => nextState[key] !== previous[key]);
 
   micHealthState = nextState;
+  persistMicrophoneWarning(nextState);
   if (!changed) {
     return;
   }
@@ -422,6 +424,41 @@ function updateMicHealthState(status, reasonCode = null, message = null, updates
   emit('healthChange', { ...micHealthState });
   if (nextState.status === MIC_HEALTH_STATUS.CRITICAL && previous.status !== MIC_HEALTH_STATUS.CRITICAL) {
     emit('criticalWarning', { ...micHealthState });
+  }
+}
+
+// Live health may recover, but that does not restore speech missing earlier in
+// the meeting. Keep these warnings with the original audio through recovery,
+// finalization and upload. Deduplicate each kind per recording, retrying failed
+// metadata writes on later health samples without flooding IPC.
+function persistMicrophoneWarning(health) {
+  const warning = health?.reasonCode === MIC_HEALTH_REASON.TRACK_ENDED ? 'microphone-disconnected'
+    : health?.reasonCode === MIC_HEALTH_REASON.ZERO_SIGNAL ? 'microphone-zero-signal' : null;
+  const recordId = recordingStoreRef?.recordId;
+  const saveMetadata = window.electronAPI?.recording?.saveMetadata;
+  if (!recordId || !recordingStoreRef.isRecording || recordingStoreRef.isPaused || !saveMetadata) return;
+  const key = `${recordId}:${warning}`;
+  if (warning && !micWarningPersistence.has(key)) {
+    micWarningPersistence.set(key, { recordId, generation: recorderGeneration, evidence: {
+      kind: warning, detectedAt: new Date().toISOString(), reasonCode: health.reasonCode,
+      status: health.status, elapsedSeconds: getWallClockSeconds(),
+      silenceSince: health.silenceSince, afterSwitch: health.afterSwitch === true
+    } });
+  }
+  for (const entry of micWarningPersistence.values()) {
+    if (entry.recordId !== recordId || entry.saved || entry.pending || Date.now() < (entry.retryAt || 0)) continue;
+    entry.pending = true;
+    Promise.resolve().then(() => {
+      if (entry.generation !== recorderGeneration) return;
+      return saveMetadata(recordId, { captureWarnings: [entry.evidence.kind], lastMicrophoneWarning: entry.evidence });
+    }).then(result => {
+      if (entry.generation !== recorderGeneration) return;
+      if (result?.success !== true) throw new Error(result?.error || 'Metadata write failed');
+      entry.saved = true;
+    }).catch(error => {
+      entry.retryAt = Date.now() + 5000;
+      console.warn('Could not persist microphone warning:', error);
+    }).finally(() => { entry.pending = false; });
   }
 }
 
@@ -1511,6 +1548,7 @@ function startMicHealthMonitoring(micStream, recordingStore) {
 
     micHealthInterval = setInterval(() => {
       if (!micHealthAnalyser) return;
+      persistMicrophoneWarning(null); // Retry earlier evidence even after current input becomes healthy.
       if (!recordingStore.isRecording) {
         // Paused/stopped: measurement is gated, so wall-clock episode state
         // must not keep aging (a 10-min pause would otherwise resume straight
@@ -2321,6 +2359,7 @@ async function startRecordingInternal(options) {
   // if an orphaned recorder is somehow still running.
   const myGeneration = ++recorderGeneration;
   orphanRecorderWarned = false;
+  micWarningPersistence = new Map();
 
   // Layer 3 — belt-and-braces: nothing from a previous pipeline may survive
   // into a new session.

@@ -391,6 +391,95 @@ describe('recordingService mic signal forensics (MSIG)', () => {
     await vi.advanceTimersByTimeAsync(0);
   });
 
+  it('retains a disconnected microphone warning after a replacement is verified healthy', async () => {
+    const previousApi = window.electronAPI;
+    const metadata = { captureWarnings: ['existing-warning'] };
+    const saveMetadata = vi.fn(async (id, patch) => {
+      expect(id).toBe('rec-test');
+      metadata.captureWarnings = [...new Set([...metadata.captureWarnings, ...patch.captureWarnings])];
+      return { success: true };
+    });
+    window.electronAPI = { recording: { saveMetadata } };
+    try {
+      const store = createMockRecordingStore();
+      const { micTrack } = await startHealthyRecording(store, { produceChunks: true });
+      micTrack.readyState = 'ended';
+      micTrack.onended();
+      await vi.advanceTimersByTimeAsync(300);
+      expect(saveMetadata).toHaveBeenCalledWith('rec-test', expect.objectContaining({
+        captureWarnings: ['microphone-disconnected'],
+        lastMicrophoneWarning: expect.objectContaining({ kind: 'microphone-disconnected', reasonCode: 'track_ended' })
+      }));
+      expect(saveMetadata).toHaveBeenCalledTimes(1);
+      navigator.mediaDevices.getUserMedia.mockResolvedValue(new MockMediaStream([createTrack({ deviceId: 'replacement' })]));
+      const result = await recordingService.switchMicrophoneStream('replacement');
+      await vi.advanceTimersByTimeAsync(400);
+      expect(await result.verified).toBe('signal');
+      expect(healthNow().status).toBe('ok');
+      expect(metadata.captureWarnings).toEqual(['existing-warning', 'microphone-disconnected']);
+      expect(saveMetadata).toHaveBeenCalledTimes(1);
+    } finally { window.electronAPI = previousApi; }
+  });
+
+  it('retains zero-signal evidence after the same microphone begins delivering audio again', async () => {
+    const previousApi = window.electronAPI;
+    const saveMetadata = vi.fn().mockResolvedValue({ success: true });
+    window.electronAPI = { recording: { saveMetadata } };
+    try {
+      const store = createMockRecordingStore();
+      await startHealthyRecording(store, { produceChunks: true });
+      ctrl.amplitude = 0; ctrl.byteVal = 0;
+      await vi.advanceTimersByTimeAsync(21000);
+      expect(saveMetadata).toHaveBeenCalledWith('rec-test', expect.objectContaining({
+        captureWarnings: ['microphone-zero-signal'],
+        lastMicrophoneWarning: expect.objectContaining({ reasonCode: 'zero_signal', silenceSince: expect.any(Number) })
+      }));
+      expect(saveMetadata).toHaveBeenCalledTimes(1);
+      ctrl.amplitude = 0.1; ctrl.byteVal = 50;
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(healthNow().status).toBe('ok');
+      expect(saveMetadata).toHaveBeenCalledTimes(1); // Healthy input must not clear the durable warning.
+    } finally { window.electronAPI = previousApi; }
+  });
+
+  it('retries failed microphone-warning persistence with a bounded rate even if health remains unchanged', async () => {
+    const previousApi = window.electronAPI;
+    const saveMetadata = vi.fn().mockResolvedValueOnce({ success: false, error: 'temporary write failure' }).mockResolvedValue({ success: true });
+    window.electronAPI = { recording: { saveMetadata } };
+    try {
+      const store = createMockRecordingStore();
+      const { micTrack } = await startHealthyRecording(store, { produceChunks: true });
+      micTrack.readyState = 'ended';
+      await vi.advanceTimersByTimeAsync(4900);
+      expect(saveMetadata).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(saveMetadata).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(saveMetadata).toHaveBeenCalledTimes(2);
+      expect(saveMetadata.mock.calls[0][1].lastMicrophoneWarning).toEqual(saveMetadata.mock.calls[1][1].lastMicrophoneWarning);
+    } finally { window.electronAPI = previousApi; }
+  });
+
+  it('still persists earlier microphone loss if the first metadata write failed and capture already recovered', async () => {
+    const previousApi = window.electronAPI;
+    const saveMetadata = vi.fn().mockRejectedValueOnce(new Error('temporary IPC error')).mockResolvedValue({ success: true });
+    window.electronAPI = { recording: { saveMetadata } };
+    try {
+      const store = createMockRecordingStore();
+      const { micTrack } = await startHealthyRecording(store, { produceChunks: true });
+      micTrack.readyState = 'ended';
+      await vi.advanceTimersByTimeAsync(200);
+      navigator.mediaDevices.getUserMedia.mockResolvedValue(new MockMediaStream([createTrack({ deviceId: 'replacement' })]));
+      const switched = await recordingService.switchMicrophoneStream('replacement');
+      await vi.advanceTimersByTimeAsync(400);
+      expect(await switched.verified).toBe('signal');
+      expect(healthNow().status).toBe('ok');
+      await vi.advanceTimersByTimeAsync(5500);
+      expect(saveMetadata).toHaveBeenCalledTimes(2);
+      expect(saveMetadata).toHaveBeenLastCalledWith('rec-test', expect.objectContaining({ captureWarnings: ['microphone-disconnected'] }));
+    } finally { window.electronAPI = previousApi; }
+  });
+
   afterEach(() => {
     // Deregister — the service is a module singleton, so leaked listeners
     // from earlier tests would multiply-push into the current events object.

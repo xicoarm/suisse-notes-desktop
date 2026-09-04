@@ -853,6 +853,7 @@ import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
 import { useMinutesStore } from '../stores/minutes';
 import { useRecorder } from '../composables/useRecorder';
+import { useMicSwitchNotifications } from '../composables/useMicSwitchNotifications';
 import { isElectron, isCapacitor, isAndroid } from '../utils/platform';
 import { humanizeStorageError } from '../utils/storageErrors';
 import { uploadWithVerification } from '../services/upload';
@@ -975,29 +976,9 @@ watch(recordingErrorInfo, (info) => {
   });
 });
 
-watch(micSwitchEvent, (ev) => {
-  if (!ev) return;
-  micSwitchEvent.value = null; // consume (transient event)
-  if (ev.unverified) return;   // probe unavailable — nothing truthful to say
-  const device = ev.label || t('micGenericDevice');
-  if (ev.ok) {
-    // The auto-switch case gets its own, more prominent toast below.
-    if (ev.context === 'auto-recovery') return;
-    $q.notify({
-      type: 'positive',
-      message: t('micSwitchOkToast', { device }),
-      icon: 'mic',
-      timeout: 4000
-    });
-  } else {
-    $q.notify({
-      type: 'negative',
-      message: t('micSwitchSilentToast', { device }),
-      icon: 'mic_off',
-      timeout: 0,
-      actions: [{ label: t('ok', 'OK'), color: 'white' }]
-    });
-  }
+useMicSwitchNotifications({
+  notify: options => $q.notify(options), t, micSwitchEvent, recordingHealth,
+  recordId: () => recordingStore.recordId
 });
 
 // MSIG: the service auto-switched to another device after the selected mic
