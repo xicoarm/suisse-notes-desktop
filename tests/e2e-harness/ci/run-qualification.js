@@ -11,12 +11,13 @@ const repository = path.resolve(__dirname, '../../..');
 const work = path.join(repository, 'tests/e2e-harness/work');
 const bundle = path.join(repository, 'dist/electron/UnPackaged');
 const scenario = process.argv[2] || 's11-capture-qualification';
-if (!['s11-capture-qualification', 's12-device-qualification', 's13-coded-endurance'].includes(scenario)) {
+if (!['s11-capture-qualification', 's12-device-qualification', 's13-coded-endurance', 's15-main-crash-qualification'].includes(scenario)) {
   throw new Error('Unknown hosted qualification scenario');
 }
 const diagnostics = path.join(work, 'ci', scenario);
 const endurance = scenario === 's13-coded-endurance';
-const timeoutMs = (endurance ? 330 : 20) * 60 * 1000;
+const mainCrash = scenario === 's15-main-crash-qualification';
+const timeoutMs = (endurance ? 330 : mainCrash ? 10 : 20) * 60 * 1000;
 fs.mkdirSync(diagnostics, { recursive: true });
 
 function log(message) {

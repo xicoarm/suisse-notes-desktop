@@ -24,7 +24,7 @@ jobs:
     if: ${{ github.event_name != 'workflow_dispatch' || !inputs.run_endurance }}
     name: Synthetic capture / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -66,6 +66,7 @@ jobs:
         run: npm ci
 
       - name: Prepare native FFmpeg and ffprobe
+        timeout-minutes: 2
         run: node scripts/prepare-ffmpeg.js
 
       - name: Build an unsigned Electron test bundle
@@ -81,6 +82,11 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 23
         run: node tests/e2e-harness/ci/run-qualification.js s12-device-qualification
+
+      - name: Qualify full app-process crash recovery
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 13
+        run: node tests/e2e-harness/ci/run-qualification.js s15-main-crash-qualification
 
       # Keep failed captures and their original chunks, not just a verdict.
       # The harness uses generated audio and fake credentials against localhost.
