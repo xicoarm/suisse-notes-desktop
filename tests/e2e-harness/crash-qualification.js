@@ -143,11 +143,7 @@ async function visibleHistory(app, recordId) {
     const pinia = window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia;
     const recordings = pinia?.state?.value?.['recordings-history']?.recordings || pinia?.state?.value?.recordingsHistory?.recordings || [];
     const recording = recordings.find(item => item.id === rid);
-    const card = [...document.querySelectorAll('.history-card')].find(element => {
-      let owner = element.__vueParentComponent;
-      while (owner) { if (owner.props?.recording?.id === rid) return true; owner = owner.parent; }
-      return false;
-    });
+    const card = document.querySelector(`[data-test="history-expand"][data-record-id="${rid}"]`)?.closest('.history-card');
     const box = card?.getBoundingClientRect();
     return { id: recording?.id, recovered: recording?.recovered === true, uploadStatus: recording?.uploadStatus,
       audioFileId: recording?.audioFileId, visible: !!box?.width && !!box?.height, text: card?.textContent?.trim().slice(0, 500) || null };
@@ -155,7 +151,7 @@ async function visibleHistory(app, recordId) {
 }
 
 async function runMainCrashQualification(opts = {}) {
-  const seconds = opts.seconds ?? 48;
+  const seconds = opts.seconds ?? 50;
   if (!Number.isInteger(seconds) || seconds < 45 || seconds > 60) throw new Error('Crash qualification requires 45–60 real capture seconds');
   const appDir = opts.appDir || process.env.SUISSE_E2E_APP_DIR;
   if (!appDir) throw new Error('Crash qualification requires an isolated compiled Electron bundle');
@@ -166,6 +162,7 @@ async function runMainCrashQualification(opts = {}) {
   const result = { name, pass: false, problems: [], notes: [
     'Abrupt whole-app process termination; no graceful stop or renderer-only crash.',
     'Only audio that reached durable storage can survive this crash. No audio is expected during process downtime.',
+    'Default 50-second capture avoids a multiple of the ordinary three-second recording slice, exercising an unfinished final slice.',
     'Synthetic microphone and localhost upload; physical devices, power-loss disk caches, and production backend acceptance are outside this test.',
   ], requestedSeconds: seconds, progress: [], evidenceDir, summaryPath };
   const checkpoint = stage => {
@@ -175,10 +172,13 @@ async function runMainCrashQualification(opts = {}) {
   };
   let first = null, recovered = null, mock = null;
   try {
+    checkpoint('preparing-reference');
     const reference = buildCodedScenario(name, [{ type: 'speech', seconds: seconds + 25 }]);
     result.reference = reference.metaPath;
     mock = await startMockBackend({ port: opts.mockPort || 3000 });
     first = new AppDriver({ name, appDir, apiUrl: mock.url, fakeAudioWav: reference.wavPath, env: { SUISSE_TEST_NETWORK_ISOLATION: '1' } });
+    result.profile = first.userDataDir;
+    checkpoint('launching');
     await first.launch(); await first.login();
     if (await first.evalTimed(() => window.electronAPI.config.getApiUrl()) !== mock.url) throw new Error('Crash qualification must use only the local backend');
     result.bundleSha = opts.bundleSha || process.env.SUISSE_E2E_BUNDLE_SHA || null;
@@ -187,6 +187,7 @@ async function runMainCrashQualification(opts = {}) {
     const started = performance.now();
     while (performance.now() - started < seconds * 1000) {
       const state = await recordingSnapshot(first);
+      result.recordId = state.recordId;
       result.progress.push({ elapsedS: (performance.now() - started) / 1000, ...state });
       checkpoint('recording');
       if (state.phase !== 'recording') throw new Error('Capture left recording phase before crash injection');
