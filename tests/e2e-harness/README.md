@@ -28,7 +28,7 @@ prefix chunks and coded audio outside the deliberately silent intervals. These
 are synthetic application tests; they do not reproduce physical USB/Bluetooth
 drivers, radio loss, codec-profile changes or actual permission prompts.
 
-Native Windows, Intel Mac and Apple Silicon Mac CI runs `s11` and `s12` on pull requests.
+Native Windows, Intel Mac and Apple Silicon Mac CI runs `s11`, `s12` and `s15` on pull requests.
 See [hosted qualification](ci/README.md) for exact scope, isolation and artifacts.
 A failed hosted capture is a failure to investigate, not a reason to skip an OS.
 
@@ -43,6 +43,47 @@ $env:SUISSE_E2E_APP_DIR=(Resolve-Path dist/electron/UnPackaged).Path
 node tests/e2e-harness/run.js s11-capture-qualification
 node tests/e2e-harness/run.js s12-device-qualification
 ```
+
+The strict endurance runner defaults to **five hours and five minutes of actual
+capture**. It checks available disk space, samples progress into an append-only
+log, streams the mock upload hash, verifies numbered audio across the natural
+4h55 rotation, and retains every source chunk. It requires a frozen bundle:
+
+```powershell
+$env:SUISSE_ENDURANCE_SECONDS='18300'
+node tests/e2e-harness/run.js s13-coded-endurance
+```
+
+For harness smoke testing, an explicit duration from 45 to 20,000 seconds is
+accepted. A short smoke reports `fiveHourQualificationPassed=false`. The mock
+accepts long files to test the client; the production backend still rejects
+recordings over five hours, so mock success cannot qualify that contract.
+The same full-duration scenario can run independently of the developer laptop
+on three native cloud runners through the manual workflow described in
+[hosted qualification](ci/README.md). It never runs automatically on a PR.
+
+On a local Windows machine, `s14-system-audio-qualification` plays 48 seconds of
+numbered audio through the existing default output and captures it through the
+real Chromium desktop-audio path. Hardware microphone requests are replaced with
+disabled zero-valued tracks, and app mute is verified before playout. This checks
+the actual default output path without changing device defaults or volume.
+Because other Windows playback could enter loopback, all evidence stays in
+repo-root `work/private-system-audio`, outside the synthetic CI artifact tree;
+the scenario refuses CI. It does not qualify the communications endpoint or
+physical USB/Bluetooth changes.
+The fixture prepares its numbered PCM samples before capture and records
+preparation checkpoints. An earlier asynchronous WAV-decoding fixture crashed
+Electron 28.3.3 before capture; its failure evidence remains separate from the
+passing PCM fixture. This is not a production runtime fix.
+
+`s15-main-crash-qualification` records a numbered signal, hashes the acknowledged
+durable chunks, abruptly terminates only its own Electron process tree, and
+restarts the same isolated profile. It exercises the real startup recovery scan
+without changing file timestamps. Recovery must retain every original hash,
+preserve the decoded durable audio exactly, upload matching bytes and show a
+recovered History entry. Any tail not yet persisted is measured separately;
+no audio can be captured while the process is absent. This differs from the
+older renderer-only crash scenario and does not emulate a disk losing power.
 
 Do not rebuild the active bundle, run competing captures, or run unrelated heavy
 tests during a baseline. Intentional contention should be a named fault case.
@@ -96,11 +137,12 @@ Each scenario prints PASS/FAIL with concrete problems and writes
 
 ## Roadmap (tiers)
 
-- **Tier 2**: 5-hour real-time endurance run (`s3` plan with real threshold),
-  overnight; disk-pressure scenario (filler file → ENOSPC → safety-net stop).
+- **Endurance execution**: run `s13-coded-endurance` for its full real-time
+  duration; a shortened harness smoke is insufficient. Real disk-pressure
+  qualification remains separate from injected write-failure unit tests.
 - **Tier 3** (needs hardware): real Bluetooth speakerphone kill-test, real
   system sleep/wake mid-recording (scheduled wake timer).
-- **Native system capture** (still unqualified): AudioTee/merge scenarios
+- **Mac system capture** (still unqualified): AudioTee/merge scenarios
   with a second pilot frequency on the system-audio side to measure
   mic-vs-system desync to the millisecond.
 

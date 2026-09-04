@@ -359,6 +359,16 @@ async function deviceCase(kind) {
       document.querySelector('[data-test="history-delete-file"]')?.getAttribute('aria-checked'));
     if (result.localDeletionSelectedByDefault !== 'false') result.problems.push('The desktop delete dialog preselects permanent local audio deletion');
     result.screenshots.push(await app.screenshot(name + '-delete-keeps-audio'));
+    await app.page.click('[data-test="history-delete-file"]');
+    result.localDeletionCanBeSelected = await app.evalTimed(() =>
+      document.querySelector('[data-test="history-delete-file"]')?.getAttribute('aria-checked'));
+    if (result.localDeletionCanBeSelected !== 'true') result.problems.push('Explicit local deletion cannot be selected in its confirmation dialog');
+    await app.page.click('[data-test="history-delete-cancel"]');
+    await app.page.click(deleteSelector);
+    await app.page.waitForSelector('[data-test="history-delete-file"]', { visible: true, timeout: 10000 });
+    result.localDeletionSelectedOnReopen = await app.evalTimed(() =>
+      document.querySelector('[data-test="history-delete-file"]')?.getAttribute('aria-checked'));
+    if (result.localDeletionSelectedOnReopen !== 'false') result.problems.push('Reopening the desktop delete dialog retained a prior permanent-deletion selection');
     await app.page.click('[data-test="history-delete-cancel"]');
     if (!fs.existsSync(output)) result.problems.push('Opening and cancelling the history delete dialog removed the local audio');
     result.pass = result.problems.length === 0;

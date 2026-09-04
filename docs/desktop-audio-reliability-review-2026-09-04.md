@@ -105,7 +105,7 @@ The Azure configuration was checked read-only through the backend’s configured
 2. **No end-to-end storage proof:** status confirms a Meeting row under the current backend contract. Automatic local deletion is now paused to mitigate this gap. Add server-side blob existence/length/checksum verification and persistent upload receipts before enabling automatic deletion or claiming byte-for-byte durable remote custody. The read-only Azure check found StorageV2 with Standard_LRS and 30-day blob soft deletion. Container recovery, versioning and restore policy were not returned by that service API and remain unverified; no restore drill was performed.
 3. **Capture still depends on the renderer and OS audio stack:** a renderer crash can lose the current unpersisted timeslice and cannot record subsequent speech until capture resumes. The nominal chunk interval is three seconds; CPU stalls, disk stalls and OS scheduling can extend that interval. A native capture service with a small durable spool would reduce this dependency; independent recording redundancy is required to survive destruction of the sole device while offline.
 4. **Unsupported runtime:** Electron 28.3.3 is outside Electron’s supported major-version window. Plan a separate supported-runtime migration with real capture, permission, helper-signing and auto-update regression tests. A blind major bump inside the persistence fix would add unmeasured audio changes. [Electron support policy](https://www.electronjs.org/docs/latest/tutorial/electron-timelines), [release schedule](https://releases.electronjs.org/schedule)
-5. **Hardware and endurance qualification:** Intel Mac, Apple Silicon Mac, physical Windows devices and a true five-plus-hour soak remain unvalidated. Accelerating a timer tests branch logic, not five hours of memory, disk, driver and battery behavior.
+5. **Hardware and endurance qualification:** native synthetic jobs now exercise Windows, Intel Mac and Apple Silicon, and local Windows default-output loopback has passed. Physical Bluetooth/USB transitions, Mac AudioTee/system capture and a true five-plus-hour soak remain unvalidated. Accelerating a timer tests branch logic, not five hours of memory, disk, driver and battery behavior.
 6. **Durability has physical boundaries:** filesystem flush reduces crash loss but cannot guarantee a failing drive honors it. Windows Node does not expose directory fsync. A user-forced sleep/shutdown can override an idle-sleep blocker. Audio from a disconnected/muted source never reached the recorder. [Electron power blocker](https://www.electronjs.org/docs/latest/api/power-save-blocker), [power events](https://www.electronjs.org/docs/latest/api/power-monitor)
 7. **Unexplained empty capture:** one real-Electron synthetic run persisted no chunks. A subsequent instrumented run succeeded, but cannot establish the earlier cause. Preserve the failed evidence and investigate with recorder-event, WebAudio and disk-progress diagnostics before release.
 
@@ -174,7 +174,129 @@ Local evidence is retained under `tests/e2e-harness/work/qualification`,
 `tests/e2e-harness/work/oracle-investigation-RTOAjM`; downloaded CI artifacts are
 under ignored `work/ci-audio/33923939089`. The test-only commit `f4921e0` additionally
 adds repeated synthetic device loss/reconnect and digital-silence qualification;
-its actual run remains pending at this checkpoint.
+the assertions were strengthened in `a04e1d2`. Both local Windows device cases
+passed on the compiled application containing `799e79f`: two ended-track and
+reconnect episodes during a two-minute capture, and thirty seconds of digital
+silence during a ninety-second capture. They verified live warnings and recovery,
+absence of the stale silent toast after recovery, retained warning metadata,
+unchanged original prefix chunks, coded continuity outside planned zeros, and
+matching local/mock-upload hashes. The new
+[native run](https://github.com/xicoarm/suisse-notes-desktop/actions/runs/33924859865)
+passed both suites on Windows and Apple Silicon. Intel passed every decoded-audio
+check and both device cases, but its socket-cut case failed to retry `write EPIPE`.
+The final audio and original chunks remained intact; no upload receipt was
+created. The legacy retry classifier omitted `EPIPE` even though the direct
+uploader handled it. Commit `8bf83a0` fixes that classification and the exhausted
+retry message. Ten new tests exercise the actual upload functions with replaced
+I/O: fresh streams on retry, bounded failure, cancellation, terminal HTTP errors,
+and accepted-ID verification without reupload. All 24 related upload tests passed;
+native Intel integration still needs a rerun. [Regular CI](https://github.com/xicoarm/suisse-notes-desktop/actions/runs/33924859832)
+passed on PR head `a04e1d2`.
+
+Commit `2bd96a5` makes retained capture warnings visible in desktop History with
+a localized **Review audio** badge. It hydrates warnings from managed metadata,
+retains cached warnings after manual local deletion, and refreshes existing
+History visits without resetting active upload status. The device suite now also
+requires the visible badge after upload. The complete local suite subsequently
+passed 257 tests across 29 files; the compiled E2E build also passed.
+
+Further review found an asynchronous History race: a background refresh could
+reorder the list while an update awaited IPC, after which the old array index
+could overwrite another row. The correction re-finds the row by ID and owner,
+rejects responses from an earlier account/reset, and prevents stale snapshots
+from undoing intervening additions, updates or deletions. Deferred-response
+regressions exercise these cases. Desktop deletion also now leaves permanent
+local-file deletion unchecked on every dialog opening, even after upload;
+the existing manual opt-in remains available. A known server ID does not prove
+that an independently recoverable audio copy exists.
+
+A local rerun on compiled `5ef4bb7` passed both device cases' audio, recovery,
+warning-persistence and upload checks, then failed in the new History assertion:
+CDP serialized Vue's reactive warning array as an indexed object. The harness
+now copies it to an ordinary array inside the renderer before returning it.
+This is a fixture correction; the full cases must rerun to qualify the visible
+badge and the new unchecked deletion default.
+
+The strict endurance runner (`d5cb359`, diagnostic clarification `5168c65`)
+defaults to real five-hour-five-minute capture with numbered audio, natural
+rotation, disk-space safeguards, bounded progress logs, streaming mock-upload
+hashing and retention checks. Its 45-second smoke passed with 91 consecutive
+frames, an exact 729,160-byte upload match, and all 16 emitted source chunks
+retained. The result explicitly says `fiveHourQualificationPassed=false` and
+`productionBackendQualified=false`. Full-duration execution remains pending.
+
+Commits `f83b8c0` and `5ef4bb7` add manual hosted endurance execution and a native
+Windows loopback qualification fixture respectively. The five-hour workflow
+runs only on explicit manual dispatch, on the reviewed branch, with three native
+jobs. It fixes capture at 18,300 seconds with production processing defaults and
+natural 4h55 rotation, preserves original and finalized audio for seven days,
+and requires the full-duration result before reporting success. Generated input
+WAVs can be regenerated from the retained reference plan and revision. Adding
+the workflow does not itself qualify endurance.
+
+Pre-dispatch review also found that the interior numbered-frame oracle could
+accept a correct-duration file with a long silent prefix or suffix. Endurance
+now adds explicit 1.5-second boundary-coverage limits and an independent native
+microphone-acquisition clock check. Equal-duration prefix/suffix silence and a
+shifted source interval are negative controls; the shared interior oracle and
+production audio settings remain unchanged.
+
+The corrected 45-second endurance smoke passed on frozen `ff31287`: 46.200
+seconds decoded against 46.182 seconds of native capture, 93 consecutive frames,
+no boundary gaps, and a 97.3 ms source-clock difference from the measured native
+acquisition interval. All 16 source chunks (748,248 bytes) remained, and the
+upload matched. Ten focused endurance tests passed. This is still a shortened
+smoke, not the real five-hour qualification.
+
+The new whole-app crash scenario `s15-main-crash-qualification` (`9ac0a92`)
+hashes the acknowledged durable prefix, forcibly kills only its own Electron
+process tree, and restarts the same synthetic profile. It waits for the ordinary
+startup scan and freshness re-scan without modifying timestamps or invoking
+private finalization commands. The first local Windows execution on `ff31287`
+retained all 16 acknowledged chunks and recovered 47.940 seconds; original and
+recovered decoded PCM hashes were identical, all 97 observed numbered frames
+passed, and one upload matched the 776,698-byte final file. Its last observation
+left 0.182 seconds not yet durable, with a 0.658-second upper bound including
+the measured delay through process termination. Those timings do not establish
+a universal crash-tail bound. The raw interrupted container logged a read error;
+the finalized file decoded without warnings and contained identical PCM.
+
+That first scenario still failed its UI assertion: the recovered, uploaded row
+was present in History state, but the harness used Vue component internals that
+are unavailable in a production build to locate the card. A stable DOM selector
+replaces that lookup. The failed result is preserved at
+`tests/e2e-harness/work/qualification/s15-main-crash-1788562436142-87616c1c`.
+The native three-OS workflow now also runs this whole-app crash test after the
+capture and device suites, even when an earlier suite fails. At this report
+checkpoint, the fresh complete crash/UI reruns and real hosted five-hour runs
+are pending. Follow the [draft PR checks](https://github.com/xicoarm/suisse-notes-desktop/pull/4/checks)
+for their actual outcomes; adding an automated scenario is not a passing result.
+
+Local Windows system-audio qualification passed on compiled application
+`2bd96a5`: all 96 supplied numbered frames survived the real Chromium desktop
+audio path, with 52.500 seconds decoded against 52.483 seconds of native capture.
+The uploaded audio hash matched the finalized local file, all three previously
+hashed source chunks remained intact, the app microphone stayed muted, and
+console/multimedia output defaults were unchanged. Hardware microphone requests
+were replaced with disabled zero-valued tracks. This qualifies the existing
+Cirrus default-speaker route; the separate communications endpoint, physical
+Bluetooth/USB transitions and macOS system capture remain outside its scope.
+Because other local playback could enter loopback, all evidence is private under
+repo-root `work/private-system-audio/2026-09-04T22-40-56-739Z-2f5f81`, outside the
+synthetic CI artifact directory.
+
+Two preceding loopback attempts crashed the Electron renderer with Windows
+access violation `0xC0000005`. Moving the fixture's WAV preparation before
+recording reproduced the failure before native capture, which rules out capture
+as a prerequisite for this reproduction. The passing fixture prepares the same
+samples with explicit PCM parsing and `AudioContext.createBuffer`, avoiding the
+asynchronous `decodeAudioData` operation. The application does not call
+`decodeAudioData`; this fixture change is not a production runtime fix. Both
+failed profiles and logs remain private in the neighboring timestamped folders.
+[Electron issue 42271](https://github.com/electron/electron/issues/42271) reports
+a `decodeAudioData` crash on 28.3.3, but its platform/context differ and no matching
+native stack has been collected here. Runtime dependence remains a candidate,
+not an established root cause. A passing PCM run does not erase the failures.
 
 ## Earlier validation and release gate
 
