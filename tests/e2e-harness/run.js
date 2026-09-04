@@ -760,6 +760,7 @@ const SCENARIOS = {
   's12-device-qualification': async () => report('s12-device-qualification', await require('./device-qualification').runDeviceQualification()),
   's13-coded-endurance': async () => report('s13-coded-endurance', await require('./endurance-qualification').runCodedEndurance()),
   's14-system-audio-qualification': async () => (await require('./windows-loopback-qualification').runSystemAudioQualification()).pass,
+  's15-main-crash-qualification': async () => report('s15-main-crash-qualification', await require('./crash-qualification').runMainCrashQualification()),
 };
 
 (async () => {
