@@ -150,9 +150,42 @@ async function visibleHistory(app, recordId) {
   }, recordId);
 }
 
-async function runMainCrashQualification(opts = {}) {
+function parseCrashOptions(opts = {}) {
   const seconds = opts.seconds ?? 50;
-  if (!Number.isInteger(seconds) || seconds < 45 || seconds > 60) throw new Error('Crash qualification requires 45–60 real capture seconds');
+  if (!Number.isFinite(seconds) || seconds < 45 || seconds > 60) throw new Error('Crash qualification requires 45–60 real capture seconds');
+  const expectedTimesliceMs = opts.expectedTimesliceMs ?? null;
+  if (expectedTimesliceMs !== null && (!Number.isInteger(expectedTimesliceMs) || expectedTimesliceMs <= 0)) throw new Error('Expected timeslice must be a positive integer in milliseconds');
+  const maxTailExposureS = opts.maxTailExposureS ?? 4.5;
+  if (!Number.isFinite(maxTailExposureS) || maxTailExposureS < 0) throw new Error('Maximum tail exposure must be a finite nonnegative number of seconds');
+  // The requested crash time may be fractional; the coded reference itself
+  // must still contain complete half-second identities and enough spare audio.
+  const referenceSeconds = Math.ceil((seconds + 25) * 2) / 2;
+  return { seconds, expectedTimesliceMs, maxTailExposureS, referenceSeconds };
+}
+
+function captureTimingEvidence(snapshot, expectedTimesliceMs = null) {
+  const capture = snapshot?.capture, native = capture?.recorders?.at(-1);
+  const observedTimesliceMs = Number.isFinite(native?.requestedTimesliceMs) ? native.requestedTimesliceMs : null;
+  const nativeElapsedS = Number.isFinite(capture?.at) && Number.isFinite(native?.startedAt)
+    ? (capture.at - native.startedAt) / 1000 : null;
+  const lastDataAgeS = Number.isFinite(capture?.at) && Number.isFinite(native?.lastDataAt)
+    ? (capture.at - native.lastDataAt) / 1000 : null;
+  const problems = [];
+  if (expectedTimesliceMs !== null && observedTimesliceMs !== expectedTimesliceMs) {
+    problems.push(`Observed MediaRecorder timeslice ${observedTimesliceMs === null ? 'unavailable' : observedTimesliceMs + 'ms'} differs from expected ${expectedTimesliceMs}ms`);
+  }
+  return { observedTimesliceMs, startCalledAt: native?.startCalledAt ?? null,
+    successfulStartCalls: native?.successfulStartCalls ?? null, nativeElapsedS, lastDataAgeS, problems };
+}
+
+function tailExposureProblems(exposure, maxTailExposureS = 4.5) {
+  if (!Number.isFinite(exposure?.notYetDurableSecondsAtLastObservation)) return ['Missing measured undurable tail exposure'];
+  return exposure.notYetDurableSecondsAtLastObservation > maxTailExposureS
+    ? [`Observed undurable tail exceeded the configured ${maxTailExposureS}-second limit`] : [];
+}
+
+async function runMainCrashQualification(opts = {}) {
+  const { seconds, expectedTimesliceMs, maxTailExposureS, referenceSeconds } = parseCrashOptions(opts);
   const appDir = opts.appDir || process.env.SUISSE_E2E_APP_DIR;
   if (!appDir) throw new Error('Crash qualification requires an isolated compiled Electron bundle');
   const name = 's15-main-crash-' + Date.now() + '-' + crypto.randomUUID().slice(0, 8);
@@ -162,9 +195,9 @@ async function runMainCrashQualification(opts = {}) {
   const result = { name, pass: false, problems: [], notes: [
     'Abrupt whole-app process termination; no graceful stop or renderer-only crash.',
     'Only audio that reached durable storage can survive this crash. No audio is expected during process downtime.',
-    'Default 50-second capture avoids a multiple of the ordinary three-second recording slice, exercising an unfinished final slice.',
+    'Requested seconds begin after UI recording readiness. Prefix hashing and process termination add delay; fractional requests do not control an exact native recording phase.',
     'Synthetic microphone and localhost upload; physical devices, power-loss disk caches, and production backend acceptance are outside this test.',
-  ], requestedSeconds: seconds, progress: [], evidenceDir, summaryPath };
+  ], requestedSeconds: seconds, expectedTimesliceMs, maxTailExposureS, referenceSeconds, progress: [], evidenceDir, summaryPath };
   const checkpoint = stage => {
     result.stage = stage; result.updatedAt = new Date().toISOString();
     const fd = fs.openSync(summaryPath, 'w');
@@ -173,7 +206,7 @@ async function runMainCrashQualification(opts = {}) {
   let first = null, recovered = null, mock = null;
   try {
     checkpoint('preparing-reference');
-    const reference = buildCodedScenario(name, [{ type: 'speech', seconds: seconds + 25 }]);
+    const reference = buildCodedScenario(name, [{ type: 'speech', seconds: referenceSeconds }]);
     result.reference = reference.metaPath;
     mock = await startMockBackend({ port: opts.mockPort || 3000 });
     first = new AppDriver({ name, appDir, apiUrl: mock.url, fakeAudioWav: reference.wavPath, env: { SUISSE_TEST_NETWORK_ISOLATION: '1' } });
@@ -209,6 +242,8 @@ async function runMainCrashQualification(opts = {}) {
       throw new Error('Could not establish a stable, acknowledged durable prefix before the crash');
     }
     result.beforeCrash = before; result.acknowledgedChunks = chunks;
+    result.captureTiming = captureTimingEvidence(before, expectedTimesliceMs);
+    result.problems.push(...result.captureTiming.problems);
     const recordingDir = assertSyntheticPath(path.join(first.recordingsDir, result.recordId));
     if (first.findOutputFile()) throw new Error('An output already existed before the abrupt crash');
     checkpoint('durable-prefix-established');
@@ -216,8 +251,9 @@ async function runMainCrashQualification(opts = {}) {
     result.observationToExitSeconds = (performance.now() - observationHostAt) / 1000;
     await first.close({ keepProfile: true });
     result.crashSurvivors = await snapshotChunks(recordingDir);
-    result.problems.push(...compareChunks(chunks, result.crashSurvivors));
-    if (result.problems.length) throw new Error('An acknowledged source did not survive full process termination');
+    const survivorProblems = compareChunks(chunks, result.crashSurvivors);
+    result.problems.push(...survivorProblems);
+    if (survivorProblems.length) throw new Error('An acknowledged source did not survive full process termination');
     const rawPrefix = assertSyntheticPath(path.join(evidenceDir, 'crash-durable-prefix.webm'));
     await concatenateFiles(result.crashSurvivors.map(chunk => path.join(recordingDir, chunk.relativePath)), rawPrefix);
     result.rawPrefix = rawPrefix;
@@ -273,7 +309,7 @@ async function runMainCrashQualification(opts = {}) {
       acknowledgedBytes: chunks.reduce((total, chunk) => total + chunk.bytes, 0), crashSurvivingBytes: result.crashSurvivors.reduce((total, chunk) => total + chunk.bytes, 0) };
     result.tailExposure.notYetDurableSecondsAtLastObservation = Math.max(0, result.tailExposure.nativeSecondsAtLastObservation - result.originalPcm.durationS);
     result.tailExposure.tailUpperBoundIncludingTerminationDelayS = Math.max(0, result.tailExposure.nativeSecondsAtLastObservation + result.observationToExitSeconds - result.originalPcm.durationS);
-    if (result.tailExposure.notYetDurableSecondsAtLastObservation > 4.5) result.problems.push('Observed undurable tail exceeded the ordinary three-second slice plus 1.5-second timing allowance');
+    result.problems.push(...tailExposureProblems(result.tailExposure, maxTailExposureS));
     result.pass = result.problems.length === 0;
   } catch (error) { result.failureStage = result.stage; result.problems.push(error.stack || error.message); }
   finally {
@@ -290,4 +326,5 @@ async function runMainCrashQualification(opts = {}) {
   return result;
 }
 
-module.exports = { runMainCrashQualification, killOwnedApp, snapshotChunks, compareChunks, prefixEndpointCoverage, assertSyntheticPath };
+module.exports = { runMainCrashQualification, killOwnedApp, snapshotChunks, compareChunks, prefixEndpointCoverage, assertSyntheticPath,
+  parseCrashOptions, captureTimingEvidence, tailExposureProblems };

@@ -4,10 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
+import vm from 'node:vm';
 
 const require = createRequire(import.meta.url);
-const { AppDriver } = require('../e2e-harness/lib/app-driver');
-const { killOwnedApp, snapshotChunks, compareChunks, prefixEndpointCoverage, assertSyntheticPath } = require('../e2e-harness/crash-qualification');
+const { AppDriver, installSyntheticCaptureProbe } = require('../e2e-harness/lib/app-driver');
+const { killOwnedApp, snapshotChunks, compareChunks, prefixEndpointCoverage, assertSyntheticPath,
+  parseCrashOptions, captureTimingEvidence, tailExposureProblems } = require('../e2e-harness/crash-qualification');
 const workRoot = path.resolve('tests/e2e-harness/work');
 let fixtureRoot;
 beforeEach(() => {
@@ -26,6 +28,111 @@ function childFixture() {
   app.proc = child;
   return { app, child };
 }
+
+function probeFixture() {
+  const nativeStart = vi.fn().mockReturnValue({ nativeReturn: true });
+  const receivers = [];
+  let clock = 125.5;
+  class Recorder {
+    constructor() {
+      this.state = 'inactive';
+      this.stream = { getAudioTracks: () => [] };
+      this.handlers = new Map();
+    }
+    addEventListener(type, callback) { this.handlers.set(type, callback); }
+    start(...args) {
+      receivers.push(this);
+      const result = nativeStart.apply(this, args);
+      this.state = 'recording';
+      return result;
+    }
+    emit(type, fields = {}) { this.handlers.get(type)?.({ target: this, ...fields }); }
+  }
+  const context = { window: { MediaRecorder: Recorder }, MediaRecorder: Recorder,
+    performance: { now: () => clock }, document: { visibilityState: 'visible' }, console: { debug: vi.fn() } };
+  vm.runInNewContext('(' + installSyntheticCaptureProbe.toString() + ')()', context);
+  return { Recorder, nativeStart, receivers, context, setTime: time => { clock = time; }, snapshot: () => context.window.__suisseCaptureDiagnostics.snapshot() };
+}
+
+describe('passive native recording provenance', () => {
+  it.each([1000, 3000])('observes %ims without changing native arguments, receiver or return value', timeslice => {
+    const fixture = probeFixture(), recorder = new fixture.Recorder();
+    const extraArgument = { marker: 'unchanged' };
+    const returned = recorder.start(timeslice, extraArgument);
+    expect(fixture.nativeStart).toHaveBeenCalledWith(timeslice, extraArgument);
+    expect(fixture.receivers[0]).toBe(recorder);
+    expect(returned).toBe(fixture.nativeStart.mock.results[0].value);
+    expect(fixture.snapshot().recorders[0]).toMatchObject({ requestedTimesliceMs: timeslice, startCalledAt: 125.5, successfulStartCalls: 1 });
+  });
+
+  it('preserves omitted/non-numeric arguments without inventing a numeric source policy', () => {
+    const fixture = probeFixture(), omitted = new fixture.Recorder(), nonnumeric = new fixture.Recorder();
+    omitted.start();
+    nonnumeric.start('1000');
+    expect(fixture.nativeStart.mock.calls).toEqual([[], ['1000']]);
+    expect(fixture.snapshot().recorders.map(recorder => recorder.requestedTimesliceMs)).toEqual([null, null]);
+  });
+
+  it('preserves native exceptions and does not replace the last successful start evidence', () => {
+    const fixture = probeFixture(), recorder = new fixture.Recorder();
+    recorder.start(1000);
+    const failure = new Error('native start failed');
+    fixture.nativeStart.mockImplementationOnce(() => { throw failure; });
+    fixture.setTime(999);
+    expect(() => recorder.start(3000)).toThrow(failure);
+    expect(fixture.snapshot().recorders[0]).toMatchObject({ requestedTimesliceMs: 1000, startCalledAt: 125.5, successfulStartCalls: 1 });
+  });
+
+  it('uses observed event timing rather than requested seconds to measure native elapsed and last-data age', () => {
+    const fixture = probeFixture(), recorder = new fixture.Recorder();
+    recorder.start(1000);
+    recorder.emit('start', { timeStamp: 200 });
+    fixture.setTime(51200);
+    recorder.emit('dataavailable', { data: { size: 1024 } });
+    fixture.setTime(51750);
+    const evidence = captureTimingEvidence({ capture: fixture.snapshot() }, 1000);
+    expect(evidence).toMatchObject({ observedTimesliceMs: 1000, nativeElapsedS: 51.55, lastDataAgeS: 0.55, problems: [] });
+  });
+});
+
+describe('fractional crash requests and explicit limits', () => {
+  it('keeps the historical defaults and rounds only the spare reference to complete coded frames', () => {
+    expect(parseCrashOptions()).toEqual({ seconds: 50, expectedTimesliceMs: null, maxTailExposureS: 4.5, referenceSeconds: 75 });
+    for (const seconds of [45, 50.15, 50.5, 50.85, 60]) {
+      const options = parseCrashOptions({ seconds, expectedTimesliceMs: 1000, maxTailExposureS: 1.25 });
+      expect(options.seconds).toBe(seconds);
+      expect(options.referenceSeconds).toBeGreaterThanOrEqual(seconds + 25);
+      expect(options.referenceSeconds * 2).toBe(Math.floor(options.referenceSeconds * 2));
+      expect(options.referenceSeconds - (seconds + 25)).toBeLessThan(0.5);
+    }
+  });
+
+  it.each([44.99, 60.01, NaN, Infinity, '50.5'])('rejects invalid capture duration %s before launching', seconds => {
+    expect(() => parseCrashOptions({ seconds })).toThrow('45–60');
+  });
+
+  it.each([{ expectedTimesliceMs: 0 }, { expectedTimesliceMs: 1000.5 }, { expectedTimesliceMs: '1000' },
+    { maxTailExposureS: -1 }, { maxTailExposureS: NaN }, { maxTailExposureS: Infinity }])('rejects invalid limit %j', options => {
+    expect(() => parseCrashOptions(options)).toThrow();
+  });
+
+  it('fails an expected one-second policy when the app actually requested three seconds or no evidence exists', () => {
+    const before = { capture: { at: 52000, recorders: [{ startedAt: 1000, lastDataAt: 50000, requestedTimesliceMs: 3000 }] } };
+    expect(captureTimingEvidence(before, 1000).problems).toEqual(['Observed MediaRecorder timeslice 3000ms differs from expected 1000ms']);
+    expect(captureTimingEvidence({}, 1000).problems).toEqual(['Observed MediaRecorder timeslice unavailable differs from expected 1000ms']);
+    expect(captureTimingEvidence(before).problems).toEqual([]);
+  });
+
+  it('applies an explicit tighter measured-tail limit while preserving the default threshold and separate termination bound', () => {
+    const exposure = { notYetDurableSecondsAtLastObservation: 1.3, tailUpperBoundIncludingTerminationDelayS: 1.9 };
+    expect(tailExposureProblems(exposure)).toEqual([]);
+    expect(tailExposureProblems(exposure, 1.25)).toEqual(['Observed undurable tail exceeded the configured 1.25-second limit']);
+    expect(tailExposureProblems({ notYetDurableSecondsAtLastObservation: 4.5 })).toEqual([]);
+    expect(tailExposureProblems({ notYetDurableSecondsAtLastObservation: 4.5001 })).toHaveLength(1);
+    expect(tailExposureProblems({ notYetDurableSecondsAtLastObservation: 0 }, 0)).toEqual([]);
+    expect(tailExposureProblems({})).toHaveLength(1);
+  });
+});
 
 describe('whole-process synthetic crash safeguards', () => {
   it('targets exactly the observed Windows child tree and clears the exited PID', async () => {

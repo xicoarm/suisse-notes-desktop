@@ -49,14 +49,18 @@ function macFakeAudioLaunchArgs(env, platform = process.platform) {
 function installSyntheticCaptureProbe() {
   if (window.__suisseCaptureDiagnostics || !window.MediaRecorder) return;
   const entries = new Map();
-  const observed = new WeakSet();
+  const observed = new WeakMap();
   let nextId = 0;
   const nativeStart = MediaRecorder.prototype.start;
   MediaRecorder.prototype.start = function (...args) {
+    let entry, startCalledAt;
     try {
-      if (!observed.has(this)) {
-        observed.add(this);
-        const entry = { id: ++nextId, ref: new WeakRef(this), events: 0, bytes: 0, emptyEvents: 0, firstDataAt: null, lastDataAt: null, startedAt: null, stoppedAt: null };
+      startCalledAt = performance.now();
+      entry = observed.get(this);
+      if (!entry) {
+        entry = { id: ++nextId, ref: new WeakRef(this), events: 0, bytes: 0, emptyEvents: 0, firstDataAt: null, lastDataAt: null, startedAt: null, stoppedAt: null,
+          requestedTimesliceMs: null, startCalledAt: null, successfulStartCalls: 0 };
+        observed.set(this, entry);
         entries.set(entry.id, entry);
         // Bound diagnostic bookkeeping during extended/multi-recording runs.
         if (entries.size > 20) entries.delete(entries.keys().next().value);
@@ -79,13 +83,22 @@ function installSyntheticCaptureProbe() {
         }
       }
     } catch (_) { /* native start must still run unchanged */ }
-    return Reflect.apply(nativeStart, this, args);
+    // Observe exactly what the application supplied; never replace a timeslice
+    // or request extra data to make a different source policy appear tested.
+    const result = Reflect.apply(nativeStart, this, args);
+    try {
+      entry.requestedTimesliceMs = Number.isFinite(args[0]) ? args[0] : null;
+      entry.startCalledAt = startCalledAt;
+      entry.successfulStartCalls++;
+    } catch (_) { /* diagnostic failure must not alter the native return */ }
+    return result;
   };
   window.__suisseCaptureDiagnostics = {
     snapshot: () => ({ at: performance.now(), visibility: document.visibilityState, recorders: [...entries.values()].map(entry => {
       const recorder = entry.ref.deref();
       const counts = { id: entry.id, events: entry.events, bytes: entry.bytes, emptyEvents: entry.emptyEvents,
-        firstDataAt: entry.firstDataAt, lastDataAt: entry.lastDataAt, startedAt: entry.startedAt, stoppedAt: entry.stoppedAt };
+        firstDataAt: entry.firstDataAt, lastDataAt: entry.lastDataAt, startedAt: entry.startedAt, stoppedAt: entry.stoppedAt,
+        requestedTimesliceMs: entry.requestedTimesliceMs, startCalledAt: entry.startCalledAt, successfulStartCalls: entry.successfulStartCalls };
       return { ...counts, state: recorder?.state || 'released', tracks: recorder?.stream?.getAudioTracks().map(track => ({
         readyState: track.readyState, enabled: track.enabled, muted: track.muted,
       })) || [] };
@@ -678,4 +691,4 @@ class AppDriver {
   }
 }
 
-module.exports = { AppDriver, sleep };
+module.exports = { AppDriver, sleep, installSyntheticCaptureProbe };
