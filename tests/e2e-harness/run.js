@@ -220,8 +220,59 @@ async function s3Autosplit() {
     // The final combined file must contain the ENTIRE 8 minutes - two split
     // boundaries crossed with zero audio loss.
     const v = verdict(out, sc, { tailLossMaxS: 10 });
-    v.notes.push('crossed 2 auto-split boundaries (180s compressed threshold)');
+    const batchRoot = path.join(path.dirname(out), 'source-chunks');
+    const batches = fs.existsSync(batchRoot) ? fs.readdirSync(batchRoot).filter(name => /^\d+$/.test(name)).length : 0;
+    if (batches < 3) { v.problems.push('Session rotation did not retain at least three source batches'); v.pass = false; }
+    v.notes.push('retained ' + batches + ' source batches after crossing 180s compressed split boundaries');
     return v;
+  });
+}
+
+// Exercise the real main-process custody decision, not just a mocked result.
+async function s10UploadCustody() {
+  const sc = buildScenario('s10', [{ type: 'speech', seconds: 60 }]);
+  return withApp('s10-upload-custody', sc, {}, async (app, mock) => {
+    mock.setMode('status-unknown');
+    await app.startRecording(); await sleep(45000); await app.stopRecording();
+    await app.waitForPhase(['error'], 180000);
+    const filePath = app.findOutputFile();
+    if (!filePath) return { pass: false, problems: ['No output file after uncertain upload'] };
+    const recordId = path.basename(path.dirname(filePath));
+    const receiptPath = path.join(path.dirname(filePath), 'upload-receipt.json');
+    const problems = []; const notes = [];
+    const checksum = require('crypto').createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+    let receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+    if (receipt.verified || receipt.canDelete) problems.push('Unknown status incorrectly authorized deletion');
+    const remote = mock.state.uploads.get(receipt.audioFileId);
+    if (remote?.sha256 !== checksum) problems.push('Uploaded bytes do not match the local final file');
+    for (const mode of ['status-404', 'status-401']) {
+      mock.setMode(mode);
+      const result = await app.page.evaluate(params => window.electronAPI.upload.start(params), { recordId, filePath, metadata: {} });
+      if (result.success || result.verified || result.canDelete || !result.pendingVerification) problems.push(mode + ' incorrectly accepted as verified');
+      const deletion = await app.page.evaluate(id => window.electronAPI.recording.deleteRecording(id, { requireVerified: true }), recordId);
+      if (deletion.success || !fs.existsSync(filePath)) problems.push(mode + ' did not retain local audio');
+    }
+    mock.setMode('ok');
+    const result = await app.page.evaluate(params => window.electronAPI.upload.start(params), { recordId, filePath, metadata: {} });
+    if (!result.success || !result.verified) problems.push('Accepted upload did not verify after server recovery');
+    const attempts = mock.state.requests.filter(r => r.url === '/api/desktop/upload');
+    if (attempts.length !== 1) problems.push('Expected exactly 1 upload, observed ' + attempts.length);
+    receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+    if (!receipt.verified) problems.push('Verified receipt was not persisted');
+    notes.push('Unknown enum, 404 and 401 retain audio and refuse deletion; later confirmation reuses one accepted upload.');
+    notes.push('Multipart file SHA-256 matches the local final file.');
+    await app.page.evaluate(id => window.electronAPI.recording.setUnsavedAudio(id), recordId);
+    const protectedDelete = await app.page.evaluate(id => window.electronAPI.recording.deleteRecording(id), recordId);
+    if (protectedDelete.success || !fs.existsSync(filePath)) problems.push('Deletion ignored in-memory unsaved audio');
+    const protectedUpload = await app.page.evaluate(params => window.electronAPI.upload.start(params), { recordId, filePath, metadata: {} });
+    if (protectedUpload.success || protectedUpload.canDelete) problems.push('Upload ignored in-memory unsaved audio');
+    await app.page.evaluate(() => window.electronAPI.recording.setUnsavedAudio(null));
+    notes.push('Main process refuses deletion and upload while audio remains unsaved in renderer memory.');
+    fs.appendFileSync(filePath, 'modified-after-upload');
+    const changedDeletion = await app.page.evaluate(id => window.electronAPI.recording.deleteRecording(id, { requireVerified: true }), recordId);
+    if (changedDeletion.success || !fs.existsSync(filePath)) problems.push('Changed audio was deleted using an old upload receipt');
+    notes.push('A verified receipt cannot delete audio changed after upload.');
+    return { pass: problems.length === 0, problems, notes };
   });
 }
 
@@ -288,6 +339,7 @@ async function s6Crash() {
   const sc = buildScenario('s6', [{ type: 'speech', seconds: 180 }]);
   const mock = await startMockBackend({ port: 3000 });
   const app = new AppDriver({ name: 's6-crash', apiUrl: mock.url, fakeAudioWav: sc.wavPath, cdpPort: 9339 });
+  let app2;
   try {
     await app.launch();
     await app.login();
@@ -298,10 +350,12 @@ async function s6Crash() {
     await app.close({ keepProfile: true });
 
     // Relaunch on the SAME profile - recovery must find and combine the chunks.
-    const app2 = new AppDriver({ name: 's6-crash', apiUrl: mock.url, cdpPort: 9341, userDataDir: app.userDataDir });
+    app2 = new AppDriver({ name: 's6-crash', apiUrl: mock.url, cdpPort: 9341, userDataDir: app.userDataDir });
     await app2.launch({ freshProfile: false });
     await app2.login();
-    await sleep(30_000);           // recovery runs ~5s after launch + combine time
+    // Fresh chunks are intentionally deferred; allow the scheduled rescan.
+    const recoveryDeadline = Date.now() + 180000;
+    while (!app2.findOutputFile() && Date.now() < recoveryDeadline) await sleep(1000);
 
     const out = app2.findOutputFile();
     const problems = [];
@@ -318,6 +372,7 @@ async function s6Crash() {
     await app2.close({ keepProfile: true });
     return report('s6-crash', { pass: problems.length === 0, problems, notes });
   } finally {
+    if (app2) await app2.close({ keepProfile: true }).catch(() => {});
     await app.close({ keepProfile: true }).catch(() => {});
     await mock.close();
   }
@@ -681,6 +736,7 @@ const SCENARIOS = {
   's4-storm': s4Storm,
   's5-resilience': s5Resilience,
   's6-crash': s6Crash,
+  's10-upload-custody': s10UploadCustody,
   's7-endurance': s7Endurance,
   's8-sysaudio': s8SysAudio,
 };

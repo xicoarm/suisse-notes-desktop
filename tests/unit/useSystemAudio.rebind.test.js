@@ -175,6 +175,27 @@ describe('useSystemAudio — Windows loopback rebind on devicechange', () => {
     expect(addSystemAudioStream).not.toHaveBeenCalled();
   });
 
+  it('disposes a late loopback stream after stop while permission acquisition was pending', async () => {
+    let resolve; mediaDevices.getUserMedia.mockReturnValue(new Promise(r => { resolve = r; }));
+    const starting = sysAudio.startCapture('rec-1');
+    await vi.advanceTimersByTimeAsync(0);
+    await sysAudio.stopCapture();
+    const late = makeLoopbackStream(); resolve(late);
+    expect(await starting).toBeNull();
+    late.getAudioTracks().forEach(track => expect(track.stop).toHaveBeenCalled());
+  });
+
+  it('ignores an old rebind that completes after another instance owns capture', async () => {
+    await startCapture();
+    let resolve; mediaDevices.getUserMedia.mockReturnValueOnce(new Promise(r => { resolve = r; }));
+    fireDeviceChange(); await vi.advanceTimersByTimeAsync(1500);
+    const replacement = useSystemAudio(); await replacement.loadState(); await replacement.startCapture('rec-2');
+    const late = makeLoopbackStream(); resolve(late); await vi.advanceTimersByTimeAsync(0);
+    expect(addSystemAudioStream).not.toHaveBeenCalled();
+    late.getAudioTracks().forEach(track => expect(track.stop).toHaveBeenCalled());
+    await replacement.stopCapture();
+  });
+
   it('does not rebind while capture was never started', async () => {
     fireDeviceChange();
     await vi.advanceTimersByTimeAsync(1500);

@@ -120,9 +120,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
         IPC_TIMEOUTS.quick,
         'Get file path'
       ),
-    deleteRecording: (id) =>
+    deleteRecording: (id, options) =>
       withTimeout(
-        ipcRenderer.invoke('recording:deleteRecording', id),
+        ipcRenderer.invoke('recording:deleteRecording', id, options),
         IPC_TIMEOUTS.default,
         'Delete recording'
       ),
@@ -142,6 +142,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Recording state for window close protection
     setInProgress: (inProgress) =>
       ipcRenderer.invoke('recording:setInProgress', inProgress),
+    setUnsavedAudio: (recordId) =>
+      ipcRenderer.invoke('recording:setUnsavedAudio', recordId),
     setProcessing: (processing) =>
       ipcRenderer.invoke('recording:setProcessing', processing),
     // Metadata
@@ -245,6 +247,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     isSupported: () => ipcRenderer.invoke('systemAudio:isSupported'),
     start: (recordId, offsetMs = 0) => ipcRenderer.invoke('systemAudio:start', recordId, offsetMs),
     stop: () => ipcRenderer.invoke('systemAudio:stop'),
+    setPaused: (paused) => ipcRenderer.invoke('systemAudio:setPaused', paused),
     // Legacy (kept for backward compat)
     getSources: () => ipcRenderer.invoke('systemAudio:getSources'),
     diag: (level, message) => ipcRenderer.invoke('systemAudio:diag', level, message),

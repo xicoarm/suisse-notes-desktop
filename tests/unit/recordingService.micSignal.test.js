@@ -67,6 +67,7 @@ class MockMediaRecorder {
     this.ondataavailable = null;
     this.onstop = null;
     this.onerror = null;
+    MockMediaRecorder.last = this;
   }
 
   start() { this.state = 'recording'; }
@@ -147,7 +148,7 @@ describe('recordingService mic signal forensics (MSIG)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
 
     ctrl.amplitude = 0.1;
     ctrl.byteVal = 50;
@@ -182,7 +183,108 @@ describe('recordingService mic signal forensics (MSIG)', () => {
       recordingService.removeEventListener(evt, fn);
     }
     recordingService.cleanup();
+    vi.restoreAllMocks();
     vi.useRealTimers();
+  });
+
+  it('checks final audio against active elapsed time even when no chunks advance the display', async () => {
+    const store = createMockRecordingStore(); await startHealthyRecording(store);
+    store.duration = 3;
+    await vi.advanceTimersByTimeAsync(45000);
+    expect(recordingService.getWallClockSeconds()).toBeCloseTo(45, 1);
+    await recordingService.stopRecording(store);
+    expect(store.stopRecording).toHaveBeenCalledWith(45);
+  });
+
+  it('excludes paused time and system-clock changes from the final audio expectation', async () => {
+    const store = createMockRecordingStore(); await startHealthyRecording(store);
+    store.pauseRecording = () => { store.isRecording = false; store.isPaused = true; };
+    store.resumeRecording = () => { store.isRecording = true; store.isPaused = false; };
+    await vi.advanceTimersByTimeAsync(20000);
+    recordingService.pauseRecording(store);
+    await vi.advanceTimersByTimeAsync(30000);
+    vi.setSystemTime(Date.now() + 3600000);
+    recordingService.resumeRecording(store, { value: false });
+    await vi.advanceTimersByTimeAsync(10000);
+    await recordingService.stopRecording(store);
+    expect(store.stopRecording).toHaveBeenCalledWith(30);
+  });
+
+  it('starts macOS system capture under the newly created recording identity', async () => {
+    const store = createMockRecordingStore();
+    store.recordId = 'previous-meeting';
+    store.startRecording.mockImplementation(async () => { store.recordId = 'new-meeting'; return { success: true }; });
+    const captureSystemAudio = vi.fn(async id => { expect(id).toBe('new-meeting'); return true; });
+    await startHealthyRecording(store, { systemAudioEnabled: true, captureSystemAudio });
+    expect(captureSystemAudio).toHaveBeenCalledTimes(1);
+    expect(recordingService.getState().systemAudioActive).toBe(true);
+  });
+
+  it('preserves a deliberate mute when replacing the microphone', async () => {
+    const store = createMockRecordingStore(); await startHealthyRecording(store);
+    recordingService.toggleMicMute();
+    const next = createTrack({ deviceId: 'usb' });
+    navigator.mediaDevices.getUserMedia.mockResolvedValue(new MockMediaStream([next]));
+    expect((await recordingService.switchMicrophoneStream('usb', { skipVerify: true })).success).toBe(true);
+    expect(next.enabled).toBe(false);
+  });
+
+  it('disposes a microphone acquisition that completes after recording cleanup', async () => {
+    const store = createMockRecordingStore(); await startHealthyRecording(store);
+    let resolve; navigator.mediaDevices.getUserMedia.mockReturnValue(new Promise(r => { resolve = r; }));
+    const switching = recordingService.switchMicrophoneStream('usb');
+    recordingService.cleanup();
+    const next = createTrack({ deviceId: 'usb' }); resolve(new MockMediaStream([next]));
+    expect((await switching).success).toBe(false);
+    expect(next.stop).toHaveBeenCalled();
+  });
+
+  it('keeps the working microphone if connecting the replacement graph fails', async () => {
+    const store = createMockRecordingStore(); const { micTrack } = await startHealthyRecording(store);
+    const next = createTrack({ deviceId: 'usb' });
+    navigator.mediaDevices.getUserMedia.mockResolvedValue(new MockMediaStream([next]));
+    vi.spyOn(MockAudioContext.prototype, 'createMediaStreamSource').mockImplementation(() => { throw Error('graph failure'); });
+    expect((await recordingService.switchMicrophoneStream('usb')).success).toBe(false);
+    expect(micTrack.stop).not.toHaveBeenCalled();
+    expect(next.stop).toHaveBeenCalled();
+  });
+
+  it('finalizes only after the final data event and its slow disk save finish', async () => {
+    const store = createMockRecordingStore(); await startHealthyRecording(store);
+    let saved; store.saveChunk.mockReturnValue(new Promise(r => { saved = r; }));
+    const recorder = MockMediaRecorder.last;
+    recorder.stop = () => {
+      recorder.state = 'inactive';
+      recorder.ondataavailable({ target: recorder, data: { size: 3, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer } });
+      recorder.onstop();
+    };
+    const stop = recordingService.stopRecording(store);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.stopRecording).not.toHaveBeenCalled();
+    saved({ success: true });
+    expect((await stop).success).toBe(true);
+    expect(store.saveChunk).toHaveBeenCalledWith([1, 2, 3]);
+    expect(store.stopRecording).toHaveBeenCalledTimes(1);
+  });
+
+  it('protects failed in-memory audio until the same bytes are saved on retry', async () => {
+    const store = createMockRecordingStore(); await startHealthyRecording(store);
+    const previousApi = window.electronAPI;
+    const setUnsavedAudio = vi.fn().mockResolvedValue({ success: true });
+    window.electronAPI = { recording: { setUnsavedAudio, setInProgress: vi.fn(), setProcessing: vi.fn() } };
+    try {
+      store.saveChunk.mockResolvedValueOnce({ success: false, diskFull: true, error: 'Disk full' }).mockResolvedValue({ success: true });
+      const recorder = MockMediaRecorder.last;
+      recorder.ondataavailable({ target: recorder, data: { size: 3, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer } });
+      await vi.advanceTimersByTimeAsync(0);
+      const failed = await recordingService.stopRecording(store);
+      expect(failed.unsavedAudio).toBe(true);
+      expect(setUnsavedAudio).toHaveBeenLastCalledWith('rec-test');
+      expect(store.stopRecording).not.toHaveBeenCalled();
+      expect((await recordingService.stopRecording(store)).success).toBe(true);
+      expect(setUnsavedAudio).toHaveBeenLastCalledWith(null);
+      expect(store.saveChunk.mock.calls.map(args => args[0])).toEqual([[1, 2, 3], [1, 2, 3]]);
+    } finally { window.electronAPI = previousApi; }
   });
 
   it('healthy signal stays ok — no zero-signal false positive', async () => {

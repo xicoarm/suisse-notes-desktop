@@ -23,7 +23,7 @@ async function fetchJson(url) {
       let d = '';
       res.on('data', c => d += c);
       res.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
-    }).on('error', reject);
+    }).on('error', reject).setTimeout(5000, function () { this.destroy(new Error('CDP request timed out')); });
   });
 }
 
@@ -41,11 +41,18 @@ class AppDriver {
     this.log = [];
   }
 
+  assertTestProfile() {
+    const allowed = path.resolve(WORK_DIR, 'userdata');
+    const target = path.resolve(this.userDataDir);
+    if (!target.startsWith(allowed + path.sep)) throw new Error('Refusing to modify a non-test profile');
+  }
+
   get recordingsDir() {
     return path.join(this.userDataDir, 'recordings');
   }
 
   async launch({ freshProfile = true } = {}) {
+    this.assertTestProfile();
     if (freshProfile) fs.rmSync(this.userDataDir, { recursive: true, force: true });
     fs.mkdirSync(this.userDataDir, { recursive: true });
 
@@ -376,7 +383,7 @@ class AppDriver {
 
   async crashRenderer() {
     const client = await this.page.target().createCDPSession();
-    await client.send('Page.crash').catch(() => { /* connection dies with the crash */ });
+    await Promise.race([client.send('Page.crash').catch(() => {}), sleep(5000)]);
   }
 
   async screenshot(name) {
@@ -395,7 +402,7 @@ class AppDriver {
       for (const e of fs.readdirSync(d, { withFileTypes: true })) {
         const p = path.join(d, e.name);
         if (e.isDirectory()) walk(p);
-        else if (/\.(webm|m4a|wav)$/.test(e.name) && !e.name.startsWith('chunk')) files.push(p);
+        else if (/^audio\.(webm|m4a|wav)$/.test(e.name)) files.push(p);
       }
     };
     walk(this.recordingsDir);
@@ -404,6 +411,7 @@ class AppDriver {
   }
 
   async close({ keepProfile = true } = {}) {
+    this.assertTestProfile();
     try { this.browser?.disconnect(); } catch (e) { /* ignore */ }
     if (this.proc && !this.proc.killed) {
       // Kill the whole quasar/electron tree

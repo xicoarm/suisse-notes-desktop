@@ -139,11 +139,13 @@ function getRecordingSourceBytes(recordPath) {
         try {
           const st = fs.statSync(path.join(dir, f));
           if (st.isFile()) total += st.size;
+          else if (st.isDirectory()) addDir(path.join(dir, f));
         } catch (e) { /* file vanished mid-scan */ }
       }
     } catch (e) { /* unreadable dir */ }
   };
   addDir(path.join(recordPath, 'chunks'));
+  addDir(path.join(recordPath, 'source-chunks'));
   addDir(path.join(recordPath, 'sessions'));
   try {
     const sysAudio = path.join(recordPath, 'system_audio.raw');

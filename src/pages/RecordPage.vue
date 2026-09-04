@@ -1805,7 +1805,13 @@ const handleStopInternal = async () => {
       // in-place retry (re-runs the combine via the recovery path) instead of
       // a dead-end error toast. If the user dismisses, launch recovery
       // combines the chunks automatically once space is freed.
-      if (result.diskFull) {
+      if (result.unsavedAudio) {
+        $q.dialog({
+          title: t('error'), message: t('unsavedAudioMessage'),
+          cancel: { flat: true, color: 'negative', label: t('discardRecording') },
+          ok: { color: 'primary', label: t('retry') }, persistent: true
+        }).onOk(() => handleStop()).onCancel(() => handleDiscardDeadRecording());
+      } else if (result.diskFull) {
         const mb = result.shortfallMB || result.neededMB || 200;
         $q.dialog({
           title: t('diskFullFinalizeTitle'),
@@ -1816,11 +1822,13 @@ const handleStopInternal = async () => {
         }).onOk(() => handleStop());
       } else if (result.partialRecovery) {
         // Show more detailed error for partial recovery
-        $q.notify({
-          type: 'warning',
-          message: 'Recording was interrupted. Your audio chunks are saved locally but could not be combined. Please try again from History.',
-          timeout: 10000
-        });
+        $q.dialog({
+          title: t('error'),
+          message: result.error,
+          cancel: { flat: true, label: t('cancel') },
+          ok: { color: 'primary', label: t('retry') },
+          persistent: true
+        }).onOk(() => handleStop());
       } else {
         $q.notify({
           type: 'negative',
@@ -2018,7 +2026,8 @@ const startAutoUpload = async () => {
           setTimeout(async () => {
             try {
               if (isElectron()) {
-                await window.electronAPI.recording.deleteRecording(deleteRecordId);
+                const deletion = await window.electronAPI.recording.deleteRecording(deleteRecordId, { requireVerified: true });
+                if (!deletion?.success) throw new Error(deletion?.error || 'Local audio could not be deleted');
               }
               await historyStore.updateRecording(deleteRecordId, { filePath: null });
               recordingStore.unlockFile(deleteRecordId);
@@ -2052,7 +2061,7 @@ const startAutoUpload = async () => {
       });
     } else {
       // P0 Data Loss Fix: Keep file locked on failure - will be unlocked on retry or explicit delete
-      handleUploadError(result.error, ownerUserId);
+      handleUploadError(result.error, ownerUserId, result);
     }
   } catch (error) {
     // phase reset handled by store actions
@@ -2060,7 +2069,8 @@ const startAutoUpload = async () => {
   }
 };
 
-const handleUploadError = async (errorMessage, ownerUserId = null) => {
+const handleUploadError = async (errorMessage, ownerUserId = null, outcome = {}) => {
+  recordingStore.setError(errorMessage || 'Upload confirmation is pending');
   // Make "Insufficient minutes" error more user-friendly
   if (errorMessage && errorMessage.includes('Insufficient minutes')) {
     recordingStore.uploadError ='No recording minutes remaining. Please upgrade your plan or purchase more minutes at app.suisse-meets.ch';
@@ -2077,7 +2087,8 @@ const handleUploadError = async (errorMessage, ownerUserId = null) => {
   // ownerUserId keeps this write valid even after a forced logout nulled
   // authStore.user (the userId ownership guard would otherwise refuse it).
   await historyStore.updateRecording(recordingStore.recordId, {
-    uploadStatus: 'failed',
+    uploadStatus: outcome.pendingVerification ? 'pending_verification' : 'failed',
+    ...(outcome.audioFileId ? { audioFileId: outcome.audioFileId } : {}),
     uploadError: errorMessage,
     ...(ownerUserId ? { userId: ownerUserId } : {})
   });
@@ -2149,8 +2160,7 @@ const retryUpload = async () => {
   recordingStore.uploadRetryAttempt = 0;
 
   try {
-    // Remove from history (will re-add based on result)
-    await historyStore.deleteRecording(recordingStore.recordId, false);
+    // Preserve history and ownership across retry and any intervening crash.
 
     isRetrying.value = false;
     await startAutoUpload();
@@ -2274,12 +2284,7 @@ const handleDiscardDeadRecording = () => {
     cancel: { flat: true, label: t('cancel') },
     ok: { color: 'negative', label: t('discardRecording') },
     persistent: true
-  }).onOk(() => {
-    recordingStore.reset();
-    // phase transition handled by subsequent action (setUploading/setError/reset)
-    // phase reset handled by store actions
-    recordingStore.uploadError =null;
-  });
+  }).onOk(() => handleCancel());
 };
 
 const handleNewRecording = () => {

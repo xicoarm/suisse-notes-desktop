@@ -25,7 +25,7 @@ export const useRecordingStore = defineStore('recording', {
   state: () => ({
     recordId: null,
     userId: null, // Track userId for multi-account handling
-    // Single authoritative state: idle | recording | paused | stopping | processing | uploading | uploaded | error
+    // Single authoritative state: idle | preparing | recording | paused | stopping | processing | uploading | uploaded | error
     phase: 'idle',
     startTime: null,
     duration: 0, // in seconds
@@ -88,7 +88,7 @@ export const useRecordingStore = defineStore('recording', {
       return 0;
     },
     // True during any phase where the user must stay on the record page
-    isBlocking: (state) => ['recording', 'paused', 'stopping', 'processing', 'uploading'].includes(state.phase),
+    isBlocking: (state) => ['preparing', 'recording', 'paused', 'stopping', 'processing', 'uploading'].includes(state.phase),
     formattedDuration: (state) => {
       if (!state.duration || !isFinite(state.duration)) return '00:00:00';
       const hours = Math.floor(state.duration / 3600);
@@ -216,13 +216,13 @@ export const useRecordingStore = defineStore('recording', {
       }
     },
 
-    async startRecording(userId = null) {
+    async startRecording(userId = null, { deferCaptureStart = false } = {}) {
       // Re-entrancy guard (double-start incident): a new session must not start
       // while a capture lifecycle is live — the body below regenerates recordId
       // and resets chunkIndex, which would corrupt the active chunk sequence.
       // The service-level latch blocks renderer double-starts; this protects
       // the store against any other caller.
-      if (['recording', 'paused', 'stopping', 'processing'].includes(this.phase)) {
+      if (['preparing', 'recording', 'paused', 'stopping', 'processing'].includes(this.phase)) {
         console.warn(`startRecording rejected: phase is '${this.phase}'`);
         return { success: false, error: `Cannot start a recording while phase is '${this.phase}'` };
       }
@@ -262,7 +262,7 @@ export const useRecordingStore = defineStore('recording', {
 
         this.recordId = uuidv4();
         this.userId = userId; // Store userId for use in saveChunk
-        this.phase ='recording';
+        this.phase = deferCaptureStart ? 'preparing' : 'recording';
         this.startTime = Date.now();
         this.duration = 0;
         this.chunkIndex = 0;
@@ -327,6 +327,12 @@ export const useRecordingStore = defineStore('recording', {
       }
     },
 
+    confirmCaptureStarted() {
+      if (this.phase !== 'preparing') return;
+      this.phase = 'recording';
+      this.startTime = Date.now();
+    },
+
     pauseRecording() {
       if (this.phase === 'recording') {
         this.phase ='paused';
@@ -341,7 +347,7 @@ export const useRecordingStore = defineStore('recording', {
       }
     },
 
-    async stopRecording() {
+    async stopRecording(expectedDurationSec = this.duration) {
       try {
         this.phase ='stopped';
         stopStorageMonitor();
@@ -356,7 +362,7 @@ export const useRecordingStore = defineStore('recording', {
           // Pass the wall-clock duration so main can tell whether the combined file
           // actually contains the meeting. Main has no other source for this:
           // metadata.json only gets a duration AFTER the combine, from the probe.
-          const result = await window.electronAPI.recording.combineChunks(this.recordId, '.webm', this.duration);
+          const result = await window.electronAPI.recording.combineChunks(this.recordId, '.webm', Number.isFinite(expectedDurationSec) ? expectedDurationSec : this.duration);
 
           await window.electronAPI.recording.setProcessing(false);
 
@@ -654,13 +660,13 @@ export const useRecordingStore = defineStore('recording', {
 
             if (isElectron()) {
               // Pass userId for crash recovery state tracking
-              result = await window.electronAPI.recording.saveChunk(
-                this.recordId,
-                chunkData,
-                this.chunkIndex,
-                '.webm',
-                this.userId
-              );
+              let timeout;
+              try {
+                result = await Promise.race([
+                  window.electronAPI.recording.saveChunk(this.recordId, chunkData, this.chunkIndex, '.webm', this.userId),
+                  new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Saving audio timed out; bytes retained for retry')), 30000); }),
+                ]);
+              } finally { clearTimeout(timeout); }
             } else if (isCapacitor()) {
               result = await storage.saveChunk(
                 this.recordId,

@@ -5,6 +5,7 @@
 
 import { isAndroid, isElectron } from '../utils/platform';
 import { captureMessage } from '../boot/sentry';
+import { createRecordingChunkWriter } from './recordingChunkWriter';
 
 let BackgroundRecording = null;
 
@@ -91,6 +92,7 @@ const micGraceTimeouts = new Set();
 let lastRequestedDeviceId = null;
 let micDeviceChangeHandler = null;
 let micAutoRecovering = false;
+let micSwitchGeneration = 0;
 
 // INT-2: audio-session interruption auto-recovery (Nyberg incident 2026-06-25).
 // On iOS an incoming call interrupts the audio session even with the app in
@@ -137,6 +139,9 @@ let orphanRecorderWarned = false;
 // teardown/combine sequence twice (the stop-side twin of the start race; the
 // full guard was deferred in 3a7415b).
 let stopInFlightPromise = null;
+let chunkWriter = null;
+let splitInFlightPromise = null;
+let recorderStopObserved = false;
 // Auto-split ref captured at start so verifyRecordingState can tell an
 // intentional split-pause from a stuck recorder (see verifyRecordingState).
 let isAutoSplittingRef = null;
@@ -805,24 +810,46 @@ export async function resumeAudioContexts() {
  *   would false-positive "silent")
  * @returns {Promise<{success: boolean, error?: string, label?: string, verified?: Promise}>}
  */
+async function acquireReplacementMicrophone(constraints) {
+  let expired = false;
+  let timeout;
+  const acquired = navigator.mediaDevices.getUserMedia(constraints).then(candidate => {
+    if (expired) {
+      candidate.getTracks().forEach(track => track.stop());
+      throw new Error('Microphone request expired');
+    }
+    return candidate;
+  });
+  try {
+    return await Promise.race([
+      acquired,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => { expired = true; reject(new Error('Microphone did not respond within 8 seconds')); }, 8000);
+      })
+    ]);
+  } finally { clearTimeout(timeout); }
+}
+
 export async function switchMicrophoneStream(newDeviceId, opts = {}) {
   const verifyContext = opts.verifyContext || 'manual-switch';
   if (!mixingContext || !mixingDest) {
     return { success: false, error: 'No active recording to switch microphone in' };
   }
 
+  const switchId = ++micSwitchGeneration;
+  const generation = recorderGeneration;
+  const targetContext = mixingContext;
+  let newStream = null;
+  let replacementNode = null;
   try {
-    // DREC-3: remember the active device so auto-recovery can prefer it if it
-    // drops and later reappears.
-    lastRequestedDeviceId = newDeviceId || null;
+    // Relax processing constraints, never the selected device. In particular,
+    // same-device recovery must not open a different microphone behind a mute.
     // Step 1: Acquire new mic stream with fallback constraints
-    let newStream = null;
     const constraintLadder = newDeviceId
       ? [
         { deviceId: { exact: newDeviceId }, echoCancellation: true, noiseSuppression: true, sampleRate: 48000 },
-        { deviceId: { ideal: newDeviceId }, noiseSuppression: true },
-        { noiseSuppression: true },
-        true
+        { deviceId: { exact: newDeviceId }, noiseSuppression: true },
+        { deviceId: { exact: newDeviceId } }
       ]
       : [
         { echoCancellation: true, noiseSuppression: true, sampleRate: 48000 },
@@ -832,7 +859,7 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
 
     for (const constraints of constraintLadder) {
       try {
-        newStream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+        newStream = await acquireReplacementMicrophone({ audio: constraints });
         break;
       } catch (e) {
         console.warn('Mic switch constraint attempt failed:', e.name);
@@ -842,6 +869,18 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
     if (!newStream) {
       return { success: false, error: 'Could not access the selected microphone' };
     }
+
+    if (generation !== recorderGeneration || switchId !== micSwitchGeneration || mixingContext !== targetContext || !mixingDest) {
+      newStream.getTracks().forEach(track => track.stop());
+      return { success: false, error: 'Microphone switch superseded or recording stopped' };
+    }
+    const liveTrack = newStream.getAudioTracks()[0];
+    if (!liveTrack || liveTrack.readyState === 'ended') throw new Error('The selected microphone disconnected while opening');
+    // Connect the replacement before touching the working input. Graph setup
+    // can throw after getUserMedia succeeds (driver/context failures).
+    liveTrack.enabled = !micMuted;
+    replacementNode = targetContext.createMediaStreamSource(newStream);
+    replacementNode.connect(mixingDest);
 
     // Step 2: Stop old health monitoring (uses the old mic stream)
     if (micHealthInterval) {
@@ -871,10 +910,9 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
     }
 
     // Step 4: Connect new mic to mixing pipeline
-    micSourceNode = mixingContext.createMediaStreamSource(newStream);
-    micSourceNode.connect(mixingDest);
+    micSourceNode = replacementNode;
     stream = newStream;
-    micMuted = false;
+    lastRequestedDeviceId = newDeviceId || null;
 
     // Step 5: Set up track.onended listener for new stream
     for (const track of newStream.getTracks()) {
@@ -883,6 +921,7 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
         updateMicHealthState(MIC_HEALTH_STATUS.DEGRADED, MIC_HEALTH_REASON.TRACK_ENDED, null, {
           micActive: false, systemAudioActive
         });
+        handleMicDeviceChange();
         registerMicGraceTimeout(() => {
           if (!recordingStoreRef?.isRecording) return;
           if (micHealthState.status === MIC_HEALTH_STATUS.OK) return;
@@ -965,6 +1004,10 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
     emit('microphoneChange', { deviceId: newDeviceId, label: trackLabel });
     return { success: true, label: trackLabel, verified };
   } catch (e) {
+    if (stream !== newStream) {
+      try { replacementNode?.disconnect(); } catch (_) { /* setup failed */ }
+      newStream?.getTracks().forEach(track => track.stop());
+    }
     console.error('Error switching microphone:', e);
     return { success: false, error: e.message };
   }
@@ -1790,11 +1833,12 @@ const AUTOSPLIT_RETRY_SECONDS = 300;
 let lastSuccessfulChunkAt = 0;
 let savedChunkCount = 0;
 let lastWallClockSec = 0;
+let durationRunStartedAt = null;
+let durationBaseSec = 0;
 let stallWarned = false;
 // C3: latch the disk-full emergency-stop event. The recorder keeps emitting a
 // blob every timeslice, so without a latch the diskFull chunkSaveFailure re-fires
 // every ~3s and launches concurrent stopRecording() calls (double-combine/thrash).
-let diskFullWarned = false;
 const STALL_WARN_MS = 30000; // ~10 timeslices with no persisted chunk while 'recording'
 
 /**
@@ -1847,7 +1891,9 @@ function startDurationTracking(recordingStore, isAutoSplitting, maxSeconds = nul
     durationInterval = null;
   }
 
-  const startTime = Date.now();
+  const startTime = performance.now();
+  durationBaseSec = 0;
+  durationRunStartedAt = startTime;
   minutesLimitSeconds = maxSeconds;
   limitWarningShown = false;
   nextAutoSplitAtSeconds = MAX_DURATION_SECONDS; // fresh recording → first split at MAX_DURATION
@@ -1856,11 +1902,10 @@ function startDurationTracking(recordingStore, isAutoSplitting, maxSeconds = nul
   savedChunkCount = 0;
   stallWarned = false;
   lastWallClockSec = 0;
-  diskFullWarned = false;
 
   durationInterval = setInterval(async () => {
     if (recordingStore.isRecording) {
-      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      const elapsed = Math.floor((performance.now() - startTime) / 1000);
       lastWallClockSec = elapsed;
       // Honest duration: persist/show captured-audio seconds, not wall-clock,
       // so a capture stall is visible. Limit + auto-split below intentionally
@@ -1900,6 +1945,8 @@ function startDurationTracking(recordingStore, isAutoSplitting, maxSeconds = nul
  * Stop duration tracking
  */
 function stopDurationTracking() {
+  lastWallClockSec = getWallClockSeconds();
+  durationRunStartedAt = null;
   if (durationInterval) {
     clearInterval(durationInterval);
     durationInterval = null;
@@ -1934,7 +1981,9 @@ export function getMinutesLimitSeconds() {
  * ffprobe can't read the file (A6)).
  */
 export function getWallClockSeconds() {
-  return lastWallClockSec;
+  return durationRunStartedAt === null
+    ? lastWallClockSec
+    : durationBaseSec + Math.max(0, performance.now() - durationRunStartedAt) / 1000;
 }
 
 /**
@@ -1969,98 +2018,20 @@ export function notifyForegrounded() {
  * Perform auto-split
  */
 async function performAutoSplit(recordingStore, isAutoSplitting) {
-  if (isAutoSplitting.value) return;
+  if (isAutoSplitting.value || splitInFlightPromise) return;
   isAutoSplitting.value = true;
-
-  // Wait for the store's saveChunk mutex to drain.
-  // _chunkSaveQueue is reassigned on each saveChunk, so we snapshot → await → recheck
-  // to cover the case where a new saveChunk was queued while we were awaiting.
-  const drainChunkQueue = async () => {
-    for (let i = 0; i < 3; i++) {
-      const q = recordingStore._chunkSaveQueue;
-      if (!q) return;
-      try { await q; } catch (_) { /* ignore */ }
-      if (recordingStore._chunkSaveQueue === q) return; // nothing new queued while awaiting
-    }
-  };
-
-  try {
-    // 1. Drain any in-flight saveChunk from BEFORE we touch the recorder.
-    await drainChunkQueue();
-
-    // 2. Flush buffered data while the recorder is still 'recording'.
-    //    flushRecordingData early-returns if state !== 'recording', so calling it
-    //    AFTER pause() silently does nothing, and any buffered audio would instead
-    //    be emitted later as a stale chunk that races with createSessionFile.
-    await flushRecordingData();
-
-    // 3. Wait for the flushed chunk to be persisted before pausing.
-    await drainChunkQueue();
-
-    // 4. Pause to stop new data being gathered into the blob.
-    if (mediaRecorder && mediaRecorder.state === 'recording') {
-      mediaRecorder.pause();
-    }
-
-    // 5. Final drain in case pause() itself queued a dataavailable
-    //    (implementation-defined across browsers).
-    await drainChunkQueue();
-
-    // 6. Create the session. Main process serializes createSessionFile with
-    //    saveChunk via withRecordingLock, so no late chunk can slip through.
-    const result = await recordingStore.createSessionFile();
-
-    if (result.success) {
-      // Schedule the NEXT split a full cycle later — this advancing threshold
-      // is the Bug D fix: it makes the predicate edge-triggered so it cannot
-      // re-fire every tick once elapsed has crossed it. DREC-5: anchor to the
-      // current wall-clock instead of `+=` so the threshold can't drift after a
-      // prior failed split already bumped it by the retry back-off (which would
-      // otherwise push the next split minutes late or fire it early on resume).
-      nextAutoSplitAtSeconds = lastWallClockSec + MAX_DURATION_SECONDS;
-
-      // 7. Reset chunkIndex AFTER the session was finalized. Resetting earlier
-      //    would allow a late saveChunk to overwrite chunk_0 with pre-split audio.
-      //    C1: only on Electron — there createSessionFile rolls the chunks into a
-      //    finalized session file, so chunk_0 is free to reuse. On mobile
-      //    createSessionFile is a no-op flush (chunks stay in the same dir), so
-      //    resetting would overwrite chunk_000000 of the first ~5h segment →
-      //    silent total-segment loss. Keep the monotonic index on mobile until
-      //    it has real per-segment directories.
-      if (isElectron()) {
-        recordingStore.resetChunkIndex();
-      }
-    } else {
-      // Split failed: KEEP the chunks (do NOT reset — resetting here would
-      // orphan the just-recorded audio and resume into a context that
-      // overwrites chunk_0). Back off so we retry in a few minutes rather than
-      // hammering createSessionFile every 1s tick (the Bug D runaway).
-      console.error('Auto-split: Failed to create session file:', result.error);
-      nextAutoSplitAtSeconds = lastWallClockSec + AUTOSPLIT_RETRY_SECONDS; // DREC-5: anchor, don't drift
-    }
-
-    // 8. Resume.
-    if (mediaRecorder && mediaRecorder.state === 'paused') {
-      mediaRecorder.resume();
-    }
-  } catch (error) {
-    console.error('Error during auto-split:', error);
-    // Back off so an exception mid-split doesn't re-trigger the predicate every
-    // 1s tick (Bug D runaway). The chunks are left intact for recovery.
-    nextAutoSplitAtSeconds = lastWallClockSec + AUTOSPLIT_RETRY_SECONDS; // DREC-5: anchor, don't drift
-    // Ensure recording resumes even on error
-    if (mediaRecorder && mediaRecorder.state === 'paused') {
-      mediaRecorder.resume();
-    }
-  } finally {
-    isAutoSplitting.value = false;
-    // The split paused capture for the (possibly multi-minute) merge and the new
-    // segment hasn't produced a chunk yet. Reset the watchdog episode so it does
-    // NOT read the merge gap as a stall (B1), and so a genuine post-split stall
-    // can warn again.
-    lastSuccessfulChunkAt = Date.now();
-    stallWarned = false;
-  }
+  splitInFlightPromise = (async () => {
+    try {
+      await flushRecordingData();
+      const result = await recordingStore.createSessionFile();
+      nextAutoSplitAtSeconds = lastWallClockSec + (result.success ? MAX_DURATION_SECONDS : AUTOSPLIT_RETRY_SECONDS);
+      if (!result.success) console.error('Source rotation failed; audio retained:', result.error);
+    } catch (error) {
+      nextAutoSplitAtSeconds = lastWallClockSec + AUTOSPLIT_RETRY_SECONDS;
+      console.error('Source rotation failed:', error);
+    } finally { isAutoSplitting.value = false; }
+  })();
+  try { await splitInFlightPromise; } finally { splitInFlightPromise = null; }
 }
 
 /**
@@ -2257,6 +2228,9 @@ export async function startRecording(options = {}) {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     return { success: false, error: 'Recording already in progress' };
   }
+  if (stopInFlightPromise || chunkWriter?.pendingCount) {
+    return { success: false, error: 'The previous recording still has unsaved audio. Retry saving it before starting another recording.' };
+  }
   startInProgress = true;
   try {
     return await startRecordingInternal(options);
@@ -2297,6 +2271,7 @@ async function startRecordingInternal(options) {
   clearMicGraceTimeouts();
 
   let sysStream = null;
+  let audioTeeActive = false;
   try {
     resetMicHealthState();
     clearSilenceWarning();
@@ -2341,6 +2316,14 @@ async function startRecordingInternal(options) {
       }
     }
 
+    // Establish the new ID and durable directory BEFORE AudioTee starts.
+    // Start recording session in store (pass userId for multi-account handling)
+    const userId = authStore?.user?.id || authStore?.user?.userId || null;
+    const sessionResult = await recordingStore.startRecording(userId, { deferCaptureStart: true });
+    if (!sessionResult.success) {
+      throw new Error(sessionResult.error || 'Failed to create recording session');
+    }
+
     // Start system audio capture — AFTER the mic is acquired, never before.
     // Opening a Bluetooth headset's microphone forces the headset from A2DP
     // into HFP, which suspends the A2DP output endpoint and re-routes all
@@ -2350,7 +2333,6 @@ async function startRecordingInternal(options) {
     // loopback, which then recorded pure silence for the whole session.
     // - macOS: AudioTee writes PCM to file, merged via FFmpeg in combineChunks (returns true)
     // - Windows: desktopCapturer returns a MediaStream for real-time mixing
-    let audioTeeActive = false;
     if (systemAudioEnabled && captureSystemAudio) {
       try {
         const result = await captureSystemAudio(recordingStore.recordId);
@@ -2409,13 +2391,6 @@ async function startRecordingInternal(options) {
       }
     }
 
-    // Start recording session in store (pass userId for multi-account handling)
-    const userId = authStore?.user?.id || null;
-    const sessionResult = await recordingStore.startRecording(userId);
-    if (!sessionResult.success) {
-      throw new Error(sessionResult.error || 'Failed to create recording session');
-    }
-
     // Reset mute state for new recording
     micMuted = false;
 
@@ -2424,6 +2399,7 @@ async function startRecordingInternal(options) {
     // placeholder — AudioTee output is merged via FFmpeg in combineChunks
     const recordingStream = createMixingPipeline(stream, sysStream);
     mixedStream = recordingStream;
+    if (audioTeeActive) setSystemAudioActive(true);
 
     // Resume AudioContext if suspended (suspended contexts produce silence)
     if (mixingContext && mixingContext.state === 'suspended') {
@@ -2452,101 +2428,46 @@ async function startRecordingInternal(options) {
     const recorderOptions = mimeType ? { mimeType } : {};
     mediaRecorder = new MediaRecorder(recordingStream, recorderOptions);
 
-    // Handle data available
-    mediaRecorder.ondataavailable = async (event) => {
-      // Layer 2 of the double-start protection: only the CURRENT pipeline
-      // generation may persist chunks. A stale recorder firing here (any
-      // re-entrancy/restart bug, present or future) is dropped and destroyed
-      // instead of interleaving duplicate audio into the chunk sequence.
-      if (myGeneration !== recorderGeneration || event.target !== mediaRecorder) {
+    const thisRecorder = mediaRecorder;
+    recorderStopObserved = false;
+    const thisRecordId = recordingStore.recordId;
+    const writer = createRecordingChunkWriter({
+      save: bytes => {
+        if (recordingStore.recordId !== thisRecordId) return { success: false, error: 'Recording identity changed before audio was saved' };
+        return recordingStore.saveChunk(Array.from(bytes));
+      },
+      onSaved: () => {
+        lastSuccessfulChunkAt = Date.now();
+        savedChunkCount++;
+        if (stallWarned) { stallWarned = false; emit('captureRecovered', { savedChunks: savedChunkCount }); }
+        recordingStore.chunkSaveErrors = 0;
+        if (recordingStore.chunkSaveErrorWarning) {
+          recordingStore.chunkSaveErrorWarning = false;
+          emit('chunkSaveFailure', null);
+        }
+      },
+      onFailure: failure => {
+        recordingStore.chunkSaveErrors++;
+        recordingStore.chunkSaveErrorWarning = true;
+        // Store retries already exhausted. Preserve this blob and stop capture;
+        // a later blob must never reuse its index and silently replace it.
+        emit('chunkSaveFailure', { ...failure, retriesExhausted: true, consecutiveErrors: recordingStore.chunkSaveErrors });
+      },
+    });
+    chunkWriter = writer;
+    mediaRecorder.ondataavailable = event => {
+      if (myGeneration !== recorderGeneration || (event.target && event.target !== thisRecorder)) {
         handleOrphanRecorderBlob(event);
         return;
       }
-      if (event.data.size > 0) {
-        try {
-          const arrayBuffer = await event.data.arrayBuffer();
-          const uint8Array = new Uint8Array(arrayBuffer);
-          const result = await recordingStore.saveChunk(Array.from(uint8Array));
-
-          // P0 Data Loss Fix: Check saveChunk return value (V1/V7)
-          if (result && !result.success) {
-            recordingStore.chunkSaveErrors++;
-            console.error('Chunk save failed:', result.error, `(${recordingStore.chunkSaveErrors} consecutive failures)`);
-
-            // Disk full: emergency stop immediately — emit ONCE per episode (C3).
-            if (result.diskFull) {
-              if (!diskFullWarned) {
-                diskFullWarned = true;
-                emit('chunkSaveFailure', {
-                  consecutiveErrors: recordingStore.chunkSaveErrors,
-                  error: 'Disk full — recording stopped to preserve saved data',
-                  diskFull: true
-                });
-              }
-            } else if (!recordingStore.chunkSaveErrorWarning) {
-              // Emit warning on first failure so user knows immediately
-              recordingStore.chunkSaveErrorWarning = true;
-              emit('chunkSaveFailure', {
-                consecutiveErrors: recordingStore.chunkSaveErrors,
-                error: result.error
-              });
-            }
-
-            // Still resolve pending flushes so pause/close don't hang
-            if (flushResolvers.length > 0) {
-              const resolvers = flushResolvers;
-              flushResolvers = [];
-              resolvers.forEach(resolve => resolve());
-            }
-            return;
-          } else {
-            // Chunk persisted — advance the watchdog + captured-duration counters.
-            lastSuccessfulChunkAt = Date.now();
-            savedChunkCount++;
-            if (stallWarned) {
-              stallWarned = false;
-              emit('captureRecovered', { savedChunks: savedChunkCount });
-            }
-            // Reset consecutive error counter on success
-            if (recordingStore.chunkSaveErrors > 0) {
-              recordingStore.chunkSaveErrors = 0;
-              diskFullWarned = false;
-              if (recordingStore.chunkSaveErrorWarning) {
-                recordingStore.chunkSaveErrorWarning = false;
-                emit('chunkSaveFailure', null); // Clear warning
-              }
-            }
-          }
-        } catch (error) {
-          console.error('Error saving chunk:', error);
-          recordingStore.chunkSaveErrors++;
-          if (!recordingStore.chunkSaveErrorWarning) {
-            recordingStore.chunkSaveErrorWarning = true;
-            emit('chunkSaveFailure', {
-              consecutiveErrors: recordingStore.chunkSaveErrors,
-              error: error.message
-            });
-          }
-          // Still resolve pending flushes so pause/close don't hang
-          if (flushResolvers.length > 0) {
-            const resolvers = flushResolvers;
-            flushResolvers = [];
-            resolvers.forEach(resolve => resolve());
-          }
-          return;
-        }
-      }
-      // Signal flush completion to all pending flush callers (only on success)
-      if (flushResolvers.length > 0) {
-        const resolvers = flushResolvers;
-        flushResolvers = [];
-        resolvers.forEach(resolve => resolve());
-      }
+      // Capture flush waiters synchronously; an older in-flight save cannot
+      // acknowledge a newer requestData() call.
+      const waiters = flushResolvers;
+      flushResolvers = [];
+      const saved = writer.enqueue(event.data);
+      saved.then(result => waiters.forEach(resolve => resolve(result)));
     };
-
-    mediaRecorder.onstop = () => {
-      console.log('MediaRecorder stopped');
-    };
+    mediaRecorder.onstop = () => { recorderStopObserved = true; };
 
     mediaRecorder.onerror = (event) => {
       console.error('MediaRecorder error:', event.error);
@@ -2576,6 +2497,7 @@ async function startRecordingInternal(options) {
     // P0 Data Loss Fix: Reduced from 5s to 3s to minimize crash data loss (V8).
     // Timeslice is overridable in dev/test via VITE_SUISSE_MEDIA_RECORDER_TIMESLICE_MS.
     mediaRecorder.start(MEDIA_RECORDER_TIMESLICE_MS);
+    recordingStore.confirmCaptureStarted?.();
 
     // Start monitoring the mixed recording stream (what actually gets recorded)
     if (stream || sysStream) {
@@ -2610,6 +2532,7 @@ async function startRecordingInternal(options) {
               systemAudioActive
             }
           );
+          handleMicDeviceChange();
           // Grace period: check after 3s if a replacement device appeared
           registerMicGraceTimeout(() => {
             // If recording was stopped during the grace period, skip
@@ -2713,6 +2636,11 @@ async function startRecordingInternal(options) {
       errorMessage = 'Selected microphone does not support required settings. Try a different microphone.';
     }
 
+    if (audioTeeActive) await window.electronAPI?.systemAudio?.stop?.().catch(() => {});
+    if (isElectron()) {
+      await window.electronAPI?.recording?.setInProgress(false);
+      await window.electronAPI?.recording?.setProcessing(false);
+    }
     recordingStore.reset();
     return { success: false, error: errorMessage };
   }
@@ -2724,6 +2652,7 @@ async function startRecordingInternal(options) {
 export function pauseRecording(recordingStore) {
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     mediaRecorder.pause();
+    window.electronAPI?.systemAudio?.setPaused?.(true).catch(() => {});
     recordingStore.pauseRecording();
     stopDurationTracking();
     emit('stateChange', { isRecording: false, isPaused: true });
@@ -2739,13 +2668,16 @@ export function pauseRecording(recordingStore) {
 export function resumeRecording(recordingStore, isAutoSplitting, maxRecordingSeconds = null) {
   if (mediaRecorder && mediaRecorder.state === 'paused') {
     mediaRecorder.resume();
+    window.electronAPI?.systemAudio?.setPaused?.(false).catch(() => {});
     recordingStore.resumeRecording();
 
     // Resume from the wall-clock accumulator, NOT recordingStore.duration — the
     // latter now holds the clamped captured-audio value, which would make the
     // minutes-limit / auto-split predicates under-count after a stall.
     const currentDuration = lastWallClockSec;
-    const resumeTime = Date.now();
+    const resumeTime = performance.now();
+    durationBaseSec = currentDuration;
+    durationRunStartedAt = resumeTime;
     // A fresh chunk hasn't arrived yet; don't let the pause gap read as a stall
     // on the first post-resume watchdog tick.
     lastSuccessfulChunkAt = Date.now();
@@ -2781,7 +2713,7 @@ export function resumeRecording(recordingStore, isAutoSplitting, maxRecordingSec
 
     durationInterval = setInterval(async () => {
       if (recordingStore.isRecording) {
-        const elapsed = Math.floor((Date.now() - resumeTime) / 1000);
+        const elapsed = Math.floor((performance.now() - resumeTime) / 1000);
         const newDuration = currentDuration + elapsed;
         lastWallClockSec = newDuration;
         const shown = capturedDisplaySeconds(newDuration);
@@ -2834,202 +2766,56 @@ export async function stopRecording(recordingStore, stopSystemAudio) {
 }
 
 async function stopRecordingInternal(recordingStore, stopSystemAudio) {
-  // eslint-disable-next-line no-async-promise-executor
-  return new Promise(async (resolve) => {
-    // Handle case where MediaRecorder was lost
-    if (!mediaRecorder) {
-      if (recordingStore.recordId && recordingStore.chunkIndex > 0) {
-        console.warn('MediaRecorder lost but chunks exist - attempting recovery');
-        silenceError = null;
-        stopLevelMonitoring();
-    
-        stopDurationTracking();
-        stopAuthKeepAlive();
+  // Compare decoded audio with independent active time. The display is
+  // clamped by saved chunks, which can conceal the very loss we must detect.
+  const expectedDurationSec = getWallClockSeconds();
+  stopDurationTracking();
+  const recorder = mediaRecorder;
+  const writer = chunkWriter;
+  const retryingSave = !recorder;
+  let stopError = null;
+  if (splitInFlightPromise) await splitInFlightPromise;
 
-        if (stateVerificationInterval) {
-          clearInterval(stateVerificationInterval);
-          stateVerificationInterval = null;
-        }
-
-        if (stream) {
-          stream.getTracks().forEach(track => track.stop());
-          stream = null;
-        }
-        if (mixedStream) {
-          mixedStream.getTracks().forEach(track => track.stop());
-          mixedStream = null;
-        }
-        if (systemStream) {
-          systemStream.getTracks().forEach(track => track.stop());
-          systemStream = null;
-        }
-        if (mixingContext) {
-          mixingContext.close().catch(() => {});
-          mixingContext = null;
-        }
-        mixingDest = null;
-        micSourceNode = null;
-        systemSourceNode = null;
-        systemAudioActive = false;
-        micMuted = false;
-        resetMicHealthState();
-        clearSilenceWarning();
-        if (stopSystemAudio) stopSystemAudio();
-
-        // Hide notification on Android
-        await hideRecordingNotification();
-
-        const result = await recordingStore.stopRecording();
-        emit('stateChange', { isRecording: false, isPaused: false });
-
-        if (result.success) {
-          resolve({
-            success: true,
-            filePath: result.filePath,
-            warning: 'Recording recovered after interruption.',
-            recovered: true
-          });
-        } else {
-          resolve({
-            success: false,
-            error: 'Recording interrupted. ' + (result.error || ''),
-            partialRecovery: recordingStore.chunkIndex > 0,
-            // Disk-full passthrough so a failed Retry re-offers the dialog
-            diskFull: result.diskFull,
-            shortfallMB: result.shortfallMB,
-            neededMB: result.neededMB
-          });
-        }
-        return;
+  if (recorder && !recorderStopObserved) {
+    // stop queues its FINAL dataavailable before stop. Keep the same ordered
+    // handler for the entire recording, including every final blob.
+    await new Promise(resolve => {
+      const timeout = setTimeout(() => {
+        stopError = 'The recorder did not confirm its final audio. Saved chunks are preserved for recovery.';
+        resolve();
+      }, 10000);
+      recorder.onstop = () => { recorderStopObserved = true; clearTimeout(timeout); resolve(); };
+      if (recorder.state !== 'inactive') {
+        try { recorder.stop(); }
+        catch (error) { stopError = error.message; clearTimeout(timeout); resolve(); }
+      } else {
+        // An error may already have stopped the recorder; queued final events
+        // still get the opportunity to run before teardown.
+        setTimeout(() => { clearTimeout(timeout); resolve(); }, 0);
       }
-
-      // Hide notification on Android
-      await hideRecordingNotification();
-      resetMicHealthState();
-      clearSilenceWarning();
-      resolve({ success: false, error: 'No active recording' });
-      return;
-    }
-
-    let finalChunkSavedResolve;
-    const finalChunkSaved = new Promise(r => {
-      finalChunkSavedResolve = r;
-      // Timeout: if ondataavailable never fires after stop(), don't hang forever
-      setTimeout(() => {
-        console.warn('Final chunk save timed out after 5s — proceeding with available data');
-        r();
-      }, 5000);
     });
+  }
 
-    mediaRecorder.ondataavailable = async (event) => {
-      if (event.data.size > 0) {
-        try {
-          const arrayBuffer = await event.data.arrayBuffer();
-          const uint8Array = new Uint8Array(arrayBuffer);
-          const result = await recordingStore.saveChunk(Array.from(uint8Array));
-          if (result && !result.success) {
-            console.error('Final chunk save failed:', result.error);
-          }
-        } catch (error) {
-          console.error('Error saving final chunk:', error);
-        }
-      }
-      finalChunkSavedResolve();
-    };
-
-    mediaRecorder.onstop = async () => {
-      await finalChunkSaved;
-      await new Promise(r => setTimeout(r, 100));
-
-      stopLevelMonitoring();
-  
-      stopDurationTracking();
-      stopAuthKeepAlive();
-
-      if (stateVerificationInterval) {
-        clearInterval(stateVerificationInterval);
-        stateVerificationInterval = null;
-      }
-
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-        stream = null;
-      }
-      if (mixedStream) {
-        mixedStream.getTracks().forEach(track => track.stop());
-        mixedStream = null;
-      }
-      if (systemStream) {
-        systemStream.getTracks().forEach(track => track.stop());
-        systemStream = null;
-      }
-      if (mixingContext) {
-        mixingContext.close().catch(() => {});
-        mixingContext = null;
-      }
-      mixingDest = null;
-      micSourceNode = null;
-      systemSourceNode = null;
-      systemAudioActive = false;
-      micMuted = false;
-      resetMicHealthState();
-      clearSilenceWarning();
-      if (stopSystemAudio) stopSystemAudio();
-      stopMicRecoveryListener(); // DREC-3
-
-      mediaRecorder = null;
-      resetMicHealthState();
-      clearSilenceWarning();
-      emit('stateChange', { isRecording: false, isPaused: false });
-
-      // Hide notification on Android
-      await hideRecordingNotification();
-
-      const result = await recordingStore.stopRecording();
-      resolve(result);
-    };
-
-    if (mediaRecorder.state !== 'inactive') {
-      try {
-        mediaRecorder.requestData();
-        mediaRecorder.stop();
-      } catch (stopError) {
-        console.error('MediaRecorder stop/requestData failed:', stopError);
-        // Force cleanup and resolve — don't let the promise hang
-        finalChunkSavedResolve();
-        cleanup();
-        mediaRecorder = null;
-        const result = await recordingStore.stopRecording();
-        resolve(result);
-        return;
-      }
-    } else {
-      stopLevelMonitoring();
-  
-      stopDurationTracking();
-      stopAuthKeepAlive();
-
-      if (stateVerificationInterval) {
-        clearInterval(stateVerificationInterval);
-        stateVerificationInterval = null;
-      }
-
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-        stream = null;
-      }
-
-      mediaRecorder = null;
-      resetMicHealthState();
-      clearSilenceWarning();
-      emit('stateChange', { isRecording: false, isPaused: false });
-
-      // Hide notification on Android
-      await hideRecordingNotification();
-
-      recordingStore.stopRecording().then(resolve);
+  // Releasing capture resources must not clear the unsaved-blob queue.
+  cleanup();
+  if (stopSystemAudio) {
+    try { await stopSystemAudio(); } catch (error) { stopError = error.message; }
+  }
+  await hideRecordingNotification();
+  const saved = writer ? await writer.drain({ retry: retryingSave }) : { success: true };
+  if (!saved.success || stopError) {
+    const error = saved.error || stopError;
+    recordingStore.setError(error);
+    if (isElectron()) {
+      await window.electronAPI?.recording?.setUnsavedAudio?.(!saved.success ? recordingStore.recordId : null);
+      await window.electronAPI?.recording?.setInProgress(false);
+      await window.electronAPI?.recording?.setProcessing(false);
     }
-  });
+    return { success: false, error, diskFull: saved.diskFull, unsavedAudio: !saved.success, partialRecovery: true, recordId: recordingStore.recordId };
+  }
+  if (!recordingStore.recordId) return { success: false, error: 'No active recording' };
+  await window.electronAPI?.recording?.setUnsavedAudio?.(null);
+  return recordingStore.stopRecording(expectedDurationSec);
 }
 
 /**
@@ -3037,6 +2823,8 @@ async function stopRecordingInternal(recordingStore, stopSystemAudio) {
  * Used when user wants to discard the recording entirely
  */
 export async function cancelRecording(recordingStore, stopSystemAudio) {
+  // This is the explicit discard path. Drain any active write before the caller
+  // deletes the recording directory so a late write cannot resurrect it.
   // Stop level monitoring, duration tracking, auth keepalive
   stopLevelMonitoring();
   stopDurationTracking();
@@ -3060,6 +2848,9 @@ export async function cancelRecording(recordingStore, stopSystemAudio) {
     }
   }
   mediaRecorder = null;
+  if (chunkWriter) await chunkWriter.drain();
+  chunkWriter = null;
+  await window.electronAPI?.recording?.setUnsavedAudio?.(null);
 
   // Clean up all audio streams and contexts
   if (stream) {
@@ -3086,7 +2877,7 @@ export async function cancelRecording(recordingStore, stopSystemAudio) {
   resetMicHealthState();
   clearSilenceWarning();
 
-  if (stopSystemAudio) stopSystemAudio();
+  if (stopSystemAudio) await stopSystemAudio();
 
   emit('stateChange', { isRecording: false, isPaused: false });
 
@@ -3132,12 +2923,12 @@ export async function flushRecordingData() {
         }, 6000);
       });
       mediaRecorder.requestData();
-      await chunkSaved;
+      const saved = await chunkSaved;
       // P2 Fix: Report whether flush actually produced data or timed out
       if (didTimeout) {
         console.warn('Flush timed out after 6s without ondataavailable');
       }
-      return { flushed: !didTimeout, timedOut: didTimeout };
+      return { flushed: !didTimeout && saved?.success === true, timedOut: didTimeout };
     } catch (e) {
       console.warn('Could not flush recording data:', e);
       return { flushed: false, timedOut: false };
@@ -3199,4 +2990,3 @@ export function cleanup(stopSystemAudio) {
 
   emit('stateChange', { isRecording: false, isPaused: false });
 }
-

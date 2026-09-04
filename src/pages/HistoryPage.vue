@@ -411,7 +411,8 @@ export default {
             if (result.canDelete && recordingStore.canDelete(recording.id)) {
               try {
                 if (isElectron()) {
-                  await window.electronAPI.recording.deleteRecording(recording.id);
+                  const deletion = await window.electronAPI.recording.deleteRecording(recording.id, { requireVerified: true });
+            if (!deletion?.success) throw new Error(deletion?.error || 'Local audio could not be deleted');
                 }
                 // On mobile, skip file deletion for now (files managed by storage service)
                 await historyStore.updateRecording(recording.id, { filePath: null });
@@ -430,7 +431,8 @@ export default {
           });
         } else {
           await historyStore.updateRecording(recording.id, {
-            uploadStatus: 'failed',
+            uploadStatus: result.pendingVerification ? 'pending_verification' : 'failed',
+            ...(result.audioFileId ? { audioFileId: result.audioFileId } : {}),
             uploadError: result.error
           });
 

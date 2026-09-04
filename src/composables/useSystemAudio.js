@@ -15,6 +15,7 @@ import { addSystemAudioStream } from '../services/recordingService';
 let _activeMonitorRemove = null;
 
 export function useSystemAudio() {
+  let captureGeneration = 0;
   const systemAudioEnabled = ref(false);
   const permissionStatus = ref('unknown'); // 'unknown' | 'granted' | 'denied' | 'unsupported'
   const systemAudioStream = ref(null);
@@ -78,19 +79,22 @@ export function useSystemAudio() {
   const startCapture = async (recordId, offsetMs = 0) => {
     if (!systemAudioEnabled.value || !isSupported.value || !isElectron()) return null;
 
+    const generation = ++captureGeneration;
     isLoading.value = true;
     error.value = null;
 
     try {
       const support = await window.electronAPI.systemAudio.isSupported();
 
+      if (generation !== captureGeneration) return null;
       if (support.platform === 'win32') {
         // Windows: use desktopCapturer via renderer-side getUserMedia
-        return await startDesktopCapture();
+        return await startDesktopCapture(generation);
       }
 
       // macOS: use AudioTee via main process
       const result = await window.electronAPI.systemAudio.start(recordId, offsetMs);
+      if (generation !== captureGeneration) return null;
       if (!result.success) {
         error.value = result.error;
         if (result.error?.includes('permission') || result.error?.includes('denied')) {
@@ -308,7 +312,7 @@ export function useSystemAudio() {
       // fails we keep whatever the old endpoint still delivers.
       const newStream = await acquireLoopbackStream();
 
-      if (!systemAudioStream.value) {
+      if (!systemAudioStream.value || _activeMonitorRemove !== removeRebindMonitor) {
         // Capture was stopped while we were acquiring — discard.
         newStream.getTracks().forEach(t => t.stop());
         return;
@@ -336,7 +340,7 @@ export function useSystemAudio() {
     }
   };
 
-  const startDesktopCapture = async () => {
+  const startDesktopCapture = async (generation) => {
     try {
       // Record the endpoint split in main.log BEFORE capturing, so a "system
       // audio was silent" report is diagnosable from the log alone.
@@ -350,6 +354,10 @@ export function useSystemAudio() {
         );
       }
       const stream = await acquireLoopbackStream();
+      if (generation !== captureGeneration) {
+        stream.getTracks().forEach(track => track.stop());
+        return null;
+      }
       systemAudioStream.value = stream;
       installRebindMonitor();
       watchTrackEnded(stream);
@@ -368,6 +376,8 @@ export function useSystemAudio() {
 
   // Stop system audio capture (called when recording stops)
   const stopCapture = async () => {
+    captureGeneration++;
+    if (_activeMonitorRemove && _activeMonitorRemove !== removeRebindMonitor) _activeMonitorRemove();
     // Stop the rebind monitor first so an in-flight devicechange can't
     // resurrect the capture we are tearing down.
     removeRebindMonitor();

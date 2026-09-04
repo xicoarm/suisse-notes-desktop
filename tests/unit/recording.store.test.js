@@ -99,6 +99,18 @@ describe('Recording Store', () => {
         expect(store.error).toBeNull();
       });
 
+      it('keeps preparation distinct from confirmed audio capture', async () => {
+        const store = useRecordingStore();
+        mockElectronAPI.recording.createSession.mockResolvedValue({ success: true });
+        const result = await store.startRecording(null, { deferCaptureStart: true });
+        expect(result.success).toBe(true);
+        expect(store.phase).toBe('preparing');
+        expect(store.isRecording).toBe(false);
+        expect(store.isBlocking).toBe(true);
+        store.confirmCaptureStarted();
+        expect(store.isRecording).toBe(true);
+      });
+
       it('should handle session creation failure', async () => {
         const store = useRecordingStore();
         mockElectronAPI.recording.createSession.mockResolvedValue({
@@ -145,6 +157,13 @@ describe('Recording Store', () => {
     });
 
     describe('stopRecording', () => {
+      it('passes the independent elapsed time instead of the clamped display to finalization', async () => {
+        const store = useRecordingStore();
+        store.recordId = 'test-id'; store.phase = 'recording'; store.duration = 3;
+        mockElectronAPI.recording.combineChunks.mockResolvedValue({ success: true, outputPath: '/path/to/audio.webm' });
+        await store.stopRecording(90);
+        expect(mockElectronAPI.recording.combineChunks).toHaveBeenCalledWith('test-id', '.webm', 90);
+      });
       it('should combine chunks and return file path', async () => {
         const store = useRecordingStore();
         store.recordId = 'test-id';
@@ -160,7 +179,7 @@ describe('Recording Store', () => {
         expect(result.success).toBe(true);
         expect(result.filePath).toBe('/path/to/audio.webm');
         expect(store.audioFilePath).toBe('/path/to/audio.webm');
-        expect(store.phase).toBe('stopping');
+        expect(store.phase).toBe('stopped');
       });
     });
 

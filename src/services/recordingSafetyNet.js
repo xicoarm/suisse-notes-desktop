@@ -114,7 +114,7 @@ function handleChunkSaveFailure(data) {
   if (!recordingStore.isRecording && !recordingStore.isPaused) return;
   if (data.diskFull) {
     emergencyStop('safetyNetDiskFullStop');
-  } else if ((data.consecutiveErrors || 0) >= 3) {
+  } else if (data.retriesExhausted || (data.consecutiveErrors || 0) >= 3) {
     emergencyStop('safetyNetChunkFailStop');
   }
 }
@@ -136,7 +136,15 @@ function handleLimitReached() {
  *  (and are exempt from system.removeAllListeners, see preload). */
 function handleCaptureWarning(data) {
   if (!data?.kind) return;
-  if (data.kind === 'ffmpeg-missing') {
+  if (data.kind === 'system-audio-interrupted' || data.kind === 'recovery-failed') {
+    if (data.kind === 'system-audio-interrupted') recordingService.setSystemAudioActive(false);
+    Notify.create({
+      type: 'negative',
+      message: t(data.kind === 'recovery-failed' ? 'recordingRecoveryFailedWarning' : 'systemAudioInterruptedWarning'),
+      icon: 'warning', timeout: 0,
+      actions: [{ label: t('ok', 'OK'), color: 'white' }]
+    });
+  } else if (data.kind === 'ffmpeg-missing') {
     Notify.create({
       type: 'warning',
       message: t('captureWarningFfmpegMissing'),
@@ -261,6 +269,7 @@ export function initRecordingSafetyNet() {
   recordingService.addEventListener('chunkSaveFailure', handleChunkSaveFailure);
   recordingService.addEventListener('captureRecoveryFailed', handleCaptureRecoveryFailed);
   recordingService.addEventListener('limitReached', handleLimitReached);
+  recordingService.addEventListener('recordingError', () => emergencyStop('safetyNetChunkFailStop'));
 
   if (isElectron() && window.electronAPI?.system) {
     if (window.electronAPI.system.onCaptureWarning) {

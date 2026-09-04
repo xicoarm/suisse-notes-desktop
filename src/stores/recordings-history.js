@@ -688,7 +688,7 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
     },
 
     // Mark recording as uploaded (and optionally delete file)
-    async markAsUploaded(id, transcriptionId = null, audioFileId = null, canDelete = true) {
+    async markAsUploaded(id, transcriptionId = null, audioFileId = null, canDelete = false) {
       const recording = this.recordings.find(r => r.id === id);
 
       const updates = {
@@ -708,7 +708,8 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
         // Only delete if canDelete flag is true AND file is not locked
         if (canDelete && recordingStore.canDelete(id)) {
           try {
-            await window.electronAPI.recording.deleteRecording(id);
+            const deletion = await window.electronAPI.recording.deleteRecording(id, { requireVerified: true });
+            if (!deletion?.success) throw new Error(deletion?.error || 'Local audio could not be deleted');
             // Update file path to indicate deletion
             await this.updateRecording(id, { filePath: null });
             // Unlock file after successful deletion
@@ -852,7 +853,8 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
               (result?.canRetry === false && result?.status !== 401) ||
               retryCount + 1 >= RETRY_AUTO_MAX;
             await this.updateRecording(recording.id, {
-              uploadStatus: 'failed',
+              uploadStatus: result?.pendingVerification ? 'pending_verification' : 'failed',
+              ...(result?.audioFileId ? { audioFileId: result.audioFileId } : {}),
               uploadError: result?.error || 'Upload failed',
               ...(terminal ? { uploadTerminal: true } : {})
             });
