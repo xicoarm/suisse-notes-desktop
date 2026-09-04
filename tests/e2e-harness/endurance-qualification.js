@@ -15,6 +15,9 @@ const ROTATION_SECONDS = 4 * 3600 + 55 * 60;
 const SAMPLE_SECONDS = 30;
 const HEADROOM_BYTES = 1024 ** 3;
 const CRITICAL_FREE_BYTES = 512 * 1024 ** 2;
+const SOURCE_BOUNDARY_TOLERANCE_S = 1.5;
+const SOURCE_CLOCK_TOLERANCE_S = 1.5;
+const MAX_SOURCE_ACQUISITION_S = 10;
 
 function diskBudget(seconds) {
   return { referenceBytes: (seconds + 25) * 48000 * 2 + 44,
@@ -139,19 +142,61 @@ class EnduranceDriver extends AppDriver {
 async function installConstraintEvidence(app, processingDisabled) {
   await app.evalTimed(disabled => {
     const original = navigator.mediaDevices.getUserMedia;
-    const evidence = { processingDisabled: disabled, calls: 0, tracks: [] };
+    const evidence = { processingDisabled: disabled, calls: 0, tracks: [], acquisitions: [] };
     window.__enduranceConstraints = evidence;
     navigator.mediaDevices.getUserMedia = async function (constraints) {
       const requested = disabled && constraints?.audio ? { ...constraints, audio: {
         ...(typeof constraints.audio === 'object' ? constraints.audio : {}),
         echoCancellation: false, noiseSuppression: false, autoGainControl: false,
       } } : constraints;
+      const requestedAt = performance.now();
       const stream = await Reflect.apply(original, this, [requested]);
+      const receivedAt = performance.now();
       evidence.calls++;
       evidence.tracks = stream.getAudioTracks().map(track => track.getSettings());
+      if (constraints?.audio && !constraints.video && !constraints.audio?.mandatory?.chromeMediaSource) {
+        evidence.acquisitions.push({ requestedAt, receivedAt, trackIds: stream.getAudioTracks().map(track => track.id) });
+      }
       return stream;
     };
   }, processingDisabled);
+}
+
+/** The interior oracle alone cannot detect a long silent prefix or suffix. */
+function assessSourceCoverage(audio, recorder, acquisitions, frameSeconds = 0.5) {
+  const problems = [];
+  const result = { problems, boundaryToleranceS: SOURCE_BOUNDARY_TOLERANCE_S,
+    clockToleranceS: SOURCE_CLOCK_TOLERANCE_S, maximumAcquisitionS: MAX_SOURCE_ACQUISITION_S };
+  if (!Number.isFinite(audio?.sourceOffsetS) || !Number.isInteger(audio?.firstFrame) || !Number.isInteger(audio?.lastFrame) ||
+      !Number.isFinite(audio?.durationS) || !Number.isFinite(recorder?.startedAt)) {
+    problems.push('SOURCE COVERAGE: missing numbered audio or native recorder timing');
+    return result;
+  }
+  // Map first/last source identities onto the decoded output timeline. These
+  // checks require coverage at both ends, even when total duration is correct
+  // and every observed interior frame remains perfectly ordered.
+  result.prefixGapS = Math.max(0, audio.firstFrame * frameSeconds - audio.sourceOffsetS);
+  result.suffixGapS = Math.max(0, audio.durationS - (audio.lastFrame + 1) * frameSeconds + audio.sourceOffsetS);
+  if (result.prefixGapS > SOURCE_BOUNDARY_TOLERANCE_S) problems.push(`SOURCE COVERAGE: missing ${result.prefixGapS.toFixed(3)}s prefix`);
+  if (result.suffixGapS > SOURCE_BOUNDARY_TOLERANCE_S) problems.push(`SOURCE COVERAGE: missing ${result.suffixGapS.toFixed(3)}s suffix`);
+  if (!Array.isArray(acquisitions) || acquisitions.length !== 1) {
+    problems.push('SOURCE CLOCK: endurance requires exactly one observed native microphone acquisition');
+    return result;
+  }
+  const { requestedAt, receivedAt } = acquisitions[0];
+  if (!Number.isFinite(requestedAt) || !Number.isFinite(receivedAt) || receivedAt < requestedAt) {
+    problems.push('SOURCE CLOCK: invalid native microphone acquisition timestamps');
+    return result;
+  }
+  result.acquisitionSeconds = (receivedAt - requestedAt) / 1000;
+  if (result.acquisitionSeconds > MAX_SOURCE_ACQUISITION_S) problems.push('SOURCE CLOCK: native acquisition exceeded the bounded ten-second clock interval');
+  // Native capture can begin while getUserMedia is settling. Preserve that
+  // measured interval instead of assuming the exact first sample coincides
+  // with promise resolution; the extra tolerance is explicit and bounded.
+  result.sourceOffsetRangeS = [(recorder.startedAt - receivedAt) / 1000, (recorder.startedAt - requestedAt) / 1000];
+  result.sourceClockErrorS = Math.max(0, result.sourceOffsetRangeS[0] - audio.sourceOffsetS, audio.sourceOffsetS - result.sourceOffsetRangeS[1]);
+  if (result.sourceClockErrorS > SOURCE_CLOCK_TOLERANCE_S) problems.push(`SOURCE CLOCK: decoded numbering is ${result.sourceClockErrorS.toFixed(3)}s outside native acquisition timing`);
+  return result;
 }
 
 function verifyRetainedSources(recordingDir, expectedBytes, expectedEvents, manifestPath) {
@@ -200,6 +245,7 @@ async function runCodedEndurance(opts = {}) {
       'Shortened smoke runs do not qualify five hours; natural rotation is asserted only after crossing 4h55.',
       'Synthetic native microphone capture; physical Bluetooth/USB and macOS system audio are outside this scenario.',
       'Progress metrics are thirty-second snapshots; sampled event/persistence ages do not rule out shorter intervening stalls.',
+      'Both decoded boundaries and the native acquisition clock must agree within explicit 1.5-second tolerances; acquisitions longer than ten seconds cannot qualify the source clock.',
     ], metrics: { samples: 0, maxPersistGapS: 0, maxNativeEventGapS: 0, maxRendererHeapMB: null, maxHarnessRssMB: 0,
       minFreeBytes: null, firstRotationElapsedS: null, maxBatchesDuringCapture: 0, phaseCounts: {} }, recentSamples: [], evidenceDir, summaryPath, progressPath };
   let mock = null, app = null, started = null, lastChunkCount = -1, lastPersistObservedAt = null;
@@ -297,6 +343,9 @@ async function runCodedEndurance(opts = {}) {
     const audio = await verifyCodedAudio(output, reference, { expectedDurationS: result.expectedDurationS, durationToleranceS: 1.5 });
     result.audio = { ...audio, problems: audio.problems.slice(0, 30), problemCount: audio.problems.length };
     for (const issue of audio.problems) problem(issue);
+    result.constraintEvidence = await app.evalTimed(() => window.__enduranceConstraints);
+    result.sourceCoverage = assessSourceCoverage(audio, recorder, result.constraintEvidence?.acquisitions, reference.coded.frameSeconds);
+    for (const issue of result.sourceCoverage.problems) problem(issue);
     result.localSha256 = await sha256(output);
     const recordingDir = path.dirname(output);
     const receipt = JSON.parse(fs.readFileSync(path.join(recordingDir, 'upload-receipt.json'), 'utf8'));
@@ -333,4 +382,5 @@ async function runCodedEndurance(opts = {}) {
   return result;
 }
 
-module.exports = { runCodedEndurance, resolveEnduranceSeconds, createMultipartHasher, startStreamingMockBackend, diskBudget, DEFAULT_SECONDS, ROTATION_SECONDS };
+module.exports = { runCodedEndurance, resolveEnduranceSeconds, createMultipartHasher, startStreamingMockBackend, diskBudget,
+  assessSourceCoverage, DEFAULT_SECONDS, ROTATION_SECONDS };
