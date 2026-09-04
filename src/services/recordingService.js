@@ -113,6 +113,7 @@ let captureRecoveryStartedAt = null;
 let captureRecoveryReason = null;
 let captureRecoveryBusy = false;
 let captureRecoveryHealthyTicks = 0;
+let captureRecoveryGeneration = 0;
 
 // Flush synchronization: resolved when ondataavailable saves the chunk after a flush request
 let flushResolvers = [];
@@ -554,6 +555,7 @@ function createMixingPipeline(micStream, sysStream) {
   const ctx = new (window.AudioContext || window.webkitAudioContext)({
     sampleRate: 48000
   });
+  mixingContext = ctx; // Own it immediately so graph-construction failures close it.
   const dest = ctx.createMediaStreamDestination();
 
   if (micStream) {
@@ -575,6 +577,7 @@ function createMixingPipeline(micStream, sysStream) {
   // start the recovery loop, which keeps retrying until the session is free
   // and also re-acquires the (by then muted/dead) mic track.
   ctx.addEventListener('statechange', () => {
+    if (ctx !== mixingContext) return;
     if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
       console.warn(`AudioContext state changed to "${ctx.state}" — attempting resume`);
       ctx.resume().catch(e => console.warn('AudioContext auto-resume failed:', e));
@@ -582,11 +585,37 @@ function createMixingPipeline(micStream, sysStream) {
     }
   });
 
-  mixingContext = ctx;
   mixingDest = dest;
   // NOTE: the SASIG watchdog is armed by startLevelMonitoring, not here —
   // startLevelMonitoring begins with a full monitor teardown.
   return dest.stream;
+}
+
+// A suspended context can leave resume() pending indefinitely (for example
+// while an audio session remains unavailable). A recording must not enter its
+// active phase before the context is actually running.
+async function awaitAudioContextRunning(ctx) {
+  if (!ctx || ctx.state === 'closed') throw new Error('Recording audio context is closed');
+  let timeout;
+  try {
+    if (ctx.state !== 'running') {
+      await Promise.race([
+        ctx.resume(),
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error('Recording audio context did not start within 8 seconds')), 8000);
+        })
+      ]);
+    }
+    if (ctx.state !== 'running') throw new Error(`Recording audio context is ${ctx.state}, not running`);
+  } finally { clearTimeout(timeout); }
+}
+
+async function awaitMixingContextReady(ctx) {
+  await awaitAudioContextRunning(ctx);
+  if (ctx !== mixingContext) {
+    ctx.close().catch(() => {});
+    throw Object.assign(new Error('Recording start was cancelled'), { cancelled: true });
+  }
 }
 
 /**
@@ -778,17 +807,21 @@ export function removeSystemAudioStream() {
  * Called from the resume handler to ensure audio pipeline is active.
  */
 export async function resumeAudioContexts() {
+  const generation = recorderGeneration;
   const contexts = [mixingContext, micHealthAudioContext].filter(Boolean);
-  for (const ctx of contexts) {
+  await Promise.all(contexts.map(async ctx => {
     if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
       try {
-        await ctx.resume();
-        console.log(`Resumed AudioContext (was "${ctx.state}")`);
+        const previousState = ctx.state;
+        await awaitAudioContextRunning(ctx);
+        if (generation !== recorderGeneration || ![mixingContext, micHealthAudioContext].includes(ctx)) return;
+        console.log(`Resumed AudioContext (was "${previousState}")`);
       } catch (e) {
+        if (generation !== recorderGeneration || ![mixingContext, micHealthAudioContext].includes(ctx)) return;
         console.warn('Failed to resume AudioContext:', e);
       }
     }
-  }
+  }));
 }
 
 /**
@@ -1137,6 +1170,7 @@ function stopMicRecoveryListener() {
 function scheduleCaptureRecovery(reason) {
   if (!recordingStoreRef?.isRecording || recordingStoreRef.isPaused) return;
   if (captureRecoveryTimer) return; // episode already running
+  captureRecoveryGeneration++;
   captureRecoveryStartedAt = Date.now();
   captureRecoveryReason = reason;
   captureRecoveryHealthyTicks = 0;
@@ -1150,6 +1184,7 @@ function scheduleCaptureRecovery(reason) {
 
 /** INT-2: stop the recovery loop (success, give-up, or recording teardown). */
 function stopCaptureRecovery() {
+  captureRecoveryGeneration++; // Pending work from this episode cannot touch a later recording/retry.
   if (captureRecoveryTimer) {
     clearInterval(captureRecoveryTimer);
     captureRecoveryTimer = null;
@@ -1171,6 +1206,13 @@ function stopCaptureRecovery() {
  */
 async function attemptCaptureRecovery() {
   if (captureRecoveryBusy) return;
+  const recoveryGeneration = captureRecoveryGeneration;
+  const generation = recorderGeneration;
+  const recoveryRecorder = mediaRecorder;
+  const recoveryContext = mixingContext;
+  const isCurrent = () => recoveryGeneration === captureRecoveryGeneration && generation === recorderGeneration &&
+    recoveryRecorder === mediaRecorder && recoveryContext === mixingContext &&
+    recordingStoreRef?.isRecording && !recordingStoreRef.isPaused;
   captureRecoveryBusy = true;
   try {
     // Self-terminate: session over or paused (post-resume check re-arms us).
@@ -1210,11 +1252,12 @@ async function attemptCaptureRecovery() {
 
     // 2. Resume frozen audio contexts. While the interruption is active
     //    (ongoing call) resume() rejects/stays non-running — retry next tick.
-    for (const ctx of [mixingContext, mixedAudioContext, micHealthAudioContext]) {
+    await Promise.all([mixingContext, mixedAudioContext, micHealthAudioContext].map(async ctx => {
       if (ctx && ctx.state !== 'running' && ctx.state !== 'closed') {
-        try { await ctx.resume(); } catch (e) { /* session still held */ }
+        try { await awaitAudioContextRunning(ctx); } catch (e) { /* session still held; bounded retry on next tick */ }
       }
-    }
+    }));
+    if (!isCurrent()) return;
     if (mixingContext && mixingContext.state !== 'running') {
       captureRecoveryHealthyTicks = 0;
       return;
@@ -1228,15 +1271,18 @@ async function attemptCaptureRecovery() {
       let targetDeviceId = lastRequestedDeviceId;
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
+        if (!isCurrent()) return;
         const inputs = devices.filter(d => d.kind === 'audioinput' && d.deviceId);
         if (inputs.length > 0) {
           targetDeviceId = (inputs.find(d => d.deviceId === lastRequestedDeviceId) || inputs[0]).deviceId;
         }
       } catch (e) { /* fall through with lastRequestedDeviceId */ }
+      if (!isCurrent()) return;
       // MSIG: skipVerify — INT-2's success metric is chunk flow (checked at
       // the top of every tick), and running a signal probe during an OS
       // audio-session interruption would false-positive "silent".
       const result = await switchMicrophoneStream(targetDeviceId || 'default', { skipVerify: true });
+      if (!isCurrent()) return;
       if (!result.success) {
         captureRecoveryHealthyTicks = 0;
         return; // mic still unavailable — next tick
@@ -1269,7 +1315,7 @@ async function attemptCaptureRecovery() {
       stopCaptureRecovery();
     }
   } finally {
-    captureRecoveryBusy = false;
+    if (recoveryGeneration === captureRecoveryGeneration) captureRecoveryBusy = false;
   }
 }
 
@@ -1837,10 +1883,29 @@ let lastWallClockSec = 0;
 let durationRunStartedAt = null;
 let durationBaseSec = 0;
 let stallWarned = false;
+let receivedDataEvents = 0;
+let emptyDataEvents = 0;
+let receivedDataBytes = 0;
+let lastDataEventAt = null;
 // C3: latch the disk-full emergency-stop event. The recorder keeps emitting a
 // blob every timeslice, so without a latch the diskFull chunkSaveFailure re-fires
 // every ~3s and launches concurrent stopRecording() calls (double-combine/thrash).
 const STALL_WARN_MS = 30000; // ~10 timeslices with no persisted chunk while 'recording'
+const FIRST_CHUNK_WARN_MS = Math.max(10000, MEDIA_RECORDER_TIMESLICE_MS * 3);
+
+function captureProgressSnapshot() {
+  const micTrack = stream?.getAudioTracks?.()[0];
+  return {
+    receivedDataEvents, emptyDataEvents, receivedDataBytes, lastDataEventAt,
+    savedChunks: savedChunkCount,
+    pendingChunks: chunkWriter?.pendingCount || 0,
+    mediaState: mediaRecorder?.state || null,
+    contextState: mixingContext?.state || null,
+    micTrackState: micTrack?.readyState || null,
+    micTrackMuted: micTrack?.muted ?? null,
+    micTrackEnabled: micTrack?.enabled ?? null
+  };
+}
 
 /**
  * Displayed/stored duration that reflects audio actually captured to disk, not
@@ -1866,11 +1931,21 @@ function checkChunkProgress(recordingStore, isAutoSplitting) {
   if (!mediaRecorder || mediaRecorder.state !== 'recording') return; // 'inactive' is handled by verifyRecordingState
   if (!lastSuccessfulChunkAt) return;
   const gapMs = Date.now() - lastSuccessfulChunkAt;
-  if (gapMs > STALL_WARN_MS && !stallWarned) {
+  const threshold = savedChunkCount === 0 ? FIRST_CHUNK_WARN_MS : STALL_WARN_MS;
+  if (gapMs >= threshold && !stallWarned) {
     stallWarned = true;
     const secs = Math.round(gapMs / 1000);
-    captureMessage(`recording: capture STALLED — no chunk persisted for ${secs}s (savedChunks=${savedChunkCount}, mediaState=${mediaRecorder.state})`, 'error');
-    emit('captureStalled', { secondsSinceLastChunk: secs, savedChunks: savedChunkCount });
+    const diagnostics = { secondsSinceLastChunk: secs, ...captureProgressSnapshot() };
+    captureMessage(`recording: capture STALLED — no chunk persisted for ${secs}s ${JSON.stringify(diagnostics)}`, 'error');
+    console.error('Recording capture stalled:', JSON.stringify(diagnostics));
+    // A later successful chunk proves that saving resumed, not that this gap
+    // was recovered. Keep the warning with the sources through finalization.
+    try {
+      window.electronAPI?.recording?.saveMetadata?.(recordingStore.recordId, {
+        captureWarnings: ['capture-stalled'], captureStallDiagnostics: diagnostics
+      })?.catch(error => console.warn('Could not persist capture stall warning:', error));
+    } catch (error) { console.warn('Could not persist capture stall warning:', error); }
+    emit('captureStalled', diagnostics);
     // INT-2: a stall is never acceptable while 'recording' — attempt automatic
     // recovery regardless of what caused it (interruption, focus loss, or an
     // undetected platform quirk). This is the trigger-agnostic safety net;
@@ -2317,6 +2392,7 @@ async function startRecordingInternal(options) {
       }
     }
 
+    if (myGeneration !== recorderGeneration) throw Object.assign(new Error('Recording start was cancelled'), { cancelled: true });
     // Establish the new ID and durable directory BEFORE AudioTee starts.
     // Start recording session in store (pass userId for multi-account handling)
     const userId = authStore?.user?.id || authStore?.user?.userId || null;
@@ -2324,6 +2400,7 @@ async function startRecordingInternal(options) {
     if (!sessionResult.success) {
       throw new Error(sessionResult.error || 'Failed to create recording session');
     }
+    if (myGeneration !== recorderGeneration) throw Object.assign(new Error('Recording start was cancelled'), { cancelled: true });
 
     // Start system audio capture — AFTER the mic is acquired, never before.
     // Opening a Bluetooth headset's microphone forces the headset from A2DP
@@ -2352,6 +2429,7 @@ async function startRecordingInternal(options) {
       }
     }
 
+    if (myGeneration !== recorderGeneration) throw Object.assign(new Error('Recording start was cancelled'), { cancelled: true });
     if (!stream) {
       if (sysStream || audioTeeActive) {
         let micErrorMsg = micCaptureError?.message || 'No microphone available';
@@ -2402,10 +2480,8 @@ async function startRecordingInternal(options) {
     mixedStream = recordingStream;
     if (audioTeeActive) setSystemAudioActive(true);
 
-    // Resume AudioContext if suspended (suspended contexts produce silence)
-    if (mixingContext && mixingContext.state === 'suspended') {
-      await mixingContext.resume();
-    }
+    await awaitMixingContextReady(mixingContext);
+    if (myGeneration !== recorderGeneration) throw Object.assign(new Error('Recording start was cancelled'), { cancelled: true });
 
     // Determine supported mime type
     const codecPreference = [
@@ -2431,6 +2507,10 @@ async function startRecordingInternal(options) {
 
     const thisRecorder = mediaRecorder;
     recorderStopObserved = false;
+    receivedDataEvents = 0;
+    emptyDataEvents = 0;
+    receivedDataBytes = 0;
+    lastDataEventAt = null;
     const thisRecordId = recordingStore.recordId;
     const writer = createRecordingChunkWriter({
       save: bytes => {
@@ -2461,12 +2541,16 @@ async function startRecordingInternal(options) {
         handleOrphanRecorderBlob(event);
         return;
       }
+      receivedDataEvents++;
+      lastDataEventAt = Date.now();
+      receivedDataBytes += event.data.size;
+      if (event.data.size === 0) emptyDataEvents++;
       // Capture flush waiters synchronously; an older in-flight save cannot
       // acknowledge a newer requestData() call.
       const waiters = flushResolvers;
       flushResolvers = [];
       const saved = writer.enqueue(event.data);
-      saved.then(result => waiters.forEach(resolve => resolve(result)));
+      saved.then(result => waiters.forEach(resolve => resolve({ ...result, success: event.data.size > 0 && result.success })));
     };
     mediaRecorder.onstop = () => { if (myGeneration === recorderGeneration) { recorderStopObserved = true; finalStopPending = false; } };
 
@@ -2591,7 +2675,10 @@ async function startRecordingInternal(options) {
     emit('stateChange', { isRecording: true, isPaused: false });
 
     return { success: true };
-  } catch (error) {
+  } catch (startError) {
+    const error = myGeneration !== recorderGeneration
+      ? Object.assign(new Error('Recording start was cancelled'), { cancelled: true })
+      : startError;
     console.error('Error starting recording:', error);
 
     stopLevelMonitoring();
@@ -2643,8 +2730,8 @@ async function startRecordingInternal(options) {
       await window.electronAPI?.recording?.setInProgress(false);
       await window.electronAPI?.recording?.setProcessing(false);
     }
-    recordingStore.reset();
-    return { success: false, error: errorMessage };
+    if (!error.cancelled) recordingStore.reset();
+    return { success: false, error: errorMessage, ...(error.cancelled ? { cancelled: true } : {}) };
   }
 }
 
@@ -2961,6 +3048,7 @@ export function isActive() {
  * Clean up all resources (only call when intentionally stopping)
  */
 export function cleanup(stopSystemAudio) {
+  if (startInProgress) recorderGeneration++; // A pending startup must not revive a disposed pipeline.
   stopLevelMonitoring();
   stopDurationTracking();
   stopAuthKeepAlive();

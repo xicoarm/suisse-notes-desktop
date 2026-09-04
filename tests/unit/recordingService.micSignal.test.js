@@ -40,7 +40,8 @@ class MockAnalyser {
 
 class MockAudioContext {
   constructor() {
-    this.state = 'running';
+    this.state = ctrl.contextState || 'running';
+    MockAudioContext.instances.push(this);
   }
 
   createAnalyser() {
@@ -55,11 +56,12 @@ class MockAudioContext {
     return { stream: new MockMediaStream([]) };
   }
 
-  close() { return Promise.resolve(); }
+  close() { this.state = 'closed'; return Promise.resolve(); }
   resume() { this.state = 'running'; return Promise.resolve(); }
   addEventListener() {}
   removeEventListener() {}
 }
+MockAudioContext.instances = [];
 
 class MockMediaRecorder {
   constructor() {
@@ -103,6 +105,7 @@ function createTrack(settings = {}) {
 function createMockRecordingStore() {
   return {
     startRecording: vi.fn().mockResolvedValue({ success: true }),
+    confirmCaptureStarted: vi.fn(),
     stopRecording: vi.fn().mockResolvedValue({ success: true, filePath: 'fake.webm' }),
     reset: vi.fn(),
     saveChunk: vi.fn().mockResolvedValue({ success: true }),
@@ -135,6 +138,14 @@ async function startHealthyRecording(recordingStore, opts = {}) {
   });
   expect(result.success).toBe(true);
   recordingStore.isRecording = true; // the real store flips this; mock must too
+  if (opts.produceChunks) {
+    const recorder = MockMediaRecorder.last;
+    setInterval(() => {
+      if (recorder.state === 'recording') recorder.ondataavailable?.({
+        target: recorder, data: { size: 3, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer }
+      });
+    }, 3000);
+  }
   return { micTrack, micStream };
 }
 
@@ -152,6 +163,9 @@ describe('recordingService mic signal forensics (MSIG)', () => {
 
     ctrl.amplitude = 0.1;
     ctrl.byteVal = 50;
+    ctrl.contextState = 'running';
+    MockAudioContext.instances = [];
+    MockMediaRecorder.last = null;
 
     global.MediaRecorder = MockMediaRecorder;
     global.MediaStream = MockMediaStream;
@@ -176,6 +190,207 @@ describe('recordingService mic signal forensics (MSIG)', () => {
     }
   });
 
+  function startWithPendingContext(store) {
+    const micTrack = createTrack({ deviceId: 'mic-1' });
+    navigator.mediaDevices.getUserMedia.mockResolvedValue(new MockMediaStream([micTrack]));
+    const starting = recordingService.startRecording({
+      recordingStore: store, authStore: null, deviceId: 'mic-1',
+      systemAudioEnabled: false, isAutoSplitting: { value: false }
+    });
+    return { starting, micTrack };
+  }
+
+  it('bounds a never-resolving audio-context resume and releases the microphone before allowing retry', async () => {
+    const store = createMockRecordingStore();
+    ctrl.contextState = 'suspended';
+    vi.spyOn(MockAudioContext.prototype, 'resume').mockReturnValue(new Promise(() => {}));
+    const { starting, micTrack } = startWithPendingContext(store);
+    await vi.advanceTimersByTimeAsync(7999);
+    expect(store.confirmCaptureStarted).not.toHaveBeenCalled();
+    expect(MockMediaRecorder.last).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await starting).toMatchObject({ success: false, error: expect.stringContaining('8 seconds') });
+    expect(micTrack.stop).toHaveBeenCalled();
+    expect(MockAudioContext.instances.every(ctx => ctx.state === 'closed')).toBe(true);
+    expect(store.reset).toHaveBeenCalledTimes(1);
+    ctrl.contextState = 'running';
+    await startHealthyRecording(createMockRecordingStore());
+  });
+
+  it.each(['suspended', 'interrupted'])('does not confirm capture when the %s audio context rejects resume', async state => {
+    const store = createMockRecordingStore();
+    ctrl.contextState = state;
+    vi.spyOn(MockAudioContext.prototype, 'resume').mockRejectedValue(new Error('device unavailable'));
+    const { starting, micTrack } = startWithPendingContext(store);
+    expect(await starting).toMatchObject({ success: false, error: 'device unavailable' });
+    expect(store.confirmCaptureStarted).not.toHaveBeenCalled();
+    expect(micTrack.stop).toHaveBeenCalled();
+    expect(MockMediaRecorder.last).toBeNull();
+  });
+
+  it.each(['closed', 'suspended'])('rejects a %s context even if resume reports success without running', async state => {
+    const store = createMockRecordingStore();
+    ctrl.contextState = state;
+    const resume = vi.spyOn(MockAudioContext.prototype, 'resume').mockResolvedValue();
+    const { starting, micTrack } = startWithPendingContext(store);
+    expect((await starting).success).toBe(false);
+    expect(store.confirmCaptureStarted).not.toHaveBeenCalled();
+    expect(micTrack.stop).toHaveBeenCalled();
+    expect(MockMediaRecorder.last).toBeNull();
+    expect(resume).toHaveBeenCalledTimes(state === 'closed' ? 0 : 1);
+  });
+
+  it.each(['cancel', 'cleanup'])('cannot revive startup after %s when an earlier resume resolves late', async action => {
+    const store = createMockRecordingStore();
+    ctrl.contextState = 'suspended';
+    let finishResume;
+    vi.spyOn(MockAudioContext.prototype, 'resume').mockImplementation(function () {
+      const ctx = this;
+      return new Promise(resolve => { finishResume = () => { ctx.state = 'running'; resolve(); }; });
+    });
+    const { starting, micTrack } = startWithPendingContext(store);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(finishResume).toBeTypeOf('function');
+    if (action === 'cancel') await recordingService.cancelRecording(store);
+    else recordingService.cleanup();
+    finishResume();
+    expect(await starting).toMatchObject({ success: false, cancelled: true });
+    expect(store.confirmCaptureStarted).not.toHaveBeenCalled();
+    expect(store.reset).not.toHaveBeenCalled();
+    expect(MockMediaRecorder.last).toBeNull();
+    expect(micTrack.stop).toHaveBeenCalled();
+    expect(MockAudioContext.instances.every(ctx => ctx.state === 'closed')).toBe(true);
+  });
+
+  it.each(['no events', 'empty events'])('warns about %s before the timer can imply a saved meeting and retains the warning after recovery', async mode => {
+    const previousApi = window.electronAPI;
+    const saveMetadata = vi.fn().mockResolvedValue({ success: true });
+    window.electronAPI = { recording: { saveMetadata } };
+    const stalled = vi.fn();
+    const recovered = vi.fn();
+    recordingService.addEventListener('captureStalled', stalled);
+    recordingService.addEventListener('captureRecovered', recovered);
+    try {
+      const store = createMockRecordingStore();
+      await startHealthyRecording(store);
+      const recorder = MockMediaRecorder.last;
+      if (mode === 'empty events') {
+        for (let i = 0; i < 3; i++) {
+          await vi.advanceTimersByTimeAsync(3000);
+          recorder.ondataavailable({ target: recorder, data: { size: 0 } });
+        }
+        await vi.advanceTimersByTimeAsync(1000);
+      } else await vi.advanceTimersByTimeAsync(10000);
+      const eventCount = mode === 'empty events' ? 3 : 0;
+      expect(stalled).toHaveBeenCalledTimes(1);
+      expect(stalled).toHaveBeenLastCalledWith(expect.objectContaining({
+        savedChunks: 0, receivedDataEvents: eventCount, emptyDataEvents: eventCount,
+        receivedDataBytes: 0, pendingChunks: 0, mediaState: 'recording', contextState: 'running'
+      }));
+      expect(store.saveChunk).not.toHaveBeenCalled();
+      expect(store.updateDuration).toHaveBeenLastCalledWith(3);
+      expect(saveMetadata).toHaveBeenCalledWith('rec-test', expect.objectContaining({ captureWarnings: ['capture-stalled'] }));
+      expect(recovered).not.toHaveBeenCalled();
+      recorder.ondataavailable({ target: recorder, data: { size: 3, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer } });
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(store.saveChunk).toHaveBeenCalledWith([1, 2, 3]);
+      expect(recovered).toHaveBeenCalled();
+      expect(saveMetadata).toHaveBeenCalledTimes(1); // Recovery must never erase the gap warning.
+    } finally {
+      recordingService.removeEventListener('captureStalled', stalled);
+      recordingService.removeEventListener('captureRecovered', recovered);
+      window.electronAPI = previousApi;
+    }
+  });
+
+  it('does not acknowledge an empty data event as successfully flushed audio', async () => {
+    const store = createMockRecordingStore();
+    await startHealthyRecording(store);
+    const recorder = MockMediaRecorder.last;
+    recorder.requestData = () => recorder.ondataavailable({ target: recorder, data: { size: 0 } });
+    expect(await recordingService.flushRecordingData()).toEqual({ flushed: false, timedOut: false });
+    expect(store.saveChunk).not.toHaveBeenCalled();
+    expect(recordingService.getSavedChunkCount()).toBe(0);
+  });
+
+  it('bounds foreground resume across all suspended contexts instead of hanging on the first one', async () => {
+    const store = createMockRecordingStore();
+    await startHealthyRecording(store);
+    for (const ctx of MockAudioContext.instances) ctx.state = 'suspended';
+    const resume = vi.spyOn(MockAudioContext.prototype, 'resume').mockReturnValue(new Promise(() => {}));
+    let finished = false;
+    const resuming = recordingService.resumeAudioContexts().then(() => { finished = true; });
+    await vi.advanceTimersByTimeAsync(7999);
+    expect(finished).toBe(false);
+    expect(resume.mock.calls.length).toBeGreaterThan(1); // A blocked context cannot prevent the others from resuming.
+    await vi.advanceTimersByTimeAsync(1);
+    await resuming;
+    expect(finished).toBe(true);
+  });
+
+  it('does not announce a stale foreground resume after that recording was discarded', async () => {
+    const store = createMockRecordingStore();
+    await startHealthyRecording(store);
+    MockAudioContext.instances[0].state = 'suspended';
+    let finishResume;
+    vi.spyOn(MockAudioContext.prototype, 'resume').mockReturnValue(new Promise(resolve => { finishResume = resolve; }));
+    const logged = vi.spyOn(console, 'log');
+    const resuming = recordingService.resumeAudioContexts();
+    await recordingService.cancelRecording(store);
+    await startHealthyRecording(createMockRecordingStore());
+    logged.mockClear();
+    finishResume();
+    await resuming;
+    expect(logged).not.toHaveBeenCalledWith(expect.stringContaining('Resumed AudioContext'));
+  });
+
+  it('retries capture recovery after a hung resume deadline and resumes the existing recorder', async () => {
+    const store = createMockRecordingStore();
+    const { micTrack } = await startHealthyRecording(store);
+    const ctx = MockAudioContext.instances[0];
+    const recorder = MockMediaRecorder.last;
+    const requestData = vi.spyOn(recorder, 'requestData');
+    const resume = vi.spyOn(MockAudioContext.prototype, 'resume')
+      .mockReturnValueOnce(new Promise(() => {}))
+      .mockImplementation(function () { this.state = 'running'; return Promise.resolve(); });
+    await vi.advanceTimersByTimeAsync(1000);
+    ctx.state = 'suspended';
+    micTrack.onmute();
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(requestData).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(resume).toHaveBeenCalledTimes(2);
+    expect(requestData).toHaveBeenCalledTimes(1);
+    expect(MockMediaRecorder.last).toBe(recorder);
+    expect(ctx.state).toBe('running');
+  });
+
+  it('does not let an old recovery completion touch a new recorder or release its recovery lock', async () => {
+    const oldStore = createMockRecordingStore();
+    const { micTrack: oldTrack } = await startHealthyRecording(oldStore);
+    const oldContext = MockAudioContext.instances[0];
+    const completions = [];
+    const resume = vi.spyOn(MockAudioContext.prototype, 'resume').mockImplementation(() => new Promise(resolve => completions.push(resolve)));
+    await vi.advanceTimersByTimeAsync(1000);
+    oldContext.state = 'suspended';
+    oldTrack.onmute();
+    await recordingService.cancelRecording(oldStore);
+    const nextStore = createMockRecordingStore();
+    const { micTrack: nextTrack } = await startHealthyRecording(nextStore);
+    const nextContext = MockAudioContext.instances.find(ctx => ctx.state === 'running');
+    const requestData = vi.spyOn(MockMediaRecorder.last, 'requestData');
+    await vi.advanceTimersByTimeAsync(1000);
+    nextContext.state = 'suspended';
+    nextTrack.onmute();
+    expect(resume).toHaveBeenCalledTimes(2);
+    completions[0]();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(requestData).not.toHaveBeenCalled();
+    expect(resume).toHaveBeenCalledTimes(2); // Old finally must not release the new episode's in-flight latch.
+    completions[1]();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
   afterEach(() => {
     // Deregister — the service is a module singleton, so leaked listeners
     // from earlier tests would multiply-push into the current events object.
@@ -183,6 +398,7 @@ describe('recordingService mic signal forensics (MSIG)', () => {
       recordingService.removeEventListener(evt, fn);
     }
     recordingService.cleanup();
+    vi.clearAllTimers();
     vi.restoreAllMocks();
     vi.useRealTimers();
   });
@@ -367,7 +583,7 @@ describe('recordingService mic signal forensics (MSIG)', () => {
 
   it('digital zeros: degraded at 15s, one same-device re-acquire, CRITICAL after silent verify', async () => {
     const store = createMockRecordingStore();
-    await startHealthyRecording(store);
+    await startHealthyRecording(store, { produceChunks: true });
 
     await vi.advanceTimersByTimeAsync(2000);
     expect(healthNow().status).toBe('ok');
@@ -397,7 +613,7 @@ describe('recordingService mic signal forensics (MSIG)', () => {
 
   it('digital zeros: recovery succeeds when the re-acquired stream delivers signal', async () => {
     const store = createMockRecordingStore();
-    await startHealthyRecording(store);
+    await startHealthyRecording(store, { produceChunks: true });
 
     ctrl.amplitude = 0;
     ctrl.byteVal = 0;
