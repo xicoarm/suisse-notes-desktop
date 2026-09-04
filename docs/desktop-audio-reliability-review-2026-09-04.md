@@ -1,6 +1,6 @@
 # Desktop audio reliability review — 4 September 2026
 
-Status: fixes committed locally as `82f26ff` on branch `fix/desktop-audio-reliability`; no release or production deployment. This is not a certification of lossless capture. Physical failure, forced shutdown, a disconnected microphone, and audio that never reaches the capture process cannot be repaired by software after the fact.
+Status: implementation and evidence are on local branch `fix/desktop-audio-reliability`; no release or production deployment. This is not a certification of lossless capture. Physical failure, forced shutdown, a disconnected microphone, and audio that never reaches the capture process cannot be repaired by software after the fact.
 
 ## Scope and evidence
 
@@ -29,7 +29,7 @@ Production evidence includes ELECTRON-1Y (Apple Silicon, macOS 26.5.2, desktop 4
 | Critical | History deletion derived a recursive-delete directory from filePath; an imported path could escape app storage. | Restrict recursive deletion to one direct child of the managed recordings folder. Derive it from validated recordId. Keep failed or busy entries in history. |
 | High | Idle suspension could interrupt capture or processing. | Hold Electron’s prevent-app-suspension blocker during recording, finalization and in-flight uploads. |
 
-Sources and derived sessions now survive successful finalization until explicit deletion or an eligible verified-upload deletion. This intentionally uses more disk. A Mac PCM track alone is approximately 346 MB per recorded hour (48,000 mono samples/second × 2 bytes). Saved chunks, derived output and merge working files require additional space; finalization checks free space and retains sources on ENOSPC.
+Sources and derived sessions now survive successful finalization and upload until explicit deletion. Automatic local deletion is paused under the current backend contract, including for previously saved receipts that granted deletion. Settings, the recording storage dialog and History explain this policy; the saved preference is preserved. This intentionally uses more disk. A Mac PCM track alone is approximately 346 MB per recorded hour (48,000 mono samples/second × 2 bytes). Saved chunks, derived output and merge working files require additional space; finalization checks free space and retains sources on ENOSPC.
 
 The completion checksum detects local final-file corruption; it is not a server checksum. Source fingerprints detect changed/late files by identity, length and modification time, rather than hashing every source again at each restart.
 
@@ -93,7 +93,7 @@ Implemented transfer changes:
 - Preserve the main process’s verification and canDelete verdict through the renderer; remove the second, weaker confirmation path.
 - Persist success/pending-verification history in the main process, and refresh renderer history after background completion. A failed confirmation now exits the uploading screen into a retryable error; retry keeps the existing history entry.
 - Scope queued and retried uploads to the recording’s owner, including each direct-upload attempt. Abort active requests on logout.
-- Require a verified receipt and no capture warnings before automatic deletion. Callers must honor a refused deletion before clearing the local path.
+- Keep confirmed uploads successful while refusing automatic deletion: a recognized Meeting status is insufficient proof of remote audio integrity. Main-process enforcement also refuses old receipts that granted deletion. Explicit manual deletion remains available, with busy/unsaved-audio and managed-directory protections. Callers must honor a refused deletion before clearing the local path.
 
 Unknown outcomes now retain local audio and the accepted receipt. Explicit server rejection, no credit, unsupported media, and authentication problems still need user-visible resolution. Retrying a transport cannot fix a terminal backend validation failure.
 

@@ -29,8 +29,18 @@ describe('upload ownership and evidence', () => {
   it('requires a remote identifier even if the HTTP request succeeded', () => {
     expect(verifiedUploadResult({ success: true }, { persisted: true, verified: true }).canDelete).toBe(false);
   });
+  it('marks a confirmed upload successful while retaining local audio without content proof', () => {
+    expect(verifiedUploadResult({ audioFileId: 'remote-id' }, { persisted: true, verified: true }))
+      .toMatchObject({ success: true, verified: true, contentVerified: false, canDelete: false, pendingVerification: false });
+  });
+  it('overrides deletion and content-verification claims from an older accepted receipt', () => {
+    expect(verifiedUploadResult(
+      { success: true, audioFileId: 'remote-id', canDelete: true, contentVerified: true },
+      { persisted: true, verified: true, contentVerified: true },
+    )).toMatchObject({ success: true, verified: true, contentVerified: false, canDelete: false, pendingVerification: false });
+  });
   it('retains source audio after a degraded merge or capture warning', () => {
-    expect(verifiedUploadResult({ audioFileId: 'remote-id' }, { persisted: true, verified: true }, true))
+    expect(verifiedUploadResult({ audioFileId: 'remote-id', captureWarnings: ['degraded-merge'] }, { persisted: true, verified: true }))
       .toMatchObject({ success: true, verified: true, canDelete: false });
   });
 });

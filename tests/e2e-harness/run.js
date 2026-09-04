@@ -255,11 +255,21 @@ async function s10UploadCustody() {
     mock.setMode('ok');
     const result = await app.page.evaluate(params => window.electronAPI.upload.start(params), { recordId, filePath, metadata: {} });
     if (!result.success || !result.verified) problems.push('Accepted upload did not verify after server recovery');
+    if (result.canDelete !== false || result.contentVerified !== false || result.pendingVerification) problems.push('Confirmed status did not preserve local audio without claiming content verification');
     const attempts = mock.state.requests.filter(r => r.url === '/api/desktop/upload');
     if (attempts.length !== 1) problems.push('Expected exactly 1 upload, observed ' + attempts.length);
     receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
     if (!receipt.verified) problems.push('Verified receipt was not persisted');
+    if (receipt.canDelete !== false || receipt.contentVerified !== false) problems.push('Confirmed receipt incorrectly granted deletion or content verification');
+    const confirmedDeletion = await app.page.evaluate(id => window.electronAPI.recording.deleteRecording(id, { requireVerified: true }), recordId);
+    if (confirmedDeletion.success || !fs.existsSync(filePath)) problems.push('Confirmed Meeting status allowed automatic deletion');
+    const oldReceipt = { ...receipt, canDelete: true };
+    delete oldReceipt.contentVerified;
+    fs.writeFileSync(receiptPath, JSON.stringify(oldReceipt));
+    const oldReceiptDeletion = await app.page.evaluate(id => window.electronAPI.recording.deleteRecording(id, { requireVerified: true }), recordId);
+    if (oldReceiptDeletion.success || !fs.existsSync(filePath)) problems.push('An older receipt bypassed automatic local retention');
     notes.push('Unknown enum, 404 and 401 retain audio and refuse deletion; later confirmation reuses one accepted upload.');
+    notes.push('Confirmed uploads remain successful but retain local audio; even an older canDelete=true receipt cannot authorize automatic deletion.');
     notes.push('Multipart file SHA-256 matches the local final file.');
     await app.page.evaluate(id => window.electronAPI.recording.setUnsavedAudio(id), recordId);
     const protectedDelete = await app.page.evaluate(id => window.electronAPI.recording.deleteRecording(id), recordId);
@@ -271,7 +281,14 @@ async function s10UploadCustody() {
     fs.appendFileSync(filePath, 'modified-after-upload');
     const changedDeletion = await app.page.evaluate(id => window.electronAPI.recording.deleteRecording(id, { requireVerified: true }), recordId);
     if (changedDeletion.success || !fs.existsSync(filePath)) problems.push('Changed audio was deleted using an old upload receipt');
-    notes.push('A verified receipt cannot delete audio changed after upload.');
+    notes.push('Automatic retention also applies after local file mutation; this refusal does not test checksum-based deletion authorization.');
+    // This explicit deletion is last and is limited to this synthetic profile.
+    app.assertTestProfile();
+    const recordingDirectory = path.resolve(path.dirname(filePath));
+    if (path.dirname(recordingDirectory) !== path.resolve(app.recordingsDir)) throw new Error('Refusing to delete outside the synthetic recording directory');
+    const manualDeletion = await app.page.evaluate(id => window.electronAPI.recording.deleteRecording(id), recordId);
+    if (!manualDeletion.success || fs.existsSync(recordingDirectory)) problems.push('Explicit manual deletion did not remove the synthetic recording');
+    notes.push('Explicit manual deletion remains available after all retention checks and removes only the synthetic recording.');
     return { pass: problems.length === 0, problems, notes };
   });
 }
@@ -755,4 +772,3 @@ const SCENARIOS = {
     process.exit(1);
   }
 })();
-

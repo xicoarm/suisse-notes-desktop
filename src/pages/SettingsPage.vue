@@ -268,7 +268,7 @@
               {{ $t('storagePreference') }}
             </div>
             <div class="setting-description">
-              {{ $t('storagePreferenceDesc') }}
+              {{ $t(isElectron() ? 'desktopAudioRetentionNotice' : 'storagePreferenceDesc') }}
             </div>
           </div>
           <q-select
@@ -641,7 +641,7 @@ const recordingsCount = computed(() => historyStore.recordings.length);
 
 const storageOptions = computed(() => [
   { value: 'keep', label: t('keepLocally') },
-  { value: 'delete_after_upload', label: t('deleteAfterUpload') }
+  { value: 'delete_after_upload', label: t(isElectron() ? 'autoDeletePaused' : 'deleteAfterUpload'), disable: isElectron() }
 ]);
 
 const globalVocabulary = computed(() => transcriptionStore.globalVocabulary);

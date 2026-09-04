@@ -2,6 +2,8 @@ import { createI18n } from 'vue-i18n';
 
 const messages = {
   en: {
+    autoDeletePaused: 'Automatic deletion paused',
+    desktopAudioRetentionNotice: 'Local audio backups are kept after upload for added protection. They use disk space; review and remove them in History when no longer needed.',
     recordingRecoveryFailedWarning: "The recording could not be prepared. Original audio files are retained on this computer. Keep them and contact support to recover the recording.",
     systemAudioInterruptedWarning: "System audio capture stopped unexpectedly. Other participants may no longer be recorded. Re-enable system audio and check the recording for gaps.",
     // Record Page
@@ -498,6 +500,8 @@ const messages = {
     updateReadyLater: 'Later'
   },
   de: {
+    autoDeletePaused: 'Automatisches Löschen pausiert',
+    desktopAudioRetentionNotice: 'Lokale Audiokopien bleiben nach dem Hochladen zum zusätzlichen Schutz erhalten. Sie benötigen Speicherplatz. Prüfen und löschen Sie nicht mehr benötigte Kopien im Verlauf.',
     recordingRecoveryFailedWarning: "Die Aufnahme konnte nicht aufbereitet werden. Original-Audiodateien bleiben auf diesem Computer erhalten. Bewahren Sie sie auf und kontaktieren Sie den Support zur Wiederherstellung.",
     systemAudioInterruptedWarning: "Die Systemaudioaufnahme wurde unerwartet beendet. Andere Teilnehmer werden möglicherweise nicht mehr aufgenommen. Aktivieren Sie Systemaudio erneut und prüfen Sie die Aufnahme auf Lücken.",
     // Record Page
@@ -994,6 +998,8 @@ const messages = {
     updateReadyLater: 'Später'
   },
   fr: {
+    autoDeletePaused: 'Suppression automatique suspendue',
+    desktopAudioRetentionNotice: 'Les copies audio locales sont conservées après le transfert pour plus de protection. Elles occupent de l’espace disque. Vérifiez et supprimez les copies devenues inutiles dans l’historique.',
     recordingRecoveryFailedWarning: "L’enregistrement n’a pas pu être préparé. Les fichiers audio originaux sont conservés sur cet ordinateur. Gardez-les et contactez le support pour les récupérer.",
     systemAudioInterruptedWarning: "La capture de l’audio système s’est arrêtée. Les autres participants peuvent ne plus être enregistrés. Réactivez l’audio système et vérifiez si des passages manquent.",
     // Record Page
@@ -1490,6 +1496,8 @@ const messages = {
     updateReadyLater: 'Plus tard'
   },
   it: {
+    autoDeletePaused: 'Eliminazione automatica sospesa',
+    desktopAudioRetentionNotice: 'Le copie audio locali vengono conservate dopo il caricamento per maggiore protezione. Occupano spazio su disco: controlla ed elimina quelle non più necessarie nella cronologia.',
     recordingRecoveryFailedWarning: "Impossibile preparare la registrazione. I file audio originali sono conservati su questo computer. Conservali e contatta il supporto per recuperarli.",
     systemAudioInterruptedWarning: "La cattura dell’audio di sistema si è interrotta. Gli altri partecipanti potrebbero non essere più registrati. Riattiva l’audio di sistema e controlla se mancano dei passaggi.",
     // Record Page

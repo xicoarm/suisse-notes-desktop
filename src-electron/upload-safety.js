@@ -12,13 +12,17 @@ function canUploadForUser(ownerId, currentUserId) {
   return typeof ownerId === 'string' && ownerId !== 'unknown' && !!ownerId && ownerId === currentUserId;
 }
 
-function verifiedUploadResult(accepted, verification, hasCaptureWarnings = false) {
+function verifiedUploadResult(accepted, verification) {
   const confirmed = !!accepted?.audioFileId && verification?.persisted === true && verification?.verified === true;
   return {
     ...accepted,
     success: confirmed,
+    // The current status route confirms a Meeting row, not the uploaded bytes.
+    // Keep status verification compatible with successful-upload callers while
+    // retaining every local copy until the backend supports content proof.
     verified: confirmed,
-    canDelete: confirmed && !hasCaptureWarnings,
+    contentVerified: false,
+    canDelete: false,
     pendingVerification: !confirmed,
     canRetry: !verification?.terminal,
     ...(confirmed ? {} : { error: verification?.error || 'Upload received; server storage confirmation is still pending. The local audio is retained.' }),

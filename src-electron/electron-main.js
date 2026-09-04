@@ -460,24 +460,21 @@ function saveUploadOutcome(recordId, result) {
 }
 async function verifyAcceptedUpload(recordId, filePath, accepted, ownerId, remember = true, sourceSnapshot = null) {
   const stats = fs.statSync(filePath);
-  const receipt = { ...accepted, verified: false, canDelete: false, ownerId, filePath, fileSize: sourceSnapshot?.size ?? stats.size, fileMtimeMs: sourceSnapshot?.mtimeMs ?? stats.mtimeMs };
+  const receipt = { ...accepted, verified: false, contentVerified: false, canDelete: false, ownerId, filePath, fileSize: sourceSnapshot?.size ?? stats.size, fileMtimeMs: sourceSnapshot?.mtimeMs ?? stats.mtimeMs };
   if (remember) {
     fs.mkdirSync(getRecordingPath(recordId), { recursive: true });
     await writeFileAtomic(path.join(getRecordingPath(recordId), 'upload-receipt.json'), JSON.stringify(receipt));
   }
   if (stats.size !== receipt.fileSize || stats.mtimeMs !== receipt.fileMtimeMs) {
-    const result = { ...accepted, success: false, verified: false, canDelete: false, canRetry: false, pendingVerification: true, error: 'Local audio changed during upload. Both copies are retained for review.' };
+    const result = { ...accepted, success: false, verified: false, contentVerified: false, canDelete: false, canRetry: false, pendingVerification: true, error: 'Local audio changed during upload. Both copies are retained for review.' };
     saveUploadOutcome(recordId, result);
     return result;
   }
   const verification = accepted.audioFileId
     ? await pollServerStatus(accepted.audioFileId, 15, ownerId)
     : { persisted: false, verified: false, error: 'Server returned no recording identifier' };
-  let hasWarnings = false;
-  try { hasWarnings = !!JSON.parse(fs.readFileSync(path.join(getRecordingPath(recordId), 'metadata.json'), 'utf8')).captureWarnings?.length; }
-  catch (_) { /* imported files may have no capture metadata */ }
-  const result = verifiedUploadResult(accepted, verification, hasWarnings);
-  await writeFileAtomic(path.join(getRecordingPath(recordId), 'upload-receipt.json'), JSON.stringify({ ...receipt, verified: result.verified, canDelete: result.canDelete }));
+  const result = verifiedUploadResult(accepted, verification);
+  await writeFileAtomic(path.join(getRecordingPath(recordId), 'upload-receipt.json'), JSON.stringify({ ...receipt, verified: result.verified, contentVerified: result.contentVerified, canDelete: result.canDelete }));
   saveUploadOutcome(recordId, result);
   return result;
 }
@@ -3420,16 +3417,9 @@ ipcMain.handle('recording:deleteRecording', async (event, recordId, options = {}
     }
     const recordingDir = getRecordingPath(recordId);
     if (options.requireVerified) {
-      const receipt = readUploadReceipt(recordId);
-      if (!receipt?.verified || !receipt.canDelete) return { success: false, error: 'The local audio must be retained until upload verification succeeds' };
-      const sourcePath = receipt.filePath || path.join(recordingDir, 'audio.webm');
-      const stats = fs.statSync(sourcePath);
-      if (stats.size !== receipt.fileSize || stats.mtimeMs !== receipt.fileMtimeMs) return { success: false, error: 'The local audio changed after upload; keeping it for review' };
-      if (path.resolve(sourcePath) === path.resolve(recordingDir, 'audio.webm') && !(await readFinalizedRecording(recordingDir))) return { success: false, error: 'The local recording or its sources changed; keeping them for recovery' };
-      const metadataPath = path.join(recordingDir, 'metadata.json');
-      if (fs.existsSync(metadataPath) && JSON.parse(fs.readFileSync(metadataPath, 'utf8')).captureWarnings?.length) {
-        return { success: false, error: 'The original audio is retained because a capture or processing warning needs review' };
-      }
+      // Older receipts and delayed renderer callbacks may still grant deletion
+      // from a Meeting status. Enforce retention here as well as in new results.
+      return { success: false, error: 'The server has not verified the complete audio file. Automatic deletion is paused; you can delete this local copy manually in History.' };
     }
     await rmDirSafe(recordingDir);
     return { success: true };
@@ -3480,9 +3470,9 @@ async function pollServerStatus(audioFileId, maxAttempts = 15, ownerId = null) {
   // Status semantics — keep in lockstep with the renderer copy in
   // src/services/upload.js and the server contract in
   // src/lib/api/desktop-contract.ts (RecordingStatus). The moment the server
-  // returns any persisted state, the bytes are on the server and the
-  // audioFileId resolves to a Meeting row — we don't need to wait for
-  // downstream transcription. Legacy lowercase values are kept for any
+  // returns any persisted state, the audioFileId resolves to a Meeting row.
+  // This does not verify blob contents or authorize local deletion. We do not
+  // need to wait for downstream transcription. Legacy lowercase values are kept for any
   // older endpoint that still echoes them.
   const PERSISTED_STATES = new Set([
     'persisted', 'complete', 'processing',         // legacy
@@ -4193,6 +4183,7 @@ ipcMain.handle('upload:start', async (event, params) => {
         pendingVerification: result.pendingVerification,
         audioFileId: result.audioFileId,
         verified: result.verified,
+        contentVerified: result.contentVerified === true,
         canDelete: result.canDelete,
       });
     }

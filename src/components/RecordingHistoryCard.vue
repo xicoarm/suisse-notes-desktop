@@ -49,7 +49,7 @@
               name="auto_delete"
               size="xs"
             />
-            <span>{{ $t('autoDelete') }}</span>
+            <span>{{ $t(isDesktop ? 'autoDeletePaused' : 'autoDelete') }}</span>
           </div>
         </div>
 
