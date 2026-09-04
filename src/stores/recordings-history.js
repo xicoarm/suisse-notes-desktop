@@ -143,6 +143,11 @@ function _setCachedPreference(preference) {
   }
 }
 
+function _captureWarnings(...recordings) {
+  return [...new Set(recordings.flatMap(recording =>
+    Array.isArray(recording?.captureWarnings) ? recording.captureWarnings : []))];
+}
+
 // Helper for authenticated server API calls
 async function _serverFetch(endpoint, options = {}) {
   const authStore = useAuthStore();
@@ -170,7 +175,9 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
     recordings: [],
     defaultStoragePreference: 'keep', // 'keep' or 'delete_after_upload'
     loaded: false,
-    loading: false
+    loading: false,
+    _historyEpoch: 0,
+    _localHistoryRevision: 0
   }),
 
   getters: {
@@ -236,6 +243,10 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
   },
 
   actions: {
+    _isHistoryRequestCurrent(userId, epoch) {
+      return this._historyEpoch === epoch && this._getUserId(null, { forWrite: true }) === userId;
+    },
+
     // Helper to get current user ID with fallback chain
     // When forWrite is true, skip the localStorage fallback to prevent cross-user data attribution
     _getUserId(fallbackUserId = null, { forWrite = false } = {}) {
@@ -299,12 +310,26 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
       }
 
       if (isElectron()) {
+        const epoch = this._historyEpoch;
+        const revision = this._localHistoryRevision;
         // Desktop: the local electron-store holds recordings made on THIS
         // machine. Refresh local metadata-backed warnings on every visit,
         // including background refreshes after recording or crash recovery.
         try {
           if (!background) this.loading = true;
           const localRecordings = await window.electronAPI.history.getAll(userId);
+          if (!this._isHistoryRequestCurrent(userId, epoch)) return;
+          if (revision !== this._localHistoryRevision) {
+            // A local add/update/delete completed while IPC was pending. Keep
+            // those rows and statuses; only adopt additional capture warnings.
+            const byId = new Map(localRecordings.map(recording => [recording.id, recording]));
+            this.recordings = this.recordings.map(recording => {
+              const persisted = byId.get(recording.id);
+              if (recording.userId !== userId || persisted?.userId !== userId) return recording;
+              return { ...recording, captureWarnings: _captureWarnings(recording, persisted) };
+            });
+            return;
+          }
           const localIds = new Set(localRecordings.map(recording => recording.id));
           // Keep previously fetched remote entries visible during an offline
           // background refresh; the server merge below will replace them.
@@ -312,8 +337,9 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
             ? this.recordings.filter(recording => recording._serverOnly && !localIds.has(recording.id))
             : [];
           this.recordings = [...localRecordings, ...remoteRecordings];
-          this.defaultStoragePreference =
-            await window.electronAPI.history.getDefaultStoragePreference();
+          const preference = await window.electronAPI.history.getDefaultStoragePreference();
+          if (!this._isHistoryRequestCurrent(userId, epoch) || revision !== this._localHistoryRevision) return;
+          this.defaultStoragePreference = preference;
           this.loaded = true;
 
           // Heal entries stranded in 'uploading' by a crash/kill/forced
@@ -329,7 +355,7 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
         } catch (error) {
           console.error('Error loading recordings history:', error);
         } finally {
-          if (!background) this.loading = false;
+          if (!background && this._historyEpoch === epoch) this.loading = false;
         }
         // Merge the server-side history so recordings made on the user's OTHER
         // devices (iPhone, iPad, another Mac) also appear here. Desktop used to
@@ -337,7 +363,7 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
         // next to mobile (which fetches this same endpoint). Best-effort and
         // non-blocking: the local list is already painted, server records
         // stream in, and a failure never wipes local data.
-        await this._mergeServerHistory();
+        await this._mergeServerHistory(userId, epoch, revision);
       } else {
         // Mobile/Web: load from server API, fall back to localStorage cache
         try {
@@ -446,7 +472,7 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
     // Local recordings (with a filePath / richer upload state) always win over
     // a server duplicate of the same id. Best-effort: any failure leaves the
     // existing (local) list untouched.
-    async _mergeServerHistory() {
+    async _mergeServerHistory(userId = this._getUserId(), epoch = this._historyEpoch, revision = this._localHistoryRevision) {
       const PAGE_LIMIT = 100; // server max page size
       const MAX_PAGES = 20;   // safety cap (server caps history at ~500 / 90 days)
       try {
@@ -454,9 +480,11 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
         let cursor = null;
         let pages = 0;
         do {
+          if (!this._isHistoryRequestCurrent(userId, epoch) || revision !== this._localHistoryRevision) return;
           const qs = new URLSearchParams({ limit: String(PAGE_LIMIT) });
           if (cursor) qs.set('cursor', cursor);
           const data = await _serverFetch(`/api/desktop/history?${qs.toString()}`);
+          if (!this._isHistoryRequestCurrent(userId, epoch) || revision !== this._localHistoryRevision) return;
           const batch = data?.recordings || (Array.isArray(data) ? data : []);
           serverRaw.push(...batch);
           cursor = data?.nextCursor || null;
@@ -515,9 +543,16 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
         const recordingWithUser = { ...recording, userId };
 
         if (isElectron()) {
+          const epoch = this._historyEpoch;
+          this._localHistoryRevision++;
           const result = await window.electronAPI.history.add(recordingWithUser);
           if (result.success) {
-            this.recordings.unshift(result.recording);
+            if (this._isHistoryRequestCurrent(userId, epoch)) {
+              this._localHistoryRevision++;
+              const index = this.recordings.findIndex(item => item.id === recording.id && item.userId === userId);
+              if (index === -1) this.recordings.unshift(result.recording);
+              else this.recordings[index] = { ...this.recordings[index], ...result.recording };
+            }
             return { success: true, recording: result.recording };
           }
           return { success: false, error: result.error };
@@ -573,19 +608,28 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
         }
 
         if (isElectron()) {
+          const epoch = this._historyEpoch;
           const index = this.recordings.findIndex(r => r.id === id);
           // Server-only recordings (made on another device) aren't in the
           // electron-store, so history:update would report "not found". Update
           // the in-memory copy only.
           if (index !== -1 && this.recordings[index]._serverOnly) {
+            this._localHistoryRevision++;
             this.recordings[index] = { ...this.recordings[index], ...updates };
             return { success: true };
           }
+          this._localHistoryRevision++;
           const result = await window.electronAPI.history.update(id, updates, userId);
           if (result.success) {
-            if (index !== -1) {
+            if (this._isHistoryRequestCurrent(userId, epoch)) {
+              this._localHistoryRevision++;
+              const currentIndex = this.recordings.findIndex(r => r.id === id && r.userId === userId);
               // Main also merges persisted capture warnings into this entry.
-              this.recordings[index] = { ...this.recordings[index], ...updates, ...(result.recording || {}) };
+              if (currentIndex !== -1) {
+                const current = this.recordings[currentIndex];
+                this.recordings[currentIndex] = { ...current, ...updates, ...(result.recording || {}),
+                  captureWarnings: _captureWarnings(current, result.recording) };
+              }
             }
             return { success: true };
           }
@@ -632,6 +676,7 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
         }
 
         if (isElectron()) {
+          const epoch = this._historyEpoch;
           // Server-only recordings (made on another device) aren't in the
           // local electron-store, so history:delete would report "not found".
           // Just drop them from the in-memory list — like mobile, this hides
@@ -639,12 +684,17 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
           // it reappears on the next server refresh).
           const target = this.recordings.find(r => r.id === id);
           if (target?._serverOnly) {
+            this._localHistoryRevision++;
             this.recordings = this.recordings.filter(r => r.id !== id);
             return { success: true };
           }
+          this._localHistoryRevision++;
           const result = await window.electronAPI.history.delete(id, deleteFile, userId);
           if (result.success) {
-            this.recordings = this.recordings.filter(r => r.id !== id);
+            if (this._isHistoryRequestCurrent(userId, epoch)) {
+              this._localHistoryRevision++;
+              this.recordings = this.recordings.filter(r => r.id !== id || r.userId !== userId);
+            }
             return { success: true };
           }
           return { success: false, error: result.error };
@@ -668,6 +718,8 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
 
     // Reset store state (call on logout to prevent data leaks)
     reset() {
+      this._historyEpoch++;
+      this._localHistoryRevision++;
       this.recordings = [];
       this.loaded = false;
       this.loading = false;
