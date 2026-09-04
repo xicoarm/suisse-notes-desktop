@@ -76,8 +76,11 @@ function installLoopbackFixture({ apiUrl }) {
   const originalGet = devices.getUserMedia;
   const originalStart = MediaRecorder.prototype.start;
   const issued = [], desktopCalls = [], recorders = [], samples = [], errors = [];
-  let zeroContext, zeroSource, zeroDestination, playbackContext, playbackSource;
+  let zeroContext, zeroSource, zeroDestination, playbackContext, playbackSource, playbackBuffer;
   let playback = null, disposed = false;
+  const trace = async stage => {
+    await window.electronAPI.systemAudio.diag('info', '[s14 output] ' + stage);
+  };
   const validated = Promise.resolve().then(async () => {
     if (await window.electronAPI.config.getApiUrl() !== apiUrl) throw new Error('Loopback fixture backend mismatch');
   });
@@ -129,30 +132,58 @@ function installLoopbackFixture({ apiUrl }) {
   };
   window.__windowsLoopbackQualification = {
     snapshot: () => ({ ...snapshot(), samples }),
-    play: async base64 => {
+    prepare: async base64 => {
+      await validated;
+      if (disposed || playbackContext) throw new Error('Output preparation must run once');
+      await trace('creating default output context before capture');
+      playbackContext = new AudioContext({ sampleRate: 48000 });
+      await trace('resuming default output context');
+      await playbackContext.resume();
+      if (disposed || playbackContext.state !== 'running') throw new Error('Output AudioContext did not become ready');
+      if ('sinkId' in playbackContext && !['', 'default'].includes(playbackContext.sinkId)) throw new Error('Unexpected non-default output sink');
+      await trace('converting numbered WAV bytes before capture (PCM createBuffer variant)');
+      const bytes = Uint8Array.from(atob(base64), value => value.charCodeAt(0));
+      await trace('base64 conversion complete; validating strict PCM WAV');
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const tag = (offset, expected) => [...expected].every((character, index) => bytes[offset + index] === character.charCodeAt(0));
+      if (bytes.length !== 44 + 48 * 48000 * 2 || !tag(0, 'RIFF') || !tag(8, 'WAVE') || !tag(12, 'fmt ') || !tag(36, 'data') ||
+          view.getUint32(4, true) !== bytes.length - 8 || view.getUint32(16, true) !== 16 ||
+          view.getUint16(20, true) !== 1 || view.getUint16(22, true) !== 1 || view.getUint32(24, true) !== 48000 ||
+          view.getUint32(28, true) !== 96000 || view.getUint16(32, true) !== 2 || view.getUint16(34, true) !== 16 ||
+          view.getUint32(40, true) !== bytes.length - 44) {
+        throw new Error('Expected exactly 48 seconds of RIFF PCM16 mono 48000Hz with a standard 44-byte header');
+      }
+      // Explicit fixture variant: Electron 28 crashed inside the former async
+      // WAV decode preparation before recording. Copy the same signed PCM
+      // samples synchronously; this is not a production/runtime fix.
+      playbackBuffer = playbackContext.createBuffer(1, (bytes.length - 44) / 2, 48000);
+      const channel = playbackBuffer.getChannelData(0);
+      for (let sample = 0; sample < channel.length; sample++) channel[sample] = view.getInt16(44 + sample * 2, true) / 32768;
+      await trace('PCM parse/copy complete; numbered samples unchanged');
+      if (disposed || playbackBuffer.duration !== 48) throw new Error('Unexpected playback reference duration');
+      await trace('output ready; no signal scheduled yet');
+      return { method: 'pcm-createBuffer-v1', duration: playbackBuffer.duration, state: playbackContext.state, outputSink: playbackContext.sinkId ?? 'default' };
+    },
+    play: async () => {
       const state = snapshot();
       if (disposed || playback || state.phase !== 'recording' || !state.mutedUi || !state.microphoneTracks.length ||
           state.microphoneTracks.some(track => track.enabled) || !desktopCalls.some(call => call.tracks?.some(track => track.kind === 'audio'))) {
         throw new Error('Playout requires verified muted zero microphone and real desktop audio acquisition');
       }
-      playbackContext = new AudioContext({ sampleRate: 48000 });
-      await playbackContext.resume();
-      if (disposed || playbackContext.state !== 'running') throw new Error('Output AudioContext did not become ready');
-      if ('sinkId' in playbackContext && !['', 'default'].includes(playbackContext.sinkId)) throw new Error('Unexpected non-default output sink');
-      const bytes = Uint8Array.from(atob(base64), value => value.charCodeAt(0));
-      const buffer = await playbackContext.decodeAudioData(bytes.buffer);
-      if (disposed || buffer.duration !== 48) throw new Error('Unexpected playback reference duration');
-      playbackSource = playbackContext.createBufferSource(); playbackSource.buffer = buffer;
+      if (!playbackBuffer || playbackContext?.state !== 'running') throw new Error('Prepare the output source before capture');
+      await trace('connecting prepared source to real default output');
+      playbackSource = playbackContext.createBufferSource(); playbackSource.buffer = playbackBuffer;
       // This changes only this test's generated signal, never a Windows device
       // volume. The coded reference remains identifiable at this attenuation.
       const gain = playbackContext.createGain(); gain.gain.value = 0.25;
       playbackSource.connect(gain).connect(playbackContext.destination);
       const scheduledAt = playbackContext.currentTime + 0.25;
       playback = { startedAt: performance.now() + (scheduledAt - playbackContext.currentTime) * 1000,
-        duration: buffer.duration, endedAt: null, outputSink: playbackContext.sinkId ?? 'default',
+        duration: playbackBuffer.duration, endedAt: null, outputSink: playbackContext.sinkId ?? 'default',
         baseLatency: playbackContext.baseLatency, outputLatency: playbackContext.outputLatency, outputGain: 0.25 };
       playbackSource.onended = () => { playback.endedAt = performance.now(); };
       playbackSource.start(scheduledAt);
+      await trace('numbered output scheduled for 48 seconds');
       return playback;
     },
     dispose: () => {
@@ -172,6 +203,7 @@ async function runSystemAudioQualification() {
     'LOCAL PRIVATE EVIDENCE: real WASAPI loopback can include other Windows playback; never publish these artifacts.',
     'Microphone requests use disabled zero-valued WebAudio tracks; no hardware microphone is acquired.',
     'Qualifies unchanged default Windows output through native Chromium desktop capture, recording, finalization and localhost upload.',
+    'Playout fixture uses strict PCM WAV parsing and createBuffer; earlier async decode preparation crashed before capture. This variant does not fix that runtime crash.',
     'Does not qualify physical USB/Bluetooth switching, the communications endpoint, or the 90-second silence warning lifecycle.',
   ] };
   if (process.platform !== 'win32' || process.env.CI || process.env.GITHUB_ACTIONS) {
@@ -216,6 +248,10 @@ async function runSystemAudioQualification() {
       await app.page.click('[data-test=system-audio-toggle]'); await sleep(500);
     }
     if (!(await app.evalTimed(() => Boolean(document.querySelector('.system-audio-active'))))) throw new Error('System audio toggle did not turn on');
+    // Decode before capture: transferring/converting the WAV must not burden
+    // the recording renderer during the continuity measurement.
+    result.outputPreparation = await app.evalTimed(base64 => window.__windowsLoopbackQualification.prepare(base64),
+      fs.readFileSync(reference.wavPath).toString('base64'));
     await app.startRecording();
     const recordId = await app.getRecordId();
     if (!/^[a-f0-9-]{36}$/i.test(recordId)) throw new Error('Invalid private recording identity');
@@ -227,7 +263,7 @@ async function runSystemAudioQualification() {
     });
     await sleep(500);
     result.beforePlayback = await app.evalTimed(() => window.__windowsLoopbackQualification.snapshot());
-    await app.evalTimed(base64 => window.__windowsLoopbackQualification.play(base64), fs.readFileSync(reference.wavPath).toString('base64'));
+    await app.evalTimed(() => window.__windowsLoopbackQualification.play());
     const deadline = performance.now() + (SECONDS + 12) * 1000;
     while (performance.now() < deadline) {
       result.fixture = await app.evalTimed(() => window.__windowsLoopbackQualification.snapshot());

@@ -25,9 +25,15 @@ beforeEach(() => {
       return this.source;
     }
     resume() { return Promise.resolve(); }
+    createBuffer(channels, frames, rate) {
+      this.buffer = { channels, frames, rate, duration: frames / rate, channel: new Float32Array(frames),
+        getChannelData() { return this.channel; } };
+      return this.buffer;
+    }
+    decodeAudioData() { throw new Error('Async WAV decoder must never run in the PCM fixture variant'); }
     close() { this.state = 'closed'; return Promise.resolve(); }
   });
-  window.electronAPI = { config: { getApiUrl: vi.fn().mockResolvedValue(API) } };
+  window.electronAPI = { config: { getApiUrl: vi.fn().mockResolvedValue(API) }, systemAudio: { diag: vi.fn().mockResolvedValue() } };
 });
 
 afterEach(() => {
@@ -79,6 +85,27 @@ describe('private Windows loopback fixture boundaries', () => {
     window.electronAPI.config.getApiUrl.mockResolvedValue('https://app.suisse-notes.ch');
     installLoopbackFixture({ apiUrl: API });
     await expect(navigator.mediaDevices.getUserMedia({ audio: { mandatory: { chromeMediaSource: 'desktop' } } })).rejects.toThrow('backend mismatch');
+    expect(nativeGet).not.toHaveBeenCalled();
+  });
+
+  it('prepares the exact signed PCM samples without using the crashing async decoder', async () => {
+    const bytes = Buffer.alloc(44 + 48 * 48000 * 2);
+    bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8);
+    bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22);
+    bytes.writeUInt32LE(48000, 24); bytes.writeUInt32LE(96000, 28); bytes.writeUInt16LE(2, 32);
+    bytes.writeUInt16LE(16, 34); bytes.write('data', 36); bytes.writeUInt32LE(bytes.length - 44, 40);
+    bytes.writeInt16LE(-32768, 44); bytes.writeInt16LE(0, 46); bytes.writeInt16LE(32767, 48);
+    installLoopbackFixture({ apiUrl: API });
+    const prepared = await window.__windowsLoopbackQualification.prepare(bytes.toString('base64'));
+    expect(prepared).toMatchObject({ method: 'pcm-createBuffer-v1', duration: 48 });
+    expect(Array.from(contexts[0].buffer.channel.slice(0, 3))).toEqual([-1, 0, 32767 / 32768]);
+    expect(nativeGet).not.toHaveBeenCalled();
+  });
+
+  it('rejects a truncated or unsupported PCM fixture before allocating an output buffer', async () => {
+    installLoopbackFixture({ apiUrl: API });
+    await expect(window.__windowsLoopbackQualification.prepare(Buffer.alloc(44).toString('base64'))).rejects.toThrow('RIFF PCM16 mono 48000Hz');
+    expect(contexts[0].buffer).toBeUndefined();
     expect(nativeGet).not.toHaveBeenCalled();
   });
 });
