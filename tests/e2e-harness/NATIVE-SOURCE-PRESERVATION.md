@@ -4,7 +4,7 @@ The release remains blocked by confirmed audio discarded in the live WebAudio
 recording-input FIFO on Intel macOS. A correct upload cannot recover audio that
 never reached the recorded stream. The existing five-hour failures remain open.
 
-## Implemented foundation, not yet the application capture path
+## Integrated capture path; qualification is still in progress
 
 `src/services/nativeSourceRecorder.js` records selected native audio tracks in
 independent microphone/system source epochs. It shares the actual tracks so the
@@ -18,24 +18,34 @@ Exact retries are idempotent; conflicting bytes, gaps and ambiguous metadata are
 errors. Final data and durable writes must finish before the terminal marker.
 Interrupted sources and unacknowledged reservation staging files remain on disk.
 
-The coordinator and disk implementation are tested together, including a lost IPC
-reply after a successful disk write. **They are not connected to the production
-recording service or IPC yet.** No native-source-backed final output is produced
-by the app at this stage; the FIFO bug is not fixed by these modules alone.
+The recording service now creates a durable native capture-mode marker before
+starting independent sources. Start/stop, pause/resume, mute, replacement,
+system toggles, cancellation, backpressure and app-level emergency saving use
+the coordinator. Native final events and pending writes must drain before
+combining, and the retry UI goes through that same save path.
 
-Before activation, implement and test all of the following together:
+`native-source-finalization.js` reconstructs the canonical output from native
+epochs and macOS AudioTee PCM. The live mixed chunks remain available as evidence;
+they cannot serve as a fallback for a failed native finalization. Version 3
+receipts bind all saved source identities/fingerprints, PCM inclusion and output
+checksum. Crash discovery, upload eligibility and disk accounting recognize the
+archive and its authority marker.
 
-- Wire start, stop, pause, mute, replacement, system-audio toggles, suspend,
-  cancellation, backpressure and app-level emergency stop to the coordinator.
-- Reconstruct the final file from independent native microphone/Windows system
-  epochs, or native microphone plus macOS AudioTee PCM. Never add native mic to
-  the already mixed recording, or silently publish the mixed fallback as complete.
-- Establish and test source alignment and replacement overlap cuts. Start-call
-  offsets remove reservation-write delay; they do not establish the exact first
-  device sample timestamp. Packet timestamp gaps cannot be called recovered speech.
-- Include every native source in crash discovery, disk-space accounting and the
-  finalization receipt. Current upload eligibility deliberately blocks native
-  archives because existing final receipts do not prove their incorporation.
+The common one-epoch-per-lane path uses at most two inputs and one Opus encode,
+avoiding full-meeting FLAC intermediates. Multiple epochs use sequential lossless
+normalization and streamed lane assembly. Disk estimates are checked before the
+selected path and before fallback. Original sources and failed scratch are kept.
+Real-media tests cover packet gaps, stereo anti-phase inputs, offsets, explicit
+replacement cuts, retained tails and failures. Final output is re-encoded; exact
+decoded PCM equality with its original Opus is not a valid recovery oracle.
+
+Start-call offsets do not establish exact first-sample alignment. Pause overlap
+above 2 ms currently blocks with originals retained. Large internal timestamp
+gaps may exceed the bounded allocation policy and require further recovery work.
+macOS AudioTee required-source lifecycle evidence and active-clock alignment
+remain open: helper stream-start/pipe-arrival observations are not sample clocks.
+The native path must pass the short preservation test and source-aware lifecycle
+and crash tests before another five-hour qualification can establish readiness.
 
 ## Deterministic short reproducer
 

@@ -8,6 +8,8 @@ const { AppDriver, sleep } = require('./lib/app-driver');
 const { startMockBackend } = require('./lib/mock-backend');
 const { buildCodedScenario, WORK_DIR } = require('./lib/audio');
 const { verifyCodedAudio } = require('./lib/coded-audio');
+const { installRecordingRoleObserver } = require('./lib/native-recorder-evidence');
+const { inspectNativeSources } = require('../../src-electron/native-source-persistence');
 
 async function sha256(filename) {
   const hash = crypto.createHash('sha256');
@@ -22,20 +24,6 @@ function writeEvidence(filename, result) {
 
 async function recorderSnapshot(app) {
   return app.evalTimed(() => window.__suisseCaptureDiagnostics?.snapshot());
-}
-
-async function installDelay(app) {
-  await app.evalTimed(() => {
-    const original = Blob.prototype.arrayBuffer;
-    window.__qualificationFault = { kind: 'blob-conversion-delay', injected: false };
-    Blob.prototype.arrayBuffer = async function (...args) {
-      if (!window.__qualificationFault.injected && this.type.startsWith('audio/')) {
-        window.__qualificationFault.injected = true;
-        await new Promise(resolve => setTimeout(resolve, 14000));
-      }
-      return Reflect.apply(original, this, args);
-    };
-  });
 }
 
 async function installProcessingControl(app) {
@@ -57,6 +45,8 @@ async function installProcessingControl(app) {
 }
 
 async function captureCase(kind, seconds, opts = {}) {
+  if (!['baseline', 'renderer-stall', 'blob-delay', 'native-blob-delay', 'rotation-and-network-cut'].includes(kind)) throw new Error('Unknown synthetic capture case');
+  if (!Number.isInteger(seconds) || seconds < 30 || seconds > 90) throw new Error('Synthetic short capture requires 30–90 seconds');
   const name = 's11-' + kind + (opts.processingDisabled ? '-processing-disabled' : '');
   const reference = buildCodedScenario(name, [{ type: 'speech', seconds: seconds + 25 }]);
   const mock = await startMockBackend();
@@ -74,8 +64,10 @@ async function captureCase(kind, seconds, opts = {}) {
     }
     const apiUrl = await app.evalTimed(() => window.electronAPI.config.getApiUrl());
     if (apiUrl !== mock.url) throw new Error('The app is not using the local test backend');
+    result.nativeArchiveExpected = await app.evalTimed(() => typeof window.electronAPI.recording.beginSource === 'function');
+    if (kind === 'native-blob-delay' && !result.nativeArchiveExpected) throw new Error('Native blob delay requires the native archive application');
+    await app.evalTimed(installRecordingRoleObserver, { delayRole: kind === 'blob-delay' ? 'live-mix' : kind === 'native-blob-delay' ? 'native-input' : null });
     if (opts.processingDisabled) await installProcessingControl(app);
-    if (kind === 'blob-delay') await installDelay(app);
     if (kind === 'rotation-and-network-cut') mock.setMode('upload-cut-50');
     await app.startRecording();
     if (opts.processingDisabled) {
@@ -106,7 +98,8 @@ async function captureCase(kind, seconds, opts = {}) {
         if (!rotation.success) throw new Error('Source rotation failed: ' + rotation.error);
         rotations++;
       }
-      result.progress.push({ elapsed, phase: await app.getPhase(), disk: app.captureDiskProgress() });
+      const roleEvidence = await app.evalTimed(() => window.__recordingRoleEvidence.sampleFault());
+      result.progress.push({ elapsed, phase: await app.getPhase(), disk: app.captureDiskProgress(), roleEvidence });
       writeEvidence(evidenceFile, result); // leave partial evidence if the process dies
       await sleep(Math.min(2500, Math.max(1, seconds * 1000 - (performance.now() - started))));
     }
@@ -115,7 +108,14 @@ async function captureCase(kind, seconds, opts = {}) {
     result.phase = await app.getPhase();
     if (result.phase !== 'uploaded') result.problems.push('Recording did not finish uploading');
     result.capture = await recorderSnapshot(app);
-    const recorder = result.capture?.recorders?.at(-1);
+    result.recorderRoles = await app.evalTimed(() => window.__recordingRoleEvidence.snapshot());
+    const mixed = result.recorderRoles.records.filter(recorder => recorder.role === 'live-mix');
+    const native = result.recorderRoles.records.filter(recorder => recorder.role === 'native-input');
+    if (mixed.length !== 1 || native.length !== (result.nativeArchiveExpected ? 1 : 0)) throw new Error('Unexpected short-case native/mixed recorder topology');
+    for (const observed of result.recorderRoles.records) {
+      if (observed.timesliceMs !== 1000 || observed.startedAt === null || observed.stoppedAt === null || observed.state !== 'inactive') throw new Error('Missing expected native recorder lifecycle or 1000 ms interval');
+    }
+    const recorder = result.nativeArchiveExpected ? native[0] : mixed[0];
     if (!recorder || !recorder.events || !recorder.bytes) result.problems.push('No nonempty MediaRecorder output observed');
     if (recorder?.startedAt == null || recorder?.stoppedAt == null) throw new Error('Missing recorder start/stop timing evidence');
     const expectedDurationS = (recorder.stoppedAt - recorder.startedAt) / 1000;
@@ -126,6 +126,16 @@ async function captureCase(kind, seconds, opts = {}) {
     result.audio = await verifyCodedAudio(output, reference, { expectedDurationS, durationToleranceS: 1.5 });
     result.problems.push(...result.audio.problems);
     result.localSha256 = await sha256(output);
+    if (result.nativeArchiveExpected) {
+      const sources = inspectNativeSources(path.dirname(output));
+      if (sources.length !== 1 || sources[0].kind !== 'microphone' || !sources[0].complete) throw new Error('Expected one complete preserved native microphone epoch');
+      const source = sources[0];
+      result.nativeSource = { sourceId: source.sourceId, startOffsetMs: source.startOffsetMs, endOffsetMs: source.endOffsetMs,
+        chunkCount: source.chunkCount, bytes: source.chunks.reduce((total, chunk) => total + chunk.size, 0), chunks: [] };
+      if (result.nativeSource.bytes !== native[0].bytes || source.chunkCount !== native[0].events - native[0].emptyEvents) throw new Error('Native original bytes/events do not match their observed recorder');
+      for (const chunk of source.chunks) result.nativeSource.chunks.push({ index: chunk.index, bytes: chunk.size,
+        path: path.relative(path.dirname(output), chunk.path), sha256: await sha256(chunk.path) });
+    }
     const receipt = JSON.parse(fs.readFileSync(path.join(path.dirname(output), 'upload-receipt.json'), 'utf8'));
     const remote = mock.state.uploads.get(receipt.audioFileId);
     if (remote?.sha256 !== result.localSha256) result.problems.push('Multipart upload differs from finalized audio bytes');
@@ -140,10 +150,19 @@ async function captureCase(kind, seconds, opts = {}) {
       if (result.uploadAttempts !== 2) result.problems.push('Expected one cut upload and one successful retry');
     } else if (result.uploadAttempts !== 1) result.problems.push('Expected exactly one successful upload');
     if (kind === 'blob-delay') {
-      result.fault = await app.evalTimed(() => window.__qualificationFault);
-      if (!result.fault?.injected) result.problems.push('The blob conversion delay was not actually injected');
+      result.fault = result.recorderRoles.fault;
+      if (!result.fault?.injected || result.fault.targetRole !== 'live-mix' || result.fault.recorderId !== mixed[0].id) result.problems.push('The live-mix blob conversion delay was not actually injected');
       if (!result.captureWarnings.includes('capture-stalled')) result.problems.push('Delayed initial persistence left no retained capture warning');
-      result.notes.push('First audio Blob conversion delayed 14 seconds; every original frame must survive the queued save.');
+      result.notes.push('First live-mix Blob conversion delayed 14 seconds; its original capture-stalled warning and complete final content remain required.');
+    } else if (kind === 'native-blob-delay') {
+      result.fault = result.recorderRoles.fault;
+      if (!result.fault?.injected || result.fault.targetRole !== 'native-input' || result.fault.recorderId !== native[0].id ||
+          !Number.isFinite(result.fault.completedAt) || result.fault.completedAt - result.fault.startedAt < 14000 ||
+          !result.fault.samples.some(sample => sample.at - result.fault.startedAt >= 10000 && sample.pendingBlobBytes > 0 && sample.events >= 5)) {
+        result.problems.push('The native-source delay and accumulating queued audio were not established');
+      }
+      if (native[0].convertedBytes !== native[0].bytes) result.problems.push('Some native-source bytes never completed blob conversion');
+      result.notes.push('First native archive Blob conversion delayed 14 seconds. Pending/age evidence, every saved source byte and final coded content are required; this does not claim a user-visible early warning.');
     }
     result.pass = result.problems.length === 0;
   } catch (error) {
@@ -152,6 +171,7 @@ async function captureCase(kind, seconds, opts = {}) {
     result.diagnostics = app.diagnosticsDir;
     result.profile = app.userDataDir;
     writeEvidence(evidenceFile, result);
+    try { await app.evalTimed(() => window.__recordingRoleEvidence?.dispose(), undefined, 3000); } catch (_) { /* app/profile evidence retained */ }
     await app.close({ keepProfile: true }).catch(error => { result.problems.push('App cleanup: ' + error.message); result.pass = false; });
     await mock.close();
     writeEvidence(evidenceFile, result);
@@ -165,6 +185,7 @@ async function runCaptureQualification() {
   const cases = ['baseline', 'renderer-stall', 'blob-delay', 'rotation-and-network-cut'];
   const results = [];
   for (const kind of cases) results.push(await captureCase(kind, 45));
+  if (results[0]?.nativeArchiveExpected) results.push(await captureCase('native-blob-delay', 45));
   return { pass: results.every(result => result.pass),
     problems: results.flatMap(result => result.problems.map(problem => result.name + ': ' + problem)),
     notes: ['Real Electron capture with synthetic, numbered audio; physical Bluetooth/USB and AudioTee permissions are not simulated by this suite.'], results };

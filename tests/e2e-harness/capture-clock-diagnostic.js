@@ -7,6 +7,8 @@ const net = require('net');
 const { execFileSync } = require('child_process');
 const { performance } = require('perf_hooks');
 const { startBufferTrace, summarizeTrace } = require('./lib/capture-buffer-trace');
+const { classifyWitnessRecorders, legacyChunkFiles } = require('./lib/native-recorder-evidence');
+const { concatenateFiles } = require('../../src-electron/durable-files');
 const ROOT = path.resolve(__dirname, '../..');
 const WORK = path.join(__dirname, 'work');
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -30,6 +32,7 @@ function provenance(appDirectory, applicationBuildCommit) {
     inputs: Object.fromEntries([__filename, path.join(ROOT, 'package-lock.json'),
       path.join(__dirname, 'lib/app-driver.js'), path.join(__dirname, 'lib/coded-audio.js'), path.join(__dirname, 'lib/mock-backend.js'),
       path.join(__dirname, 'lib/capture-buffer-trace.js'),
+      path.join(__dirname, 'lib/native-recorder-evidence.js'), path.join(ROOT, 'src-electron/durable-files.js'),
       require('@ffmpeg-installer/ffmpeg').path].map(file => [path.relative(ROOT, file).replaceAll('\\', '/'), hash(fs.readFileSync(file))])) };
 }
 
@@ -64,7 +67,7 @@ function installWitness({ processingDisabled }) {
     contexts: contexts.map(entry => ({ id: entry.id, createdAt: entry.createdAt, currentTime: entry.ref.currentTime,
       sampleRate: entry.ref.sampleRate, state: entry.ref.state, destinationTrackIds: [...entry.destinationTrackIds], states: [...entry.states] })),
     recorders: recorders.map(entry => ({ role: entry.role, startCalledAt: entry.startCalledAt, startedAt: entry.startedAt,
-      stoppedAt: entry.stoppedAt, timesliceMs: entry.timesliceMs, bytes: entry.bytes, events: entry.events,
+      stoppedAt: entry.stoppedAt, timesliceMs: entry.timesliceMs, bytes: entry.bytes, events: entry.events, emptyEvents: entry.emptyEvents,
       trackIds: entry.trackIds, state: entry.ref.state, lifecycle: [...entry.lifecycle] })) });
   const ContextProxy = new Proxy(originalContext, {
     construct(target, args, newTarget) {
@@ -87,13 +90,13 @@ function installWitness({ processingDisabled }) {
   if (originalWebkit === originalContext) window.webkitAudioContext = ContextProxy;
   MediaRecorder.prototype.start = function (...args) {
     const entry = { ref: this, role: witnessRecorders.has(this) ? 'direct-witness' : 'actual-application', startCalledAt: performance.now(),
-      startedAt: null, stoppedAt: null, timesliceMs: args[0], bytes: 0, events: 0, trackIds: this.stream.getAudioTracks().map(track => track.id), lifecycle: [] };
+      startedAt: null, stoppedAt: null, timesliceMs: args[0], bytes: 0, events: 0, emptyEvents: 0, trackIds: this.stream.getAudioTracks().map(track => track.id), lifecycle: [] };
     recorders.push(entry);
     for (const eventName of ['start', 'dataavailable', 'stop', 'pause', 'resume', 'error']) {
       this.addEventListener(eventName, event => {
         if (eventName === 'start') entry.startedAt = event.timeStamp;
         if (eventName === 'stop') entry.stoppedAt = event.timeStamp;
-        if (eventName === 'dataavailable') { entry.bytes += event.data?.size || 0; entry.events++; }
+        if (eventName === 'dataavailable') { entry.bytes += event.data?.size || 0; entry.events++; if (!event.data?.size) entry.emptyEvents++; }
         else if (entry.lifecycle.length < 50) entry.lifecycle.push({ event: eventName, at: performance.now(), eventTimeStamp: event.timeStamp, error: event.error?.name || null });
       });
     }
@@ -251,6 +254,7 @@ async function capture(directory, options, expectedProvenance) {
     if (toggle.checked === 'true') await app.clickByTest('[data-test="system-audio-toggle"]');
     if (await app.evalTimed(() => document.querySelector('[data-test="system-audio-toggle"]')?.getAttribute('aria-checked')) !== 'false') throw new Error('System audio must be off');
     result.systemAudioEnabled = false;
+    result.expectedNativeRecorders = await app.evalTimed(() => typeof window.electronAPI.recording.beginSource === 'function' ? 1 : 0);
     await app.evalTimed(installWitness, { processingDisabled: options.processingDisabled });
     await app.startRecording(); result.recordId = await app.getRecordId();
     console.log('Both diagnostic branches are recording: ' + directory);
@@ -267,7 +271,8 @@ async function capture(directory, options, expectedProvenance) {
       result.samples.push({ before, after: performance.now(), elapsedS: (before - began) / 1000, renderer });
       checkpoint();
       if (renderer.errors.length) throw new Error(renderer.errors.join('; '));
-      if (renderer.recorders.filter(recorder => recorder.role === 'actual-application').length !== 1) throw new Error('Expected one actual app recorder');
+      const roles = classifyWitnessRecorders(renderer, result.expectedNativeRecorders);
+      if (roles.problems.length) throw new Error(roles.problems.join('; '));
       if (renderer.recorders.some(recorder => recorder.state !== 'recording')) throw new Error('A capture branch stopped early');
       await sleep(Math.min(5000, Math.max(1, options.seconds * 1000 - (performance.now() - began))));
     }
@@ -279,14 +284,13 @@ async function capture(directory, options, expectedProvenance) {
       await trace.dispose();
       if (trace.state.problems.length) throw new Error(trace.state.problems.join('; '));
     }
-    result.finalSnapshot = await app.evalTimed(() => window.__directMixedWitness.snapshot());
-    result.clockReadout = clockReadout(result.samples, result.finalSnapshot);
+    const witnessStoppedSnapshot = await app.evalTimed(() => window.__directMixedWitness.snapshot());
     const directDir = path.join(directory, 'direct-chunks'); fs.mkdirSync(directDir);
     const directPath = path.join(directory, 'direct-original.webm');
     const joined = fs.openSync(directPath, 'wx');
     result.directChunks = [];
     try {
-      for (let index = 0; index < result.finalSnapshot.directChunks; index++) {
+      for (let index = 0; index < witnessStoppedSnapshot.directChunks; index++) {
         const item = await app.evalTimed(chunkIndex => window.__directMixedWitness.exportChunk(chunkIndex), index);
         const bytes = Buffer.from(item.base64, 'base64'); if (bytes.length !== item.size) throw new Error('Direct chunk export length differs');
         const filename = path.join(directDir, 'chunk_' + index + '.webm'); fs.writeFileSync(filename, bytes, { flag: 'wx' });
@@ -297,18 +301,35 @@ async function capture(directory, options, expectedProvenance) {
     result.directPath = directPath; result.directSha256 = hash(fs.readFileSync(directPath));
     await app.waitForPhase(['uploaded', 'error'], 120000); result.phase = await app.getPhase();
     if (result.phase !== 'uploaded') throw new Error('Actual app failed local mock upload');
-    result.mixedPath = app.findOutputFile(); if (!result.mixedPath) throw new Error('Missing actual app final recording');
-    result.mixedSha256 = hash(fs.readFileSync(result.mixedPath));
-    const receipt = JSON.parse(fs.readFileSync(path.join(path.dirname(result.mixedPath), 'upload-receipt.json'), 'utf8'));
+    result.finalSnapshot = await app.evalTimed(() => window.__directMixedWitness.snapshot());
+    result.recorderRoles = classifyWitnessRecorders(result.finalSnapshot, result.expectedNativeRecorders);
+    if (result.recorderRoles.problems.length) throw new Error(result.recorderRoles.problems.join('; '));
+    result.clockReadout = clockReadout(result.samples, result.finalSnapshot);
+    result.finalPath = app.findOutputFile(); if (!result.finalPath) throw new Error('Missing actual app final recording');
+    result.finalSha256 = hash(fs.readFileSync(result.finalPath));
+    const receipt = JSON.parse(fs.readFileSync(path.join(path.dirname(result.finalPath), 'upload-receipt.json'), 'utf8'));
     const remote = mock.state.uploads.get(receipt.audioFileId);
-    result.upload = { remoteSha256: remote?.sha256, localSha256: result.mixedSha256, canDelete: receipt.canDelete,
+    result.upload = { remoteSha256: remote?.sha256, localSha256: result.finalSha256, canDelete: receipt.canDelete,
       attempts: mock.state.requests.filter(request => request.url === '/api/desktop/upload').length };
-    if (remote?.sha256 !== result.mixedSha256 || receipt.canDelete !== false) throw new Error('Actual app local upload custody check failed');
+    if (remote?.sha256 !== result.finalSha256 || receipt.canDelete !== false) throw new Error('Actual app local upload custody check failed');
+    // Native-source finalization protects the uploaded artifact. Reconstruct
+    // the actual live mix separately so its original diagnostic failures are
+    // not hidden by comparing the independent witness to a protected final.
+    const mixedChunks = legacyChunkFiles(path.dirname(result.finalPath));
+    result.mixedSourceChunks = mixedChunks.map(chunk => ({ index: chunk.index, file: chunk.file,
+      size: fs.statSync(chunk.file).size, sha256: hash(fs.readFileSync(chunk.file)) }));
+    const mixedRecorder = result.recorderRoles.mixed;
+    if (result.mixedSourceChunks.reduce((bytes, chunk) => bytes + chunk.size, 0) !== mixedRecorder.bytes ||
+        mixedChunks.length !== mixedRecorder.events - mixedRecorder.emptyEvents) throw new Error('Live-mix original bytes/events do not match their recorder');
+    result.mixedPath = path.join(directory, 'actual-live-mix-original.webm');
+    await concatenateFiles(mixedChunks.map(chunk => chunk.file), result.mixedPath);
+    result.mixedSha256 = hash(fs.readFileSync(result.mixedPath));
+    result.notes.push('mixedPath is the actual live-mix original chunk stream; finalPath is the separately finalized and uploaded recording.');
     const acquisition = result.finalSnapshot.acquisitions;
     if (acquisition.length !== 1 || !acquisition[0].receivedAt || !acquisition[0].settings.length) throw new Error('Missing single native acquisition evidence');
     if (options.processingDisabled && acquisition[0].settings.some(settings => ['echoCancellation', 'noiseSuppression', 'autoGainControl'].some(flag => settings[flag] !== false))) throw new Error('Disabled audio processing not confirmed by native settings');
     if (!result.clockReadout.some(context => context.isActualApplicationRecordingContext)) throw new Error('Actual app mixing context was not identified');
-    if (result.finalSnapshot.recorders.length !== 2 || result.finalSnapshot.recorders.some(recorder => recorder.timesliceMs !== 1000 || recorder.startedAt === null || recorder.stoppedAt === null)) throw new Error('Unexpected recorder lifecycle or interval');
+    if (result.finalSnapshot.recorders.some(recorder => recorder.timesliceMs !== 1000 || recorder.startedAt === null || recorder.stoppedAt === null)) throw new Error('Unexpected recorder lifecycle or interval');
     await app.evalTimed(() => window.__directMixedWitness.dispose());
     await app.close({ keepProfile: true }); app = null;
     await mock.close(); mock = null;
@@ -325,6 +346,10 @@ async function capture(directory, options, expectedProvenance) {
     result.decoded = { directDurationS: directAnalysis.durationS, mixedDurationS: mixedAnalysis.durationS,
       directDecoderWarnings: directAnalysis.decoderWarnings, mixedDecoderWarnings: mixedAnalysis.decoderWarnings };
     result.commonSourceComparison = compareGroups(directAnalysis, mixedAnalysis);
+    const finalAnalysis = await analyzeCodedAudio(result.finalPath);
+    writeJson(path.join(directory, 'final-analysis.json'), finalAnalysis);
+    result.finalSourceComparison = compareGroups(directAnalysis, finalAnalysis);
+    result.decoded.finalDurationS = finalAnalysis.durationS;
     verifyUnchanged(expectedProvenance); result.controlsValid = true; result.measurementCompleted = true;
   } catch (error) { result.problems.push(error.stack || error.message); }
   finally {
@@ -401,6 +426,7 @@ async function runCaptureClockDiagnostic(opts = {}) {
       if (!caseResult.problems.length) result.problems.push(path.basename(caseDir) + ': diagnostic incomplete or controls invalid');
     }
     for (const problem of caseResult.commonSourceComparison?.problems || []) result.problems.push(path.basename(caseDir) + ': ' + problem);
+    for (const problem of caseResult.finalSourceComparison?.problems || []) result.problems.push(path.basename(caseDir) + ': final: ' + problem);
     checkpoint();
   }
   result.measurementCompleted = result.cases.every(entry => entry.measurementCompleted && entry.controlsValid);
