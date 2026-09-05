@@ -21,7 +21,8 @@ const accepted = { status: 200, data: { success: true, audioFileId: 'accepted-id
 function fixture() {
   const calls = { post: vi.fn(), verify: vi.fn().mockResolvedValue({ success: true, audioFileId: 'accepted-id', canDelete: false }),
     sleep: vi.fn().mockResolvedValue(), source: vi.fn(() => ({})), receipt: vi.fn(() => null),
-    report: vi.fn(), direct: vi.fn().mockResolvedValue({ handled: false, reason: 'test fallback' }) };
+    report: vi.fn(), direct: vi.fn().mockResolvedValue({ handled: false, reason: 'test fallback' }),
+    eligibility: vi.fn().mockResolvedValue({ allowed: true }) };
   const snapshot = { size: 1234, mtimeMs: 5678 };
   class FormData {
     constructor() { this.fields = []; }
@@ -39,6 +40,8 @@ function fixture() {
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, console: { log: vi.fn() },
     setInterval: () => 1, clearInterval: vi.fn(), AbortController,
     activeAbortControllers: new Map(), activeDirectAudioFileIds: new Map(), unsavedRecordingId: null,
+    assessRecordingUpload: calls.eligibility, getRecordingsPath: () => '/synthetic',
+    recordingLocks: new Map(), isRecordingInProgress: false,
   };
   const functions = vm.runInNewContext(uploadFunctions + '\n({ uploadWithRetry, uploadWithRetryLegacy });', context);
   const invoke = (retries = 3, controller = new AbortController()) => functions.uploadWithRetryLegacy(
@@ -47,6 +50,20 @@ function fixture() {
 }
 
 describe('legacy upload broken-pipe recovery', () => {
+  it('blocks both upload transports and accepted-receipt resume while saved sources require finalization', async () => {
+    const { calls, functions } = fixture();
+    calls.eligibility.mockResolvedValue({ allowed: false, requiresFinalization: true, error: 'Combine the saved sources first' });
+    calls.receipt.mockReturnValue({ audioFileId: 'stale-accepted-id' });
+    expect(await functions.uploadWithRetry('record', '/synthetic/audio.webm', {})).toMatchObject({
+      success: false, canDelete: false, requiresFinalization: true, error: 'Combine the saved sources first',
+    });
+    expect(calls.receipt).not.toHaveBeenCalled();
+    expect(calls.verify).not.toHaveBeenCalled();
+    expect(calls.post).not.toHaveBeenCalled();
+    expect(calls.direct).not.toHaveBeenCalled();
+    expect(calls.source).not.toHaveBeenCalled();
+  });
+
   it('reopens the source for EPIPE retry and verifies the accepted response once', async () => {
     const { calls, snapshot, invoke } = fixture();
     calls.post.mockRejectedValueOnce(brokenPipe()).mockResolvedValueOnce(accepted);

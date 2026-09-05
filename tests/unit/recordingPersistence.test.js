@@ -107,6 +107,87 @@ describe('recording disk transactions under failures', () => {
     const result = await onlyPcm.finalize(root);
     expect(fs.readFileSync(result.outputPath, 'utf8')).toBe('system-only');
     expect(fs.readFileSync(path.join(root, 'system_audio.raw'), 'utf8')).toBe('system-only');
+    // A valid receipt also makes this path idempotent without mixing the PCM
+    // with its own previous output.
+    expect(await onlyPcm.finalize(root)).toMatchObject({ success: true, outputPath: result.outputPath });
+  });
+
+  it('never replaces legacy audio with system-only PCM when microphone provenance is missing', async () => {
+    await fs.promises.writeFile(path.join(root, 'system_audio.raw'), 'participants');
+    await fs.promises.writeFile(path.join(root, 'audio.webm'), 'surviving-microphone');
+    const fromPcm = vi.fn((input, output) => fs.promises.copyFile(input, output));
+    const ambiguous = createRecordingPersistence({
+      prepareRaw: async () => ({}), remux, concatSessions: concatenateFiles,
+      validate: file => ({ valid: fs.statSync(file).size > 0 }), probe: async () => 1, fromPcm,
+    });
+    await expect(ambiguous.finalize(root)).rejects.toThrow('both original files are retained');
+    expect(fromPcm).not.toHaveBeenCalled();
+    expect(fs.readFileSync(path.join(root, 'audio.webm'), 'utf8')).toBe('surviving-microphone');
+    expect(fs.readFileSync(path.join(root, 'system_audio.raw'), 'utf8')).toBe('participants');
+    expect(await readFinalizedRecording(root)).toBeNull();
+  });
+
+  it('recovers system-only publication after a crash before its final receipt', async () => {
+    await fs.promises.writeFile(path.join(root, 'system_audio.raw'), 'participants');
+    const pcm = createRecordingPersistence({
+      prepareRaw: async () => ({}), remux, concatSessions: concatenateFiles,
+      validate: file => ({ valid: fs.statSync(file).size > 0 }), probe: async () => 1,
+      fromPcm: (input, output) => fs.promises.copyFile(input, output),
+    });
+    const rename = fs.promises.rename.bind(fs.promises);
+    vi.spyOn(fs.promises, 'rename').mockImplementation((source, destination) => {
+      if (destination === path.join(root, 'finalized.json')) throw new Error('crash before receipt publication');
+      return rename(source, destination);
+    });
+    await expect(pcm.finalize(root)).rejects.toThrow('crash before receipt');
+    expect(fs.readFileSync(path.join(root, 'audio.webm'), 'utf8')).toBe('participants');
+    expect(await readFinalizedRecording(root)).toBeNull();
+    vi.restoreAllMocks();
+    const recovered = await pcm.finalize(root);
+    expect(fs.readFileSync(recovered.outputPath, 'utf8')).toBe('participants');
+    expect(await readFinalizedRecording(root)).toMatchObject({ success: true });
+  });
+
+  it('rejects old success receipts that could have omitted system audio, and rebuilds from both originals', async () => {
+    await chunk(0, 'microphone');
+    await fs.promises.writeFile(path.join(root, 'system_audio.raw'), 'participants');
+    const combined = createRecordingPersistence({
+      prepareRaw: async () => ({}), remux, concatSessions: concatenateFiles,
+      validate: file => ({ valid: fs.statSync(file).size > 0 }), probe: async () => 1,
+      merge: file => fs.promises.appendFile(file, '+participants'),
+    });
+    await combined.finalize(root);
+    const receiptPath = path.join(root, 'finalized.json');
+    const old = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+    expect(old).toMatchObject({ version: 2, sourceMode: 'microphone-and-system' });
+    await fs.promises.writeFile(receiptPath, JSON.stringify({ ...old, version: 1 }));
+    expect(await readFinalizedRecording(root)).toBeNull();
+    const rebuilt = await combined.finalize(root);
+    expect(fs.readFileSync(rebuilt.outputPath, 'utf8')).toBe('microphone+participants');
+    expect(await readFinalizedRecording(root)).toMatchObject({ success: true });
+  });
+
+  it('keeps compatible microphone-only version-one receipts readable', async () => {
+    await chunk(0, 'microphone');
+    await persistence.finalize(root);
+    const receiptPath = path.join(root, 'finalized.json');
+    const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+    await fs.promises.writeFile(receiptPath, JSON.stringify({ ...receipt, version: 1 }));
+    expect(await readFinalizedRecording(root)).toMatchObject({ success: true });
+  });
+
+  it('withholds publication if source audio changes during the merge', async () => {
+    await chunk(0, 'microphone');
+    await fs.promises.writeFile(path.join(root, 'system_audio.raw'), 'participants');
+    const changing = createRecordingPersistence({
+      prepareRaw: async () => ({}), remux, concatSessions: concatenateFiles,
+      validate: file => ({ valid: fs.statSync(file).size > 0 }), probe: async () => 1,
+      merge: () => fs.promises.appendFile(path.join(root, 'system_audio.raw'), 'late audio'),
+    });
+    await expect(changing.finalize(root)).rejects.toThrow('sources changed during finalization');
+    expect(fs.existsSync(path.join(root, 'audio.webm'))).toBe(false);
+    expect(await readFinalizedRecording(root)).toBeNull();
+    expect(fs.readFileSync(path.join(root, 'system_audio.raw'), 'utf8')).toBe('participantslate audio');
   });
 
   it('never authorizes recursive deletion of an import folder, root, or sibling', () => {

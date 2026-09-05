@@ -67,11 +67,33 @@ function createRecordingPersistence({ prepareRaw, remux, concatSessions, merge, 
   async function finalize(recordPath, ext = '.webm') {
     const sessions = await createSessions(recordPath, ext);
     const pcmPath = path.join(recordPath, 'system_audio.raw');
-    const pcmOnly = !sessions.length && fromPcm && fs.existsSync(pcmPath) && fs.statSync(pcmPath).size > 0;
+    const hasPcm = fs.existsSync(pcmPath) && fs.statSync(pcmPath).size > 0;
+    const pcmOnly = !sessions.length && fromPcm && hasPcm;
     if (!sessions.length && !pcmOnly) throw new Error('No audio segments found to finalize');
+    if (hasPcm && !pcmOnly && !merge) throw new Error('System audio must be combined before finalization; original sources retained');
+    const fingerprint = sourceFingerprint(recordPath);
+    const sourceMode = pcmOnly ? 'system-only' : hasPcm ? 'microphone-and-system' : 'microphone';
+    const planPath = path.join(recordPath, 'finalization-plan.json');
     // A failed final batch throws above. Never publish only the earlier batches.
     const buildingPath = path.join(recordPath, `audio_building${ext}`);
     const outputPath = path.join(recordPath, `audio${ext}`);
+    if (pcmOnly && fs.existsSync(outputPath)) {
+      const completed = await readFinalizedRecording(recordPath);
+      if (completed) return completed;
+      // Older builds could leave a microphone-only output beside unmerged
+      // system PCM after deleting the mic chunks. We cannot tell whether that
+      // output already includes system audio. Replacing it with PCM alone or
+      // mixing it again could lose the microphone or duplicate participants.
+      let previousPlan;
+      try { previousPlan = JSON.parse(await fs.promises.readFile(planPath, 'utf8')); } catch (_) { /* unknown provenance */ }
+      if (previousPlan?.version !== 1 || previousPlan.sourceMode !== 'system-only' || previousPlan.sourceFingerprint !== fingerprint) {
+        throw new Error('Existing audio and separate system audio need recovery before finalization; both original files are retained');
+      }
+    }
+    // Establish source provenance BEFORE publishing output. A crash after
+    // system-only publication but before its receipt must be distinguishable
+    // from an old microphone file beside unmerged PCM.
+    await writeFileAtomic(planPath, JSON.stringify({ version: 1, sourceMode, sourceFingerprint: fingerprint }));
     if (pcmOnly) await fromPcm(pcmPath, buildingPath);
     else if (sessions.length === 1) await concatenateFiles(sessions, buildingPath);
     else await concatSessions(sessions, buildingPath);
@@ -81,10 +103,11 @@ function createRecordingPersistence({ prepareRaw, remux, concatSessions, merge, 
     const duration = await probe(buildingPath);
     const sha256 = await checksum(buildingPath);
     const size = fs.statSync(buildingPath).size;
+    if (sourceFingerprint(recordPath) !== fingerprint) throw new Error('Recording sources changed during finalization; originals retained for retry');
     await publishFile(buildingPath, outputPath);
     // If the app dies between publish and this marker, restart safely repeats
     // the operation from the retained sources. It never trusts a partial file.
-    const receipt = { sourceFingerprint: sourceFingerprint(recordPath), version: 1, filename: path.basename(outputPath), size, sha256, duration, completedAt: new Date().toISOString() };
+    const receipt = { sourceFingerprint: fingerprint, version: 2, sourceMode, filename: path.basename(outputPath), size, sha256, duration, completedAt: new Date().toISOString() };
     await writeFileAtomic(path.join(recordPath, 'finalized.json'), JSON.stringify(receipt));
     return { success: true, outputPath, filename: receipt.filename, duration, fileSize: size, fileSizeMb: (size / 1048576).toFixed(2) };
   }
@@ -112,7 +135,15 @@ function sourceFingerprint(recordPath) {
 async function readFinalizedRecording(recordPath) {
   try {
     const receipt = JSON.parse(await fs.promises.readFile(path.join(recordPath, 'finalized.json'), 'utf8'));
-    if (receipt.version !== 1 || receipt.filename !== 'audio.webm' || !/^[a-f0-9]{64}$/.test(receipt.sha256)) return null;
+    if (![1, 2].includes(receipt.version) || receipt.filename !== 'audio.webm' || !/^[a-f0-9]{64}$/.test(receipt.sha256)) return null;
+    const pcmPath = path.join(recordPath, 'system_audio.raw');
+    const hasPcm = fs.existsSync(pcmPath) && fs.statSync(pcmPath).size > 0;
+    // Version 1 could acknowledge a mic-only file even after its system merge
+    // failed. Its checksum proves file identity, not inclusion of participants.
+    if (receipt.version === 1 && hasPcm) return null;
+    if (receipt.version === 2 && (hasPcm
+      ? !['microphone-and-system', 'system-only'].includes(receipt.sourceMode)
+      : receipt.sourceMode !== 'microphone')) return null;
     if (receipt.sourceFingerprint !== sourceFingerprint(recordPath)) return null;
     const outputPath = path.join(recordPath, receipt.filename);
     const size = fs.statSync(outputPath).size;

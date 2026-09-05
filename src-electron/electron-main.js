@@ -1,8 +1,9 @@
 const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu, Tray, nativeImage, desktopCapturer, systemPreferences, powerMonitor, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { writeFileAtomic, writeFileAtomicSync, publishFile, concatenateFiles, archiveChunkBatch, listChunkBatches } = require('./durable-files');
+const { writeFileAtomic, writeFileAtomicSync, publishFile, concatenateFiles, archiveChunkBatch, listChunkBatches, syncDirectorySync } = require('./durable-files');
 const { createRecordingPersistence, readFinalizedRecording, listSessions } = require('./recording-persistence');
+const { assessRecordingUpload, FINALIZATION_PENDING_MARKER } = require('./recording-upload-eligibility');
 const { withCaptureWarnings, hydrateHistoryCaptureWarnings } = require('./recording-history-warnings');
 const { createPcmCapture } = require('./pcm-capture');
 const { tokenUserId, canUploadForUser, verifiedUploadResult } = require('./upload-safety');
@@ -593,7 +594,7 @@ async function recoverOrphanedRecordings() {
         // output after a crash. Check the durable receipt, then repair history.
         if (inFlightUploads.has(dir) || recordingLocks.has(dir)) continue;
         const existingRecord = historyStore.get('recordings', []).find(r => r.id === dir);
-        const finalized = await readFinalizedRecording(dirPath);
+        const finalized = fs.existsSync(path.join(dirPath, FINALIZATION_PENDING_MARKER)) ? null : await readFinalizedRecording(dirPath);
         if (finalized && existingRecord?.filePath === finalized.outputPath &&
             !['recording', 'processing', 'stopped'].includes(existingRecord.uploadStatus)) continue;
 
@@ -649,8 +650,9 @@ async function recoverOrphanedRecordings() {
         // Older releases removed sources after finalization. Restore a surviving
         // legacy output into history instead of making it invisible.
         if (!result && hasOutput && !hasChunks && !hasSessions && !hasBatches) {
-          const validation = validateAudioOutput(audioPath);
-          if (validation.valid) {
+          const eligibility = await assessRecordingUpload({ recordId: dir, filePath: audioPath, recordingsRoot: recordingsPath });
+          const validation = eligibility.allowed && validateAudioOutput(audioPath);
+          if (validation?.valid) {
             const duration = safeParseDuration(await getAudioMetadata(audioPath));
             result = { success: true, outputPath: audioPath, duration, fileSize: validation.size, fileSizeMb: (validation.size / 1048576).toFixed(2) };
           }
@@ -822,7 +824,9 @@ ipcMain.handle('recording:isRecoveryRunning', () => isRecoveryRunning);
 
 // Internal function for recovery - similar to combineChunks but without IPC
 async function combineChunksForRecovery(recordId) {
-  return withRecordingLock(recordId, () => finalizeRecording(recordId, '.webm'));
+  return withRecordingLock(recordId, () => inFlightUploads.has(recordId)
+    ? { success: false, error: 'This recording is still uploading' }
+    : finalizeRecording(recordId, '.webm'));
 }
 
 // === Cleanup Old Orphaned Directories ===
@@ -2930,12 +2934,11 @@ async function mergeSystemAudio(micPath, recordId) {
   }
   if (binaryHealth.ffmpeg.available === false) {
     notifyMergeDegraded(recordId, 'ffmpeg-unavailable', binaryHealth.ffmpeg.error || 'spawn failed');
-    return micPath;
+    throw Object.assign(new Error('System audio could not be combined because FFmpeg is unavailable; both sources are retained for retry'), { code: 'FFMPEG_UNAVAILABLE' });
   }
 
   const mergedPath = micPath.replace(/(\.\w+)$/, '_merged$1');
   const pcmBytes = fs.statSync(systemAudioPath).size;
-  let mergedOk = false;
   log.info(`Merging system audio (${pcmBytes} bytes) with mic recording`);
 
   // The merge re-encodes the FULL meeting. The flat 5-minute FFMPEG_TIMEOUT_MS
@@ -2979,29 +2982,23 @@ async function mergeSystemAudio(micPath, recordId) {
 
     // Validate merged file
     const mergedValidation = validateAudioOutput(mergedPath);
-    if (mergedValidation.valid) {
-      // Replace original with merged
-      await publishFile(mergedPath, micPath);
-      log.info('System audio merged successfully');
-      mergedOk = true;
-    } else {
-      notifyMergeDegraded(recordId, 'merged-file-invalid', mergedValidation.error || 'validation failed');
-      try { fs.unlinkSync(mergedPath); } catch (e) { /* ignore */ }
+    if (!mergedValidation.valid) {
+      throw Object.assign(new Error(mergedValidation.error || 'System audio merge produced an invalid file'), {
+        code: 'AUDIO_MERGE_INVALID', mergeReason: 'merged-file-invalid'
+      });
     }
+    await publishFile(mergedPath, micPath);
+    log.info('System audio merged successfully');
   } catch (err) {
-    notifyMergeDegraded(recordId, 'merge-failed', err.message);
+    notifyMergeDegraded(recordId, err.mergeReason || 'merge-failed', err.message);
     try { if (fs.existsSync(mergedPath)) fs.unlinkSync(mergedPath); } catch (e) { /* ignore */ }
+    // Returning the mic file here lets finalize() publish a success receipt and
+    // upload a meeting with every remote participant missing. Keep all sources
+    // and the original error code (especially ENOSPC) for the normal retry flow.
+    throw err;
   }
 
-  // Clean up the PCM only after a SUCCESSFUL merge. On failure it is the only
-  // copy of the participants' audio — keep it in the recording dir so a fixed
-  // build (or manual support intervention) can still merge it later.
-  if (mergedOk) {
-    // Keep the original PCM alongside source chunks until explicit deletion
-    // or a verified upload. A successful encode can still contain lost packets.
-  } else {
-    log.warn(`Keeping ${systemAudioPath} for later recovery (merge did not succeed)`);
-  }
+  // Keep the original PCM alongside microphone chunks after success too.
   return micPath;
 }
 
@@ -3314,7 +3311,9 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext, expectedD
     const validRecordId = validateRecordId(recordId);
     const validExt = validateExtension(ext);
     if (inFlightUploads.has(validRecordId)) return { success: false, error: 'This recording is still uploading' };
-    return await withRecordingLock(validRecordId, () => finalizeRecording(validRecordId, validExt, expectedDurationSec));
+    return await withRecordingLock(validRecordId, () => inFlightUploads.has(validRecordId)
+      ? { success: false, error: 'This recording is still uploading' }
+      : finalizeRecording(validRecordId, validExt, expectedDurationSec));
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -3323,6 +3322,10 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext, expectedD
 async function finalizeRecording(recordId, ext, expectedDurationSec = 0) {
   const recordPath = getRecordingPath(recordId);
   try {
+    // A failed rebuild must not let automatic upload retries send an older
+    // audio.webm. Clear this durable gate only after finalization succeeds.
+    const pendingPath = path.join(recordPath, FINALIZATION_PENDING_MARKER);
+    await writeFileAtomic(pendingPath, JSON.stringify({ version: 1, startedAt: new Date().toISOString() }));
     const spaceCheck = await canFinalizeRecording(recordPath);
     if (!spaceCheck.canFinalize) {
       return { success: false, diskFull: true, ...spaceCheck, error: 'Insufficient disk space to finalize recording; source audio is preserved' };
@@ -3362,6 +3365,8 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0) {
       probe: async outputPath => safeParseDuration(await getAudioMetadata(outputPath)),
     });
     const result = await persistence.finalize(recordPath, ext);
+    await fs.promises.unlink(pendingPath);
+    syncDirectorySync(recordPath);
     updateRecordingMetadataOnCompletion(recordId, result.duration, true);
     checkForTruncation(recordId, result.duration, Number(expectedDurationSec) || 0);
     if (getActiveRecording()?.recordId === recordId) clearActiveRecording();
@@ -3678,6 +3683,11 @@ async function pollMeetingTranscriptionStatus(meetingId, maxAttempts = 30) {
 //      doesn't need a client-supplied duration.
 async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
   if (unsavedRecordingId === recordId) return { success: false, canDelete: false, canRetry: true, error: 'Finish saving the recording before uploading it' };
+  if (recordingLocks.has(recordId) || (isRecordingInProgress && getActiveRecording()?.recordId === recordId)) {
+    return { success: false, canDelete: false, canRetry: true, error: 'The recording is still being saved' };
+  }
+  const eligibility = await assessRecordingUpload({ recordId, filePath, recordingsRoot: getRecordingsPath() });
+  if (!eligibility.allowed) return { success: false, canDelete: false, canRetry: true, requiresFinalization: true, error: eligibility.error };
   const ownerId = recordingOwner(recordId);
   if (!canUploadForUser(ownerId, tokenUserId(await getAuthToken()))) {
     return { success: false, status: 401, canDelete: false, canRetry: true, error: 'Sign in to the account that owns this recording' };
