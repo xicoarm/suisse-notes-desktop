@@ -7,6 +7,16 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 export default function (ctx) {
+  const isElectronE2EBuild = ctx.mode.electron && process.env.SUISSE_E2E_HOOKS === '1';
+  let testApiOrigin = null;
+  if (isElectronE2EBuild) {
+    let apiUrl;
+    try { apiUrl = new URL(process.env.VITE_API_URL); } catch (_) { /* rejected below */ }
+    if (!apiUrl || apiUrl.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(apiUrl.hostname)) {
+      throw new Error('Electron E2E builds require VITE_API_URL to point to a local mock backend');
+    }
+    testApiOrigin = apiUrl.origin;
+  }
   return {
     eslint: {
       warnings: true,
@@ -39,15 +49,30 @@ export default function (ctx) {
       vueRouterMode: 'hash',
       // Use our custom Quasar variables for brand colors
       sassVariables: 'src/css/quasar.variables.scss',
-      // DEV ONLY: forward the API override into the renderer so the e2e
-      // harness can point the whole app (renderer + main) at its local mock
-      // backend. Never applied to production builds.
-      ...(ctx.dev && process.env.VITE_API_URL
+      // Forward the mock API override for dev and explicitly gated E2E bundles.
+      // Ordinary production/release builds retain the production configuration.
+      ...((ctx.dev || isElectronE2EBuild) && process.env.VITE_API_URL
         ? { env: { VITE_API_URL: process.env.VITE_API_URL } }
         : {}),
       // Enable source maps in CI for Sentry (when SENTRY_AUTH_TOKEN is set)
       ...(process.env.SENTRY_AUTH_TOKEN && ctx.mode.capacitor ? { sourcemap: true } : {}),
       extendViteConf(viteConf) {
+        if (isElectronE2EBuild) {
+          viteConf.plugins = viteConf.plugins || [];
+          viteConf.plugins.push({
+            name: 'suisse-e2e-loopback-csp',
+            transformIndexHtml: {
+              order: 'post',
+              handler(html) {
+                // Bundled renderer calls must reach the same mock as the main
+                // process. Keep index.html and every production CSP unchanged.
+                const directive = /\bconnect-src\s+[^;"]+/g;
+                if (html.match(directive)?.length !== 1) throw new Error('Expected one connect-src directive in the Electron E2E HTML');
+                return html.replace(directive, value => `${value} ${testApiOrigin}`);
+              }
+            }
+          });
+        }
         // Upload source maps to Sentry during CI mobile builds
         if (process.env.SENTRY_AUTH_TOKEN && ctx.mode.capacitor) {
           const { sentryVitePlugin } = require('@sentry/vite-plugin');

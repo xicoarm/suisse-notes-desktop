@@ -1,6 +1,6 @@
 import { ref } from 'vue';
 import { isElectron } from '../utils/platform';
-import { addSystemAudioStream } from '../services/recordingService';
+import { addSystemAudioStream, isNativeSourceRetained } from '../services/recordingService';
 
 // The loopback capture is inherently a singleton (one recording, one mix), but
 // this composable is instantiated fresh on every RecordPage mount while a
@@ -14,7 +14,15 @@ import { addSystemAudioStream } from '../services/recordingService';
 // system audio into a subsequent recording where the user had it DISABLED.
 let _activeMonitorRemove = null;
 
+// App-lifetime stop paths have no RecordPage/composable instance to call.
+// Release the owning Windows capture and revoke its asynchronous rebinds;
+// the caller still owns recording-mix teardown and macOS helper shutdown.
+export function stopSystemAudioRebindMonitor() {
+  _activeMonitorRemove?.({ releaseCapture: true });
+}
+
 export function useSystemAudio() {
+  let captureGeneration = 0;
   const systemAudioEnabled = ref(false);
   const permissionStatus = ref('unknown'); // 'unknown' | 'granted' | 'denied' | 'unsupported'
   const systemAudioStream = ref(null);
@@ -78,19 +86,22 @@ export function useSystemAudio() {
   const startCapture = async (recordId, offsetMs = 0) => {
     if (!systemAudioEnabled.value || !isSupported.value || !isElectron()) return null;
 
+    const generation = ++captureGeneration;
     isLoading.value = true;
     error.value = null;
 
     try {
       const support = await window.electronAPI.systemAudio.isSupported();
 
+      if (generation !== captureGeneration) return null;
       if (support.platform === 'win32') {
         // Windows: use desktopCapturer via renderer-side getUserMedia
-        return await startDesktopCapture();
+        return await startDesktopCapture(generation);
       }
 
       // macOS: use AudioTee via main process
       const result = await window.electronAPI.systemAudio.start(recordId, offsetMs);
+      if (generation !== captureGeneration) return null;
       if (!result.success) {
         error.value = result.error;
         if (result.error?.includes('permission') || result.error?.includes('denied')) {
@@ -247,7 +258,7 @@ export function useSystemAudio() {
   // reliable signal: re-acquire the loopback (it binds to the CURRENT default
   // output) and hot-swap the fresh track into the live recording mix.
   let rebindTimer = null;
-  let rebindInProgress = false;
+  let activeRebind = null;
   let monitorInstalled = false;
 
   const _onDeviceChange = () => scheduleLoopbackRebind('devicechange');
@@ -264,14 +275,24 @@ export function useSystemAudio() {
     navigator.mediaDevices.addEventListener('devicechange', _onDeviceChange);
   };
 
-  const removeRebindMonitor = () => {
-    if (!monitorInstalled) return;
-    monitorInstalled = false;
-    if (_activeMonitorRemove === removeRebindMonitor) _activeMonitorRemove = null;
-    navigator.mediaDevices.removeEventListener('devicechange', _onDeviceChange);
+  const removeRebindMonitor = ({ releaseCapture = false } = {}) => {
+    // Acquisitions cannot be cancelled, but a detached monitor no longer owns
+    // their result. A subsequent capture may start its own rebind immediately.
+    activeRebind = null;
+    if (monitorInstalled) {
+      monitorInstalled = false;
+      if (_activeMonitorRemove === removeRebindMonitor) _activeMonitorRemove = null;
+      navigator.mediaDevices.removeEventListener('devicechange', _onDeviceChange);
+    }
     if (rebindTimer) {
       clearTimeout(rebindTimer);
       rebindTimer = null;
+    }
+    if (releaseCapture) {
+      captureGeneration++;
+      const stoppedStream = systemAudioStream.value;
+      systemAudioStream.value = null;
+      if (!isNativeSourceRetained(stoppedStream)) stoppedStream?.getTracks().forEach(track => track.stop());
     }
   };
 
@@ -297,19 +318,23 @@ export function useSystemAudio() {
   };
 
   const rebindLoopback = async (reason) => {
-    if (rebindInProgress || !systemAudioStream.value) return;
+    if (activeRebind?.generation === captureGeneration || !systemAudioStream.value) return;
     // Only the instance that currently OWNS the monitor may rebind — a stale
     // instance (superseded by a RecordPage remount) must never re-acquire a
     // loopback and push it into someone else's recording mix.
     if (_activeMonitorRemove !== removeRebindMonitor) return;
-    rebindInProgress = true;
+    // The same composable can stop and restart while acquisition is pending.
+    // Monitor ownership alone does not distinguish those recording sessions.
+    const operation = { generation: captureGeneration };
+    activeRebind = operation;
     try {
       // Acquire the new binding BEFORE touching the old stream: if this
       // fails we keep whatever the old endpoint still delivers.
       const newStream = await acquireLoopbackStream();
 
-      if (!systemAudioStream.value) {
-        // Capture was stopped while we were acquiring — discard.
+      if (operation !== activeRebind || operation.generation !== captureGeneration ||
+          !systemAudioStream.value || _activeMonitorRemove !== removeRebindMonitor) {
+        // Capture was stopped or superseded while we were acquiring — discard.
         newStream.getTracks().forEach(t => t.stop());
         return;
       }
@@ -317,7 +342,11 @@ export function useSystemAudio() {
       const oldStream = systemAudioStream.value;
       // addSystemAudioStream detaches + stops the previous stream, then wires
       // the new one into the live mixing pipeline.
-      const attached = addSystemAudioStream(newStream);
+      const attached = await addSystemAudioStream(newStream);
+      if (operation !== activeRebind || operation.generation !== captureGeneration || _activeMonitorRemove !== removeRebindMonitor) {
+        if (!isNativeSourceRetained(newStream)) newStream.getTracks().forEach(track => track.stop());
+        return;
+      }
       systemAudioStream.value = newStream;
       watchTrackEnded(newStream);
 
@@ -326,17 +355,20 @@ export function useSystemAudio() {
       } else {
         // No active mixing pipeline (not recording right now): just carry the
         // fresh binding forward and release the stale one ourselves.
-        try { oldStream.getTracks().forEach(t => t.stop()); } catch { /* ignore */ }
+        try { if (!isNativeSourceRetained(oldStream)) oldStream.getTracks().forEach(t => t.stop()); } catch { /* ignore */ }
         diag('info', `loopback rebound after ${reason} (no active recording mix to attach to)`);
       }
     } catch (e) {
-      diag('error', `loopback rebind failed (${e.name || 'Error'}: ${e.message}) — keeping previous capture`);
+      if (operation === activeRebind && operation.generation === captureGeneration) {
+        diag('error', `loopback rebind failed (${e.name || 'Error'}: ${e.message}) — keeping previous capture`);
+      }
     } finally {
-      rebindInProgress = false;
+      // A stale completion must not unlock a newer acquisition.
+      if (operation === activeRebind) activeRebind = null;
     }
   };
 
-  const startDesktopCapture = async () => {
+  const startDesktopCapture = async (generation) => {
     try {
       // Record the endpoint split in main.log BEFORE capturing, so a "system
       // audio was silent" report is diagnosable from the log alone.
@@ -350,6 +382,10 @@ export function useSystemAudio() {
         );
       }
       const stream = await acquireLoopbackStream();
+      if (generation !== captureGeneration) {
+        stream.getTracks().forEach(track => track.stop());
+        return null;
+      }
       systemAudioStream.value = stream;
       installRebindMonitor();
       watchTrackEnded(stream);
@@ -368,12 +404,14 @@ export function useSystemAudio() {
 
   // Stop system audio capture (called when recording stops)
   const stopCapture = async () => {
+    captureGeneration++;
+    if (_activeMonitorRemove && _activeMonitorRemove !== removeRebindMonitor) _activeMonitorRemove();
     // Stop the rebind monitor first so an in-flight devicechange can't
     // resurrect the capture we are tearing down.
     removeRebindMonitor();
     // Stop desktopCapturer stream (Windows)
     if (systemAudioStream.value) {
-      systemAudioStream.value.getTracks().forEach(track => track.stop());
+      if (!isNativeSourceRetained(systemAudioStream.value)) systemAudioStream.value.getTracks().forEach(track => track.stop());
       systemAudioStream.value = null;
     }
     // Stop AudioTee (macOS)

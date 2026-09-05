@@ -25,11 +25,13 @@ export const useRecordingStore = defineStore('recording', {
   state: () => ({
     recordId: null,
     userId: null, // Track userId for multi-account handling
-    // Single authoritative state: idle | recording | paused | stopping | processing | uploading | uploaded | error
+    // Single authoritative state: idle | preparing | recording | paused | stopping | processing | uploading | uploaded | error
     phase: 'idle',
     startTime: null,
     duration: 0, // in seconds
     chunkIndex: 0,
+    captureMode: null,
+    finalizationRecoveryNeeded: false,
     audioFilePath: null,
     uploadProgress: 0,
     bytesUploaded: 0,
@@ -88,7 +90,7 @@ export const useRecordingStore = defineStore('recording', {
       return 0;
     },
     // True during any phase where the user must stay on the record page
-    isBlocking: (state) => ['recording', 'paused', 'stopping', 'processing', 'uploading'].includes(state.phase),
+    isBlocking: (state) => ['preparing', 'recording', 'paused', 'stopping', 'processing', 'uploading'].includes(state.phase),
     formattedDuration: (state) => {
       if (!state.duration || !isFinite(state.duration)) return '00:00:00';
       const hours = Math.floor(state.duration / 3600);
@@ -216,13 +218,13 @@ export const useRecordingStore = defineStore('recording', {
       }
     },
 
-    async startRecording(userId = null) {
+    async startRecording(userId = null, { deferCaptureStart = false, captureMode = null } = {}) {
       // Re-entrancy guard (double-start incident): a new session must not start
       // while a capture lifecycle is live — the body below regenerates recordId
       // and resets chunkIndex, which would corrupt the active chunk sequence.
       // The service-level latch blocks renderer double-starts; this protects
       // the store against any other caller.
-      if (['recording', 'paused', 'stopping', 'processing'].includes(this.phase)) {
+      if (['preparing', 'recording', 'paused', 'stopping', 'processing'].includes(this.phase)) {
         console.warn(`startRecording rejected: phase is '${this.phase}'`);
         return { success: false, error: `Cannot start a recording while phase is '${this.phase}'` };
       }
@@ -262,10 +264,12 @@ export const useRecordingStore = defineStore('recording', {
 
         this.recordId = uuidv4();
         this.userId = userId; // Store userId for use in saveChunk
-        this.phase ='recording';
+        this.phase = deferCaptureStart ? 'preparing' : 'recording';
         this.startTime = Date.now();
         this.duration = 0;
         this.chunkIndex = 0;
+        this.captureMode = captureMode;
+        this.finalizationRecoveryNeeded = false;
         this.error = null;
         this.integrity = createRecordingIntegrity(this.recordId);
 
@@ -274,7 +278,9 @@ export const useRecordingStore = defineStore('recording', {
           await window.electronAPI.recording.setInProgress(true);
 
           // Pass userId to createSession for metadata.json persistence
-          const result = await window.electronAPI.recording.createSession(this.recordId, '.webm', userId);
+          const result = captureMode
+            ? await window.electronAPI.recording.createSession(this.recordId, '.webm', userId, { captureMode })
+            : await window.electronAPI.recording.createSession(this.recordId, '.webm', userId);
 
           if (!result.success) {
             await window.electronAPI.recording.setInProgress(false);
@@ -327,6 +333,12 @@ export const useRecordingStore = defineStore('recording', {
       }
     },
 
+    confirmCaptureStarted() {
+      if (this.phase !== 'preparing') return;
+      this.phase = 'recording';
+      this.startTime = Date.now();
+    },
+
     pauseRecording() {
       if (this.phase === 'recording') {
         this.phase ='paused';
@@ -341,7 +353,7 @@ export const useRecordingStore = defineStore('recording', {
       }
     },
 
-    async stopRecording() {
+    async stopRecording(expectedDurationSec = this.duration) {
       try {
         this.phase ='stopped';
         stopStorageMonitor();
@@ -356,11 +368,19 @@ export const useRecordingStore = defineStore('recording', {
           // Pass the wall-clock duration so main can tell whether the combined file
           // actually contains the meeting. Main has no other source for this:
           // metadata.json only gets a duration AFTER the combine, from the probe.
-          const result = await window.electronAPI.recording.combineChunks(this.recordId, '.webm', this.duration);
+          const expected = Number.isFinite(expectedDurationSec) ? expectedDurationSec : this.duration;
+          // A required PCM capture can fail after preserving some audio. The
+          // first save reports that interruption; an explicit Retry Saving
+          // recovers available sources and keeps the warning in History.
+          const result = this.finalizationRecoveryNeeded
+            ? await window.electronAPI.recording.combineChunks(this.recordId, '.webm', expected, { recovery: true })
+            : await window.electronAPI.recording.combineChunks(this.recordId, '.webm', expected);
+          if (result.requiresRecovery) this.finalizationRecoveryNeeded = true;
 
           await window.electronAPI.recording.setProcessing(false);
 
           if (result.success) {
+            this.finalizationRecoveryNeeded = false;
             this.audioFilePath = result.outputPath;
             sentryRecordingStop(this.recordId, this.duration);
             return { success: true, filePath: result.outputPath, duration: result.duration || null, warning: result.warning };
@@ -379,7 +399,7 @@ export const useRecordingStore = defineStore('recording', {
               shortfallMB: result.shortfallMB,
               neededMB: result.neededMB,
               error: this.error,
-              partialRecovery: this.chunkIndex > 0,
+              partialRecovery: this.chunkIndex > 0 || this.captureMode === 'native-sources-v1',
               chunkCount: this.chunkIndex,
               recordId: this.recordId
             };
@@ -421,7 +441,7 @@ export const useRecordingStore = defineStore('recording', {
           success: false,
           error: error.message,
           diskFull: /ENOSPC|no space left/i.test(error.message || ''),
-          partialRecovery: this.chunkIndex > 0,
+          partialRecovery: this.chunkIndex > 0 || this.captureMode === 'native-sources-v1',
           chunkCount: this.chunkIndex,
           recordId: this.recordId
         };
@@ -468,7 +488,7 @@ export const useRecordingStore = defineStore('recording', {
         // Best-effort system-audio teardown (desktop only; no-op on mobile).
         const stopSystemAudio = async () => {
           try {
-            svc.removeSystemAudioStream?.();
+            await svc.removeSystemAudioStream?.();
             svc.setSystemAudioActive?.(false);
             if (isElectron() && window.electronAPI?.systemAudio?.stop) {
               await window.electronAPI.systemAudio.stop();
@@ -654,13 +674,13 @@ export const useRecordingStore = defineStore('recording', {
 
             if (isElectron()) {
               // Pass userId for crash recovery state tracking
-              result = await window.electronAPI.recording.saveChunk(
-                this.recordId,
-                chunkData,
-                this.chunkIndex,
-                '.webm',
-                this.userId
-              );
+              let timeout;
+              try {
+                result = await Promise.race([
+                  window.electronAPI.recording.saveChunk(this.recordId, chunkData, this.chunkIndex, '.webm', this.userId),
+                  new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Saving audio timed out; bytes retained for retry')), 30000); }),
+                ]);
+              } finally { clearTimeout(timeout); }
             } else if (isCapacitor()) {
               result = await storage.saveChunk(
                 this.recordId,
@@ -673,9 +693,18 @@ export const useRecordingStore = defineStore('recording', {
             }
 
             if (result.success) {
-              // Track integrity
+              // Only acknowledged writes advance integrity, inside this
+              // serialized save loop with no await between its updates.
               if (this.integrity) {
-                this.integrity = addChunkToRecordingIntegrity(this.integrity, chunkIntegrity);
+                if (isElectron()) {
+                  // Keep long desktop recordings linear instead of copying
+                  // the entire growing array for every saved chunk.
+                  this.integrity.chunks.push(chunkIntegrity);
+                  this.integrity.totalSize += chunkIntegrity.size;
+                } else {
+                  // Mobile metadata writes retain a snapshot across an await.
+                  this.integrity = addChunkToRecordingIntegrity(this.integrity, chunkIntegrity);
+                }
               }
               this.chunkIndex++;
               return { success: true };
@@ -1105,6 +1134,8 @@ export const useRecordingStore = defineStore('recording', {
       this.startTime = null;
       this.duration = 0;
       this.chunkIndex = 0;
+      this.captureMode = null;
+      this.finalizationRecoveryNeeded = false;
       this.audioFilePath = null;
       this.uploadProgress = 0;
       this.bytesUploaded = 0;

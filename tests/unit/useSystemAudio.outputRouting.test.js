@@ -19,7 +19,7 @@ vi.mock('../../src/utils/platform', () => ({
 }));
 
 vi.mock('../../src/services/recordingService', () => ({
-  addSystemAudioStream: vi.fn()
+  addSystemAudioStream: vi.fn(), isNativeSourceRetained: () => false
 }));
 
 import { useSystemAudio } from '../../src/composables/useSystemAudio';

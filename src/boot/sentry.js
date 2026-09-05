@@ -110,6 +110,7 @@ function filterBreadcrumbs(breadcrumb) {
  * Initialize Sentry for Electron desktop renderer
  */
 async function initElectronRenderer(app, router) {
+  if (window.electronAPI?.isE2E) return; // Synthetic faults are retained in local test logs.
   // Desktop renderer uses the same DSN as electron-main.js
   const dsn = 'https://185912b1585eb5138079ae189a6d41ec@o4510659364716544.ingest.de.sentry.io/4510659366748240';
 

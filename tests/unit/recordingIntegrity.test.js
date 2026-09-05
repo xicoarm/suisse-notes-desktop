@@ -38,25 +38,15 @@ describe('evaluateTruncation', () => {
     expect(evaluateTruncation(240, 236).truncated).toBe(false);
   });
 
-  it('ignores a shortfall under the absolute floor even in a short meeting', () => {
-    // 20s missing from 100s clears 10% but not 30s — noise, not data loss.
-    const v = evaluateTruncation(80, 100);
-    expect(v.truncated).toBe(false);
-    expect(v.reason).toBe('below-absolute-floor');
+  it('flags missing speech in short and long meetings', () => {
+    expect(evaluateTruncation(80, 100)).toMatchObject({ truncated: true, shortfallSec: 20 });
+    expect(evaluateTruncation(14360, 14400)).toMatchObject({ truncated: true, shortfallSec: 40 });
+    expect(evaluateTruncation(950, 1000).truncated).toBe(true);
   });
 
-  it('ignores a shortfall under the relative floor in a long meeting', () => {
-    // 40s missing from 4 hours is 0.3% — encoder trim, not loss.
-    const v = evaluateTruncation(14360, 14400);
-    expect(v.truncated).toBe(false);
-    expect(v.reason).toBe('below-relative-floor');
-  });
-
-  it('needs BOTH floors cleared', () => {
-    // 100s missing from 600s: 100 > 30 absolute AND 100 > 60 relative.
-    expect(evaluateTruncation(500, 600).truncated).toBe(true);
-    // 50s missing from 1000s: clears absolute, fails relative (needs 100).
-    expect(evaluateTruncation(950, 1000).truncated).toBe(false);
+  it('allows small timing differences but warns at the five-second boundary', () => {
+    expect(evaluateTruncation(95.1, 100)).toMatchObject({ truncated: false, reason: 'below-absolute-floor' });
+    expect(evaluateTruncation(95, 100)).toMatchObject({ truncated: true, shortfallSec: 5 });
   });
 
   it('never cries wolf when either number is unknown', () => {

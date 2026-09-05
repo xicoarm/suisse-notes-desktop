@@ -1,0 +1,77 @@
+# Hosted desktop audio qualification
+
+## Capture-clock investigation
+
+Manual `run_capture_clock=true` on `audio-reliability.yml` (with `run_endurance=false`)
+runs `s16-capture-clock-diagnostic` on Windows, Intel Mac and Apple Silicon. Each job
+records two sequential three-minute cases, using default and disabled microphone
+processing. One native acquisition feeds a direct recorder on a cloned input and
+the unchanged application's actual mixer/recorder. There is no hardware microphone,
+system-audio capture or production traffic. The existing 20-minute supervisor and
+23-minute step deadline bound the pair; original profiles and audio are retained.
+
+The result records native settings, observed recorder intervals, AudioContext versus
+monotonic clock deltas, both audio files, and alignment of common numbered source
+frames. Differing start/stop endpoints are excluded from the shared interval.
+Disabled processing can negotiate a different sample rate/channel count, so this
+is not automatically a single-variable comparison of processing alone. The direct
+witness also adds encoder workload. A green diagnostic means measurement completed
+with valid controls; it does **not** qualify five hours or clear historical failures.
+
+The failed 5h05 artifacts from run `33932066219` were independently compared offline:
+original chunks, final packets/timestamps and decoded PCM match on all three OSes.
+The decoded-sample shortfalls already exist in the original capture, while packet
+timestamps span approximately the full recording interval. Capture, synthetic source,
+processing and scheduling remain under investigation; no test tolerance is relaxed.
+Boundary coverage now uses actual first/last identified positions in decoded audio.
+The global median source offset remains a separate clock diagnostic; timing drift
+must not let that median conceal an unrecognized beginning or ending.
+
+Dispatch after reviewing/pushing the intended branch:
+
+```sh
+gh workflow run audio-reliability.yml --ref REVIEWED_BRANCH --field run_capture_clock=true
+```
+
+An optional `--field capture_buffer_trace=true` adds a 30-second trace near the
+middle of each case, using Chromium's `disabled-by-default-mediastream` events.
+The trace has a 16 MiB native buffer, independent 45-second stop deadline and
+64 MiB export cap. Collection stops during capture; bytes are exported only after
+both recorders stop, and analysis runs after the app closes. Missing events,
+buffer loss and export failures stay visible. Trace overhead is an additional
+experimental variable; compare against the retained untraced run. Several health
+and recording AudioContexts are present, so a FIFO event alone does not identify
+the recording mixer. The trace is disabled in ordinary qualification and releases.
+
+Untraced run `33972112297` reproduced a short Intel Mac failure: with processing
+disabled, two numbered markers split only in the actual mixed output, with 650 ms
+relative drift over the common interval. The direct branch retains single marker
+groups. The mixed packet span exceeds decoded sample duration by 808 ms, versus
+80 ms in the direct branch. All original mixed chunks, final packets/timestamps,
+decoded PCM and upload bytes match. Windows and Apple Silicon completed without
+split/missing/reordered groups; Apple Silicon still measured 190 ms relative
+drift with processing disabled. These are diagnostic findings, not release passes.
+
+## Existing qualification suites
+
+`audio-reliability.yml` runs `s11-capture-qualification`, `s12-device-qualification`, and `s15-main-crash-qualification` on pull requests to `main` and ordinary manual workflow dispatch. Its matrix uses Windows Server 2022 x64, macOS 15 Intel, and macOS 26 Apple Silicon. These are native OS jobs using the installed Electron runtime and the unsigned `dist/electron/UnPackaged` test bundle. The device suite exercises synthetic microphone track loss/reconnection and exact-zero input with live warnings, saved-source checks and decoded audio verification. The crash suite forcibly stops the owned test application's process tree, relaunches its isolated profile, and checks durable audio recovery, upload bytes, retained source chunks, and visible recording history. It does not simulate a power cut or test hardware disk caches. No installer, signature, release, tag, backend deployment, or publication is produced.
+
+Node 24 installs the locked dependencies and the matching FFmpeg/ffprobe binaries. The test bundle explicitly embeds a loopback mock API address. Only an Electron build with `SUISSE_E2E_HOOKS=1` adds that validated HTTP loopback origin to the bundled HTML's `connect-src`; production HTML and CSP remain unchanged. This lets renderer requests for minutes, history and templates reach the mock instead of silently relying on fallback state. `SUISSE_E2E_HOOKS=1` and `SUISSE_TEST_NETWORK_ISOLATION=1` enable test isolation; the supervisor also strips inherited service tokens and signing credentials before launching the harness. The harness generates its own microphone input and uses only synthetic accounts in isolated profiles.
+
+The capture and device scenarios each have a 20-minute supervisor deadline and a 23-minute workflow step limit. The following crash scenario has a 10-minute supervisor deadline and a 13-minute step limit. The 90-minute native job budget leaves room for setup, build, and the five-minute evidence upload step. After a successful build, both the device and crash suites run even when an earlier suite fails, unless the workflow is cancelled. Failure is never converted to a skipped or successful result. Supervisor logs are separated under `work/ci/<scenario>/`. The artifact step runs after ordinary test/build failures and retains the entire harness work directory for 30 days, including original audio chunks, finalized audio, profiles, result JSON, renderer/WebAudio diagnostics, and CI logs. A runner loss or force-cancel can still prevent artifact upload. Re-running a job creates a separate artifact rather than replacing earlier evidence.
+
+GitHub provisions these jobs on fresh VMs. Chromium's fake-device switch replaces the actual microphone, and its file-input switch supplies the generated WAV. Therefore a pass validates the Electron capture/mixing/recording/persistence code exercised by the scenario on that OS; it does **not** validate Bluetooth profile changes, USB unplugging, physical audio drivers, native AudioTee system capture, or actual macOS privacy permission prompts. A hosted-runner permission or device-startup failure must remain visible and be investigated. The harness does not edit TCC databases, bypass Gatekeeper, or change OS privacy permissions. [GitHub runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners), [Chromium fake-media switches](https://github.com/chromium/chromium/blob/main/media/base/media_switches.cc), [Electron media permissions](https://www.electronjs.org/docs/latest/api/system-preferences#systempreferencesaskformediaaccessmediatype-macos)
+
+There is one explicit sandbox exception for synthetic input: on macOS native Electron launches, AppDriver adds `--disable-features=AudioServiceSandbox` only when a fake WAV file exists, both API URLs are HTTP loopback addresses, and both test/isolation flags equal `1`. The first Intel and Apple Silicon CI runs logged fake-file open failures and produced exact digital silence. Chromium 120 enables the audio-service sandbox on macOS, and its fake source returns no frames when that file cannot be opened. The launch exception lets that audio utility process read the fixture; it does not disable the renderer or global Chromium sandbox and does not alter the production app. Consequently, a passing synthetic run also does not qualify operation of the audio-service sandbox itself. The driver logs the exception in retained evidence. [Chromium audio-service feature](https://github.com/chromium/chromium/blob/120.0.6099.291/content/public/common/content_features.cc), [Chromium fake-file failure path](https://github.com/chromium/chromium/blob/120.0.6099.291/media/audio/simple_sources.cc)
+
+Artifact retention is finite and subject to repository settings. Download evidence that needs to be kept longer before it expires. The artifact includes hidden files only within the synthetic work directory; never extend that path to a developer home, real profile, checkout root, or credential directory. [GitHub artifact storage](https://docs.github.com/en/actions/tutorials/store-and-share-data), [Upload-artifact retention and hidden-file behavior](https://github.com/actions/upload-artifact)
+
+`audio-endurance.yml` provides **manual-only** qualification for `s13-coded-endurance` on the same three native operating systems. It supports direct manual dispatch and a reusable entry called only when the existing reliability workflow is manually dispatched with `run_endurance=true`. That boolean defaults to false; push/pull-request runs and ordinary manual runs retain the short suites. An endurance dispatch skips the short suites and runs only the three endurance jobs. It forces a real 18,300-second (5h05) capture with ordinary microphone processing and the default 17,700-second (4h55) source rotation. It exposes no input that can shorten capture or disable processing. The supervisor rejects altered duration/processing/rotation settings, strips credentials, supplies the checked-out Git SHA to the harness, and requires `fiveHourQualificationPassed: true` in the result before declaring success. A local 45-second smoke cannot satisfy this workflow.
+
+The endurance supervisor allows 330 minutes, the capture step 335 minutes, and the native job 360 minutes. This gives 25 minutes beyond the requested capture for startup, reference generation, local upload, and full decoded verification, with additional job time for dependency installation, build, and artifact upload. A slow or terminated job fails and retains whatever evidence the runner can upload; elapsed capture time alone does not count as a pass. No timers or audio are accelerated. The scenario checks available disk space before generating its roughly 1.8 GB input WAV, samples free space and recording/persistence/memory state every 30 seconds, writes progress JSONL, and preserves a bounded summary. A critical low-space condition stops only the synthetic app and retains its durable sources.
+
+Endurance success requires strict numbered-frame continuity, decoded duration matching native recorder timing, natural source rotation, every original chunk retained, exact final/local-mock upload hashes, and a retained local backup. It does **not** prove that production accepts a recording longer than five hours: the production backend currently has a five-hour limit. Nor does it qualify physical Bluetooth/USB devices, native system-audio capture, actual permission dialogs, power loss, or every possible runtime interruption. These three jobs specifically qualify sustained synthetic microphone capture through the native Electron pipeline and local upload custody.
+
+Endurance artifacts last **seven days** and include final audio, all original source batches, the isolated profiles, result/manifest JSON, chunk manifests, progress logs, and renderer/WebAudio evidence. Only regenerable `work/scenarios/*.wav` inputs are excluded to avoid uploading three additional multi-gigabyte references. Their `scenarios/*.json` metadata remains. The CI manifest identifies the generator, checked-out revision, full 18,325-second reference plan, and initial frame ID `0`; this all-coded signal uses no random seed. To regenerate an input, check out that manifest's commit and call `buildCodedScenario(metadata.name, metadata.timeline, { outputDir })` from `tests/e2e-harness/lib/coded-audio.js` using the retained scenario metadata. Keep regenerated files inside ignored harness work.
+
+After reviewing and pushing the intended branch, request the run through the already registered workflow: `gh workflow run audio-reliability.yml --repo xicoarm/suisse-notes-desktop --ref REVIEWED_BRANCH --field run_endurance=true`. This selects the reviewed branch's local reusable endurance workflow; no application merge into `main` is required to register a new standalone workflow. Direct dispatch of `audio-endurance.yml` is also available once GitHub recognizes it. Confirm the resulting run's head SHA before relying on it. If GitHub rejects the dispatch, report it as blocked; do not merge or publish application changes merely to enable the test. Adding this workflow or passing its smoke test does not mean a real five-hour run has completed. These workflows perform no signing, installer packaging, release publication, tag creation, or backend deployment.

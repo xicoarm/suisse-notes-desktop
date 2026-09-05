@@ -411,7 +411,8 @@ export default {
             if (result.canDelete && recordingStore.canDelete(recording.id)) {
               try {
                 if (isElectron()) {
-                  await window.electronAPI.recording.deleteRecording(recording.id);
+                  const deletion = await window.electronAPI.recording.deleteRecording(recording.id, { requireVerified: true });
+            if (!deletion?.success) throw new Error(deletion?.error || 'Local audio could not be deleted');
                 }
                 // On mobile, skip file deletion for now (files managed by storage service)
                 await historyStore.updateRecording(recording.id, { filePath: null });
@@ -430,7 +431,8 @@ export default {
           });
         } else {
           await historyStore.updateRecording(recording.id, {
-            uploadStatus: 'failed',
+            uploadStatus: result.pendingVerification ? 'pending_verification' : 'failed',
+            ...(result.audioFileId ? { audioFileId: result.audioFileId } : {}),
             uploadError: result.error
           });
 
@@ -625,9 +627,8 @@ export default {
       if (!historyStore.loaded) {
         await historyStore.loadRecordings();
       } else if (isElectron()) {
-        // Desktop: silently refresh so recordings made on other devices (or
-        // since the last visit) appear without an app restart. Mobile already
-        // accumulates its full history via the local cache, so it's left as-is.
+        // Refresh local capture warnings without delaying progress listeners
+        // while server history is unavailable or slow.
         historyStore.loadRecordings({ background: true });
       }
 

@@ -1,0 +1,90 @@
+name: Desktop audio five-hour endurance
+
+# Expensive real-time qualification: direct manual dispatch or the registered
+# reliability workflow's explicit manual input, never automatically on a PR.
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audio-endurance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  coded-endurance:
+    name: Real 5h05 capture / ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-2022
+          - name: macos-intel
+            os: macos-15-intel
+          - name: macos-arm64
+            os: macos-26
+    env:
+      CI: 'true'
+      HUSKY: '0'
+      API_BASE_URL: http://127.0.0.1:3000
+      VITE_API_URL: http://127.0.0.1:3000
+      SUISSE_E2E_HOOKS: '1'
+      SUISSE_TEST_NETWORK_ISOLATION: '1'
+      SUISSE_E2E_APP_DIR: dist/electron/UnPackaged
+      SUISSE_ENDURANCE_SECONDS: '18300'
+      SUISSE_ENDURANCE_PROCESSING_DISABLED: '0'
+      VITE_SUISSE_MAX_DURATION_SECONDS: ''
+      # No signing, production API, or upload credentials are provided.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      SENTRY_AUTH_TOKEN: ''
+      GH_TOKEN: ''
+      GITHUB_TOKEN: ''
+
+    steps:
+      - name: Check out the reviewed revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install locked dependencies
+        timeout-minutes: 8
+        run: npm ci
+
+      - name: Prepare native FFmpeg and ffprobe
+        timeout-minutes: 2
+        run: node scripts/prepare-ffmpeg.js
+
+      - name: Build an unsigned Electron test bundle
+        timeout-minutes: 8
+        run: npx quasar build -m electron --skip-pkg
+
+      # The inner 330-minute deadline leaves 25 minutes after the requested
+      # capture for startup, streamed reference generation, upload and decode.
+      - name: Qualify a real five-hour-five-minute recording
+        timeout-minutes: 335
+        run: node tests/e2e-harness/ci/run-qualification.js s13-coded-endurance
+
+      - name: Preserve captured audio and original source chunks
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: audio-endurance-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            tests/e2e-harness/work/
+            !tests/e2e-harness/work/scenarios/*.wav
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0

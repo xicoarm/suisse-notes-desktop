@@ -239,6 +239,9 @@ function buildScenario(name, plan, opts = {}) {
 
 module.exports = {
   buildScenario,
+  // Portable numbered-frame fixture for strict continuity qualification.
+  // Keep legacy spoken scenarios unchanged for their existing level checks.
+  buildCodedScenario: (...args) => require('./coded-audio').buildCodedScenario(...args),
   generateSegment,
   SAMPLE_RATE,
   PULSE_FREQ_HZ,

@@ -638,7 +638,7 @@ const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts 
   const pollInterval = 2000; // 2 seconds between polls
   let currentToken = authToken;
   // We only refresh-and-retry once per poll session — if the second attempt
-  // also 401s, the token can't be saved and we accept trust-based fallback
+  // also 401s, verification remains pending and local audio is retained
   // (the audio bytes already landed via the authenticated POST).
   let didTokenRefresh = false;
   const buildHeaders = () => (currentToken ? { Authorization: `Bearer ${currentToken}` } : {});
@@ -648,13 +648,13 @@ const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts 
       const response = await fetch(`${apiUrl}/api/desktop/upload/${audioFileId}/status`, { headers: buildHeaders() });
 
       if (!response.ok) {
-        // Server doesn't support status endpoint yet, fall back to trust-based
+        // A missing recording is not proof of a missing status route.
         if (response.status === 404) {
-          console.warn('Upload status endpoint not available, using trust-based confirmation');
-          return { persisted: true, verified: false, fallback: true };
+          console.warn('Server has not confirmed the recording (404); retaining local audio');
+          return { persisted: false, verified: false, error: 'Server has not confirmed this recording (404)' };
         }
         // 401: try one token refresh on the first occurrence, then retry the
-        // same poll attempt. If that's also 401, fall back to trust-based —
+        // same poll attempt. If that also fails, retain the local audio —
         // the user shouldn't see "failed" because of a polling-side auth
         // problem after the audio bytes already landed via the authenticated
         // POST. Refresh is at most once per pollServerStatus call.
@@ -673,8 +673,8 @@ const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts 
               console.warn('Upload status token refresh threw:', refreshErr.message);
             }
           }
-          console.warn('Upload status endpoint returned 401; using trust-based confirmation');
-          return { persisted: true, verified: false, fallback: true, authError: true };
+          console.warn('Upload status unauthorized; retaining local audio');
+          return { persisted: false, verified: false, authError: true, error: 'Sign in to confirm the uploaded recording' };
         }
         throw new Error(`Status check failed: ${response.status}`);
       }
@@ -697,7 +697,7 @@ const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts 
       const s = status.status;
       const PERSISTED_STATES = new Set([
         'persisted', 'complete', 'processing',         // legacy (kept in lockstep with electron-main)
-        'UPLOADING', 'PROCESSING', 'COMPLETED',        // contract
+        'PROCESSING', 'COMPLETED',                     // stored by the verified backend contract
       ]);
       const FAILED_STATES = new Set([
         'failed',                                       // legacy
@@ -724,16 +724,11 @@ const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts 
         return { persisted: false, verified: false, error: status.errorMessage || status.error || `Server reported status=${s}` };
       }
 
-      // DUREC-1: RECORDING means the server is still ingesting — keep polling.
-      // Any OTHER unrecognized status means the backend added a
-      // post-persistence state the client doesn't know yet; the bytes already
-      // landed via the authenticated upload, so treat as persisted
-      // (trust-based) rather than polling to a false "confirmation timeout"
-      // that triggers a duplicate re-upload and burns the user's minutes.
+      // Unknown status cannot confirm storage. Retain local audio and the receipt.
       if (s !== 'RECORDING' && s !== 'recording') {
-        console.warn(`Upload status unrecognized "${s}" — treating as persisted (fail-safe)`);
+        console.warn(`Upload status unrecognized "${s}" — retaining local audio until confirmation`);
         try { captureMessage(`upload: unknown status enum=${s}`, 'warning'); } catch { /* sentry optional */ }
-        return { persisted: true, verified: false, fallback: true, unknownStatus: s };
+        return { persisted: false, verified: false, error: 'Unrecognized server recording status: ' + s };
       }
       // RECORDING — server hasn't confirmed persistence yet. Keep polling.
       await sleep(pollInterval);
@@ -821,7 +816,7 @@ export const uploadWithVerification = async (options) => {
     // Skip on mobile — reading the file for checksumming is expensive (base64 decode)
     // and the file will be read again for the actual upload, causing a long freeze.
     // TUS protocol has its own integrity checks on mobile.
-    if (!isCapacitor()) {
+    if (!isCapacitor() && !isElectron()) {
       onStatusChange('calculating_checksum');
       try {
         let fileData;
@@ -869,11 +864,13 @@ export const uploadWithVerification = async (options) => {
               continue;
             }
           }
-          throw new Error(uploadResult.error || 'Upload failed');
+          return { ...uploadResult, canDelete: false };
         }
-
-        audioFileId = uploadResult.audioFileId;
-        break;
+        // Main owns the durable receipt and verification. Preserve its verdict
+        // and deletion flag instead of running a second, weaker renderer poll.
+        onStatusChange('complete');
+        sentryUploadSuccess(recordId, uploadResult.audioFileId);
+        return uploadResult;
       } else if (isCapacitor() || file) {
         // Try direct-to-Azure-Blob via SAS URL (works on iOS, Android, browser
         // file picker). Falls through to simple POST when the server reports
@@ -1001,14 +998,14 @@ export const uploadWithVerification = async (options) => {
       };
     }
 
-    // Upload successful and verified (or trust-based)
+    // Upload confirmation succeeded; deletion still requires verified storage.
     if (isCapacitor() && recordId) removeFromMobileUploadQueue(recordId); // DMOB-6
     onStatusChange('complete');
     sentryUploadSuccess(recordId, audioFileId);
     return {
       success: true,
       audioFileId,
-      canDelete: true,
+      canDelete: verification.verified === true,
       verified: verification.verified,
       fallback: verification.fallback
     };

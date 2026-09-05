@@ -36,7 +36,7 @@ class MockAudioContext {
 // A MediaRecorder we can WEDGE: normally requestData()/timeslice would emit a
 // chunk; when wedged=true it stops emitting entirely while state stays 'recording'.
 class MockMediaRecorder {
-  constructor() { this.state = 'inactive'; this.ondataavailable = null; this.onstop = null; this.onerror = null; this.wedged = false; }
+  constructor() { this.state = 'inactive'; this.ondataavailable = null; this.onstop = null; this.onerror = null; this.wedged = false; MockMediaRecorder.last = this; }
   start() { this.state = 'recording'; }
   stop() { this.state = 'inactive'; if (this.onstop) this.onstop(); }
   pause() { this.state = 'paused'; }
@@ -107,8 +107,12 @@ describe('wedged MediaRecorder is detected and safely finalized (ELECTRON-23 cla
   it('a recorder that stops emitting chunks is detected within ~30s and escalates to stop-with-save', async () => {
     const store = createStore();
     await startWithRecorder(store);
-    // The MockMediaRecorder never emits a chunk (fully wedged from the start) —
-    // the worst case: lastSuccessfulChunkAt never advances past the start time.
+    // Capture begins normally, then wedges. No initial chunks has its own
+    // earlier 10-second warning, covered in the startup regression suite.
+    const recorder = MockMediaRecorder.last;
+    recorder.ondataavailable({ target: recorder, data: { size: 3, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.saveChunk).toHaveBeenCalledWith([1, 2, 3]);
 
     // Advance past STALL_WARN_MS (30s) so the 5s stateVerification watchdog trips
     // and reports the stall (this is what became a 932s Sentry event on 4.4.1).

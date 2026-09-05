@@ -12,6 +12,23 @@
             {{ statusLabel }}
           </span>
           <span
+            v-if="hasCaptureWarnings"
+            class="capture-warning-badge"
+            data-test="history-capture-warning"
+            :data-record-id="recording.id"
+            tabindex="0"
+            :title="$t('historyCaptureWarningDescription')"
+            :aria-label="$t('historyCaptureWarningDescription')"
+            @click.stop
+          >
+            <q-icon
+              name="hearing"
+              size="12px"
+            />
+            {{ $t('historyCaptureWarningLabel') }}
+            <q-tooltip>{{ $t('historyCaptureWarningDescription') }}</q-tooltip>
+          </span>
+          <span
             v-if="recording.source === 'device'"
             class="source-badge device"
           >
@@ -49,7 +66,7 @@
               name="auto_delete"
               size="xs"
             />
-            <span>{{ $t('autoDelete') }}</span>
+            <span>{{ $t(isDesktop ? 'autoDeletePaused' : 'autoDelete') }}</span>
           </div>
         </div>
 
@@ -245,6 +262,8 @@
           color="grey-7"
           size="sm"
           :disable="uploading"
+          data-test="history-expand"
+          :data-record-id="recording.id"
           @click="expanded = !expanded"
         >
           <q-tooltip>{{ expanded ? $t('hide') : $t('play') }}</q-tooltip>
@@ -295,6 +314,8 @@
             :color="isRecoverable ? 'grey-7' : 'negative'"
             :label="$t('delete')"
             :disable="uploading"
+            data-test="history-delete"
+            :data-record-id="recording.id"
             @click="onDelete"
           />
         </div>
@@ -319,6 +340,7 @@
         <q-card-section v-if="recording.filePath">
           <q-checkbox
             v-model="deleteFile"
+            data-test="history-delete-file"
             :label="$t('deleteFileAlso')"
             color="negative"
           />
@@ -330,6 +352,7 @@
             flat
             :label="$t('cancel')"
             color="grey-7"
+            data-test="history-delete-cancel"
           />
           <q-btn
             flat
@@ -382,20 +405,16 @@ export default {
 
     const expanded = ref(false);
     const showDeleteDialog = ref(false);
-    const deleteFile = ref(true);
+    const deleteFile = ref(false);
     const linkLoading = ref(false);
     const exporting = ref(false);
     const isDesktop = isElectron();
+    const hasCaptureWarnings = computed(() => isDesktop && Array.isArray(props.recording.captureWarnings) &&
+      props.recording.captureWarnings.some(kind => typeof kind === 'string' && kind.trim()));
 
-    // A recording is "recoverable" once it has a cloud copy. Deleting it then
-    // only drops the local file — the cloud copy is still available. Without a
-    // cloud copy, delete is permanent loss, so the dialog escalates and the
-    // "also delete file from disk" checkbox defaults to unchecked.
-    //
-    // pending_verification counts as recoverable: the upload succeeded, the
-    // bytes are on the server, the audioFileId is known. The only thing we
-    // haven't yet confirmed is the post-upload status poll (often a server
-    // race or trust-based fallback). The user shouldn't lose this recording.
+    // A known server ID enables the online actions. It is not proof that the
+    // remote audio remains recoverable, so desktop deletion never selects the
+    // local-file checkbox from this status alone.
     const isRecoverable = computed(() =>
       (props.recording.uploadStatus === 'uploaded' ||
        props.recording.uploadStatus === 'pending_verification')
@@ -427,10 +446,7 @@ export default {
         pending: 'statusPending',
         uploading: 'statusUploading',
         uploaded: 'statusUploaded',
-        // 'pending_verification' = audio bytes uploaded successfully, but
-        // server-side persistence check timed out / fell back to trust-based.
-        // The file IS on the server, we just haven't been able to confirm it
-        // yet. Soft state — the recording is safely on the server.
+        // An accepted ID is awaiting confirmation; retain the local backup.
         pending_verification: 'statusPendingVerification',
         failed: 'statusFailed',
         recording: 'statusRecording',
@@ -510,11 +526,9 @@ export default {
     };
 
     const onDelete = () => {
-      // Reset the "delete file from disk" checkbox each time so the default
-      // matches the current recording's recoverability — unchecked when the
-      // recording has no cloud copy yet, so accidental confirmation still
-      // leaves the audio file on disk for manual recovery.
-      deleteFile.value = isRecoverable.value;
+      // Removing a desktop history entry must not implicitly select permanent
+      // audio deletion, even after a successful upload. Reset on every opening.
+      deleteFile.value = isDesktop ? false : isRecoverable.value;
       showDeleteDialog.value = true;
     };
 
@@ -551,6 +565,7 @@ export default {
       openFileLocation,
       onExport,
       isDesktop,
+      hasCaptureWarnings,
       onDelete,
       confirmDelete
     };
@@ -638,6 +653,7 @@ export default {
 
 .card-title {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-bottom: 4px;
@@ -647,6 +663,18 @@ export default {
     font-size: 12px;
     color: #1e293b;
   }
+}
+
+.capture-warning-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: #fef3c7;
+  color: #78350f;
+  font-size: 10px;
+  font-weight: 600;
 }
 
 .view-transcript-link {
