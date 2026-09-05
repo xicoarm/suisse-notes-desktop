@@ -1,5 +1,37 @@
 # Hosted desktop audio qualification
 
+## Capture-clock investigation
+
+Manual `run_capture_clock=true` on `audio-reliability.yml` (with `run_endurance=false`)
+runs `s16-capture-clock-diagnostic` on Windows, Intel Mac and Apple Silicon. Each job
+records two sequential three-minute cases, using default and disabled microphone
+processing. One native acquisition feeds a direct recorder on a cloned input and
+the unchanged application's actual mixer/recorder. There is no hardware microphone,
+system-audio capture or production traffic. The existing 20-minute supervisor and
+23-minute step deadline bound the pair; original profiles and audio are retained.
+
+The result records native settings, observed recorder intervals, AudioContext versus
+monotonic clock deltas, both audio files, and alignment of common numbered source
+frames. Differing start/stop endpoints are excluded from the shared interval.
+Disabled processing can negotiate a different sample rate/channel count, so this
+is not automatically a single-variable comparison of processing alone. The direct
+witness also adds encoder workload. A green diagnostic means measurement completed
+with valid controls; it does **not** qualify five hours or clear historical failures.
+
+The failed 5h05 artifacts from run `33932066219` were independently compared offline:
+original chunks, final packets/timestamps and decoded PCM match on all three OSes.
+The decoded-sample shortfalls already exist in the original capture, while packet
+timestamps span approximately the full recording interval. Capture, synthetic source,
+processing and scheduling remain under investigation; no test tolerance is relaxed.
+
+Dispatch after reviewing/pushing the intended branch:
+
+```sh
+gh workflow run audio-reliability.yml --ref REVIEWED_BRANCH --field run_capture_clock=true
+```
+
+## Existing qualification suites
+
 `audio-reliability.yml` runs `s11-capture-qualification`, `s12-device-qualification`, and `s15-main-crash-qualification` on pull requests to `main` and ordinary manual workflow dispatch. Its matrix uses Windows Server 2022 x64, macOS 15 Intel, and macOS 26 Apple Silicon. These are native OS jobs using the installed Electron runtime and the unsigned `dist/electron/UnPackaged` test bundle. The device suite exercises synthetic microphone track loss/reconnection and exact-zero input with live warnings, saved-source checks and decoded audio verification. The crash suite forcibly stops the owned test application's process tree, relaunches its isolated profile, and checks durable audio recovery, upload bytes, retained source chunks, and visible recording history. It does not simulate a power cut or test hardware disk caches. No installer, signature, release, tag, backend deployment, or publication is produced.
 
 Node 24 installs the locked dependencies and the matching FFmpeg/ffprobe binaries. The test bundle explicitly embeds a loopback mock API address. Only an Electron build with `SUISSE_E2E_HOOKS=1` adds that validated HTTP loopback origin to the bundled HTML's `connect-src`; production HTML and CSP remain unchanged. This lets renderer requests for minutes, history and templates reach the mock instead of silently relying on fallback state. `SUISSE_E2E_HOOKS=1` and `SUISSE_TEST_NETWORK_ISOLATION=1` enable test isolation; the supervisor also strips inherited service tokens and signing credentials before launching the harness. The harness generates its own microphone input and uses only synthetic accounts in isolated profiles.

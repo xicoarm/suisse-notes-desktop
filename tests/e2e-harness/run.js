@@ -766,6 +766,7 @@ const SCENARIOS = {
     // The estimate now includes start-call uncertainty and only acknowledged audio.
     maxTailExposureS: 2.5,
   })),
+  's16-capture-clock-diagnostic': async () => report('s16-capture-clock-diagnostic', await require('./capture-clock-diagnostic').runCaptureClockDiagnostic()),
 };
 
 (async () => {

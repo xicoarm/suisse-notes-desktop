@@ -10,6 +10,11 @@ on:
         type: boolean
         required: false
         default: false
+      run_capture_clock:
+        description: Run the paired native-input and app-mixer diagnostic (leave run_endurance false)
+        type: boolean
+        required: false
+        default: false
 
 # This workflow never signs, publishes, pushes, or creates a release.
 permissions:
@@ -75,18 +80,24 @@ jobs:
         run: npx quasar build -m electron --skip-pkg
 
       - name: Qualify the synthetic capture pipeline
+        if: ${{ !inputs.run_capture_clock }}
         timeout-minutes: 23
         run: node tests/e2e-harness/ci/run-qualification.js
 
       - name: Qualify synthetic device loss and signal recovery
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && !inputs.run_capture_clock }}
         timeout-minutes: 23
         run: node tests/e2e-harness/ci/run-qualification.js s12-device-qualification
 
       - name: Qualify full app-process crash recovery
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && !inputs.run_capture_clock }}
         timeout-minutes: 13
         run: node tests/e2e-harness/ci/run-qualification.js s15-main-crash-qualification
+
+      - name: Compare native-input and actual app-mixer clocks
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.run_capture_clock }}
+        timeout-minutes: 23
+        run: node tests/e2e-harness/ci/run-qualification.js s16-capture-clock-diagnostic
 
       # Keep failed captures and their original chunks, not just a verdict.
       # The harness uses generated audio and fake credentials against localhost.
