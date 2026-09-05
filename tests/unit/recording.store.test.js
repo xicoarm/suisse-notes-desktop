@@ -160,7 +160,7 @@ describe('Recording Store', () => {
         expect(result.success).toBe(true);
         expect(result.filePath).toBe('/path/to/audio.webm');
         expect(store.audioFilePath).toBe('/path/to/audio.webm');
-        expect(store.phase).toBe('stopping');
+        expect(store.phase).toBe('stopped');
       });
     });
 
