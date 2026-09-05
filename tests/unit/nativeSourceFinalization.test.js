@@ -5,12 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 const require = createRequire(import.meta.url);
 const ffmpeg = require('fluent-ffmpeg');
 ffmpeg.setFfmpegPath(require('@ffmpeg-installer/ffmpeg').path);
 ffmpeg.setFfprobePath(require('@ffprobe-installer/ffprobe').path);
-const { createNativeSourceFinalization, createTimestampEvidence, planLane, estimateScratchBytes } = require('../../src-electron/native-source-finalization');
+const { createNativeSourceFinalization, createTimestampEvidence, planLane, estimateScratchBytes, estimateEncodedBytes } = require('../../src-electron/native-source-finalization');
 const { beginSource, markSourceStarted, saveSourceChunk, endSource, inspectNativeSources } = require('../../src-electron/native-source-persistence');
 let root;
 let commands;
@@ -26,7 +28,7 @@ function metadata(file) {
   return new Promise((resolve, reject) => ffmpeg.ffprobe(file, (error, result) => error ? reject(error) : resolve(result)));
 }
 function finalizer(overrides = {}) {
-  return createNativeSourceFinalization({ ffmpeg, run,
+  return createNativeSourceFinalization({ ffmpeg, run, ffprobePath: require('@ffprobe-installer/ffprobe').path,
     validate: async file => ({ valid: fs.statSync(file).size > 0 }),
     probe: async file => Number((await metadata(file)).format.duration), ...overrides });
 }
@@ -86,6 +88,40 @@ afterEach(async () => {
 });
 
 describe('native source finalization real-media custody', () => {
+  it.each(['fast', 'general'])('bounds %s output with 192-kbit CBR packets while preserving stereo and fractional sample count', async mode => {
+    const targetSeconds = 12.345;
+    await source(await encoded(mode === 'fast' ? 12 : 6, 440, { stereo: true, antiPhase: true }),
+      { end: mode === 'fast' ? targetSeconds * 1000 : 6000, reason: mode === 'fast' ? 'stopped' : 'paused', channels: 2 });
+    if (mode === 'general') await source(await encoded(6, 880, { stereo: true, antiPhase: true }),
+      { start: 6000, end: targetSeconds * 1000, channels: 2 });
+    const result = await finalizer().build(root, path.join(root, 'audio_building.webm'), { expectedDurationSec: targetSeconds });
+    const { stdout } = await promisify(execFile)(require('@ffprobe-installer/ffprobe').path,
+      ['-v', 'error', '-select_streams', 'a', '-show_packets', '-show_streams', '-show_entries',
+        'packet=size,duration_time:stream=codec_name,sample_rate,channels', '-of', 'json', result.outputPath],
+      { windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024 });
+    const packetEvidence = JSON.parse(stdout);
+    expect(packetEvidence.streams).toEqual([expect.objectContaining({ codec_name: 'opus', sample_rate: '48000', channels: 2 })]);
+    expect(packetEvidence.packets.length).toBeGreaterThan(600);
+    expect(new Set(packetEvidence.packets.map(packet => Number(packet.size)))).toEqual(new Set([480]));
+    expect(new Set(packetEvidence.packets.map(packet => Number(packet.duration_time)))).toEqual(new Set([0.02]));
+    const audio = await decoded(result.outputPath);
+    expect(audio.samples).toBe(Math.round(targetSeconds * 48000));
+    for (const channel of [0, 1]) {
+      expect(amplitude(audio, 440, 0.5, 5.5, channel)).toBeGreaterThan(0.08);
+      if (mode === 'general') expect(amplitude(audio, 880, 7, 11, channel)).toBeGreaterThan(0.08);
+    }
+    const outputBytes = fs.statSync(result.outputPath).size;
+    expect(outputBytes / targetSeconds).toBeGreaterThan(24000);
+    expect(outputBytes / targetSeconds).toBeLessThan(25000);
+    expect(outputBytes).toBeLessThan(estimateEncodedBytes(targetSeconds));
+    expect(result.plan.validation).toMatchObject({ observedOutputBytes: outputBytes,
+      observedDecodedSamples: audio.samples, estimatedMaximumOutputBytes: estimateEncodedBytes(targetSeconds) });
+    expect(result.plan.codecPolicy).toBe('opus-cbr-192k-20ms-reencoded-from-native-sources');
+    expect(result.plan.encoding).toEqual({ codec: 'opus', sampleRate: 48000, channels: 2, bitRate: 192000, bitRateMode: 'cbr', frameDurationMs: 20 });
+    expect(result.fastPathUsed).toBe(mode === 'fast');
+    expect(Math.max(...commands)).toBeLessThanOrEqual(2);
+  }, 60000);
+
   it('preserves independent mic/system identities and cuts only the explicit replacement overlap', async () => {
     const firstBytes = await encoded(2, 440);
     const first = await source(firstBytes, { end: 1000, reason: 'replacement' });
@@ -183,6 +219,17 @@ describe('native source finalization real-media custody', () => {
     expect(estimates[0]).toBeLessThan(70 * 1024 * 1024);
   }, 60000);
 
+  it('validates decoded samples despite fractional-stop Opus discard padding extending container duration', async () => {
+    const targetMs = 46893.90000000596;
+    await source(await encoded(1, 440), { end: targetMs });
+    const result = await finalizer().build(root, path.join(root, 'audio_building.webm'), { expectedDurationSec: targetMs / 1000 });
+    const expectedSamples = Math.round(targetMs * 48);
+    expect(result.plan.validation).toMatchObject({ status: 'passed', expectedDecodedSamples: expectedSamples, observedDecodedSamples: expectedSamples });
+    expect(result.containerDuration - result.duration).toBeGreaterThan(0.025);
+    expect(result.plan.validation.encodedPacketEvidence.discardPaddingSamples).toBeGreaterThan(0);
+    expect((await decoded(result.outputPath)).samples).toBe(expectedSamples);
+  }, 60000);
+
   it('preserves ordinary stopped tails and checks space again before a two-lane fallback', async () => {
     await source(await encoded(1.2, 440), { end: 1000 });
     await source(await encoded(1, 660), { kind: 'system', end: 1000 });
@@ -256,7 +303,13 @@ describe('native timeline policy', () => {
   });
 
   it('provides a conservative disk budget with no decoded-meeting RAM allocation', () => {
-    expect(estimateScratchBytes({ sourceBytes: 100, timelineSeconds: 1, lanes: 2 })).toBe(100 + 48000 * 2 * 3 * 2 * 2 + 24000 + 64 * 1024 * 1024);
+    const encodedBudget = (50 + 4) * (480 + 64) + 64 * 1024;
+    expect(estimateEncodedBytes(1)).toBe(encodedBudget);
+    expect(estimateScratchBytes({ sourceBytes: 100, timelineSeconds: 1, lanes: 2 })).toBe(100 + 48000 * 2 * 3 * 2 * 2 + encodedBudget + 64 * 1024 * 1024);
+    expect(estimateScratchBytes({ sourceBytes: 100, timelineSeconds: 1, lanes: 2, fastPath: true })).toBe(100 + encodedBudget + 64 * 1024 * 1024);
+    // Output budget only: original custody and scratch are separate costs.
+    // This arithmetic is not evidence that the backend accepted a long file.
+    expect(estimateEncodedBytes(5 * 3600 + 5 * 60)).toBe(497827712);
     expect(() => estimateScratchBytes({ timelineSeconds: Infinity })).toThrow('Invalid');
   });
 });

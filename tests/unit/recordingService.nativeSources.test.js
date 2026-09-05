@@ -126,6 +126,28 @@ describe('desktop native source lifecycle integration', () => {
     expect(store.stopRecording).toHaveBeenCalledTimes(1);
   });
 
+  it('shows the first PCM stop failure and enables recovery on the first explicit retry only after native writes drain', async () => {
+    await start({ systemAudioEnabled: true, captureSystemAudio: async () => true });
+    const finalWrite = deferred();
+    bridge.saveSourceChunk.mockImplementationOnce(() => finalWrite.promise);
+    window.electronAPI.systemAudio.stop.mockResolvedValueOnce({ success: false, error: 'PCM disk drain failed' });
+    const stopping = service.stopRecording(store);
+    await tick();
+    expect(store.stopRecording).not.toHaveBeenCalled();
+    expect(mic.getTracks()[0].stop).not.toHaveBeenCalled();
+    finalWrite.resolve({ success: true });
+    expect(await stopping).toMatchObject({ success: false, requiresRecovery: true, error: 'PCM disk drain failed' });
+    expect(store.finalizationRecoveryNeeded).toBe(true);
+    expect(store.setError).toHaveBeenCalledWith('PCM disk drain failed');
+    expect(store.stopRecording).not.toHaveBeenCalled();
+    expect(bridge.endSource).toHaveBeenCalledWith(store.recordId, expect.any(String), expect.objectContaining({ chunkCount: 1 }));
+    // This is the user's Retry Saving action. The store already sees the
+    // recovery flag, so it needs no additional failed combine to discover it.
+    expect(await service.stopRecording(store)).toMatchObject({ success: true });
+    expect(store.finalizationRecoveryNeeded).toBe(true);
+    expect(store.stopRecording).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps native audio retryable when the mixed recorder never starts', async () => {
     mixedStartError = 'Mixed encoder failed to start';
     expect(await start()).toMatchObject({ success: false, partialRecovery: true, recordId: store.recordId });
@@ -210,6 +232,28 @@ describe('desktop native source lifecycle integration', () => {
     expect(recorders.filter(recorder => recorder.kind === 'mixed')).toHaveLength(1);
   });
 
+  it.each(['beginSource', 'markSourceStarted'])('resumes PCM with the shared clock before a delayed native %s acknowledgement', async method => {
+    await start({ systemAudioEnabled: true, captureSystemAudio: async () => true });
+    await vi.advanceTimersByTimeAsync(400);
+    await service.pauseRecording(store);
+    await vi.advanceTimersByTimeAsync(5000);
+    const gate = deferred(); bridge[method].mockImplementationOnce(() => gate.promise);
+    window.electronAPI.systemAudio.setPaused.mockClear();
+    const resuming = service.resumeRecording(store, { value: false });
+    await tick();
+    expect(window.electronAPI.systemAudio.setPaused).toHaveBeenCalledTimes(1);
+    expect(window.electronAPI.systemAudio.setPaused).toHaveBeenCalledWith(false);
+    expect(store.resumeRecording).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(service.getActiveRecordingOffsetMs()).toBe(2400);
+    if (method === 'beginSource') expect(recorders.filter(recorder => recorder.kind === 'microphone')).toHaveLength(1);
+    gate.resolve({ success: true });
+    expect(await resuming).toEqual({ success: true });
+    expect(bridge.markSourceStarted.mock.calls.at(-1)[2].startOffsetMs).toBe(method === 'beginSource' ? 2400 : 400);
+    expect(window.electronAPI.systemAudio.setPaused).toHaveBeenCalledTimes(1);
+    expect(store.resumeRecording).toHaveBeenCalledTimes(1);
+  });
+
   it.each(['microphone', 'system'])('keeps the previous native %s if the replacement graph cannot connect', async kind => {
     await start({ systemAudioEnabled: true, captureSystemAudio: async () => system });
     const next = source('broken-replacement');
@@ -252,17 +296,35 @@ describe('desktop native source lifecycle integration', () => {
     expect(service.getState().nativeSources.phase).toBe('closed');
   });
 
-  it('does not revive the store after stop overtakes the system resume acknowledgement', async () => {
+  it('waits for the system resume acknowledgement when stop overtakes resume without reviving the store', async () => {
     await start();
     await service.pauseRecording(store);
     const resumed = deferred(); window.electronAPI.systemAudio.setPaused.mockImplementationOnce(() => resumed.promise);
     const resuming = service.resumeRecording(store, { value: false });
     await tick();
-    expect(await service.stopRecording(store)).toMatchObject({ success: true });
+    const stopping = service.stopRecording(store);
+    await tick();
+    expect(store.stopRecording).not.toHaveBeenCalled();
     resumed.resolve({ success: true });
     expect(await resuming).toMatchObject({ success: false });
+    expect(await stopping).toMatchObject({ success: true });
     expect(store.resumeRecording).not.toHaveBeenCalled();
     expect(service.getState().nativeSources.phase).toBe('closed');
+  });
+
+  it('reports a failed PCM resume after settling native reservation and never revives the paused store', async () => {
+    await start({ systemAudioEnabled: true, captureSystemAudio: async () => true });
+    await service.pauseRecording(store);
+    const gate = deferred(); bridge.beginSource.mockImplementationOnce(() => gate.promise);
+    window.electronAPI.systemAudio.setPaused.mockResolvedValueOnce({ success: false, error: 'PCM resume failed' });
+    const resuming = service.resumeRecording(store, { value: false });
+    await tick();
+    expect(store.resumeRecording).not.toHaveBeenCalled();
+    gate.resolve({ success: true });
+    expect(await resuming).toMatchObject({ success: false, error: 'PCM resume failed' });
+    expect(store.setError).toHaveBeenCalledWith('PCM resume failed');
+    expect(store.resumeRecording).not.toHaveBeenCalled();
+    await tick();
   });
 
   it('retires an ended device without stopping the other source, then re-acquires independently', async () => {

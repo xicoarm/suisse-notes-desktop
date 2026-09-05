@@ -3032,26 +3032,31 @@ export async function resumeRecording(recordingStore, isAutoSplitting, maxRecord
   if (mediaRecorder && mediaRecorder.state === 'paused') {
     if (nativeArchive) {
       startNativeTimeline();
-      const transition = nativeArchive.resume();
+      // Resume PCM against the same active-clock boundary. Waiting for native
+      // reservation/start-marker I/O first would remove that whole delay from
+      // the PCM lane and shift every later system sample earlier than the mic.
+      // IPC/producer startup uncertainty remains; this is not a sample clock.
+      let systemResume;
+      try { systemResume = Promise.resolve(window.electronAPI?.systemAudio?.setPaused?.(false)); }
+      catch (error) { systemResume = Promise.reject(error); }
+      const transition = Promise.allSettled([nativeArchive.resume(), systemResume]).then(results => {
+        for (const result of results) {
+          if (result.status === 'rejected') throw result.reason;
+          if (result.value !== undefined) requireNativeResult(result.value);
+        }
+        return { success: true };
+      }).catch(error => ({ success: false, error: error.message || String(error) }));
       sourceTransitionPromise = transition;
       let resumed;
       try { resumed = await transition; } finally { if (sourceTransitionPromise === transition) sourceTransitionPromise = null; }
-      if (!resumed.success || stopInFlightPromise || nativeSourceFailure) {
+      if (!resumed.success || stopInFlightPromise || nativeSourceFailure || !mediaRecorder || nativeArchive.getState().phase !== 'open') {
         freezeNativeTimeline();
         if (!stopInFlightPromise) nativeFailure(resumed);
         return resumed.success ? { success: false, error: 'Recording is stopping' } : resumed;
       }
     }
     mediaRecorder.resume();
-    const systemResume = window.electronAPI?.systemAudio?.setPaused?.(false);
-    if (nativeArchive) {
-      try { if (systemResume) requireNativeResult(await systemResume); }
-      catch (error) { nativeFailure({ error: error.message }); return { success: false, error: error.message }; }
-      if (stopInFlightPromise || !mediaRecorder || nativeArchive.getState().phase !== 'open') {
-        freezeNativeTimeline();
-        return { success: false, error: 'Recording is stopping' };
-      }
-    } else Promise.resolve(systemResume).catch(() => {});
+    if (!nativeArchive) Promise.resolve(window.electronAPI?.systemAudio?.setPaused?.(false)).catch(() => {});
     recordingStore.resumeRecording();
 
     // Resume from the wall-clock accumulator, NOT recordingStore.duration — the
@@ -3196,7 +3201,12 @@ async function stopRecordingInternal(recordingStore, stopSystemAudio) {
   }
   const sourcesSaved = await sourceStop;
   const pcmStopped = stopPcm ? await stopPcm : null;
-  if (pcmStopped?.success === false) stopError = pcmStopped.error || 'System audio did not finish saving';
+  if (pcmStopped?.success === false) {
+    stopError = pcmStopped.error || 'System audio did not finish saving';
+    // Preserve the visible first failure. The next user Retry Saving may ask
+    // main to recover available PCM, but only after all source drains succeed.
+    recordingStore.finalizationRecoveryNeeded = true;
+  }
   // A native stop timeout retains its shared tracks/handlers for the late final
   // events. Retry must settle that epoch before releasing hardware or combining.
   if (sourcesSaved.success) await cleanup();
@@ -3216,7 +3226,9 @@ async function stopRecordingInternal(recordingStore, stopSystemAudio) {
       await window.electronAPI?.recording?.setInProgress(false);
       await window.electronAPI?.recording?.setProcessing(false);
     }
-    return { success: false, error, diskFull: saved.diskFull || nativeSourceFailure?.diskFull, unsavedAudio: !saved.success || !sourcesSaved.success || finalStopPending, partialRecovery: true, recordId: recordingStore.recordId };
+    return { success: false, error, diskFull: saved.diskFull || nativeSourceFailure?.diskFull,
+      requiresRecovery: recordingStore.finalizationRecoveryNeeded === true,
+      unsavedAudio: !saved.success || !sourcesSaved.success || finalStopPending, partialRecovery: true, recordId: recordingStore.recordId };
   }
   if (!recordingStore.recordId) return { success: false, error: 'No active recording' };
   await window.electronAPI?.recording?.setUnsavedAudio?.(null);

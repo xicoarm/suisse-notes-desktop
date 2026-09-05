@@ -10,7 +10,8 @@ const NATIVE_CAPTURE_MARKER = 'native-capture.json';
 function usesNativeSources(recordPath) {
   // Presence fails closed, including an interrupted/empty source reservation.
   return fs.existsSync(path.join(recordPath, NATIVE_CAPTURE_MARKER)) ||
-    fs.existsSync(path.join(recordPath, 'native-sources'));
+    fs.existsSync(path.join(recordPath, 'native-sources')) ||
+    fs.existsSync(path.join(recordPath, 'pcm-capture-attempts'));
 }
 
 function readNativeCaptureMarker(recordPath) {

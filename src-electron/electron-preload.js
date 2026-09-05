@@ -117,9 +117,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ),
     // expectedDurationSec: the renderer's wall-clock duration, so main can tell
     // whether the combined file really contains the meeting (truncation guard).
-    combineChunks: (id, ext, expectedDurationSec) =>
+    combineChunks: (id, ext, expectedDurationSec, options) =>
       withTimeout(
-        ipcRenderer.invoke('recording:combineChunks', id, ext, expectedDurationSec),
+        ipcRenderer.invoke('recording:combineChunks', id, ext, expectedDurationSec, options),
         finalizationTimeoutMs(expectedDurationSec),
         'Combine chunks'
       ),

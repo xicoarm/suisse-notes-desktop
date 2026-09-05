@@ -9,6 +9,7 @@ const { NATIVE_CAPTURE_MODE, usesNativeSources, readNativeCaptureMarker, markNat
 const { assessRecordingUpload, FINALIZATION_PENDING_MARKER } = require('./recording-upload-eligibility');
 const { withCaptureWarnings, hydrateHistoryCaptureWarnings } = require('./recording-history-warnings');
 const { createPcmCapture } = require('./pcm-capture');
+const pcmCaptureEvidence = require('./pcm-capture-evidence');
 const { tokenUserId, canUploadForUser, verifiedUploadResult } = require('./upload-safety');
 const { pathToFileURL } = require('url');
 const axios = require('axios');
@@ -3334,14 +3335,14 @@ function updateRecordingMetadataOnCompletion(recordId, duration, hasAudioFile) {
 }
 
 // Normal stop and crash recovery use the same durable finalization pipeline.
-ipcMain.handle('recording:combineChunks', async (event, recordId, ext, expectedDurationSec) => {
+ipcMain.handle('recording:combineChunks', async (event, recordId, ext, expectedDurationSec, options = {}) => {
   try {
     const validRecordId = validateRecordId(recordId);
     const validExt = validateExtension(ext);
     if (inFlightUploads.has(validRecordId)) return { success: false, error: 'This recording is still uploading' };
     return await withRecordingLock(validRecordId, () => inFlightUploads.has(validRecordId)
       ? { success: false, error: 'This recording is still uploading' }
-      : finalizeRecording(validRecordId, validExt, expectedDurationSec));
+      : finalizeRecording(validRecordId, validExt, expectedDurationSec, { recovery: options?.recovery === true }));
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -3361,11 +3362,12 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
     // Ensure all AudioTee stdout and disk writes have finished before merging.
     if (activeAudioTee?.recordId === recordId) {
       const stopped = await stopSystemAudio();
-      if (stopped?.success === false) throw new Error(stopped.error || 'System audio did not finish saving; source audio is retained');
+      if (stopped?.success === false) throw Object.assign(new Error(stopped.error || 'System audio did not finish saving; source audio is retained'), { code: 'PCM_CAPTURE_RECOVERY_REQUIRED' });
     }
     const persistence = createRecordingPersistence({
       nativeBuild: (directory, outputPath, nativeOptions) => createNativeSourceFinalization({
         ffmpeg, run: ffmpegWithTimeout, validate: validateAudioOutput,
+        ffprobePath: resolveBundledBinaryPaths().ffprobe,
         probe: async file => Number((await getAudioMetadata(file))?.format?.duration) || 0,
         checkSpace: async neededBytes => {
           const available = await getAvailableSpaceDetailed(directory);
@@ -3418,7 +3420,7 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
   } catch (error) {
     log.error('Recording finalization failed; all source batches retained:', error);
     const diskFull = error.code === 'ENOSPC' || /no space left|not enough space|disk full/i.test(error.message || '');
-    return { success: false, diskFull, error: error.message };
+    return { success: false, diskFull, requiresRecovery: error.code === 'PCM_CAPTURE_RECOVERY_REQUIRED', error: error.message };
   }
 }
 
@@ -4921,6 +4923,9 @@ function serializeAudioTee(operation) {
 }
 
 ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serializeAudioTee(async () => {
+  let evidencePath, attemptId;
+  const requestStartedAt = require('perf_hooks').performance.now();
+  const requestedAt = new Date().toISOString();
   try {
     validateRecordId(recordId);
     await stopSystemAudioInternal();
@@ -4929,6 +4934,11 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
     if (!fs.existsSync(binaryPath)) return { success: false, error: 'AudioTee binary not found' };
     const recordPath = getRecordingPath(recordId);
     fs.mkdirSync(recordPath, { recursive: true });
+    const activeOffsetMs = Math.min(7 * 24 * 3600000, Math.max(0, Number(offsetMs) || 0));
+    attemptId = require('crypto').randomUUID();
+    await pcmCaptureEvidence.beginPcmAttempt(recordPath, { attemptId, required: true,
+      requestOffsetMs: activeOffsetMs, requestedAt });
+    evidencePath = recordPath;
     const monitor = createSystemAudioMonitor({ isRecording: () => isRecordingInProgress && !activeAudioTee?.paused });
     monitor.reset(Date.now());
     const report = verdict => {
@@ -4942,7 +4952,21 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
     const capture = createPcmCapture({
       process: proc,
       filePath: path.join(recordPath, 'system_audio.raw'),
-      offsetMs: Math.min(7 * 24 * 3600000, Math.max(0, Number(offsetMs) || 0)),
+      offsetMs: activeOffsetMs, requestStartedAt,
+      evidence: {
+        event: (name, details) => pcmCaptureEvidence.markPcmEvent(recordPath, attemptId, {
+          event: name, elapsedMs: details.elapsedMs, activeOffsetMs: details.activeOffsetMs,
+          ...(name === 'first-data' ? { byteLength: details.byteLength } : {}),
+        }),
+        failure: (error, details) => pcmCaptureEvidence.recordPcmFailure(recordPath, attemptId, {
+          stage: String(details.stage || 'capture').replace(/\p{Cc}/gu, ' ').slice(0, 64), code: String(error.code || '').replace(/\p{Cc}/gu, ' ').slice(0, 64),
+          message: String(error.message || error).replace(/\p{Cc}/gu, ' ').slice(0, 1000), elapsedMs: details.elapsedMs,
+        }),
+        finish: details => pcmCaptureEvidence.endPcmAttempt(recordPath, attemptId, {
+          success: details.success, childClosed: details.childClosed, diskDrained: details.diskDrained,
+          endOffsetMs: details.endOffsetMs, elapsedMs: details.elapsedMs, reason: details.reason,
+        }),
+      },
       onData: bytes => report(monitor.handleChunk(bytes, Date.now())),
       onFailure: error => {
         log.error('System audio capture failed:', error.message);
@@ -4964,6 +4988,13 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
     if (!result.success) await stopSystemAudioInternal();
     return result;
   } catch (error) {
+    if (evidencePath && attemptId) {
+      await pcmCaptureEvidence.recordPcmFailure(evidencePath, attemptId, {
+        stage: 'startup', code: String(error.code || '').replace(/\p{Cc}/gu, ' ').slice(0, 64),
+        message: String(error.message || error).replace(/\p{Cc}/gu, ' ').slice(0, 1000),
+        elapsedMs: Math.max(0, require('perf_hooks').performance.now() - requestStartedAt),
+      }).catch(failure => log.error('Could not persist system audio startup failure:', failure.message));
+    }
     return { success: false, error: error.message };
   }
 }));

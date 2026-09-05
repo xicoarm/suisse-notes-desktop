@@ -171,6 +171,24 @@ describe('Recording Store', () => {
     });
 
     describe('stopRecording', () => {
+      it('requires another save attempt before recovering incomplete system audio and resets that intent', async () => {
+        const store = useRecordingStore();
+        store.recordId = 'test-id';
+        store.captureMode = 'native-sources-v1';
+        store.duration = 20;
+        mockElectronAPI.recording.combineChunks
+          .mockResolvedValueOnce({ success: false, requiresRecovery: true, error: 'System audio did not finish saving' })
+          .mockResolvedValueOnce({ success: true, outputPath: '/path/to/audio.webm', duration: 20 });
+        expect(await store.stopRecording()).toMatchObject({ success: false, partialRecovery: true });
+        expect(store.finalizationRecoveryNeeded).toBe(true);
+        expect(mockElectronAPI.recording.combineChunks).toHaveBeenNthCalledWith(1, 'test-id', '.webm', 20);
+        expect(await store.stopRecording()).toMatchObject({ success: true });
+        expect(mockElectronAPI.recording.combineChunks).toHaveBeenNthCalledWith(2, 'test-id', '.webm', 20, { recovery: true });
+        expect(store.finalizationRecoveryNeeded).toBe(false);
+        store.finalizationRecoveryNeeded = true;
+        store.reset();
+        expect(store.finalizationRecoveryNeeded).toBe(false);
+      });
       it('passes the independent elapsed time instead of the clamped display to finalization', async () => {
         const store = useRecordingStore();
         store.recordId = 'test-id'; store.phase = 'recording'; store.duration = 3;

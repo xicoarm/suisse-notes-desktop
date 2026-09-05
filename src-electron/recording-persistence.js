@@ -5,6 +5,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { sourceFingerprint: nativeSourceFingerprint, inspectNativeSources } = require('./native-source-persistence');
 const { usesNativeSources, NATIVE_CAPTURE_MARKER, readNativeCaptureMarker } = require('./native-recording-session');
+const { inspectPcmCaptureEvidence, pcmEvidenceFingerprint } = require('./pcm-capture-evidence');
 const {
   archiveChunkBatch, listChunkBatches, concatenateFiles,
   publishFile, writeFileAtomic,
@@ -68,6 +69,10 @@ function createRecordingPersistence({ prepareRaw, remux, concatSessions, merge, 
 
   async function finalizeNative(recordPath, ext, options) {
     if (!nativeBuild) throw new Error('Native audio finalization is unavailable; all source audio is retained');
+    const pcmEvidence = inspectPcmCaptureEvidence(recordPath, { recovery: options.recovery === true });
+    if (!pcmEvidence.canFinalize) {
+      throw Object.assign(new Error('System audio did not finish saving. Retry saving to recover the available audio; original sources are retained.'), { code: 'PCM_CAPTURE_RECOVERY_REQUIRED' });
+    }
     const fingerprint = nativeRecordingFingerprint(recordPath);
     const buildingPath = path.join(recordPath, `audio_native_building${ext}`);
     const outputPath = path.join(recordPath, `audio${ext}`);
@@ -77,8 +82,11 @@ function createRecordingPersistence({ prepareRaw, remux, concatSessions, merge, 
     const result = await nativeBuild(recordPath, buildingPath, options);
     if (result?.success !== true || result.outputPath !== buildingPath) throw new Error('Native audio was not finalized');
     assertNativeSourceCoverage(recordPath, result);
+    result.warnings = [...(result.warnings || []), ...pcmEvidence.warnings.map(warning => ({ ...warning, kind: `system-audio-${warning.kind}` }))];
     await assertValid(buildingPath);
-    const duration = await probe(buildingPath);
+    // Native finalization measures decoded Opus samples after pre-skip/discard
+    // padding. The nominal container duration includes codec padding.
+    const duration = result.duration;
     if (!Number.isFinite(duration) || duration <= 0) throw new Error('Native audio duration could not be verified');
     const sha256 = await checksum(buildingPath);
     const size = fs.statSync(buildingPath).size;
@@ -190,7 +198,7 @@ async function readFinalizedRecording(recordPath) {
 function nativeRecordingFingerprint(recordPath) {
   const marker = fs.existsSync(path.join(recordPath, NATIVE_CAPTURE_MARKER)) ? readNativeCaptureMarker(recordPath) : null;
   return crypto.createHash('sha256').update(JSON.stringify({
-    marker, native: nativeSourceFingerprint(recordPath), retained: sourceFingerprint(recordPath),
+    marker, native: nativeSourceFingerprint(recordPath), pcmEvidence: pcmEvidenceFingerprint(recordPath), retained: sourceFingerprint(recordPath),
   })).digest('hex');
 }
 

@@ -4,9 +4,13 @@ const fs = require('fs');
 const path = require('path');
 const { inspectNativeSources } = require('./native-source-persistence');
 const { concatenateFiles, publishFile, writeFileAtomic, syncDirectorySync } = require('./durable-files');
+const { inspectEncodedOpus } = require('./encoded-opus-evidence');
 
 const RATE = 48000;
 const CHANNELS = 2;
+const BIT_RATE = 192000;
+const FRAME_DURATION_MS = 20;
+const CODEC_POLICY = 'opus-cbr-192k-20ms-reencoded-from-native-sources';
 const TIMING_TOLERANCE_SAMPLES = 96; // 2 ms: native WebM timestamps have millisecond precision.
 const MAX_DURATION_SECONDS = 31 * 24 * 60 * 60;
 
@@ -136,19 +140,32 @@ function planLane(epochs, warnings) {
   return { segments, samples: cursor };
 }
 
-// Conservative general-path ceiling: unchanged source concatenations, up to two
-// copies of uncompressed-equivalent 24-bit stereo FLAC, final 192-kbit Opus,
-// and fixed metadata/container reserve. Silence FLAC is normally much smaller.
+// Hard CBR produces 480 payload bytes per 20-ms packet. Reserve four extra
+// packets for encoder delay/flush, 64 bytes per packet for WebM blocks, cues,
+// and clusters, and 64 KiB for the fixed header. This is a conservative budget
+// for our audio-only muxer, not a universal WebM size bound. Inherited metadata
+// and chapters are disabled by opus() below so source tags cannot inflate it.
+function estimateEncodedBytes(timelineSeconds = 0) {
+  const packetSamples = RATE * FRAME_DURATION_MS / 1000;
+  const packets = Math.ceil(samples(timelineSeconds) / packetSamples) + 4;
+  const payloadBytes = BIT_RATE * FRAME_DURATION_MS / 8000;
+  return packets * (payloadBytes + 64) + 64 * 1024;
+}
+
+// Unchanged source concatenations, up to two copies of uncompressed-equivalent
+// 24-bit stereo FLAC, bounded-rate Opus/WebM, and a separate scratch reserve.
+// Silence FLAC is normally much smaller; the common fast path needs no FLAC.
 function estimateScratchBytes({ sourceBytes = 0, timelineSeconds = 0, sourceSeconds = 0, lanes = 2, fastPath = false } = {}) {
   const duration = samples(timelineSeconds) / RATE;
   if (!Number.isFinite(sourceBytes) || sourceBytes < 0 || ![1, 2].includes(lanes)) throw failure('Invalid native scratch estimate');
   const mediaSeconds = samples(sourceSeconds) / RATE;
   return Math.ceil(sourceBytes + (fastPath ? 0 : Math.max(duration * lanes, mediaSeconds) * RATE * CHANNELS * 3 * 2) +
-    duration * 24000 + 64 * 1024 * 1024);
+    estimateEncodedBytes(duration) + 64 * 1024 * 1024);
 }
 
-function createNativeSourceFinalization({ ffmpeg, run, validate, probe, checkSpace = async () => {} }) {
+function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobePath, checkSpace = async () => {} }) {
   if ([ffmpeg, run, validate, probe, checkSpace].some(value => typeof value !== 'function')) throw new Error('Native finalization dependencies are incomplete');
+  if (typeof ffprobePath !== 'string' || !ffprobePath) throw new Error('Native finalization requires a bundled ffprobe path');
 
   const timeout = seconds => Math.min(45 * 60000, 5 * 60000 + Math.ceil(seconds / 3600) * 10 * 60000);
   async function validDuration(file) {
@@ -161,6 +178,13 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, checkSpa
   }
   const lossless = command => command.audioCodec('flac').audioFrequency(RATE).audioChannels(CHANNELS)
     .outputOptions(['-sample_fmt', 's32', '-compression_level', '5', '-threads', '1']);
+  // libopus defaults to VBR, which can exceed the nominal bitrate materially.
+  // Hard CBR preserves our 192-kbit stereo policy while bounding long-meeting
+  // storage/upload size. Keep the default audio application explicit.
+  // https://ffmpeg.org/ffmpeg-codecs.html#libopus-1
+  const opus = command => command.audioCodec('libopus').audioBitrate(BIT_RATE / 1000).audioFrequency(RATE).audioChannels(CHANNELS)
+    .outputOptions(['-threads', '1', '-vbr', 'off', '-frame_duration', String(FRAME_DURATION_MS), '-application', 'audio',
+      '-map_metadata', '-1', '-map_metadata:s:a', '-1', '-map_chapters', '-1']);
   const input = file => ffmpeg().input(file).outputOptions(['-nostdin', '-xerror', '-max_alloc', '67108864', '-filter_threads', '1', '-filter_complex_threads', '1']);
 
   async function build(recordPath, outputPath, options = {}) {
@@ -196,18 +220,41 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, checkSpa
     const resample = 'aresample=48000:ocl=stereo:clev=1:async=1:first_pts=0:min_hard_comp=0.002:max_soft_comp=0';
     const rendered = path.join(scratchDirectory, 'rendered.webm');
     async function finish(candidate, plan, totalSamples, fastPathUsed) {
-      const duration = await validDuration(candidate);
-      const difference = samples(duration) - totalSamples;
-      // The final encoder is fixed to 20ms Opus frames. The container can
-      // include its small codec delay; it must not end materially early.
-      if (difference < -TIMING_TOLERANCE_SAMPLES || difference > RATE * 0.025) throw failure('Encoded native recording has an incorrect timeline length');
       Object.assign(plan, { version: 1, sampleRate: RATE, channels: CHANNELS, totalSamples, recovery: !!options.recovery,
         sourceIds: usable.map(source => source.sourceId), systemPcmIncluded: hasPcm, fastPathUsed,
-        onsetIsApproximate: true, mixingPolicy: 'unity-sum-no-limiter', codecPolicy: 'opus-reencoded-from-native-sources',
+        onsetIsApproximate: true, mixingPolicy: 'unity-sum-no-limiter', codecPolicy: CODEC_POLICY,
+        encoding: { codec: 'opus', sampleRate: RATE, channels: CHANNELS, bitRate: BIT_RATE, bitRateMode: 'cbr', frameDurationMs: FRAME_DURATION_MS },
         scratchEstimateHasUnknownDuration: usable.some(source => source.interrupted) });
-      await writeFileAtomic(path.join(scratchDirectory, 'plan.json'), JSON.stringify(plan));
+      const planPath = path.join(scratchDirectory, 'plan.json');
+      plan.validation = { status: 'pending', expectedDecodedSamples: totalSamples, expectedDecodedDuration: totalSamples / RATE,
+        estimatedMaximumOutputBytes: estimateEncodedBytes(totalSamples / RATE) };
+      // Failure diagnostics must survive even if inspection rejects the file.
+      await writeFileAtomic(planPath, JSON.stringify(plan));
+      let encoded;
+      try {
+        plan.validation.observedOutputBytes = (await fs.promises.stat(candidate)).size;
+        plan.validation.containerDuration = await validDuration(candidate);
+        encoded = await inspectEncodedOpus(candidate, { ffprobePath });
+        Object.assign(plan.validation, { observedDecodedSamples: encoded.decodedSamples,
+          observedDecodedDuration: encoded.duration, encodedPacketEvidence: encoded });
+        if (Math.abs(encoded.decodedSamples - totalSamples) > 1) {
+          throw Object.assign(failure('Encoded native recording has an incorrect decoded sample count', 'NATIVE_FINALIZATION_SAMPLE_COUNT'), {
+            expectedDecodedSamples: totalSamples, actualDecodedSamples: encoded.decodedSamples,
+            expectedDuration: totalSamples / RATE, actualDuration: encoded.duration,
+          });
+        }
+        plan.validation.status = 'passed';
+        await writeFileAtomic(planPath, JSON.stringify(plan));
+      } catch (error) {
+        plan.validation.status = 'failed';
+        plan.validation.error = { code: error.code || 'NATIVE_FINALIZATION_VALIDATION_FAILED', message: String(error.message).slice(0, 1024),
+          evidence: error.evidence || null };
+        await writeFileAtomic(planPath, JSON.stringify(plan)).catch(() => {});
+        throw error;
+      }
       await publishFile(candidate, outputPath);
-      return { success: true, outputPath, duration, warnings: plan.warnings, sourceIds: plan.sourceIds, sourceMode: 'native',
+      return { success: true, outputPath, duration: encoded.duration, containerDuration: plan.validation.containerDuration,
+        warnings: plan.warnings, sourceIds: plan.sourceIds, sourceMode: 'native',
         systemPcmIncluded: hasPcm, scratchDirectory, plan, fastPathUsed, reencoded: true,
         estimatedScratchBytes: estimateScratchBytes({ sourceBytes, timelineSeconds: totalSamples / RATE,
           sourceSeconds: plan.sourceEvidence.reduce((sum, source) => sum + source.decodedDuration, 0) + (hasPcm ? pcm.duration : 0),
@@ -245,8 +292,7 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, checkSpa
           ? '[lane0][lane1]amix=inputs=2:duration=longest:dropout_transition=0,volume=2[out]'
           : '[lane0]anull[out]');
         const candidate = path.join(scratchDirectory, 'fast-rendered.webm');
-        command = command.complexFilter(filters, ['out']).audioCodec('libopus').audioBitrate('192k').audioFrequency(RATE).audioChannels(CHANNELS)
-          .outputOptions(['-threads', '1', '-frame_duration', '20']).on('stderr', line => {
+        command = opus(command.complexFilter(filters, ['out'])).on('stderr', line => {
             for (let index = 0; index < lanes.length; index++) {
               if (!line.includes('ashowinfo') || line.includes(`ashowinfo@native_${index} `)) lanes[index].evidence.consume(line);
             }
@@ -365,8 +411,7 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, checkSpa
       // volume=2 restores unity summing without a limiter's hidden lookahead.
       // Simultaneous peaks can clip in final encoding, as in the live mixer;
       // original stereo source files remain available without this summing.
-      await run(command.audioCodec('libopus').audioBitrate('192k').audioFrequency(RATE).audioChannels(CHANNELS)
-        .outputOptions(['-threads', '1', '-frame_duration', '20']).output(rendered), timeout(totalSamples / RATE), 'Encode native recording');
+      await run(opus(command).output(rendered), timeout(totalSamples / RATE), 'Encode native recording');
       return await finish(rendered, { sourceEvidence, lanes: plans, warnings }, totalSamples, false);
     } catch (error) {
       error.scratchDirectory = scratchDirectory;
@@ -376,4 +421,4 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, checkSpa
   return { build };
 }
 
-module.exports = { createNativeSourceFinalization, createTimestampEvidence, planLane, classifySources, estimateScratchBytes };
+module.exports = { createNativeSourceFinalization, createTimestampEvidence, planLane, classifySources, estimateScratchBytes, estimateEncodedBytes };

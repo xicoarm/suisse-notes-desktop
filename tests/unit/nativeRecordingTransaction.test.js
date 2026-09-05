@@ -13,6 +13,7 @@ const { createRecordingPersistence, readFinalizedRecording } = require('../../sr
 const { assessRecordingUpload } = require('../../src-electron/recording-upload-eligibility');
 const { concatenateFiles } = require('../../src-electron/durable-files');
 const { getRecordingSourceBytes } = require('../../src-electron/disk-utils');
+const pcm = require('../../src-electron/pcm-capture-evidence');
 
 let recordingsRoot, recordPath, recordId, sourceId, nativeBuild, persistence;
 beforeEach(async () => {
@@ -31,7 +32,7 @@ beforeEach(async () => {
   nativeBuild = vi.fn(async (directory, outputPath, options) => {
     const sources = native.inspectNativeSources(directory);
     await concatenateFiles(sources.flatMap(source => source.chunkPaths), outputPath);
-    return { success: true, outputPath, sourceIds: sources.map(source => source.sourceId),
+    return { success: true, outputPath, duration: 2, sourceIds: sources.map(source => source.sourceId),
       systemPcmIncluded: false, warnings: options.recovery ? ['native-source-interrupted'] : [] };
   });
   persistence = createRecordingPersistence({ nativeBuild,
@@ -125,6 +126,22 @@ describe('native recording publication and upload transaction', () => {
   it('blocks a matching complete native receipt while another finalization is pending', async () => {
     await persistence.finalize(recordPath);
     await fs.promises.writeFile(path.join(recordPath, 'finalization-pending.json'), '{}');
+    expect(await eligibility()).toMatchObject({ allowed: false });
+  });
+
+  it('requires explicit recovery for an interrupted required PCM capture, preserving warnings and originals', async () => {
+    const attemptId = randomUUID();
+    await pcm.beginPcmAttempt(recordPath, { attemptId, required: true, requestOffsetMs: 0, requestedAt: new Date().toISOString() });
+    // Simulate helper failure before its first PCM reached disk. The native mic
+    // remains recoverable, but normal finalization cannot call the capture whole.
+    await expect(persistence.finalize(recordPath)).rejects.toMatchObject({ code: 'PCM_CAPTURE_RECOVERY_REQUIRED' });
+    expect(nativeBuild).not.toHaveBeenCalled();
+    const result = await persistence.finalize(recordPath, '.webm', { recovery: true });
+    expect(result.warnings).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'system-audio-required-pcm-missing' })]));
+    expect(await eligibility()).toMatchObject({ allowed: true });
+    expect(native.inspectNativeSources(recordPath)[0].hasAudio).toBe(true);
+    // A new event changes source provenance and invalidates the prior receipt.
+    await pcm.markPcmEvent(recordPath, attemptId, { event: 'spawned', elapsedMs: 0, activeOffsetMs: 0 });
     expect(await eligibility()).toMatchObject({ allowed: false });
   });
 

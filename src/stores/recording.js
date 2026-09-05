@@ -31,6 +31,7 @@ export const useRecordingStore = defineStore('recording', {
     duration: 0, // in seconds
     chunkIndex: 0,
     captureMode: null,
+    finalizationRecoveryNeeded: false,
     audioFilePath: null,
     uploadProgress: 0,
     bytesUploaded: 0,
@@ -268,6 +269,7 @@ export const useRecordingStore = defineStore('recording', {
         this.duration = 0;
         this.chunkIndex = 0;
         this.captureMode = captureMode;
+        this.finalizationRecoveryNeeded = false;
         this.error = null;
         this.integrity = createRecordingIntegrity(this.recordId);
 
@@ -366,11 +368,19 @@ export const useRecordingStore = defineStore('recording', {
           // Pass the wall-clock duration so main can tell whether the combined file
           // actually contains the meeting. Main has no other source for this:
           // metadata.json only gets a duration AFTER the combine, from the probe.
-          const result = await window.electronAPI.recording.combineChunks(this.recordId, '.webm', Number.isFinite(expectedDurationSec) ? expectedDurationSec : this.duration);
+          const expected = Number.isFinite(expectedDurationSec) ? expectedDurationSec : this.duration;
+          // A required PCM capture can fail after preserving some audio. The
+          // first save reports that interruption; an explicit Retry Saving
+          // recovers available sources and keeps the warning in History.
+          const result = this.finalizationRecoveryNeeded
+            ? await window.electronAPI.recording.combineChunks(this.recordId, '.webm', expected, { recovery: true })
+            : await window.electronAPI.recording.combineChunks(this.recordId, '.webm', expected);
+          if (result.requiresRecovery) this.finalizationRecoveryNeeded = true;
 
           await window.electronAPI.recording.setProcessing(false);
 
           if (result.success) {
+            this.finalizationRecoveryNeeded = false;
             this.audioFilePath = result.outputPath;
             sentryRecordingStop(this.recordId, this.duration);
             return { success: true, filePath: result.outputPath, duration: result.duration || null, warning: result.warning };
@@ -1125,6 +1135,7 @@ export const useRecordingStore = defineStore('recording', {
       this.duration = 0;
       this.chunkIndex = 0;
       this.captureMode = null;
+      this.finalizationRecoveryNeeded = false;
       this.audioFilePath = null;
       this.uploadProgress = 0;
       this.bytesUploaded = 0;
