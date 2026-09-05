@@ -1,8 +1,10 @@
 # Native source preservation: implementation and qualification status
 
-The release remains blocked by confirmed audio discarded in the live WebAudio
-recording-input FIFO on Intel macOS. A correct upload cannot recover audio that
-never reached the recorded stream. The existing five-hour failures remain open.
+The release remains blocked pending qualification of native-source capture on
+Windows, Intel macOS and Apple Silicon. Earlier tests confirmed audio discarded
+in the live WebAudio recording-input FIFO on Intel macOS, and the existing
+five-hour failures remain open. A correct upload cannot recover audio that never
+reached the recorded stream.
 
 ## Integrated capture path; qualification is still in progress
 
@@ -62,7 +64,16 @@ final discard padding. Container duration is retained separately. A real capture
 previously failed because nominal container padding exceeded the old tolerance,
 despite containing exactly the expected decoded samples. That failure retained
 the originals and blocked upload; an offline reconstruction is not a passed app
-qualification. The next compiled candidate must pass the full recording test.
+qualification. Subsequent compiled Windows candidates passed the actual short
+mixer-suspension test with native-source preservation. This does not establish
+five-hour or physical-device qualification.
+
+The probe adapter supports the bundled FFprobe 4.4.1 on macOS: it reads bounded
+OpusHead bytes independently of packet inspection, tolerates an absent optional
+header-size field, and uses explicit packet/side-data wrappers. Native media
+validation distinguishes lossless FLAC intermediates from final WebM. The real
+media tests use that same production validator; a previous size-only test double
+missed the actual application's rejection of valid FLAC during device recovery.
 
 ## Deterministic short reproducer
 

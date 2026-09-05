@@ -11,21 +11,86 @@ const { buildCodedScenario, WORK_DIR } = require('./lib/audio');
 const { verifyCodedAudio } = require('./lib/coded-audio');
 const { inspectNativeSources } = require('../../src-electron/native-source-persistence');
 const { concatenateFiles } = require('../../src-electron/durable-files');
+const { estimateEncodedBytes } = require('../../src-electron/native-source-finalization');
 
 const DEFAULT_SECONDS = 5 * 3600 + 5 * 60;
 const ROTATION_SECONDS = 4 * 3600 + 55 * 60;
 const SAMPLE_SECONDS = 30;
 const HEADROOM_BYTES = 1024 ** 3;
 const CRITICAL_FREE_BYTES = 512 * 1024 ** 2;
+const METADATA_RESERVE_BYTES = 64 * 1024 ** 2;
+const ENCODED_SOURCE_BYTES_PER_SECOND = 256000 / 8;
+// One sample interval plus the existing maximum stop-request wait. This only
+// reserves disk; it does not extend recording duration or oracle tolerances.
+const STOP_TAIL_SECONDS = SAMPLE_SECONDS + 60;
 const SOURCE_BOUNDARY_TOLERANCE_S = 1.5;
 const SOURCE_CLOCK_TOLERANCE_S = 1.5;
 const MAX_SOURCE_ACQUISITION_S = 10;
 
-function diskBudget(seconds, nativeSources = false) {
+function diskBudget(seconds, nativeSources = false, { fastPlan = false } = {}) {
+  if (fastPlan && !nativeSources) throw new Error('Fast endurance budget requires native sources');
   return { referenceBytes: (seconds + 25) * 48000 * 2 + 44,
     encodedCopiesBytes: Math.ceil(seconds * 256000 / 8) * 3, headroomBytes: HEADROOM_BYTES,
     ...(nativeSources ? { nativeExtraCopiesBytes: Math.ceil(seconds * 256000 / 8) * 2,
-      nativeLosslessFallbackBytes: seconds * 48000 * 2 * 3 * 2, nativeMetadataReserveBytes: 64 * 1024 ** 2 } : {}) };
+      ...(fastPlan ? { nativeStopTailBytes: STOP_TAIL_SECONDS * ENCODED_SOURCE_BYTES_PER_SECOND * 5 }
+        : { nativeLosslessFallbackBytes: seconds * 48000 * 2 * 3 * 2 }),
+      nativeMetadataReserveBytes: METADATA_RESERVE_BYTES } : {}) };
+}
+
+function nativeEnduranceReserve({ elapsedSeconds, nativeBytes, mixedBytes, nativeAcknowledgedBytes, mixedAcknowledgedBytes }) {
+  if (!Number.isFinite(elapsedSeconds) || elapsedSeconds < 0 ||
+      [nativeBytes, mixedBytes, nativeAcknowledgedBytes, mixedAcknowledgedBytes].some(bytes => !Number.isSafeInteger(bytes) || bytes < 0) ||
+      nativeAcknowledgedBytes > nativeBytes || mixedAcknowledgedBytes > mixedBytes) throw new Error('Invalid native endurance storage evidence');
+  const tailRate = bytes => Math.max(ENCODED_SOURCE_BYTES_PER_SECOND, bytes / Math.max(1, elapsedSeconds));
+  // M+N acknowledged originals already consume available disk. Reserve only
+  // unconfirmed originals, two additional N joins, and one final output F.
+  // Final publication is rename-only; mock upload and oracle PCM are streamed.
+  const allocations = {
+    pendingOriginalBytes: nativeBytes - nativeAcknowledgedBytes + mixedBytes - mixedAcknowledgedBytes,
+    nativeJoinBytes: nativeBytes * 2,
+    finalBytes: estimateEncodedBytes(elapsedSeconds + STOP_TAIL_SECONDS),
+    // Future native tail exists in originals and both joins; mixed tail once.
+    stopTailBytes: Math.ceil(STOP_TAIL_SECONDS * (tailRate(nativeBytes) * 3 + tailRate(mixedBytes))),
+    metadataReserveBytes: METADATA_RESERVE_BYTES, headroomBytes: CRITICAL_FREE_BYTES,
+  };
+  const requiredBytes = Object.values(allocations).reduce((total, bytes) => total + bytes, 0);
+  if (!Number.isSafeInteger(requiredBytes)) throw new Error('Native endurance reserve exceeds its safe bound');
+  return { ...allocations, retainedOriginalBytes: nativeAcknowledgedBytes + mixedAcknowledgedBytes, requiredBytes, stopTailSeconds: STOP_TAIL_SECONDS };
+}
+
+function assertNativeEnduranceSpace(available, reserve) {
+  if (!Number.isSafeInteger(available) || available < 0 || !Number.isSafeInteger(reserve?.requiredBytes) || reserve.requiredBytes < 0) {
+    throw new Error('Invalid native endurance free-space evidence');
+  }
+  if (available < reserve.requiredBytes) throw Object.assign(new Error('Insufficient native endurance remaining space; sources retained without finalization'),
+    { code: 'ENOSPC', availableBytes: available, requiredBytes: reserve.requiredBytes });
+}
+
+// This assertion is deliberately stricter than production's <=5s start and
+// <=one epoch per kind. A successful s13 is exactly one early native mic and
+// no PCM, so its ONE-lane finalizer cannot enter the two-lane FLAC fallback.
+// Inspect only bounded metadata and directory entries, never every old chunk.
+function assertNativeEnduranceFastPlan(recordingDir, source) {
+  const fail = message => { throw new Error('Native endurance fast plan: ' + message + '; sources retained without finalization'); };
+  for (const name of ['system_audio.raw', 'pcm-capture-attempts']) {
+    try { fs.lstatSync(path.join(recordingDir, name)); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    fail('unexpected system PCM or capture intent');
+  }
+  if (!source || !/^[0-9a-f-]{36}$/.test(source.sourceId) || source.kind !== 'microphone' ||
+      !Number.isFinite(source.startOffsetMs) || source.startOffsetMs < 0 || source.startOffsetMs > 25) fail('expected one early microphone source');
+  const nativeDir = path.join(recordingDir, 'native-sources');
+  const entries = fs.readdirSync(nativeDir, { withFileTypes: true });
+  if (entries.length !== 1 || entries[0].name !== source.sourceId || !entries[0].isDirectory()) fail('source inventory changed');
+  const readMarker = name => {
+    const file = path.join(nativeDir, source.sourceId, name), stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16384) fail('invalid source metadata');
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  };
+  const manifest = readMarker('manifest.json'), started = readMarker('started.json');
+  if (manifest.version !== 1 || manifest.sourceId !== source.sourceId || manifest.kind !== 'microphone' ||
+      started.version !== 1 || started.sourceId !== source.sourceId || started.startOffsetMs !== source.startOffsetMs) fail('source placement changed');
+  return { sourceId: source.sourceId, kind: 'microphone', startOffsetMs: source.startOffsetMs, fastPathRequired: true, systemPcmIncluded: false };
 }
 
 // Bounded aggregate evidence: no Blob list or repeated O(meeting length)
@@ -125,6 +190,7 @@ function createNativeEnduranceLedger(recordingDir, manifestPath) {
         lastProgressAt = observedAt;
       }
       if (JSON.stringify(inventory()) !== JSON.stringify([descriptor.sourceId])) throw new Error('Native source inventory changed during endurance');
+      assertNativeEnduranceFastPlan(recordingDir, descriptor);
       let added = 0;
       for (;;) {
         const index = chunks.length, filename = path.join(descriptor.directory, 'chunks', `chunk_${index}.webm`);
@@ -177,6 +243,7 @@ function createNativeEnduranceLedger(recordingDir, manifestPath) {
         metadata: currentMetadata, terminal: await fingerprint(source.endPath), manifestPath, manifestSha256: await sha256(manifestPath),
         retainedPath, retainedSha256: await sha256(retainedPath), problems };
     },
+    assertFastPlan() { return assertNativeEnduranceFastPlan(recordingDir, descriptor); },
     close() { if (!closed) { closed = true; fs.closeSync(fd); } },
   };
 }
@@ -204,6 +271,7 @@ function assessNativeEnduranceAssembly(receipt, plan, sourceId) {
       plan.systemPcmIncluded !== false || !singleSource(plan.sourceIds) || plan.onsetIsApproximate !== true) {
     problems.push('Native endurance lacks the explicit native-source re-encoding policy');
   }
+  if (plan?.fastPathUsed !== true) problems.push('Native endurance unexpectedly required general finalization');
   return problems;
 }
 
@@ -447,7 +515,8 @@ async function runCodedEndurance(opts = {}) {
     fs.writeFileSync(summaryPath, JSON.stringify(result, null, 2));
   };
   try {
-    const budget = diskBudget(seconds, fs.existsSync(path.join(appDir, 'native-source-persistence.js')));
+    const expectsNative = fs.existsSync(path.join(appDir, 'native-source-persistence.js'));
+    const budget = diskBudget(seconds, expectsNative, { fastPlan: expectsNative });
     result.diskPreflight = { ...budget, availableBytes: availableBytes(evidenceDir), requiredBytes: Object.values(budget).reduce((total, size) => total + size, 0) };
     if (result.diskPreflight.availableBytes < result.diskPreflight.requiredBytes) throw new Error('Insufficient free disk space for the synthetic reference, retained encoded copies, and 1 GiB headroom');
     checkpoint({ event: 'preparing-reference', requestedSeconds: seconds });
@@ -463,11 +532,12 @@ async function runCodedEndurance(opts = {}) {
     nativeMode = await app.evalTimed(() => typeof window.electronAPI.recording.beginSource === 'function');
     result.captureMode = nativeMode ? 'native-sources-v1' : 'legacy-live-mix';
     if (nativeMode) {
-      const nativeBudget = diskBudget(seconds, true);
+      const nativeBudget = diskBudget(seconds, true, { fastPlan: true });
       result.nativeDiskPreflight = { ...nativeBudget, availableBytes: availableBytes(evidenceDir),
         // The reference was already generated; count only remaining allocations.
         requiredRemainingBytes: Object.entries(nativeBudget).filter(([key]) => key !== 'referenceBytes').reduce((total, [, bytes]) => total + bytes, 0) };
-      if (result.nativeDiskPreflight.availableBytes < result.nativeDiskPreflight.requiredRemainingBytes) throw new Error('Insufficient native endurance scratch/retention space including lossless fallback and 1 GiB headroom');
+      if (result.nativeDiskPreflight.availableBytes < result.nativeDiskPreflight.requiredRemainingBytes) throw new Error('Insufficient native endurance fast-plan scratch/retention space and 1 GiB headroom');
+      result.nativeDiskPreflight.plan = 'single-native-microphone-no-pcm';
       result.notes.push('Native mode requires one microphone epoch plus one live mix. Native metadata/chunk custody and lower-bound ACK progress are recorded independently of legacy rotations.');
       result.sourceWriterProvenance = await Promise.all(['src/services/recordingChunkWriter.js', 'src/services/nativeSourceRecorder.js'].map(async filename => ({
         path: filename, sha256: await sha256(path.resolve(__dirname, '../..', filename)),
@@ -507,9 +577,13 @@ async function runCodedEndurance(opts = {}) {
       const nativeSource = nativeMode ? await nativeLedger.sample(roles.native, renderer.nativeCapture.at, sampledAt) : null;
       const rssMB = process.memoryUsage().rss / 1048576;
       const freeBytes = availableBytes(evidenceDir);
-      const minimumFinalizationFreeBytes = CRITICAL_FREE_BYTES + ((recorder?.bytes || 0) + (roles?.native.bytes || 0)) * 3 +
-        (nativeMode ? elapsedS * 48000 * 2 * 3 * 2 : 0);
-      const sample = { elapsedS, renderer, disk, nativeSource, wallPersistGapS, observedNoProgressS, nativeGapS, harnessRssMB: rssMB, freeBytes, minimumFinalizationFreeBytes };
+      const nativeReserve = nativeMode ? nativeEnduranceReserve({
+        elapsedSeconds: Math.max(elapsedS, (renderer.nativeCapture.at - roles.native.startCalledAt) / 1000),
+        nativeBytes: roles.native.bytes, mixedBytes: roles.mixed.bytes,
+        nativeAcknowledgedBytes: roles.native.acknowledgedBytes, mixedAcknowledgedBytes: roles.mixed.acknowledgedBytes,
+      }) : null;
+      const minimumFinalizationFreeBytes = nativeReserve?.requiredBytes ?? CRITICAL_FREE_BYTES + (recorder?.bytes || 0) * 3;
+      const sample = { elapsedS, renderer, disk, nativeSource, wallPersistGapS, observedNoProgressS, nativeGapS, harnessRssMB: rssMB, freeBytes, minimumFinalizationFreeBytes, nativeReserve };
       result.metrics.samples++;
       result.metrics.maxPersistGapS = Math.max(result.metrics.maxPersistGapS, wallPersistGapS || 0);
       result.metrics.maxNativeEventGapS = Math.max(result.metrics.maxNativeEventGapS, nativeGapS);
@@ -539,6 +613,7 @@ async function runCodedEndurance(opts = {}) {
       if (app.log.length > 200) app.log.splice(0, app.log.length - 200);
       checkpoint({ event: 'progress', ...sample });
       if (renderer.phase !== 'recording') throw new Error('Recording left the active phase before the requested endurance duration: ' + renderer.phase);
+      if (nativeMode) assertNativeEnduranceSpace(freeBytes, nativeReserve);
       if (freeBytes < minimumFinalizationFreeBytes) {
         // This is a disposable synthetic profile. Preserve durable sources and
         // stop its process instead of allocating more remux copies on low disk.
@@ -549,6 +624,20 @@ async function runCodedEndurance(opts = {}) {
       await sleep(Math.min(SAMPLE_SECONDS * 1000, Math.max(1, seconds * 1000 - (performance.now() - started))));
     }
     result.monotonicCaptureSeconds = (performance.now() - started) / 1000;
+    if (nativeMode) {
+      // Recheck immediately before requesting stop, which itself starts media
+      // finalization. A failed guard closes the synthetic process in finally;
+      // it must not invoke the normal stop/finalize UI on a different plan.
+      const snapshot = await app.evalTimed(() => ({ capture: window.__nativeEnduranceEvidence.snapshot(),
+        acquisitions: window.__enduranceConstraints.acquisitions }));
+      const roles = enduranceRecorderRoles(snapshot.capture, snapshot.acquisitions);
+      const reserve = nativeEnduranceReserve({ elapsedSeconds: Math.max(result.monotonicCaptureSeconds,
+        (snapshot.capture.at - roles.native.startCalledAt) / 1000), nativeBytes: roles.native.bytes, mixedBytes: roles.mixed.bytes,
+        nativeAcknowledgedBytes: roles.native.acknowledgedBytes, mixedAcknowledgedBytes: roles.mixed.acknowledgedBytes });
+      result.nativePreStop = { plan: nativeLedger.assertFastPlan(), reserve, availableBytes: availableBytes(evidenceDir) };
+      checkpoint({ event: 'native-pre-stop-guard', ...result.nativePreStop });
+      assertNativeEnduranceSpace(result.nativePreStop.availableBytes, reserve);
+    }
     checkpoint({ event: 'stopping' });
     await app.stopRecording(60000);
     await app.waitForPhase(['uploaded', 'error'], 30 * 60000);
@@ -641,4 +730,5 @@ async function runCodedEndurance(opts = {}) {
 
 module.exports = { runCodedEndurance, resolveEnduranceSeconds, createMultipartHasher, startStreamingMockBackend, diskBudget,
   assessSourceCoverage, DEFAULT_SECONDS, ROTATION_SECONDS, installNativeEnduranceObserver, enduranceRecorderRoles,
-  createNativeEnduranceLedger, assessNativeEndurancePreservation, assessNativeEnduranceAssembly, verifyRetainedSources };
+  createNativeEnduranceLedger, assessNativeEndurancePreservation, assessNativeEnduranceAssembly, verifyRetainedSources,
+  assertNativeEnduranceFastPlan, nativeEnduranceReserve, assertNativeEnduranceSpace };

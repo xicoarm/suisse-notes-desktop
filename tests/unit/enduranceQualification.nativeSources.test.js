@@ -10,8 +10,9 @@ import { createRecordingChunkWriter } from '../../src/services/recordingChunkWri
 const require = createRequire(import.meta.url);
 const { diskBudget, DEFAULT_SECONDS, ROTATION_SECONDS, installNativeEnduranceObserver, enduranceRecorderRoles,
   createNativeEnduranceLedger, assessNativeEndurancePreservation, assessNativeEnduranceAssembly,
-  verifyRetainedSources } = require('../e2e-harness/endurance-qualification');
-const { beginSource, markSourceStarted, saveSourceChunk, endSource } = require('../../src-electron/native-source-persistence');
+  verifyRetainedSources, assertNativeEnduranceFastPlan, nativeEnduranceReserve, assertNativeEnduranceSpace } = require('../e2e-harness/endurance-qualification');
+const { beginSource, markSourceStarted, saveSourceChunk, endSource, inspectNativeSources } = require('../../src-electron/native-source-persistence');
+const { estimateEncodedBytes } = require('../../src-electron/native-source-finalization');
 const work = path.resolve('tests/e2e-harness/work');
 let directory, ledgers;
 beforeEach(() => { fs.mkdirSync(work, { recursive: true }); directory = fs.mkdtempSync(path.join(work, 'native-endurance-unit-')); ledgers = []; });
@@ -133,12 +134,19 @@ describe('native durability ledger and separate live-mix rotation', () => {
 });
 
 describe('native endurance preserves existing duration and source-clock gates', () => {
-  it('keeps 5h05 and natural 4h55 while budgeting simultaneous bytes and native fallback scratch', () => {
+  it('keeps 5h05 and natural 4h55 while reserving every retained copy and applying no-FLAC only to the enforced fast plan', () => {
     expect(DEFAULT_SECONDS).toBe(18300); expect(ROTATION_SECONDS).toBe(17700);
     const legacy = diskBudget(18300), native = diskBudget(18300, true);
     expect(native).toMatchObject(legacy);
     expect(native.nativeExtraCopiesBytes).toBe(18300 * 32000 * 2);
     expect(native.nativeLosslessFallbackBytes).toBe(18300 * 48000 * 2 * 3 * 2);
+    const fast = diskBudget(18300, true, { fastPlan: true });
+    expect(fast).toMatchObject(legacy);
+    expect(fast.nativeLosslessFallbackBytes).toBeUndefined();
+    expect(fast.nativeExtraCopiesBytes).toBe(native.nativeExtraCopiesBytes);
+    expect(fast.nativeStopTailBytes).toBe(90 * 32000 * 5);
+    expect(Object.values(fast).reduce((total, bytes) => total + bytes, 0)).toBe(5842450732);
+    expect(() => diskBudget(18300, false, { fastPlan: true })).toThrow('requires native');
   });
 
   it('compares complete source/final identity ranges and the same 1.5s source-clock budget', () => {
@@ -153,10 +161,65 @@ describe('native endurance preserves existing duration and source-clock gates', 
   it('requires normal native completion and explicit re-encoding rather than a legacy or recovery receipt', () => {
     const receipt = { version: 3, sourceMode: 'native', recovered: false, sourceIds: [sourceId], systemPcmIncluded: false };
     const plan = { version: 1, recovery: false, codecPolicy: 'opus-cbr-192k-20ms-reencoded-from-native-sources', sourceIds: [sourceId],
-      systemPcmIncluded: false, onsetIsApproximate: true };
+      systemPcmIncluded: false, onsetIsApproximate: true, fastPathUsed: true };
     expect(assessNativeEnduranceAssembly(receipt, plan, sourceId)).toEqual([]);
     expect(assessNativeEnduranceAssembly({ ...receipt, recovered: true }, plan, sourceId)).toHaveLength(1);
     expect(assessNativeEnduranceAssembly(receipt, { ...plan, codecPolicy: 'copy' }, sourceId)).toHaveLength(1);
     expect(assessNativeEnduranceAssembly({ ...receipt, sourceIds: ['other'] }, plan, sourceId)).toHaveLength(1);
+    expect(assessNativeEnduranceAssembly(receipt, { ...plan, fastPathUsed: false }, sourceId)).toContain('Native endurance unexpectedly required general finalization');
+  });
+});
+
+describe('native endurance fast-plan disk guards', () => {
+  const usage = { elapsedSeconds: 18300, nativeBytes: 500000000, mixedBytes: 400000000,
+    nativeAcknowledgedBytes: 499000000, mixedAcknowledgedBytes: 399000000 };
+
+  it('reserves peak remaining joins, output, pending originals, stop tail and headroom without double-counting retained originals', () => {
+    const reserve = nativeEnduranceReserve(usage);
+    expect(reserve).toMatchObject({ retainedOriginalBytes: 898000000, pendingOriginalBytes: 2000000,
+      nativeJoinBytes: 1000000000, finalBytes: estimateEncodedBytes(18390), stopTailSeconds: 90,
+      stopTailBytes: 90 * 32000 * 4, metadataReserveBytes: 64 * 1024 ** 2, headroomBytes: 512 * 1024 ** 2 });
+    expect(reserve.requiredBytes).toBe(2000000 + 1000000000 + estimateEncodedBytes(18390) +
+      90 * 32000 * 4 + 64 * 1024 ** 2 + 512 * 1024 ** 2);
+    // Draining pending originals spends disk but removes that same amount
+    // from remaining allocation. Already-written M/N are not reserved twice.
+    const drained = nativeEnduranceReserve({ ...usage, nativeAcknowledgedBytes: usage.nativeBytes, mixedAcknowledgedBytes: usage.mixedBytes });
+    expect(reserve.requiredBytes - drained.requiredBytes).toBe(2000000);
+    expect(drained.retainedOriginalBytes - reserve.retainedOriginalBytes).toBe(2000000);
+    expect(nativeEnduranceReserve({ ...usage, nativeBytes: 900000000 }).stopTailBytes).toBeGreaterThan(reserve.stopTailBytes);
+  });
+
+  it('accepts the exact remaining-space boundary and refuses one byte less or unknown capacity', () => {
+    const reserve = nativeEnduranceReserve(usage);
+    expect(() => assertNativeEnduranceSpace(reserve.requiredBytes, reserve)).not.toThrow();
+    expect(() => assertNativeEnduranceSpace(reserve.requiredBytes - 1, reserve)).toThrow('retained without finalization');
+    for (const available of [NaN, Infinity, -1]) expect(() => assertNativeEnduranceSpace(available, reserve)).toThrow('Invalid');
+    expect(() => nativeEnduranceReserve({ ...usage, nativeAcknowledgedBytes: usage.nativeBytes + 1 })).toThrow('Invalid');
+    expect(() => nativeEnduranceReserve({ ...usage, elapsedSeconds: NaN })).toThrow('Invalid');
+  });
+
+  it.each(['system_audio.raw', 'pcm-capture-attempts'])('rejects %s before finalization even when it is empty, retaining all original bytes', async name => {
+    const { ledger, recorder } = await sourceFixture();
+    await ledger.sample(recorder, 2200, 10000);
+    if (name.endsWith('.raw')) fs.writeFileSync(path.join(directory, name), Buffer.alloc(0));
+    else fs.mkdirSync(path.join(directory, name));
+    expect(() => ledger.assertFastPlan()).toThrow('unexpected system PCM');
+    await expect(ledger.sample(recorder, 2300, 10100)).rejects.toThrow('unexpected system PCM');
+    expect(fs.readFileSync(path.join(directory, 'native-sources', sourceId, 'chunks', 'chunk_0.webm'), 'utf8')).toBe('one');
+    expect(fs.readdirSync(directory).some(entry => entry.startsWith('native-finalization-'))).toBe(false);
+  });
+
+  it('refuses a reserved successor, a changed placement, or a second native lane instead of falling back to FLAC', async () => {
+    await sourceFixture();
+    const source = inspectNativeSources(directory)[0];
+    expect(assertNativeEnduranceFastPlan(directory, source)).toMatchObject({ fastPathRequired: true, systemPcmIncluded: false });
+    const startedPath = path.join(source.directory, 'started.json'), started = JSON.parse(fs.readFileSync(startedPath));
+    fs.writeFileSync(startedPath, JSON.stringify({ ...started, startOffsetMs: 6000 }));
+    expect(() => assertNativeEnduranceFastPlan(directory, source)).toThrow('placement changed');
+    fs.writeFileSync(startedPath, JSON.stringify(started));
+    await beginSource(directory, { sourceId: crypto.randomUUID(), kind: 'system', startOffsetMs: 1,
+      mimeType: 'audio/webm;codecs=opus', settings: {} });
+    expect(() => assertNativeEnduranceFastPlan(directory, source)).toThrow('inventory changed');
+    expect(inspectNativeSources(directory)).toHaveLength(2);
   });
 });
