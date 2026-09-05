@@ -32,8 +32,13 @@ jobs:
   build-validation:
     runs-on: ubuntu-latest
     needs: lint-and-test
+    if: always()
 
     steps:
+      - name: Require successful lint and tests
+        if: needs.lint-and-test.result != 'success'
+        run: exit 1
+
       - name: Checkout code
         uses: actions/checkout@v4
 
