@@ -168,8 +168,8 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
   if (typeof ffprobePath !== 'string' || !ffprobePath) throw new Error('Native finalization requires a bundled ffprobe path');
 
   const timeout = seconds => Math.min(45 * 60000, 5 * 60000 + Math.ceil(seconds / 3600) * 10 * 60000);
-  async function validDuration(file) {
-    const validation = await validate(file);
+  async function validDuration(file, container = 'webm') {
+    const validation = await validate(file, { container });
     if (!validation?.valid) throw failure(validation?.error || 'Native audio output validation failed');
     const measured = await probe(file);
     const duration = typeof measured === 'number' ? measured : Number(measured?.duration);
@@ -346,7 +346,7 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
         if (timing.overlapCount) throw failure(`Native source ${source.sourceId} has overlapping native timestamps`, 'NATIVE_SOURCE_TIMESTAMP_OVERLAP');
         if (timing.gapCount) warnings.push({ kind: 'native-source-timestamp-gaps', sourceId: source.sourceId,
           count: timing.gapCount, gapSeconds: timing.gapSamples / RATE });
-        const duration = await validDuration(normalizedPath);
+        const duration = await validDuration(normalizedPath, 'flac');
         const mediaSamples = samples(duration);
         const span = timing.lastEndPts - timing.firstPts;
         if (Math.abs(mediaSamples - span) > TIMING_TOLERANCE_SAMPLES) throw failure(`Native source ${source.sourceId} normalization changed its timestamp span`);
@@ -365,7 +365,7 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
         const normalizedPath = path.join(scratchDirectory, 'system-pcm.flac');
         await run(lossless(input(pcm.path).inputOptions(['-f', 's16le', '-ar', String(RATE), '-ac', '1'])
           .audioFilters('pan=stereo|c0=c0|c1=c0')).output(normalizedPath), timeout(pcm.duration), 'Normalize AudioTee PCM');
-        const duration = await validDuration(normalizedPath);
+        const duration = await validDuration(normalizedPath, 'flac');
         if (Math.abs(samples(duration) - pcm.samples) > 1) throw failure('System PCM normalization changed its sample count');
         plans.push({ kind: 'system', samples: pcm.samples, segments: [{ kind: 'audio', sourceId: 'audiotee',
           input: normalizedPath, samples: pcm.samples, originalSamples: pcm.samples, startSample: 0 }] });
@@ -386,7 +386,7 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
             ? ffmpeg().input('anullsrc=r=48000:cl=stereo').inputFormat('lavfi').audioFilters(`atrim=end_sample=${segment.samples}`)
             : input(segment.input).audioFilters(`atrim=end_sample=${segment.samples},asetpts=PTS-STARTPTS`);
           await run(lossless(command).output(segmentPath), timeout(segment.samples / RATE), 'Build native timeline segment');
-          if (Math.abs(samples(await validDuration(segmentPath)) - segment.samples) > 1) throw failure('Native timeline segment has an incorrect length');
+          if (Math.abs(samples(await validDuration(segmentPath, 'flac')) - segment.samples) > 1) throw failure('Native timeline segment has an incorrect length');
           files.push(segmentPath);
         }
         if (files.length === 1) {

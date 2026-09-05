@@ -13,6 +13,7 @@ const ffmpeg = require('fluent-ffmpeg');
 ffmpeg.setFfmpegPath(require('@ffmpeg-installer/ffmpeg').path);
 ffmpeg.setFfprobePath(require('@ffprobe-installer/ffprobe').path);
 const { createNativeSourceFinalization, createTimestampEvidence, planLane, estimateScratchBytes, estimateEncodedBytes } = require('../../src-electron/native-source-finalization');
+const { validateNativeMedia } = require('../../src-electron/native-media-validation');
 const { beginSource, markSourceStarted, saveSourceChunk, endSource, inspectNativeSources } = require('../../src-electron/native-source-persistence');
 let root;
 let commands;
@@ -29,7 +30,7 @@ function metadata(file) {
 }
 function finalizer(overrides = {}) {
   return createNativeSourceFinalization({ ffmpeg, run, ffprobePath: require('@ffprobe-installer/ffprobe').path,
-    validate: async file => ({ valid: fs.statSync(file).size > 0 }),
+    validate: validateNativeMedia,
     probe: async file => Number((await metadata(file)).format.duration), ...overrides });
 }
 function wave(seconds, hz, { rate = 48000, stereo = false, antiPhase = false } = {}) {

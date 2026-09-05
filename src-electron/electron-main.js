@@ -10,6 +10,7 @@ const { assessRecordingUpload, FINALIZATION_PENDING_MARKER } = require('./record
 const { withCaptureWarnings, hydrateHistoryCaptureWarnings } = require('./recording-history-warnings');
 const { createPcmCapture } = require('./pcm-capture');
 const pcmCaptureEvidence = require('./pcm-capture-evidence');
+const { validateNativeMedia } = require('./native-media-validation');
 const { tokenUserId, canUploadForUser, verifiedUploadResult } = require('./upload-safety');
 const { pathToFileURL } = require('url');
 const axios = require('axios');
@@ -3366,7 +3367,7 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
     }
     const persistence = createRecordingPersistence({
       nativeBuild: (directory, outputPath, nativeOptions) => createNativeSourceFinalization({
-        ffmpeg, run: ffmpegWithTimeout, validate: validateAudioOutput,
+        ffmpeg, run: ffmpegWithTimeout, validate: validateNativeMedia,
         ffprobePath: resolveBundledBinaryPaths().ffprobe,
         probe: async file => Number((await getAudioMetadata(file))?.format?.duration) || 0,
         checkSpace: async neededBytes => {
