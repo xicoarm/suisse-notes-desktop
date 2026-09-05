@@ -1937,6 +1937,8 @@ function captureProgressSnapshot() {
     receivedDataEvents, emptyDataEvents, receivedDataBytes, lastDataEventAt,
     savedChunks: savedChunkCount,
     pendingChunks: chunkWriter?.pendingCount || 0,
+    pendingBytes: chunkWriter?.pendingBytes || 0,
+    oldestPendingMs: chunkWriter?.oldestPendingMs || 0,
     mediaState: mediaRecorder?.state || null,
     contextState: mixingContext?.state || null,
     micTrackState: micTrack?.readyState || null,
@@ -2551,6 +2553,7 @@ async function startRecordingInternal(options) {
     receivedDataBytes = 0;
     lastDataEventAt = null;
     const thisRecordId = recordingStore.recordId;
+    let backpressureStopped = false;
     const writer = createRecordingChunkWriter({
       save: bytes => {
         if (recordingStore.recordId !== thisRecordId) return { success: false, error: 'Recording identity changed before audio was saved' };
@@ -2559,6 +2562,9 @@ async function startRecordingInternal(options) {
       onSaved: () => {
         lastSuccessfulChunkAt = Date.now();
         savedChunkCount++;
+        // One old write completing does not repair an accumulating backlog.
+        // Keep its warning until successful finalization or explicit reset.
+        if (backpressureStopped) return;
         if (stallWarned) { stallWarned = false; emit('captureRecovered', { savedChunks: savedChunkCount }); }
         recordingStore.chunkSaveErrors = 0;
         if (recordingStore.chunkSaveErrorWarning) {
@@ -2573,6 +2579,24 @@ async function startRecordingInternal(options) {
         // a later blob must never reuse its index and silently replace it.
         emit('chunkSaveFailure', { ...failure, retriesExhausted: true, consecutiveErrors: recordingStore.chunkSaveErrors });
       },
+      onBackpressure: isElectron() ? diagnostics => {
+        if (backpressureStopped || myGeneration !== recorderGeneration || mediaRecorder !== thisRecorder) return;
+        backpressureStopped = true;
+        recordingStore.chunkSaveErrorWarning = true;
+        const warning = { ...diagnostics, backpressure: true,
+          error: 'Audio saving is falling behind. Recording stopped while queued audio is saved.' };
+        stopDurationTracking();
+        // Bound accumulation even when no RecordPage listener is mounted.
+        // Preserve the existing data/stop handlers for the final native blob.
+        try { if (thisRecorder.state !== 'inactive') thisRecorder.stop(); }
+        catch (error) { warning.stopError = error.message; }
+        try {
+          Promise.resolve(window.electronAPI?.recording?.saveMetadata?.(thisRecordId, {
+            captureWarnings: ['capture-backpressure'], captureBackpressureDiagnostics: diagnostics
+          })).catch(error => console.warn('Could not persist capture backlog warning:', error));
+        } catch (error) { console.warn('Could not persist capture backlog warning:', error); }
+        emit('chunkSaveFailure', warning);
+      } : undefined,
     });
     chunkWriter = writer;
     mediaRecorder.ondataavailable = event => {
@@ -2917,11 +2941,9 @@ async function stopRecordingInternal(recordingStore, stopSystemAudio) {
       if (recorder.state !== 'inactive') {
         try { recorder.stop(); }
         catch (error) { stopError = error.message; clearTimeout(timeout); resolve(); }
-      } else {
-        // An error may already have stopped the recorder; queued final events
-        // still get the opportunity to run before teardown.
-        setTimeout(() => { clearTimeout(timeout); resolve(); }, 0);
       }
+      // Native stop sets inactive before queuing final data/stop events. An
+      // emergency stop may already have done that; await the same deadline.
     });
   }
 
@@ -2952,7 +2974,13 @@ async function stopRecordingInternal(recordingStore, stopSystemAudio) {
   }
   if (!recordingStore.recordId) return { success: false, error: 'No active recording' };
   await window.electronAPI?.recording?.setUnsavedAudio?.(null);
-  return recordingStore.stopRecording(expectedDurationSec);
+  const result = await recordingStore.stopRecording(expectedDurationSec);
+  if (result?.success && writer?.backpressure && stopGeneration === recorderGeneration) {
+    recordingStore.chunkSaveErrors = 0;
+    recordingStore.chunkSaveErrorWarning = false;
+    emit('chunkSaveFailure', null);
+  }
+  return result;
 }
 
 /**

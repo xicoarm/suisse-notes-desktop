@@ -212,9 +212,9 @@ export function useRecorder() {
     if (!data) { chunkSaveError.value = null; return; }
     console.error('Chunk save failure from service:', data);
     chunkSaveError.value = data;
-    // Disk full, or repeated permanent failures → stop now and preserve what is
-    // already on disk rather than continuing to "record" into a gapped session.
-    if (data.diskFull || data.retriesExhausted || (data.consecutiveErrors && data.consecutiveErrors >= 3)) {
+    // Disk full, growing backlog, or repeated permanent failures: stop capture
+    // and save the remaining queue before finalizing the recording.
+    if (data.diskFull || data.backpressure || data.retriesExhausted || (data.consecutiveErrors && data.consecutiveErrors >= 3)) {
       console.error('Emergency stop-with-save triggered by chunk-save failure');
       try {
         await recordingService.stopRecording(recordingStore, stopSystemAudio);

@@ -313,6 +313,115 @@ describe('recordingService mic signal forensics (MSIG)', () => {
     expect(recordingService.getSavedChunkCount()).toBe(0);
   });
 
+  it.each([true, false])('bounds an aging backlog only on Electron (%s), retaining final audio and the warning until finalization', async electron => {
+    const previousApi = window.electronAPI;
+    const saveMetadata = vi.fn().mockResolvedValue({ success: true });
+    window.electronAPI = electron ? { recording: { saveMetadata } } : undefined;
+    const warnings = vi.fn();
+    recordingService.addEventListener('chunkSaveFailure', warnings);
+    let timer;
+    try {
+      const store = createMockRecordingStore();
+      const saved = [];
+      store.saveChunk.mockImplementation(bytes => new Promise(resolve => setTimeout(() => {
+        saved.push(bytes[0]); resolve({ success: true });
+      }, 2000)));
+      await startHealthyRecording(store);
+      const recorder = MockMediaRecorder.last;
+      const send = value => recorder.ondataavailable({ target: recorder,
+        data: { size: 1, arrayBuffer: async () => Uint8Array.of(value).buffer } });
+      const stopped = vi.spyOn(recorder, 'stop').mockImplementation(() => {
+        recorder.state = 'inactive';
+        send(99); // Reentrant final event must not trigger another stop.
+        recorder.onstop?.();
+      });
+      let accepted = 0;
+      timer = setInterval(() => { if (recorder.state === 'recording') send(accepted++); }, 1000);
+      await vi.advanceTimersByTimeAsync(32000);
+      clearInterval(timer);
+      if (electron) {
+        expect(stopped).toHaveBeenCalledTimes(1); // No UI emergency listener installed.
+        expect(warnings).toHaveBeenCalledTimes(1);
+        expect(warnings.mock.calls[0][0]).toMatchObject({ backpressure: true, oldestPendingMs: 15000 });
+        expect(warnings.mock.calls[0][0]).not.toHaveProperty('retriesExhausted');
+        expect(store.chunkSaveErrors).toBe(0);
+        expect(store.chunkSaveErrorWarning).toBe(true); // Later saves have already succeeded.
+        expect(saveMetadata).toHaveBeenCalledWith('rec-test', expect.objectContaining({ captureWarnings: ['capture-backpressure'] }));
+      } else {
+        expect(stopped).not.toHaveBeenCalled();
+        expect(warnings).not.toHaveBeenCalled();
+        expect(recorder.state).toBe('recording');
+      }
+      const finalizing = recordingService.stopRecording(store);
+      await vi.advanceTimersByTimeAsync(100000);
+      expect(await finalizing).toMatchObject({ success: true });
+      expect(saved).toEqual([...Array.from({ length: accepted }, (_, i) => i), 99]);
+      expect(stopped).toHaveBeenCalledTimes(1);
+      if (electron) {
+        expect(store.chunkSaveErrorWarning).toBe(false);
+        expect(warnings).toHaveBeenCalledTimes(2);
+        expect(warnings).toHaveBeenLastCalledWith(null);
+      }
+    } finally {
+      clearInterval(timer);
+      recordingService.removeEventListener('chunkSaveFailure', warnings);
+      window.electronAPI = previousApi;
+    }
+  });
+
+  it.each([false, true])('waits for queued final events after backlog stop, with an emergency listener (%s)', async withListener => {
+    const previousApi = window.electronAPI;
+    window.electronAPI = { recording: {
+      saveMetadata: vi.fn().mockResolvedValue({ success: true }),
+      setUnsavedAudio: vi.fn(), setInProgress: vi.fn(), setProcessing: vi.fn()
+    } };
+    const store = createMockRecordingStore();
+    const stopSystemAudio = vi.fn().mockResolvedValue();
+    let finalizing, releaseFirst;
+    const warning = vi.fn(data => {
+      if (withListener && data?.backpressure) finalizing = recordingService.stopRecording(store, stopSystemAudio);
+    });
+    recordingService.addEventListener('chunkSaveFailure', warning);
+    try {
+      store.saveChunk.mockImplementationOnce(() => new Promise(resolve => { releaseFirst = resolve; }));
+      await startHealthyRecording(store);
+      const recorder = MockMediaRecorder.last;
+      const send = value => recorder.ondataavailable({ target: recorder,
+        data: { size: 1, arrayBuffer: async () => Uint8Array.of(value).buffer } });
+      const stopped = vi.spyOn(recorder, 'stop').mockImplementation(() => {
+        recorder.state = 'inactive';
+        setTimeout(() => { send(99); recorder.onstop?.(); }, 50);
+      });
+      send(1);
+      await vi.advanceTimersByTimeAsync(15000);
+      send(2); // The first save is still pending: stop before more capture accumulates.
+      expect(stopped).toHaveBeenCalledTimes(1);
+      expect(recorder.state).toBe('inactive');
+      if (!withListener) finalizing = recordingService.stopRecording(store, stopSystemAudio);
+      await vi.advanceTimersByTimeAsync(25);
+      expect(stopSystemAudio).not.toHaveBeenCalled(); // Do not tear down before native final data.
+      expect(store.stopRecording).not.toHaveBeenCalled();
+      expect(store.chunkSaveErrorWarning).toBe(true);
+      await vi.advanceTimersByTimeAsync(25);
+      expect(stopSystemAudio).toHaveBeenCalledTimes(1);
+      expect(store.stopRecording).not.toHaveBeenCalled(); // Final data also waits for durable FIFO saves.
+      releaseFirst({ success: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await finalizing).toMatchObject({ success: true });
+      expect(store.saveChunk.mock.calls.map(([bytes]) => bytes)).toEqual([[1], [2], [99]]);
+      expect(store.stopRecording).toHaveBeenCalledTimes(1);
+      expect(stopped).toHaveBeenCalledTimes(1);
+      expect(store.chunkSaveErrorWarning).toBe(false);
+      expect(warning).toHaveBeenLastCalledWith(null);
+    } finally {
+      releaseFirst?.({ success: true });
+      await vi.advanceTimersByTimeAsync(50);
+      await finalizing;
+      recordingService.removeEventListener('chunkSaveFailure', warning);
+      window.electronAPI = previousApi;
+    }
+  });
+
   it('bounds foreground resume across all suspended contexts instead of hanging on the first one', async () => {
     const store = createMockRecordingStore();
     await startHealthyRecording(store);

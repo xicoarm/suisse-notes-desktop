@@ -114,7 +114,7 @@ function handleChunkSaveFailure(data) {
   if (!recordingStore.isRecording && !recordingStore.isPaused) return;
   if (data.diskFull) {
     emergencyStop('safetyNetDiskFullStop');
-  } else if (data.retriesExhausted || (data.consecutiveErrors || 0) >= 3) {
+  } else if (data.backpressure || data.retriesExhausted || (data.consecutiveErrors || 0) >= 3) {
     emergencyStop('safetyNetChunkFailStop');
   }
 }
