@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import vm from 'node:vm';
 const require = createRequire(import.meta.url);
-const { classifyWitnessRecorders, legacyChunkFiles, installRecordingRoleObserver } = require('../e2e-harness/lib/native-recorder-evidence');
+const { classifyWitnessRecorders, legacyChunkFiles, legacyBatchLayout, installRecordingRoleObserver } = require('../e2e-harness/lib/native-recorder-evidence');
 
 function capture({ extra = false, archived = true } = {}) {
   return { acquisitions: [{ sourceTrackIds: ['mic'] }], contexts: [{ destinationTrackIds: ['mix'] }], recorders: [
@@ -51,6 +51,17 @@ afterEach(() => {
 });
 
 describe('retaining the real mixed stream independently of the protected final', () => {
+  it('counts two archived rotations and the final retained batch without counting empty or native directories', () => {
+    const { root, put } = diskFixture();
+    put('source-chunks/100/chunk_0.webm'); put('source-chunks/200/chunk_1.webm'); put('chunks/chunk_2.webm');
+    put('native-sources/native/chunks/chunk_0.webm');
+    fs.mkdirSync(path.join(root, 'source-chunks/300'));
+    expect(legacyBatchLayout(root)).toMatchObject({ batches: 3, archivedBatches: 2, activeBatchRetained: true });
+    fs.unlinkSync(path.join(root, 'chunks/chunk_2.webm'));
+    expect(legacyBatchLayout(root)).toMatchObject({ batches: 2, archivedBatches: 2, activeBatchRetained: false });
+    put('source-chunks/300/chunk_2.webm');
+    expect(legacyBatchLayout(root)).toMatchObject({ batches: 3, archivedBatches: 3, activeBatchRetained: false });
+  });
   it('orders only legacy chunks across batches, excluding native chunks and final artifacts', () => {
     const { root, put } = diskFixture();
     put('source-chunks/100/chunk_0.webm'); put('chunks/chunk_1.webm');

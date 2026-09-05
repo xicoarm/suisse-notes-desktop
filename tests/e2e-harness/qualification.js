@@ -8,7 +8,7 @@ const { AppDriver, sleep } = require('./lib/app-driver');
 const { startMockBackend } = require('./lib/mock-backend');
 const { buildCodedScenario, WORK_DIR } = require('./lib/audio');
 const { verifyCodedAudio } = require('./lib/coded-audio');
-const { installRecordingRoleObserver } = require('./lib/native-recorder-evidence');
+const { installRecordingRoleObserver, legacyBatchLayout } = require('./lib/native-recorder-evidence');
 const { inspectNativeSources } = require('../../src-electron/native-source-persistence');
 
 async function sha256(filename) {
@@ -144,9 +144,18 @@ async function captureCase(kind, seconds, opts = {}) {
     result.captureWarnings = metadata.captureWarnings || [];
     result.uploadAttempts = mock.state.requests.filter(request => request.url === '/api/desktop/upload').length;
     if (kind === 'rotation-and-network-cut') {
-      const archive = path.join(path.dirname(output), 'source-chunks');
-      result.sourceBatches = fs.readdirSync(archive).length;
-      if (result.sourceBatches < 3) result.problems.push('Both requested source rotations were not preserved');
+      const layout = legacyBatchLayout(path.dirname(output));
+      // Native finalization leaves the final live-mix batch in chunks/. The two
+      // actual rotations must still be archived, with every emitted byte kept.
+      result.sourceBatches = layout.batches;
+      result.archivedSourceBatches = layout.archivedBatches;
+      result.activeBatchRetained = layout.activeBatchRetained;
+      result.liveMixChunks = [];
+      for (const chunk of layout.chunks) result.liveMixChunks.push({ index: chunk.index,
+        path: path.relative(path.dirname(output), chunk.file), bytes: fs.statSync(chunk.file).size, sha256: await sha256(chunk.file) });
+      if (rotations !== 2 || layout.archivedBatches < 2 || layout.batches < 3) result.problems.push('Both requested source rotations were not preserved');
+      if (result.liveMixChunks.length !== mixed[0].events - mixed[0].emptyEvents ||
+          result.liveMixChunks.reduce((total, chunk) => total + chunk.bytes, 0) !== mixed[0].bytes) result.problems.push('Rotated live-mix original bytes/events were not fully retained');
       if (result.uploadAttempts !== 2) result.problems.push('Expected one cut upload and one successful retry');
     } else if (result.uploadAttempts !== 1) result.problems.push('Expected exactly one successful upload');
     if (kind === 'blob-delay') {

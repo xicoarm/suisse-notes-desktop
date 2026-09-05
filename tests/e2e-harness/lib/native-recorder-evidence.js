@@ -48,6 +48,13 @@ function legacyChunkFiles(recordingDir) {
   return chunks;
 }
 
+function legacyBatchLayout(recordingDir) {
+  const chunks = legacyChunkFiles(recordingDir);
+  const directories = new Set(chunks.map(chunk => path.dirname(chunk.file)));
+  const activeBatchRetained = directories.has(path.join(recordingDir, 'chunks'));
+  return { chunks, batches: directories.size, archivedBatches: directories.size - Number(activeBatchRetained), activeBatchRetained };
+}
+
 // Installed before the app constructs any recorder. Current application source
 // and mix handlers are ondataavailable properties assigned before start().
 // Wrap those handlers so Blob identity is tagged before its writer converts it.
@@ -125,4 +132,4 @@ function installRecordingRoleObserver({ delayRole = null, delayMs = 14000 } = {}
   };
 }
 
-module.exports = { classifyWitnessRecorders, legacyChunkFiles, installRecordingRoleObserver };
+module.exports = { classifyWitnessRecorders, legacyChunkFiles, legacyBatchLayout, installRecordingRoleObserver };
