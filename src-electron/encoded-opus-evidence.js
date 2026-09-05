@@ -29,6 +29,17 @@ function compactFields(line) {
   return fields;
 }
 
+function boundedStreamEvidence(stream) {
+  if (!stream) return null;
+  const result = {};
+  for (const key of ['codec_name', 'sample_rate', 'channels', 'time_base', 'initial_padding', 'extradata_size']) {
+    result[key] = typeof stream[key] === 'string' ? stream[key].slice(0, 64) : null;
+  }
+  result.extradata = typeof stream.extradata === 'string' ? stream.extradata.slice(0, 1024) : null;
+  result.extradataTruncated = typeof stream.extradata === 'string' && stream.extradata.length > 1024;
+  return result;
+}
+
 // FFprobe 4.4 (our pinned macOS ARM binary) does not expose initial_padding.
 // Both its native/libopus decoders read pre-skip from OpusHead bytes 10..11.
 // Parse only the exact mapping-family-0 stereo header our final encoder emits;
@@ -36,18 +47,24 @@ function compactFields(line) {
 // https://github.com/FFmpeg/FFmpeg/blob/n4.4.1/libavcodec/opus.c
 function opusHeadPadding(stream) {
   if (stream.extradata === undefined && stream.extradata_size === undefined) return null;
-  if (stream.extradata_size !== '19' || typeof stream.extradata !== 'string') throw invalid('invalid OpusHead size');
+  const fail = message => invalid(message, { probeMetadata: boundedStreamEvidence(stream) });
+  // 4.4.1 uses par->extradata_size internally but never prints that field.
+  // Derive the required length from the actual hex bytes; when a newer probe
+  // supplies a size field, it must agree. Missing hex is never replaced by it.
+  // https://github.com/FFmpeg/FFmpeg/blob/n4.4.1/fftools/ffprobe.c#L2535-L2539
+  if (typeof stream.extradata !== 'string' ||
+      (stream.extradata_size !== undefined && stream.extradata_size !== '19')) throw fail('invalid OpusHead size');
   const bytes = [];
   for (const line of stream.extradata.split('\n').filter(Boolean)) {
     const match = /^([0-9a-fA-F]{8}): ((?:[0-9a-fA-F]{4} ?)*(?:[0-9a-fA-F]{2})?) {2,}/.exec(line);
-    if (!match || parseInt(match[1], 16) !== bytes.length) throw invalid('invalid OpusHead hex dump');
+    if (!match || parseInt(match[1], 16) !== bytes.length) throw fail('invalid OpusHead hex dump');
     const hex = match[2].replace(/ /g, '');
     for (let index = 0; index < hex.length; index += 2) bytes.push(parseInt(hex.slice(index, index + 2), 16));
-    if (bytes.length > 19) throw invalid('oversized OpusHead');
+    if (bytes.length > 19) throw fail('oversized OpusHead');
   }
   const header = Buffer.from(bytes);
   if (header.length !== 19 || !header.subarray(0, 8).equals(Buffer.from('OpusHead')) || header[8] !== 1 ||
-      header[9] !== 2 || header[18] !== 0) throw invalid('unsupported or malformed stereo OpusHead');
+      header[9] !== 2 || header[18] !== 0) throw fail('unsupported or malformed stereo OpusHead');
   return header.readUInt16LE(10);
 }
 
@@ -109,6 +126,7 @@ function createOpusPacketAccounting() {
     return Number(text);
   };
   return {
+    metadataEvidence() { return boundedStreamEvidence(stream); },
     consume(line) {
       if (!line.trim()) return;
       const value = compactFields(line);
@@ -207,20 +225,25 @@ async function inspectEncodedOpus(file, { ffprobePath, timeoutMs = 300000 } = {}
   }
   const accounting = createOpusPacketAccounting(), deadline = performance.now() + timeoutMs;
   const prefix = ['-v', 'error', '-select_streams', 'a'];
-  // Keep -show_data out of the full packet scan: older probes construct packet
-  // hex dumps even when those payload fields are subsequently filtered out.
-  await probeLines(ffprobePath, [...prefix, '-show_streams', '-show_data', '-show_entries',
-    'stream=codec_name,sample_rate,channels,initial_padding,time_base,extradata,extradata_size:stream_tags=:stream_disposition=',
-    '-of', 'compact=p=1:nk=0', file], timeoutMs, line => accounting.consume(line));
-  const remaining = deadline - performance.now();
-  if (remaining <= 0) throw invalid('packet inspection timed out');
-  // The list's unique name exists in 4.4 and newer. packet_side_data does not
-  // exist in 4.4; generic side_data also selects frames and triggers decoding.
-  const reader = createPacketSectionReader(line => accounting.consume(line));
-  await probeLines(ffprobePath, [...prefix, '-show_packets', '-show_entries',
-    'packet=pts,duration:packet_side_data_list', '-of', 'default=noprint_wrappers=0', file], remaining, line => reader.consume(line));
-  reader.finish();
-  return accounting.result();
+  try {
+    // Keep -show_data out of the full packet scan: older probes construct packet
+    // hex dumps even when those payload fields are subsequently filtered out.
+    await probeLines(ffprobePath, [...prefix, '-show_streams', '-show_data', '-show_entries',
+      'stream=codec_name,sample_rate,channels,initial_padding,time_base,extradata,extradata_size:stream_tags=:stream_disposition=',
+      '-of', 'compact=p=1:nk=0', file], timeoutMs, line => accounting.consume(line));
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) throw invalid('packet inspection timed out');
+    // The list's unique name exists in 4.4 and newer. packet_side_data does not
+    // exist in 4.4; generic side_data also selects frames and triggers decoding.
+    const reader = createPacketSectionReader(line => accounting.consume(line));
+    await probeLines(ffprobePath, [...prefix, '-show_packets', '-show_entries',
+      'packet=pts,duration:packet_side_data_list', '-of', 'default=noprint_wrappers=0', file], remaining, line => reader.consume(line));
+    reader.finish();
+    return accounting.result();
+  } catch (error) {
+    error.evidence = { ...error.evidence, probeMetadata: accounting.metadataEvidence() };
+    throw error;
+  }
 }
 
 module.exports = { createOpusPacketAccounting, createPacketSectionReader, inspectEncodedOpus };

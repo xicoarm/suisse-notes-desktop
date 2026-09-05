@@ -4,11 +4,12 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { createOpusPacketAccounting, createPacketSectionReader } = require('../../src-electron/encoded-opus-evidence');
 const metadata = 'stream|codec_name=opus|sample_rate=48000|channels=2|initial_padding=312|time_base=1/1000';
-// FFprobe 4.4.1 (darwin-arm64 package 5.0.1) omits initial_padding. The
+// FFprobe 4.4.1 (darwin-arm64 package 5.0.1) omits initial_padding AND
+// extradata_size: show_stream() prints the hex dump but no size field.
 // compact metadata hex dump and default packet wrappers also work in newer
 // probes. Fixture shape follows n4.4.1/fftools/ffprobe.c, not its broken compact
 // packet writer, which can concatenate side_data onto duration's value.
-const oldMetadata = String.raw`stream|codec_name=opus|sample_rate=48000|channels=2|time_base=1/1000|extradata=\n00000000: 4f70 7573 4865 6164 0102 3801 80bb 0000  OpusHead..8.....\n00000010: 0000 00                                  ...\n|extradata_size=19`;
+const oldMetadata = String.raw`stream|codec_name=opus|sample_rate=48000|channels=2|time_base=1/1000|extradata=\n00000000: 4f70 7573 4865 6164 0102 3801 80bb 0000  OpusHead..8.....\n00000010: 0000 00                                  ...\n`;
 const packetSections = `[PACKET]
 pts=-7
 duration=20
@@ -26,9 +27,9 @@ discard_reason=0
 [/PACKET]`;
 
 describe('encoded Opus decoded-sample accounting', () => {
-  it('uses exact OpusHead pre-skip with old macOS metadata and explicit packet side-data wrappers', () => {
+  it.each([false, true])('uses exact OpusHead pre-skip and packet side data with explicit size field=%s', hasSize => {
     const accounting = createOpusPacketAccounting();
-    accounting.consume(oldMetadata);
+    accounting.consume(oldMetadata + (hasSize ? '|extradata_size=19' : ''));
     const reader = createPacketSectionReader(line => accounting.consume(line));
     packetSections.split('\n').forEach(line => reader.consume(line));
     reader.finish();
@@ -53,7 +54,8 @@ describe('encoded Opus decoded-sample accounting', () => {
   });
 
   it('rejects truncated, malformed, or contradictory header evidence', () => {
-    for (const header of [oldMetadata.replace('extradata_size=19', 'extradata_size=18'),
+    for (const header of [`${oldMetadata}|extradata_size=18`, `${oldMetadata}|extradata_size=N/A`,
+      `${metadata}|extradata_size=19`,
       oldMetadata.replace('00000010: 0000 00', '00000010: 0000'),
       oldMetadata.replace('4f70', 'zzzz'), oldMetadata.replace('4f70', '4f71'), oldMetadata.replace('4f70', 'cf70'),
       oldMetadata.replace('0102', '0101'), oldMetadata.replace('00000010: 0000 00', '00000010: 0000 01'),
@@ -67,6 +69,25 @@ describe('encoded Opus decoded-sample accounting', () => {
     conflict.consume(oldMetadata);
     conflict.consume('packet|pts=-7|duration=20|skip_samples=100');
     expect(() => conflict.result()).toThrow('conflicting');
+  });
+
+  it('retains only bounded technical header evidence when validation fails', () => {
+    const accounting = createOpusPacketAccounting();
+    accounting.consume(`${oldMetadata}|extradata_size=18|tag:meeting_title=must-not-be-included`);
+    accounting.consume('packet|pts=-7|duration=20');
+    let error;
+    try { accounting.result(); } catch (failure) { error = failure; }
+    expect(error).toMatchObject({ code: 'NATIVE_ENCODED_OPUS_INVALID', evidence: { probeMetadata: {
+      codec_name: 'opus', sample_rate: '48000', channels: '2', extradata_size: '18', initial_padding: null,
+    } } });
+    expect(error.evidence.probeMetadata.extradata).toContain('4f70 7573 4865 6164');
+    expect(JSON.stringify(error.evidence)).not.toContain('must-not-be-included');
+    const oversized = createOpusPacketAccounting();
+    oversized.consume(`${oldMetadata}${'A'.repeat(5000)}|extradata_size=19`);
+    oversized.consume('packet|pts=-7|duration=20');
+    try { oversized.result(); } catch (failure) { error = failure; }
+    expect(error.evidence.probeMetadata.extradataTruncated).toBe(true);
+    expect(error.evidence.probeMetadata.extradata.length).toBe(1024);
   });
 
   it('rejects incomplete or repeated skip side data and truncated packet sections', () => {
