@@ -23,6 +23,9 @@ original chunks, final packets/timestamps and decoded PCM match on all three OSe
 The decoded-sample shortfalls already exist in the original capture, while packet
 timestamps span approximately the full recording interval. Capture, synthetic source,
 processing and scheduling remain under investigation; no test tolerance is relaxed.
+Boundary coverage now uses actual first/last identified positions in decoded audio.
+The global median source offset remains a separate clock diagnostic; timing drift
+must not let that median conceal an unrecognized beginning or ending.
 
 Dispatch after reviewing/pushing the intended branch:
 

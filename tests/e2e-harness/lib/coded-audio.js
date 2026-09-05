@@ -267,6 +267,7 @@ async function verifyCodedAudio(filePath, scenario, expectations = {}) {
   notes.push('Resolution: 0.5-second identities, 80ms spectral windows; this does not certify every individual audio sample.');
   return { pass: problems.length === 0, problems, notes, durationS: analysis.durationS, sourceOffsetS,
     identifiedFrames: groups.length, firstFrame: first?.id ?? null, lastFrame: last?.id ?? null,
+    firstIdentifiedStartS: first?.start ?? null, lastIdentifiedEndS: last?.end ?? null,
     decoderWarnings: analysis.decoderWarnings, rejectedGroups: analysis.rejectedGroups };
 }
 

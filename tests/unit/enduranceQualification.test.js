@@ -115,8 +115,17 @@ describe('endurance source boundaries and acquisition clock', () => {
     expect(result.problems).toContainEqual(expect.stringMatching('SOURCE CLOCK: decoded numbering'));
   });
 
+  it('does not let later source drift hide a silent opening in the global median offset', async () => {
+    const bytes = Buffer.concat([Buffer.alloc(3 * SAMPLE_RATE * 2), slice(0, 2), slice(8, 15)]);
+    const audio = await verifyCodedAudio(output('drifting-after-silent-prefix', bytes), reference, { expectedDurationS: 12 });
+    expect(audio.sourceOffsetS).toBeGreaterThan(2.9); // Later identities dominate the global median.
+    const result = assessSourceCoverage(audio, recorder, acquisition);
+    expect(result.prefixGapS).toBeGreaterThan(2.9);
+    expect(result.problems).toContainEqual(expect.stringMatching('SOURCE COVERAGE: missing .* prefix'));
+  });
+
   it('refuses a missing, replaced, or unbounded acquisition clock', () => {
-    const audio = { firstFrame: 0, lastFrame: 23, durationS: 12, sourceOffsetS: 0 };
+    const audio = { firstFrame: 0, lastFrame: 23, durationS: 12, sourceOffsetS: 0, firstIdentifiedStartS: 0.02, lastIdentifiedEndS: 11.98 };
     for (const acquisitions of [[], [...acquisition, ...acquisition], [{ requestedAt: 0, receivedAt: 11000 }]]) {
       expect(assessSourceCoverage(audio, recorder, acquisitions).problems.some(problem => problem.startsWith('SOURCE CLOCK:'))).toBe(true);
     }

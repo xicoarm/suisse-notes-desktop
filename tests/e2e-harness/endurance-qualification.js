@@ -163,20 +163,22 @@ async function installConstraintEvidence(app, processingDisabled) {
 }
 
 /** The interior oracle alone cannot detect a long silent prefix or suffix. */
-function assessSourceCoverage(audio, recorder, acquisitions, frameSeconds = 0.5) {
+function assessSourceCoverage(audio, recorder, acquisitions) {
   const problems = [];
   const result = { problems, boundaryToleranceS: SOURCE_BOUNDARY_TOLERANCE_S,
     clockToleranceS: SOURCE_CLOCK_TOLERANCE_S, maximumAcquisitionS: MAX_SOURCE_ACQUISITION_S };
   if (!Number.isFinite(audio?.sourceOffsetS) || !Number.isInteger(audio?.firstFrame) || !Number.isInteger(audio?.lastFrame) ||
-      !Number.isFinite(audio?.durationS) || !Number.isFinite(recorder?.startedAt)) {
+      !Number.isFinite(audio?.durationS) || !Number.isFinite(recorder?.startedAt) ||
+      !Number.isFinite(audio?.firstIdentifiedStartS) || !Number.isFinite(audio?.lastIdentifiedEndS) ||
+      audio.firstIdentifiedStartS < 0 || audio.lastIdentifiedEndS < audio.firstIdentifiedStartS || audio.lastIdentifiedEndS > audio.durationS) {
     problems.push('SOURCE COVERAGE: missing numbered audio or native recorder timing');
     return result;
   }
-  // Map first/last source identities onto the decoded output timeline. These
-  // checks require coverage at both ends, even when total duration is correct
-  // and every observed interior frame remains perfectly ordered.
-  result.prefixGapS = Math.max(0, audio.firstFrame * frameSeconds - audio.sourceOffsetS);
-  result.suffixGapS = Math.max(0, audio.durationS - (audio.lastFrame + 1) * frameSeconds + audio.sourceOffsetS);
+  // Use measured positions at each boundary. A whole-recording median offset
+  // can hide a silent opening/ending when the source drifts later in the file.
+  // Keep that median separately for the existing acquisition-clock diagnostic.
+  result.prefixGapS = audio.firstIdentifiedStartS;
+  result.suffixGapS = Math.max(0, audio.durationS - audio.lastIdentifiedEndS);
   if (result.prefixGapS > SOURCE_BOUNDARY_TOLERANCE_S) problems.push(`SOURCE COVERAGE: missing ${result.prefixGapS.toFixed(3)}s prefix`);
   if (result.suffixGapS > SOURCE_BOUNDARY_TOLERANCE_S) problems.push(`SOURCE COVERAGE: missing ${result.suffixGapS.toFixed(3)}s suffix`);
   if (!Array.isArray(acquisitions) || acquisitions.length !== 1) {
@@ -344,7 +346,7 @@ async function runCodedEndurance(opts = {}) {
     result.audio = { ...audio, problems: audio.problems.slice(0, 30), problemCount: audio.problems.length };
     for (const issue of audio.problems) problem(issue);
     result.constraintEvidence = await app.evalTimed(() => window.__enduranceConstraints);
-    result.sourceCoverage = assessSourceCoverage(audio, recorder, result.constraintEvidence?.acquisitions, reference.coded.frameSeconds);
+    result.sourceCoverage = assessSourceCoverage(audio, recorder, result.constraintEvidence?.acquisitions);
     for (const issue of result.sourceCoverage.problems) problem(issue);
     result.localSha256 = await sha256(output);
     const recordingDir = path.dirname(output);
