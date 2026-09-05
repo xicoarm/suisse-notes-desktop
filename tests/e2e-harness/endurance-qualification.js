@@ -9,6 +9,8 @@ const { AppDriver, sleep } = require('./lib/app-driver');
 const { startMockBackend } = require('./lib/mock-backend');
 const { buildCodedScenario, WORK_DIR } = require('./lib/audio');
 const { verifyCodedAudio } = require('./lib/coded-audio');
+const { inspectNativeSources } = require('../../src-electron/native-source-persistence');
+const { concatenateFiles } = require('../../src-electron/durable-files');
 
 const DEFAULT_SECONDS = 5 * 3600 + 5 * 60;
 const ROTATION_SECONDS = 4 * 3600 + 55 * 60;
@@ -19,9 +21,190 @@ const SOURCE_BOUNDARY_TOLERANCE_S = 1.5;
 const SOURCE_CLOCK_TOLERANCE_S = 1.5;
 const MAX_SOURCE_ACQUISITION_S = 10;
 
-function diskBudget(seconds) {
+function diskBudget(seconds, nativeSources = false) {
   return { referenceBytes: (seconds + 25) * 48000 * 2 + 44,
-    encodedCopiesBytes: Math.ceil(seconds * 256000 / 8) * 3, headroomBytes: HEADROOM_BYTES };
+    encodedCopiesBytes: Math.ceil(seconds * 256000 / 8) * 3, headroomBytes: HEADROOM_BYTES,
+    ...(nativeSources ? { nativeExtraCopiesBytes: Math.ceil(seconds * 256000 / 8) * 2,
+      nativeLosslessFallbackBytes: seconds * 48000 * 2 * 3 * 2, nativeMetadataReserveBytes: 64 * 1024 ** 2 } : {}) };
+}
+
+// Bounded aggregate evidence: no Blob list or repeated O(meeting length)
+// renderer snapshots. Like s15, next conversion proves the previous serial
+// native save acknowledged; current/latest save remains conservatively pending.
+function installNativeEnduranceObserver() {
+  if (window.__nativeEnduranceEvidence) throw new Error('Native endurance observer already installed');
+  const Context = window.AudioContext, originalWebkit = window.webkitAudioContext;
+  const originalStart = MediaRecorder.prototype.start, originalArrayBuffer = Blob.prototype.arrayBuffer;
+  const destinations = new Set(), records = [], blobs = new WeakMap(), errors = [];
+  const WrappedContext = new Proxy(Context, { construct(target, args, newTarget) {
+    const context = Reflect.construct(target, args, newTarget), createDestination = context.createMediaStreamDestination;
+    context.createMediaStreamDestination = function (...args) {
+      const node = Reflect.apply(createDestination, this, args);
+      node.stream.getAudioTracks().forEach(track => destinations.add(track.id));
+      return node;
+    };
+    return context;
+  } });
+  window.AudioContext = WrappedContext;
+  if (originalWebkit === Context) window.webkitAudioContext = WrappedContext;
+  MediaRecorder.prototype.start = function (...args) {
+    const tracks = this.stream.getAudioTracks().map(track => track.id);
+    const acquired = new Set((window.__enduranceConstraints?.acquisitions || []).flatMap(item => item.trackIds));
+    const entry = { ref: this, id: records.length + 1, role: tracks.length === 1 && destinations.has(tracks[0]) ? 'live-mix'
+      : tracks.length === 1 && acquired.has(tracks[0]) ? 'native-microphone' : 'unknown', trackIds: tracks,
+    requestedTimesliceMs: args[0], startCalledAt: performance.now(), startedAt: null, stoppedAt: null,
+    events: 0, emptyEvents: 0, bytes: 0, lastDataAt: null, conversionIndex: -1, acknowledgedCount: 0,
+    acknowledgedBytes: 0, acknowledgedAt: null, oldestUnconfirmedAt: null };
+    records.push(entry);
+    const handler = this.ondataavailable;
+    if (typeof handler !== 'function') throw new Error('Expected application data handler before endurance recorder start');
+    this.ondataavailable = function (event) {
+      const at = performance.now(), size = event.data.size;
+      if (size) blobs.set(event.data, { entry, index: entry.events - entry.emptyEvents, byteOffset: entry.bytes, at });
+      else entry.emptyEvents++;
+      entry.events++; entry.bytes += size; entry.lastDataAt = at;
+      return Reflect.apply(handler, this, [event]);
+    };
+    this.addEventListener('start', event => { entry.startedAt = event.timeStamp; });
+    this.addEventListener('stop', event => { entry.stoppedAt = event.timeStamp; });
+    return Reflect.apply(originalStart, this, args);
+  };
+  Blob.prototype.arrayBuffer = function (...args) {
+    const item = blobs.get(this);
+    if (item) {
+      const { entry, index } = item;
+      if ((index > entry.conversionIndex + 1 || index < entry.conversionIndex) && errors.length < 10) errors.push('Non-serial endurance source conversion');
+      if (index === entry.conversionIndex + 1) {
+        entry.conversionIndex = index; entry.acknowledgedCount = index; entry.acknowledgedBytes = item.byteOffset;
+        entry.oldestUnconfirmedAt = item.at;
+        if (index > 0) entry.acknowledgedAt = performance.now();
+      }
+    }
+    return Reflect.apply(originalArrayBuffer, this, args);
+  };
+  window.__nativeEnduranceEvidence = { snapshot: () => ({ at: performance.now(), errors: [...errors],
+    acknowledgementBasis: 'Lower bound from next serial Blob conversion; not the exact latest save acknowledgement.',
+    records: records.map(({ ref, ...entry }) => ({ ...entry, trackIds: [...entry.trackIds], state: ref.state })) }) };
+}
+
+function enduranceRecorderRoles(evidence, acquisitions, stopped = false) {
+  const native = evidence?.records?.filter(record => record.role === 'native-microphone') || [];
+  const mixed = evidence?.records?.filter(record => record.role === 'live-mix') || [];
+  if (evidence?.errors?.length || evidence?.records?.length !== 2 || native.length !== 1 || mixed.length !== 1 ||
+      acquisitions?.length !== 1 || acquisitions[0].trackIds?.length !== 1 || native[0].trackIds[0] !== acquisitions[0].trackIds[0]) {
+    throw new Error('Native endurance requires exactly one microphone epoch, one acquired track and one live mix');
+  }
+  if (evidence.records.some(record => record.requestedTimesliceMs !== 1000 || !Number.isFinite(record.startCalledAt) ||
+      record.state !== (stopped ? 'inactive' : 'recording') || (stopped && (!Number.isFinite(record.startedAt) || !Number.isFinite(record.stoppedAt))))) {
+    throw new Error('Unexpected native endurance recorder lifecycle or timeslice');
+  }
+  return { native: native[0], mixed: mixed[0] };
+}
+
+// Hash each new committed chunk once while recording, appending a compact ledger
+// instead of re-reading the whole archive every thirty seconds. Rehash all bytes
+// after stop to establish custody through rotation, finalization and upload.
+function createNativeEnduranceLedger(recordingDir, manifestPath) {
+  const root = path.resolve(WORK_DIR), resolved = path.resolve(recordingDir);
+  if (!resolved.startsWith(root + path.sep) || !path.resolve(manifestPath).startsWith(root + path.sep)) throw new Error('Native endurance evidence must stay in the synthetic workspace');
+  const fd = fs.openSync(manifestPath, 'wx'), chunks = [], prefixBytes = [0];
+  let descriptor = null, metadata = null, closed = false, lastMtimeMs = null, lastProgressAt = null;
+  const fingerprint = async filename => ({ relativePath: path.relative(recordingDir, filename).replaceAll('\\', '/'),
+    bytes: fs.statSync(filename).size, sha256: await sha256(filename) });
+  const inventory = () => fs.readdirSync(path.join(recordingDir, 'native-sources')).filter(name => !name.endsWith('.tmp'));
+  return {
+    async sample(recorder, rendererAt, observedAt) {
+      if (!descriptor) {
+        const sources = inspectNativeSources(recordingDir);
+        if (sources.length !== 1 || sources[0].kind !== 'microphone' || !sources[0].started || !sources[0].interrupted ||
+            sources[0].startOffsetMs < 0 || sources[0].startOffsetMs > 25) throw new Error('Native endurance has no unambiguous initial microphone source');
+        descriptor = sources[0];
+        metadata = await Promise.all([descriptor.manifestPath, descriptor.startedPath].map(fingerprint));
+        fs.writeSync(fd, JSON.stringify({ type: 'source', sourceId: descriptor.sourceId, kind: descriptor.kind,
+          startOffsetMs: descriptor.startOffsetMs, metadata }) + '\n');
+        lastProgressAt = observedAt;
+      }
+      if (JSON.stringify(inventory()) !== JSON.stringify([descriptor.sourceId])) throw new Error('Native source inventory changed during endurance');
+      let added = 0;
+      for (;;) {
+        const index = chunks.length, filename = path.join(descriptor.directory, 'chunks', `chunk_${index}.webm`);
+        let stat;
+        try { stat = fs.lstatSync(filename); } catch (error) { if (error.code === 'ENOENT') break; throw error; }
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0) throw new Error('Invalid native endurance chunk');
+        const chunk = { type: 'chunk', sourceId: descriptor.sourceId, index, ...(await fingerprint(filename)) };
+        chunks.push(chunk); prefixBytes.push(prefixBytes.at(-1) + chunk.bytes);
+        lastMtimeMs = stat.mtimeMs; added++;
+        fs.writeSync(fd, JSON.stringify(chunk) + '\n');
+      }
+      if (added) lastProgressAt = observedAt;
+      fs.fsyncSync(fd);
+      if (!Number.isSafeInteger(recorder.acknowledgedCount) || recorder.acknowledgedCount < 0 || recorder.acknowledgedCount > chunks.length ||
+          prefixBytes[recorder.acknowledgedCount] !== recorder.acknowledgedBytes) throw new Error('Native acknowledged prefix is missing or differs from its durable source');
+      return { sourceId: descriptor.sourceId, kind: descriptor.kind, startOffsetMs: descriptor.startOffsetMs,
+        committedCount: chunks.length, committedBytes: prefixBytes.at(-1), added, lastDurableMtimeMs: lastMtimeMs,
+        durableAgeS: lastMtimeMs === null ? null : Math.max(0, (Date.now() - lastMtimeMs) / 1000),
+        observedNoProgressS: Math.max(0, (observedAt - lastProgressAt) / 1000),
+        nativeEvents: recorder.events, nonemptyEvents: recorder.events - recorder.emptyEvents, nativeBytes: recorder.bytes,
+        eventAgeS: recorder.lastDataAt === null ? null : Math.max(0, (rendererAt - recorder.lastDataAt) / 1000),
+        acknowledgedCount: recorder.acknowledgedCount, acknowledgedBytes: recorder.acknowledgedBytes,
+        acknowledgedObservationAgeS: recorder.acknowledgedAt === null ? null : Math.max(0, (rendererAt - recorder.acknowledgedAt) / 1000),
+        unconfirmedBytes: recorder.bytes - recorder.acknowledgedBytes,
+        unconfirmedCount: recorder.events - recorder.emptyEvents - recorder.acknowledgedCount,
+        oldestUnconfirmedAgeS: recorder.oldestUnconfirmedAt === null ? null : Math.max(0, (rendererAt - recorder.oldestUnconfirmedAt) / 1000) };
+    },
+    async verify(recorder) {
+      const sources = inspectNativeSources(recordingDir);
+      if (!descriptor || sources.length !== 1 || sources[0].sourceId !== descriptor.sourceId || !sources[0].complete) throw new Error('Native endurance source did not close completely');
+      const source = sources[0], problems = [];
+      const currentMetadata = await Promise.all([source.manifestPath, source.startedPath].map(fingerprint));
+      if (JSON.stringify(currentMetadata) !== JSON.stringify(metadata)) problems.push('Native source start metadata changed during endurance');
+      const retainedPath = manifestPath.replace(/\.jsonl$/, '-retained.jsonl');
+      const retainedFd = fs.openSync(retainedPath, 'wx');
+      let totalBytes = 0;
+      try {
+        for (let index = 0; index < source.chunkPaths.length; index++) {
+          const current = { type: 'chunk', sourceId: source.sourceId, index, ...(await fingerprint(source.chunkPaths[index])) };
+          if (chunks[index] && JSON.stringify(current) !== JSON.stringify(chunks[index]) && problems.length < 20) problems.push('Previously observed native source changed: ' + source.sourceId + '/' + index);
+          totalBytes += current.bytes;
+          fs.writeSync(retainedFd, JSON.stringify(current) + '\n');
+        }
+        fs.fsyncSync(retainedFd);
+      } finally { fs.closeSync(retainedFd); }
+      if (source.chunkCount < chunks.length) problems.push('Previously observed native source chunks disappeared');
+      if (source.chunkCount !== recorder.events - recorder.emptyEvents || totalBytes !== recorder.bytes) problems.push('Native source final bytes/count differ from recorder events');
+      return { sourceId: source.sourceId, kind: source.kind, startOffsetMs: source.startOffsetMs,
+        chunkPaths: source.chunkPaths, chunkCount: source.chunkCount, bytes: totalBytes, observedDuringCaptureCount: chunks.length,
+        metadata: currentMetadata, terminal: await fingerprint(source.endPath), manifestPath, manifestSha256: await sha256(manifestPath),
+        retainedPath, retainedSha256: await sha256(retainedPath), problems };
+    },
+    close() { if (!closed) { closed = true; fs.closeSync(fd); } },
+  };
+}
+
+function assessNativeEndurancePreservation(source, final, startOffsetS = 0) {
+  const problems = [];
+  if (![source?.firstFrame, source?.lastFrame, final?.firstFrame, final?.lastFrame].every(Number.isInteger) ||
+      ![source?.sourceOffsetS, final?.sourceOffsetS].every(Number.isFinite) || source.lastFrame - source.firstFrame < 4) {
+    return { problems: ['NATIVE PRESERVATION: missing source/final numbered evidence'] };
+  }
+  if (!source.pass || !final.pass) problems.push('NATIVE PRESERVATION: source and final must independently pass coded continuity');
+  const requiredFirstInteriorId = source.firstFrame + 1, requiredLastInteriorId = source.lastFrame - 1;
+  if (final.firstFrame > requiredFirstInteriorId || final.lastFrame < requiredLastInteriorId) problems.push('NATIVE PRESERVATION: final omits durable native interior identities');
+  const placementErrorS = Math.abs(source.sourceOffsetS - final.sourceOffsetS - startOffsetS);
+  if (placementErrorS > SOURCE_CLOCK_TOLERANCE_S) problems.push('NATIVE PRESERVATION: source/final active-clock placement changed');
+  return { requiredFirstInteriorId, requiredLastInteriorId, placementErrorS, clockToleranceS: SOURCE_CLOCK_TOLERANCE_S, problems };
+}
+
+function assessNativeEnduranceAssembly(receipt, plan, sourceId) {
+  const singleSource = ids => Array.isArray(ids) && ids.length === 1 && ids[0] === sourceId;
+  const problems = [];
+  if (receipt?.version !== 3 || receipt.sourceMode !== 'native' || receipt.recovered !== false ||
+      receipt.systemPcmIncluded !== false || !singleSource(receipt.sourceIds)) problems.push('Native endurance lacks a complete normal-stop v3 source receipt');
+  if (plan?.version !== 1 || plan.recovery !== false || plan.codecPolicy !== 'opus-cbr-192k-20ms-reencoded-from-native-sources' ||
+      plan.systemPcmIncluded !== false || !singleSource(plan.sourceIds) || plan.onsetIsApproximate !== true) {
+    problems.push('Native endurance lacks the explicit native-source re-encoding policy');
+  }
+  return problems;
 }
 
 function availableBytes(directory) {
@@ -201,15 +384,20 @@ function assessSourceCoverage(audio, recorder, acquisitions) {
   return result;
 }
 
-function verifyRetainedSources(recordingDir, expectedBytes, expectedEvents, manifestPath) {
+async function verifyRetainedSources(recordingDir, expectedBytes, expectedEvents, manifestPath) {
   const archive = path.join(recordingDir, 'source-chunks');
-  const batches = fs.readdirSync(archive, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => entry.name).sort((a, b) => Number(a) - Number(b));
+  const archived = fs.existsSync(archive) ? fs.readdirSync(archive, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => entry.name).sort((a, b) => Number(a) - Number(b)) : [];
+  const batches = archived.map(batch => ({ batch, folder: path.join(archive, batch) }));
+  // Native finalization retains the final live-mix batch in chunks/. Include it
+  // separately without pretending it was another natural rotation.
+  const activeFolder = path.join(recordingDir, 'chunks');
+  const activeBatchRetained = fs.existsSync(activeFolder) && fs.readdirSync(activeFolder).some(name => /^chunk_\d+\.webm$/.test(name));
+  if (activeBatchRetained) batches.push({ batch: 'active', folder: activeFolder });
   let count = 0, bytes = 0, lastIndex = -1;
   const problems = [];
   const fd = fs.openSync(manifestPath, 'wx');
   try {
-    for (const batch of batches) {
-      const folder = path.join(archive, batch);
+    for (const { batch, folder } of batches) {
       const files = fs.readdirSync(folder, { withFileTypes: true }).filter(entry => entry.isFile() && /^chunk_\d+\.webm$/.test(entry.name))
         .map(entry => entry.name).sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]));
       for (const file of files) {
@@ -218,14 +406,16 @@ function verifyRetainedSources(recordingDir, expectedBytes, expectedEvents, mani
         lastIndex = index;
         const size = fs.statSync(path.join(folder, file)).size;
         count++; bytes += size;
-        fs.writeSync(fd, JSON.stringify({ batch, index, bytes: size }) + '\n');
+        fs.writeSync(fd, JSON.stringify({ batch, index, relativePath: path.relative(recordingDir, path.join(folder, file)).replaceAll('\\', '/'),
+          bytes: size, sha256: await sha256(path.join(folder, file)) }) + '\n');
       }
     }
     fs.fsyncSync(fd);
   } finally { fs.closeSync(fd); }
   if (bytes !== expectedBytes) problems.push(`Original sources contain ${bytes} bytes, recorder emitted ${expectedBytes}`);
   if (count !== expectedEvents) problems.push(`Original sources contain ${count} chunks, recorder emitted ${expectedEvents} nonempty events`);
-  return { count, bytes, batches: batches.length, firstBatch: batches[0], lastBatch: batches.at(-1), manifestPath, problems };
+  return { count, bytes, batches: batches.length, archivedBatches: archived.length, activeBatchRetained,
+    firstBatch: batches[0]?.batch, lastBatch: batches.at(-1)?.batch, manifestPath, manifestSha256: await sha256(manifestPath), problems };
 }
 
 async function runCodedEndurance(opts = {}) {
@@ -250,14 +440,14 @@ async function runCodedEndurance(opts = {}) {
       'Both decoded boundaries and the native acquisition clock must agree within explicit 1.5-second tolerances; acquisitions longer than ten seconds cannot qualify the source clock.',
     ], metrics: { samples: 0, maxPersistGapS: 0, maxNativeEventGapS: 0, maxRendererHeapMB: null, maxHarnessRssMB: 0,
       minFreeBytes: null, firstRotationElapsedS: null, maxBatchesDuringCapture: 0, phaseCounts: {} }, recentSamples: [], evidenceDir, summaryPath, progressPath };
-  let mock = null, app = null, started = null, lastChunkCount = -1, lastPersistObservedAt = null;
+  let mock = null, app = null, started = null, lastChunkCount = -1, lastPersistObservedAt = null, nativeLedger = null, nativeMode = false;
   const problem = message => { result.problemCount++; if (result.problems.length < 30) result.problems.push(message); };
   const checkpoint = event => {
     if (event) { fs.writeSync(progressFd, JSON.stringify({ recordedAt: new Date().toISOString(), ...event }) + '\n'); fs.fsyncSync(progressFd); }
     fs.writeFileSync(summaryPath, JSON.stringify(result, null, 2));
   };
   try {
-    const budget = diskBudget(seconds);
+    const budget = diskBudget(seconds, fs.existsSync(path.join(appDir, 'native-source-persistence.js')));
     result.diskPreflight = { ...budget, availableBytes: availableBytes(evidenceDir), requiredBytes: Object.values(budget).reduce((total, size) => total + size, 0) };
     if (result.diskPreflight.availableBytes < result.diskPreflight.requiredBytes) throw new Error('Insufficient free disk space for the synthetic reference, retained encoded copies, and 1 GiB headroom');
     checkpoint({ event: 'preparing-reference', requestedSeconds: seconds });
@@ -270,10 +460,25 @@ async function runCodedEndurance(opts = {}) {
     if (await app.evalTimed(() => window.electronAPI.config.getApiUrl()) !== mock.url) throw new Error('Endurance must use the isolated local backend');
     result.bundle = { gitSha: opts.bundleSha || process.env.SUISSE_E2E_BUNDLE_SHA || null,
       appDirectory: appDir, electronMainSha256: await sha256(path.join(appDir, 'electron-main.js')) };
+    nativeMode = await app.evalTimed(() => typeof window.electronAPI.recording.beginSource === 'function');
+    result.captureMode = nativeMode ? 'native-sources-v1' : 'legacy-live-mix';
+    if (nativeMode) {
+      const nativeBudget = diskBudget(seconds, true);
+      result.nativeDiskPreflight = { ...nativeBudget, availableBytes: availableBytes(evidenceDir),
+        // The reference was already generated; count only remaining allocations.
+        requiredRemainingBytes: Object.entries(nativeBudget).filter(([key]) => key !== 'referenceBytes').reduce((total, [, bytes]) => total + bytes, 0) };
+      if (result.nativeDiskPreflight.availableBytes < result.nativeDiskPreflight.requiredRemainingBytes) throw new Error('Insufficient native endurance scratch/retention space including lossless fallback and 1 GiB headroom');
+      result.notes.push('Native mode requires one microphone epoch plus one live mix. Native metadata/chunk custody and lower-bound ACK progress are recorded independently of legacy rotations.');
+      result.sourceWriterProvenance = await Promise.all(['src/services/recordingChunkWriter.js', 'src/services/nativeSourceRecorder.js'].map(async filename => ({
+        path: filename, sha256: await sha256(path.resolve(__dirname, '../..', filename)),
+      })));
+    }
     await installConstraintEvidence(app, processingDisabled);
+    if (nativeMode) await app.page.evaluate(installNativeEnduranceObserver);
     await app.startRecording();
     result.recordId = await app.getRecordId();
     result.constraintEvidence = await app.evalTimed(() => window.__enduranceConstraints);
+    if (nativeMode) nativeLedger = createNativeEnduranceLedger(path.join(app.recordingsDir, result.recordId), path.join(evidenceDir, 'native-observed-manifest.jsonl'));
     if (processingDisabled && (!result.constraintEvidence.tracks.length || result.constraintEvidence.tracks.some(settings =>
       ['echoCancellation', 'noiseSuppression', 'autoGainControl'].some(flag => settings[flag] !== false)))) {
       throw new Error('Processing-disabled control not confirmed by track settings');
@@ -287,7 +492,8 @@ async function runCodedEndurance(opts = {}) {
         const state = pinia?.state?.value?.recording;
         const capture = window.__suisseCaptureDiagnostics?.snapshot();
         return { phase: state?.phase, duration: state?.duration, chunkIndex: state?.chunkIndex, chunkSaveErrors: state?.chunkSaveErrors,
-          capture, heapMB: performance.memory?.usedJSHeapSize ? performance.memory.usedJSHeapSize / 1048576 : null,
+          capture, nativeCapture: window.__nativeEnduranceEvidence?.snapshot() || null,
+          heapMB: performance.memory?.usedJSHeapSize ? performance.memory.usedJSHeapSize / 1048576 : null,
           domNodes: document.getElementsByTagName('*').length };
       }, undefined, 10000);
       const disk = app.captureDiskProgress();
@@ -295,15 +501,32 @@ async function runCodedEndurance(opts = {}) {
       const observedNoProgressS = disk.chunkCount !== lastChunkCount ? 0 : (sampledAt - lastPersistObservedAt) / 1000;
       const wallPersistGapS = disk.lastChunkAt ? Math.max(0, (Date.now() - Date.parse(disk.lastChunkAt)) / 1000) : null;
       if (disk.chunkCount !== lastChunkCount) { lastChunkCount = disk.chunkCount; lastPersistObservedAt = sampledAt; }
-      const recorder = renderer.capture?.recorders?.at(-1);
+      const roles = nativeMode ? enduranceRecorderRoles(renderer.nativeCapture, result.constraintEvidence.acquisitions) : null;
+      const recorder = roles?.mixed || renderer.capture?.recorders?.at(-1);
       const nativeGapS = recorder?.lastDataAt != null ? Math.max(0, (renderer.capture.at - recorder.lastDataAt) / 1000) : elapsedS;
+      const nativeSource = nativeMode ? await nativeLedger.sample(roles.native, renderer.nativeCapture.at, sampledAt) : null;
       const rssMB = process.memoryUsage().rss / 1048576;
       const freeBytes = availableBytes(evidenceDir);
-      const minimumFinalizationFreeBytes = CRITICAL_FREE_BYTES + (recorder?.bytes || 0) * 3;
-      const sample = { elapsedS, renderer, disk, wallPersistGapS, observedNoProgressS, nativeGapS, harnessRssMB: rssMB, freeBytes, minimumFinalizationFreeBytes };
+      const minimumFinalizationFreeBytes = CRITICAL_FREE_BYTES + ((recorder?.bytes || 0) + (roles?.native.bytes || 0)) * 3 +
+        (nativeMode ? elapsedS * 48000 * 2 * 3 * 2 : 0);
+      const sample = { elapsedS, renderer, disk, nativeSource, wallPersistGapS, observedNoProgressS, nativeGapS, harnessRssMB: rssMB, freeBytes, minimumFinalizationFreeBytes };
       result.metrics.samples++;
       result.metrics.maxPersistGapS = Math.max(result.metrics.maxPersistGapS, wallPersistGapS || 0);
       result.metrics.maxNativeEventGapS = Math.max(result.metrics.maxNativeEventGapS, nativeGapS);
+      if (nativeSource) {
+        result.metrics.nativeSource ||= { sourceId: nativeSource.sourceId, maxEventAgeS: 0, maxDurableAgeS: 0, maxObservedNoProgressS: 0,
+          maxAcknowledgedObservationAgeS: 0, maxUnconfirmedBytes: 0, maxUnconfirmedCount: 0 };
+        const metrics = result.metrics.nativeSource;
+        metrics.maxEventAgeS = Math.max(metrics.maxEventAgeS, nativeSource.eventAgeS || 0);
+        metrics.maxDurableAgeS = Math.max(metrics.maxDurableAgeS, nativeSource.durableAgeS || 0);
+        metrics.maxObservedNoProgressS = Math.max(metrics.maxObservedNoProgressS, nativeSource.observedNoProgressS);
+        metrics.maxAcknowledgedObservationAgeS = Math.max(metrics.maxAcknowledgedObservationAgeS, nativeSource.acknowledgedObservationAgeS || 0);
+        metrics.maxUnconfirmedBytes = Math.max(metrics.maxUnconfirmedBytes, nativeSource.unconfirmedBytes);
+        metrics.maxUnconfirmedCount = Math.max(metrics.maxUnconfirmedCount, nativeSource.unconfirmedCount);
+        if (elapsedS > 15 && (nativeSource.eventAgeS === null || nativeSource.durableAgeS === null || nativeSource.eventAgeS > 10 || nativeSource.durableAgeS > 10)) {
+          problem('Native source event/durable age exceeded ten seconds at an endurance sample');
+        }
+      }
       result.metrics.maxHarnessRssMB = Math.max(result.metrics.maxHarnessRssMB, rssMB);
       result.metrics.minFreeBytes = Math.min(result.metrics.minFreeBytes ?? freeBytes, freeBytes);
       if (renderer.heapMB !== null) result.metrics.maxRendererHeapMB = Math.max(result.metrics.maxRendererHeapMB || 0, renderer.heapMB);
@@ -333,11 +556,14 @@ async function runCodedEndurance(opts = {}) {
     if (result.phase !== 'uploaded') problem('Endurance recording did not complete its local mock upload');
     const capture = await app.evalTimed(() => window.__suisseCaptureDiagnostics?.snapshot());
     result.capture = capture;
-    const recorder = capture?.recorders?.at(-1);
+    const nativeCapture = nativeMode ? await app.evalTimed(() => window.__nativeEnduranceEvidence.snapshot()) : null;
+    const roles = nativeMode ? enduranceRecorderRoles(nativeCapture, result.constraintEvidence.acquisitions, true) : null;
+    if (nativeMode) result.nativeCapture = nativeCapture;
+    const recorder = roles?.native || capture?.recorders?.at(-1);
     if (recorder?.startedAt == null || recorder?.stoppedAt == null) throw new Error('Missing native recorder timing evidence');
     result.expectedDurationS = (recorder.stoppedAt - recorder.startedAt) / 1000;
     if (result.expectedDurationS < seconds - 1.5) problem('Native recording ended before the requested duration');
-    if (capture.recorders.length !== 1) problem('Endurance unexpectedly created multiple MediaRecorders');
+    if (!nativeMode && capture.recorders.length !== 1) problem('Endurance unexpectedly created multiple MediaRecorders');
     const output = app.findOutputFile();
     if (!output) throw new Error('No final recording; retained profile contains the available source evidence');
     result.output = output;
@@ -356,8 +582,36 @@ async function runCodedEndurance(opts = {}) {
       maxParserBufferedBytes: remote?.maxBufferedBytes, attempts: mock.state.requests.filter(request => request.url === '/api/desktop/upload').length };
     if (remote?.sha256 !== result.localSha256 || remote?.fileSize !== result.upload.localBytes) problem('Streamed multipart audio does not match the final recording');
     if (receipt.canDelete !== false || !fs.existsSync(output)) problem('Endurance local backup was not retained');
-    result.sources = verifyRetainedSources(recordingDir, recorder.bytes, recorder.events - recorder.emptyEvents, path.join(evidenceDir, 'source-manifest.jsonl'));
+    const mixedRecorder = roles?.mixed || recorder;
+    result.sources = await verifyRetainedSources(recordingDir, mixedRecorder.bytes, mixedRecorder.events - mixedRecorder.emptyEvents, path.join(evidenceDir, 'source-manifest.jsonl'));
     for (const issue of result.sources.problems) problem(issue);
+    if (nativeMode) {
+      const { chunkPaths, ...sourceEvidence } = await nativeLedger.verify(roles.native);
+      result.nativeSource = sourceEvidence;
+      for (const issue of sourceEvidence.problems) problem(issue);
+      const finalReceipt = JSON.parse(fs.readFileSync(path.join(recordingDir, 'finalized.json'), 'utf8'));
+      const plans = fs.readdirSync(recordingDir, { withFileTypes: true }).filter(entry => entry.isDirectory() && entry.name.startsWith('native-finalization-'))
+        .map(entry => path.join(recordingDir, entry.name, 'plan.json')).filter(filename => fs.existsSync(filename));
+      if (plans.length !== 1) throw new Error('Endurance expected one completed native assembly plan');
+      const plan = JSON.parse(fs.readFileSync(plans[0], 'utf8'));
+      result.nativeAssembly = { receipt: finalReceipt, planPath: plans[0], planSha256: await sha256(plans[0]),
+        codecPolicy: plan.codecPolicy, fastPathUsed: plan.fastPathUsed, sourceIds: plan.sourceIds,
+        onsetIsApproximate: plan.onsetIsApproximate, exactDecodedPcmEqualityRequired: false };
+      for (const issue of assessNativeEnduranceAssembly(finalReceipt, plan, sourceEvidence.sourceId)) problem(issue);
+      if (fs.existsSync(path.join(recordingDir, 'finalization-pending.json')) || finalReceipt.sha256 !== result.localSha256) problem('Native endurance output transaction is not complete');
+      const nativeOriginal = path.join(evidenceDir, 'native-original.webm');
+      await concatenateFiles(chunkPaths, nativeOriginal);
+      result.nativeOriginal = { path: nativeOriginal, sha256: await sha256(nativeOriginal), sourceId: sourceEvidence.sourceId };
+      checkpoint({ event: 'verifying-native-source', sourceId: sourceEvidence.sourceId });
+      const sourceAudio = await verifyCodedAudio(nativeOriginal, reference, { expectedDurationS: result.expectedDurationS, durationToleranceS: 1.5 });
+      result.nativeSourceAudio = { ...sourceAudio, problems: sourceAudio.problems.slice(0, 30), problemCount: sourceAudio.problems.length };
+      for (const issue of sourceAudio.problems) problem('Native original: ' + issue);
+      result.nativeSourceCoverage = assessSourceCoverage(sourceAudio, roles.native, result.constraintEvidence.acquisitions);
+      for (const issue of result.nativeSourceCoverage.problems) problem('Native original: ' + issue);
+      result.nativePreservation = assessNativeEndurancePreservation(sourceAudio, audio, sourceEvidence.startOffsetMs / 1000);
+      for (const issue of result.nativePreservation.problems) problem(issue);
+      result.notes.push('Source and final are independently checked against the same continuous numbered reference; their interior ID ranges and active-clock placement must agree. Concurrent source durations are never added.');
+    }
     if (seconds > ROTATION_SECONDS) {
       if (result.metrics.maxBatchesDuringCapture < 1 || result.sources.batches < 2) problem('Natural 4h55 source rotation did not occur before finalization');
       if (result.metrics.firstRotationElapsedS !== null && (result.metrics.firstRotationElapsedS < ROTATION_SECONDS - SAMPLE_SECONDS || result.metrics.firstRotationElapsedS > ROTATION_SECONDS + 90)) {
@@ -377,6 +631,7 @@ async function runCodedEndurance(opts = {}) {
     try {
       if (app) await app.close({ keepProfile: true }).catch(cleanupFailure);
       if (mock) await mock.close().catch(cleanupFailure);
+      if (nativeLedger) { try { nativeLedger.close(); } catch (error) { cleanupFailure(error); } }
       checkpoint();
     } finally { fs.closeSync(progressFd); }
   }
@@ -385,4 +640,5 @@ async function runCodedEndurance(opts = {}) {
 }
 
 module.exports = { runCodedEndurance, resolveEnduranceSeconds, createMultipartHasher, startStreamingMockBackend, diskBudget,
-  assessSourceCoverage, DEFAULT_SECONDS, ROTATION_SECONDS };
+  assessSourceCoverage, DEFAULT_SECONDS, ROTATION_SECONDS, installNativeEnduranceObserver, enduranceRecorderRoles,
+  createNativeEnduranceLedger, assessNativeEndurancePreservation, assessNativeEnduranceAssembly, verifyRetainedSources };

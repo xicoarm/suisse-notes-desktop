@@ -38,14 +38,31 @@ selected path and before fallback. Original sources and failed scratch are kept.
 Real-media tests cover packet gaps, stereo anti-phase inputs, offsets, explicit
 replacement cuts, retained tails and failures. Final output is re-encoded; exact
 decoded PCM equality with its original Opus is not a valid recovery oracle.
+Final encoding explicitly uses 192-kbit/s constant-rate stereo Opus with 20-ms
+frames. Its disk estimate includes WebM overhead. Variable-rate output previously
+exceeded the nominal bitrate enough to threaten the five-hour upload-size budget;
+the bounded policy still needs a real long upload against the deployed backend.
 
 Start-call offsets do not establish exact first-sample alignment. Pause overlap
 above 2 ms currently blocks with originals retained. Large internal timestamp
 gaps may exceed the bounded allocation policy and require further recovery work.
-macOS AudioTee required-source lifecycle evidence and active-clock alignment
-remain open: helper stream-start/pipe-arrival observations are not sample clocks.
+macOS AudioTee now reserves a durable required-capture attempt before spawning,
+records startup/data/failure observations, and publishes its terminal evidence
+only after the child closes and accepted PCM drains to disk. A failed or missing
+required capture blocks normal completion; Retry Saving recovers available audio
+with persistent warnings. Attempt evidence is bound to the final receipt. A
+regression covers buffered stdout remaining after child closure, and periodic
+file syncing uses monotonic time. Exact active-clock alignment remains open:
+helper stream-start/pipe-arrival observations are not sample clocks.
 The native path must pass the short preservation test and source-aware lifecycle
 and crash tests before another five-hour qualification can establish readiness.
+
+Native output validation counts encoded Opus packet samples minus pre-skip and
+final discard padding. Container duration is retained separately. A real capture
+previously failed because nominal container padding exceeded the old tolerance,
+despite containing exactly the expected decoded samples. That failure retained
+the originals and blocked upload; an offline reconstruction is not a passed app
+qualification. The next compiled candidate must pass the full recording test.
 
 ## Deterministic short reproducer
 

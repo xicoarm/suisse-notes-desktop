@@ -8,6 +8,8 @@ const { AppDriver, sleep } = require('./lib/app-driver');
 const { startMockBackend } = require('./lib/mock-backend');
 const { buildCodedScenario, WORK_DIR } = require('./lib/audio');
 const { verifyCodedAudio } = require('./lib/coded-audio');
+const { installRecordingRoleObserver } = require('./lib/native-recorder-evidence');
+const { inspectNativeSources } = require('../../src-electron/native-source-persistence');
 
 const LIMITATIONS = [
   'Synthetic microphone tracks and enumeration qualify application recovery; physical USB/Bluetooth drivers, codec changes and macOS permissions are not exercised.',
@@ -35,8 +37,94 @@ function chunksIn(directory) {
   });
 }
 
+// Match a native epoch to its actual input track and monotonic start call.
+// The 2 ms correspondence budget identifies the recorder, not audio onset;
+// decoded source-clock and final-duration budgets remain 0.75 s and 1.5 s.
+function assessNativeDeviceTimeline(kind, sources, roleEvidence, fixture) {
+  const records = roleEvidence?.records || [];
+  const mixed = records.filter(recorder => recorder.role === 'live-mix');
+  const native = records.filter(recorder => recorder.role === 'native-input');
+  const expectedEpochs = kind === 'reconnect' ? 3 : kind === 'zero-input' ? 2 : 0;
+  if (!expectedEpochs || mixed.length !== 1 || native.length !== expectedEpochs ||
+      records.length !== native.length + mixed.length || sources.length !== expectedEpochs) {
+    throw new Error('Unexpected device-case native/mixed recorder topology');
+  }
+  for (const recorder of records) {
+    if (recorder.timesliceMs !== 1000 || recorder.state !== 'inactive' || !recorder.bytes || !recorder.events ||
+        !Number.isFinite(recorder.startCalledAt) || !Number.isFinite(recorder.startedAt) ||
+        !Number.isFinite(recorder.stoppedAt) || recorder.stoppedAt < recorder.startCalledAt ||
+        recorder.trackIds?.length !== 1 || recorder.convertedBytes !== recorder.bytes) {
+      throw new Error('Missing device recorder lifecycle, source identity or converted bytes');
+    }
+  }
+  const initialStart = Math.min(...native.map(recorder => recorder.startCalledAt));
+  const issued = new Set(fixture.calls.filter(call => call.trackId).map(call => call.trackId));
+  const matchedRecorders = new Set(), sourceIds = new Set();
+  const epochs = [...sources].sort((a, b) => a.startOffsetMs - b.startOffsetMs).map(source => {
+    if (!source.complete || !source.started || source.kind !== 'microphone' ||
+        sourceIds.has(source.sourceId) || !Number.isFinite(source.startOffsetMs) ||
+        !Number.isFinite(source.endOffsetMs) || source.endOffsetMs < source.startOffsetMs) {
+      throw new Error('Missing, duplicate or unclosed native microphone source');
+    }
+    sourceIds.add(source.sourceId);
+    const matching = native.filter(recorder =>
+      Math.abs(recorder.startCalledAt - initialStart - source.startOffsetMs) <= 2);
+    if (matching.length !== 1 || matchedRecorders.has(matching[0].id) || !issued.has(matching[0].trackIds[0])) {
+      throw new Error('Native source cannot be uniquely matched to an issued microphone track and start call');
+    }
+    const recorder = matching[0]; matchedRecorders.add(recorder.id);
+    const bytes = source.chunks.reduce((total, chunk) => total + chunk.size, 0);
+    if (bytes !== recorder.bytes || source.chunkCount !== recorder.events - recorder.emptyEvents ||
+        source.chunks.some((chunk, index) => chunk.index !== index)) {
+      throw new Error('Native source bytes, indices or event count differ from its recorder');
+    }
+    return { sourceId: source.sourceId, recorderId: recorder.id, trackId: recorder.trackIds[0],
+      startOffsetMs: source.startOffsetMs, endOffsetMs: source.endOffsetMs, reason: source.reason,
+      startCalledAt: recorder.startCalledAt, stoppedAt: recorder.stoppedAt, bytes, chunkCount: source.chunkCount };
+  });
+  if (Math.abs(epochs[0].startOffsetMs) > 2) throw new Error('Initial native source is missing the recording timeline origin');
+  const last = epochs.at(-1);
+  const stops = (fixture.recorderStops || []).filter(call => call.trackIds.length === 1 &&
+    call.trackIds[0] === last.trackId && call.at >= last.startCalledAt && call.at <= last.stoppedAt);
+  if (stops.length !== 1) throw new Error('Final native epoch has no unique observed stop call');
+  const activeDurationMs = stops[0].at - initialStart;
+  if (Math.abs(last.endOffsetMs - activeDurationMs) > 2) throw new Error('Native terminal offset differs from the observed recording clock');
+  // Device outages remain part of the meeting. Never sum epoch durations or
+  // use only the final replacement recorder's duration to hide those gaps.
+  return { epochs, expectedDurationS: activeDurationMs / 1000,
+    expectedSourceOffsetS: (initialStart - fixture.sourceStartedAt) / 1000 };
+}
+
+async function nativeChunkCustody(recordingDir, sources, limitPerSource = Infinity) {
+  const result = [];
+  for (const source of sources) {
+    for (const chunk of source.chunks.slice(0, limitPerSource)) {
+      const relativePath = path.relative(recordingDir, chunk.path).split(path.sep).join('/');
+      const expected = `native-sources/${source.sourceId}/chunks/chunk_${chunk.index}.webm`;
+      if (relativePath !== expected) throw new Error('Native chunk path does not match its source and index');
+      result.push({ sourceId: source.sourceId, index: chunk.index, relativePath, bytes: chunk.size, sha256: await sha256(chunk.path) });
+    }
+  }
+  return result;
+}
+
+function verifyNativeCustody(prefix, retained) {
+  const byIdentity = new Map();
+  for (const chunk of retained) {
+    const identity = `${chunk.sourceId}:${chunk.index}:${chunk.relativePath}`;
+    if (byIdentity.has(identity)) throw new Error('Duplicate native chunk custody identity');
+    byIdentity.set(identity, chunk);
+  }
+  for (const original of prefix) {
+    const preserved = byIdentity.get(`${original.sourceId}:${original.index}:${original.relativePath}`);
+    if (!preserved || preserved.bytes !== original.bytes || preserved.sha256 !== original.sha256) {
+      throw new Error(`Persisted native prefix changed or disappeared: ${original.relativePath}`);
+    }
+  }
+}
+
 /** Runs in the synthetic renderer only; it never replaces MediaRecorder. */
-async function installDeviceFixture({ apiUrl, actions }) {
+async function installDeviceFixture({ apiUrl, actions, observeNative = false }) {
   if (window.__deviceQualification) throw new Error('Device fixture already installed');
   if (await window.electronAPI.config.getApiUrl() !== apiUrl ||
       !['localhost', '127.0.0.1', '[::1]'].includes(new URL(apiUrl).hostname)) {
@@ -48,6 +136,12 @@ async function installDeviceFixture({ apiUrl, actions }) {
   const devices = navigator.mediaDevices;
   const originalGet = devices.getUserMedia;
   const originalEnumerate = devices.enumerateDevices;
+  const originalRecorderStop = MediaRecorder.prototype.stop;
+  const recorderStops = [];
+  if (observeNative) MediaRecorder.prototype.stop = function (...args) {
+    recorderStops.push({ at: performance.now(), trackIds: this.stream.getAudioTracks().map(track => track.id) });
+    return Reflect.apply(originalRecorderStop, this, args);
+  };
   let anchor = null, opening = null, sourceStartedAt = null, sourceRequestedAt = null;
   let unavailable = false;
   const issued = [], calls = [], events = [], samples = [], errors = [];
@@ -162,10 +256,11 @@ async function installDeviceFixture({ apiUrl, actions }) {
   const samplingTimer = setInterval(sample, 250);
   window.__deviceQualification = {
     snapshot: () => ({ sourceStartedAt, sourceRequestedAt, sourceSeconds: sourceSeconds(), calls, events, samples, errors,
-      actions: schedule, anchorState: anchor?.getAudioTracks()[0]?.readyState || null }),
+      actions: schedule, recorderStops, anchorState: anchor?.getAudioTracks()[0]?.readyState || null }),
     dispose: () => {
       clearInterval(injectionTimer); clearInterval(samplingTimer);
       devices.getUserMedia = originalGet; devices.enumerateDevices = originalEnumerate;
+      if (observeNative) MediaRecorder.prototype.stop = originalRecorderStop;
       for (const item of issued) item.stream.getTracks().forEach(track => track.stop());
       anchor?.getTracks().forEach(track => track.stop());
     },
@@ -242,7 +337,9 @@ async function deviceCase(kind) {
     app.assertTestProfile();
     await app.launch();
     await app.login();
-    await app.evalTimed(installDeviceFixture, { apiUrl: mock.url, actions });
+    result.nativeArchiveExpected = await app.evalTimed(() => typeof window.electronAPI.recording.beginSource === 'function');
+    if (result.nativeArchiveExpected) await app.evalTimed(installRecordingRoleObserver);
+    await app.evalTimed(installDeviceFixture, { apiUrl: mock.url, actions, observeNative: result.nativeArchiveExpected });
     await app.startRecording();
     const recordId = await app.getRecordId();
     if (!/^[a-f0-9-]{36}$/i.test(recordId)) throw new Error('Unexpected synthetic recording ID');
@@ -256,9 +353,26 @@ async function deviceCase(kind) {
       if (elapsed === null) throw new Error('Microphone source never started');
       if (result.fixture.errors.length) throw new Error(result.fixture.errors.join('; '));
       if (!result.prefix && elapsed >= 10) {
-        const files = chunksIn(recordDir).sort((a, b) => Number(path.basename(a).match(/\d+/)[0]) - Number(path.basename(b).match(/\d+/)[0])).slice(0, 3);
+        const files = chunksIn(recordDir).filter(filename => !result.nativeArchiveExpected ||
+          !path.relative(recordDir, filename).startsWith('native-sources' + path.sep))
+          .sort((a, b) => Number(path.basename(a).match(/\d+/)[0]) - Number(path.basename(b).match(/\d+/)[0])).slice(0, 3);
         if (files.length < 2) throw new Error('Fewer than two persisted prefix chunks before fault injection');
-        result.prefix = await Promise.all(files.map(async filename => ({ file: filename, sha256: await sha256(filename) })));
+        result.prefix = await Promise.all(files.map(async filename => ({ file: filename, sha256: await sha256(filename),
+          ...(result.nativeArchiveExpected ? { sourceId: 'live-mix-comparison', index: Number(path.basename(filename).match(/\d+/)[0]),
+            relativePath: path.relative(recordDir, filename).split(path.sep).join('/'), bytes: fs.statSync(filename).size } : {}) })));
+      }
+      let nativeProgress;
+      if (result.nativeArchiveExpected) {
+        const sources = inspectNativeSources(recordDir);
+        nativeProgress = sources.map(source => ({ sourceId: source.sourceId, kind: source.kind,
+          startOffsetMs: source.startOffsetMs, chunkCount: source.chunkCount,
+          bytes: source.chunks.reduce((total, chunk) => total + chunk.size, 0), complete: source.complete }));
+        result.nativePrefix ||= [];
+        // Snapshot an independently retained prefix for EVERY epoch, including
+        // each replacement, before finalization and upload touch this meeting.
+        const awaitingPrefix = sources.filter(source => source.chunkCount >= 3 &&
+          !result.nativePrefix.some(chunk => chunk.sourceId === source.sourceId));
+        result.nativePrefix.push(...await nativeChunkCustody(recordDir, awaitingPrefix, 3));
       }
       if (screenshotIndex < screenshotAt.length && elapsed >= screenshotAt[screenshotIndex]) {
         result.screenshots.push(await app.screenshot(name + '-' + screenshotAt[screenshotIndex++]));
@@ -271,7 +385,7 @@ async function deviceCase(kind) {
           result.problems.push(`Missing persisted ${expectedWarning} warning after microphone recovery`);
         }
       }
-      result.progress.push({ sourceSeconds: elapsed, disk: app.captureDiskProgress() });
+      result.progress.push({ sourceSeconds: elapsed, disk: app.captureDiskProgress(), ...(nativeProgress ? { nativeProgress } : {}) });
       evidence(file, result);
       if (elapsed >= seconds) break;
       await sleep(1000);
@@ -290,28 +404,59 @@ async function deviceCase(kind) {
     result.phase = await app.getPhase();
     if (result.phase !== 'uploaded') result.problems.push('Recording did not finish uploading to the local mock');
     result.capture = await app.evalTimed(() => window.__suisseCaptureDiagnostics?.snapshot());
-    const recorder = result.capture?.recorders?.at(-1);
-    if (!recorder?.bytes || !recorder.events || recorder.startedAt == null || recorder.stoppedAt == null) throw new Error('Missing native recorder output/timing evidence');
-    result.expectedDurationS = (recorder.stoppedAt - recorder.startedAt) / 1000;
+    if (result.nativeArchiveExpected) {
+      result.recorderRoles = await app.evalTimed(() => window.__recordingRoleEvidence.snapshot());
+      const sources = inspectNativeSources(recordDir);
+      result.nativeTimeline = assessNativeDeviceTimeline(kind, sources, result.recorderRoles, result.fixture);
+      result.expectedDurationS = result.nativeTimeline.expectedDurationS;
+      result.expectedSourceOffsetS = result.nativeTimeline.expectedSourceOffsetS;
+      result.nativeSources = await nativeChunkCustody(recordDir, sources);
+      if (sources.some(source => !result.nativePrefix?.some(chunk => chunk.sourceId === source.sourceId))) {
+        throw new Error('A native microphone epoch has no independently observed persisted prefix');
+      }
+      verifyNativeCustody(result.nativePrefix, result.nativeSources);
+      result.notes.push('All native microphone epochs are identified by input track and start-call correspondence; outages retain their active-timeline positions. First sample onset remains approximate.');
+    } else {
+      // Historical single-recorder qualification stays on its original clock.
+      const recorder = result.capture?.recorders?.at(-1);
+      if (!recorder?.bytes || !recorder.events || recorder.startedAt == null || recorder.stoppedAt == null) throw new Error('Missing native recorder output/timing evidence');
+      result.expectedDurationS = (recorder.stoppedAt - recorder.startedAt) / 1000;
+      result.expectedSourceOffsetS = (recorder.startedAt - result.fixture.sourceStartedAt) / 1000;
+    }
     const output = app.findOutputFile();
     if (!output || path.dirname(output) !== recordDir) throw new Error('Missing finalized audio for this recording; original profile retained');
     result.output = output;
     result.audio = await verifyCodedAudio(output, reference, { expectedDurationS: result.expectedDurationS, durationToleranceS: 1.5 });
     result.problems.push(...result.audio.problems);
-    result.expectedSourceOffsetS = (recorder.startedAt - result.fixture.sourceStartedAt) / 1000;
     result.sourceClockErrorS = Math.abs(result.audio.sourceOffsetS - result.expectedSourceOffsetS);
     // Check the acquisition clock against actual decoded identities. If it is
     // inaccurate, classify the schedule as invalid instead of widening zeros.
     if (result.audio.sourceOffsetS === null || result.sourceClockErrorS > 0.75) result.problems.push('SOURCE CLOCK MISMATCH: decoded audio does not validate the injection clock within 0.75 seconds');
     if (result.expectedSourceOffsetS < -0.1 || result.expectedSourceOffsetS > 3) result.problems.push('SOURCE CLOCK PRECONDITION: capture did not start within three seconds of source acquisition');
     result.localSha256 = await sha256(output);
+    if (result.nativeArchiveExpected) {
+      const finalized = JSON.parse(fs.readFileSync(path.join(recordDir, 'finalized.json'), 'utf8'));
+      const sourceIds = result.nativeTimeline.epochs.map(epoch => epoch.sourceId).sort();
+      if (finalized.version !== 3 || finalized.sourceMode !== 'native' || finalized.systemPcmIncluded !== false ||
+          !Array.isArray(finalized.sourceIds) || JSON.stringify([...finalized.sourceIds].sort()) !== JSON.stringify(sourceIds) ||
+          finalized.sha256 !== result.localSha256 || finalized.filename !== path.basename(output)) {
+        throw new Error('Final publication does not cover the exact preserved native microphone epochs');
+      }
+    }
     const receipt = JSON.parse(fs.readFileSync(path.join(recordDir, 'upload-receipt.json'), 'utf8'));
     if (mock.state.uploads.get(receipt.audioFileId)?.sha256 !== result.localSha256) result.problems.push('Mock upload bytes differ from finalized audio');
     if (receipt.canDelete !== false || receipt.contentVerified !== false) result.problems.push('Local backup retention receipt is incorrect');
     result.retainedPrefix = [];
-    const retained = await Promise.all(chunksIn(recordDir).map(async filename => ({ file: filename, sha256: await sha256(filename) })));
+    const retained = await Promise.all(chunksIn(recordDir).filter(filename => !result.nativeArchiveExpected ||
+      !path.relative(recordDir, filename).startsWith('native-sources' + path.sep))
+      .map(async filename => ({ file: filename, sha256: await sha256(filename),
+        ...(result.nativeArchiveExpected ? { sourceId: 'live-mix-comparison', index: Number(path.basename(filename).match(/\d+/)[0]),
+          relativePath: path.relative(recordDir, filename).split(path.sep).join('/'), bytes: fs.statSync(filename).size } : {}) })));
+    if (result.nativeArchiveExpected) verifyNativeCustody(result.prefix || [], retained);
     for (const original of result.prefix || []) {
-      const match = retained.find(candidate => candidate.sha256 === original.sha256);
+      const match = retained.find(candidate => candidate.sha256 === original.sha256 &&
+        (!result.nativeArchiveExpected || (candidate.relativePath === original.relativePath &&
+          candidate.sourceId === original.sourceId && candidate.index === original.index && candidate.bytes === original.bytes)));
       if (!match) result.problems.push('Persisted prefix source changed or disappeared: ' + path.basename(original.file));
       else result.retainedPrefix.push(match);
     }
@@ -381,6 +526,10 @@ async function deviceCase(kind) {
     await app.page.click('[data-test="history-delete-cancel"]');
     await app.page.waitForSelector('[data-test="history-delete-file"]', { hidden: true, timeout: 10000 });
     if (!fs.existsSync(output)) result.problems.push('Opening and cancelling the history delete dialog removed the local audio');
+    if (result.nativeArchiveExpected) {
+      result.nativeSourcesAfterHistory = await nativeChunkCustody(recordDir, inspectNativeSources(recordDir));
+      verifyNativeCustody(result.nativeSources, result.nativeSourcesAfterHistory);
+    }
     result.pass = result.problems.length === 0;
   } catch (error) {
     result.problems.push(error.stack || error.message);
@@ -388,6 +537,9 @@ async function deviceCase(kind) {
     result.diagnostics = app?.diagnosticsDir || null;
     result.profile = app?.userDataDir || null;
     evidence(file, result);
+    if (app && result.nativeArchiveExpected) {
+      try { await app.evalTimed(() => window.__recordingRoleEvidence?.dispose(), undefined, 3000); } catch (_) { /* retain failed profile */ }
+    }
     if (app) await app.close({ keepProfile: true }).catch(error => { result.problems.push('App cleanup: ' + error.message); result.pass = false; });
     if (mock) await mock.close().catch(error => { result.problems.push('Mock cleanup: ' + error.message); result.pass = false; });
     evidence(file, result);
@@ -404,4 +556,4 @@ async function runDeviceQualification() {
     notes: [...LIMITATIONS], results };
 }
 
-module.exports = { runDeviceQualification };
+module.exports = { runDeviceQualification, assessNativeDeviceTimeline, nativeChunkCustody, verifyNativeCustody };

@@ -89,6 +89,11 @@ jobs:
         timeout-minutes: 23
         run: node tests/e2e-harness/ci/run-qualification.js
 
+      - name: Preserve native input through an actual mixer suspension
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && !inputs.run_capture_clock }}
+        timeout-minutes: 12
+        run: node tests/e2e-harness/native-source-qualification.js --seconds 45 --expect-preserved --app-dir dist/electron/UnPackaged --bundle-sha ${{ github.sha }}
+
       - name: Qualify synthetic device loss and signal recovery
         if: ${{ !cancelled() && steps.build.outcome == 'success' && !inputs.run_capture_clock }}
         timeout-minutes: 23

@@ -7,9 +7,196 @@ const { performance } = require('perf_hooks');
 const { spawn, execFileSync } = require('child_process');
 const { AppDriver, sleep } = require('./lib/app-driver');
 const { buildCodedScenario, WORK_DIR, FFMPEG } = require('./lib/audio');
-const { verifyCodedAudio } = require('./lib/coded-audio');
+const { verifyCodedAudio, analyzeCodedAudio } = require('./lib/coded-audio');
 const { startMockBackend } = require('./lib/mock-backend');
 const { concatenateFiles } = require('../../src-electron/durable-files');
+const { inspectNativeSources } = require('../../src-electron/native-source-persistence');
+
+// Passive, local to s15. The source writer converts one Blob, awaits its save
+// acknowledgement, then starts the next conversion. Conversion i+1 therefore
+// proves acknowledgement of i, even though the immutable preload bridge does
+// not expose its exact latest acknowledgement. Do not treat conversion i itself
+// as durable. This deliberately conservative lower bound keeps the 2.5s budget.
+function installNativeCrashObserver() {
+  if (window.__nativeCrashEvidence) throw new Error('Native crash observer already installed');
+  const NativeContext = window.AudioContext, originalWebkit = window.webkitAudioContext;
+  const originalStart = MediaRecorder.prototype.start, originalArrayBuffer = Blob.prototype.arrayBuffer;
+  const originalAcquire = navigator.mediaDevices.getUserMedia;
+  const destinations = new Set(), acquisitions = [], records = [], blobs = new WeakMap(), errors = [];
+  const WrappedContext = new Proxy(NativeContext, { construct(target, args, newTarget) {
+    const context = Reflect.construct(target, args, newTarget), originalDestination = context.createMediaStreamDestination;
+    context.createMediaStreamDestination = function (...args) {
+      const node = Reflect.apply(originalDestination, this, args);
+      node.stream.getAudioTracks().forEach(track => destinations.add(track.id));
+      return node;
+    };
+    return context;
+  } });
+  window.AudioContext = WrappedContext;
+  if (originalWebkit === NativeContext) window.webkitAudioContext = WrappedContext;
+  navigator.mediaDevices.getUserMedia = async function (...args) {
+    const stream = await Reflect.apply(originalAcquire, this, args);
+    acquisitions.push(stream.getAudioTracks().map(track => track.id));
+    return stream;
+  };
+  MediaRecorder.prototype.start = function (...args) {
+    const trackIds = this.stream.getAudioTracks().map(track => track.id);
+    const inputIds = new Set(acquisitions.flat());
+    const role = trackIds.length === 1 && destinations.has(trackIds[0]) ? 'live-mix'
+      : trackIds.length === 1 && inputIds.has(trackIds[0]) ? 'native-microphone' : 'unknown';
+    const entry = { recorder: this, id: records.length + 1, role, trackIds, startCalledAt: performance.now(), startedAt: null,
+      stoppedAt: null, timesliceMs: args[0], events: 0, bytes: 0, chunks: [], lastConversionIndex: -1, acknowledgedCount: 0 };
+    records.push(entry);
+    const handler = this.ondataavailable;
+    if (typeof handler !== 'function') throw new Error('Expected native source handler before start');
+    this.ondataavailable = function (event) {
+      entry.events++; entry.bytes += event.data.size;
+      if (event.data.size) {
+        const chunk = { index: entry.chunks.length, bytes: event.data.size, conversionStartedAt: null };
+        entry.chunks.push(chunk); blobs.set(event.data, { entry, chunk });
+      }
+      return Reflect.apply(handler, this, [event]);
+    };
+    this.addEventListener('start', event => { entry.startedAt = event.timeStamp; });
+    this.addEventListener('stop', event => { entry.stoppedAt = event.timeStamp; });
+    return Reflect.apply(originalStart, this, args);
+  };
+  Blob.prototype.arrayBuffer = function (...args) {
+    const owner = blobs.get(this);
+    if (owner) {
+      const { entry, chunk } = owner;
+      if (chunk.index > entry.lastConversionIndex + 1 || chunk.index < entry.lastConversionIndex) errors.push('Non-serial source Blob conversion');
+      if (chunk.index === entry.lastConversionIndex + 1) {
+        entry.acknowledgedCount = chunk.index;
+        entry.lastConversionIndex = chunk.index;
+      }
+      chunk.conversionStartedAt ??= performance.now();
+    }
+    return Reflect.apply(originalArrayBuffer, this, args);
+  };
+  window.__nativeCrashEvidence = { snapshot: () => ({ at: performance.now(), acquisitions: acquisitions.map(ids => [...ids]), errors: [...errors],
+    acknowledgementBasis: 'Lower bound: starting the next Blob conversion proves the previous serial save acknowledged successfully.',
+    records: records.map(({ recorder, ...entry }) => ({ ...entry, trackIds: [...entry.trackIds],
+      chunks: entry.chunks.map(chunk => ({ ...chunk })), state: recorder.state })) }),
+  dispose: () => {
+    MediaRecorder.prototype.start = originalStart; Blob.prototype.arrayBuffer = originalArrayBuffer;
+    navigator.mediaDevices.getUserMedia = originalAcquire; window.AudioContext = NativeContext;
+    if (originalWebkit === NativeContext) window.webkitAudioContext = originalWebkit;
+  } };
+}
+
+async function snapshotNativeSources(recordingDir, acknowledgedCounts = null) {
+  assertSyntheticPath(recordingDir);
+  const result = [];
+  for (const source of inspectNativeSources(recordingDir)) {
+    if (source.gaps.length || source.terminalMismatch) throw new Error('Native source sequence is incomplete');
+    const limit = acknowledgedCounts ? acknowledgedCounts[source.sourceId] : source.chunkCount;
+    if (!Number.isSafeInteger(limit) || limit < 0 || limit > source.chunkCount) throw new Error('Missing acknowledged native source prefix');
+    const files = async filenames => Promise.all(filenames.map(async filename => ({
+      relativePath: path.relative(recordingDir, filename).replaceAll('\\', '/'), bytes: fs.statSync(filename).size, sha256: await sha256(filename),
+    })));
+    const chunks = await files(source.chunkPaths.slice(0, limit));
+    result.push({ sourceId: source.sourceId, kind: source.kind, startOffsetMs: source.startOffsetMs,
+      started: source.started, interrupted: source.interrupted,
+      metadata: await files([source.manifestPath, source.startedPath, source.endPath].filter(Boolean)),
+      chunks: chunks.map((chunk, index) => ({ ...chunk, sourceId: source.sourceId, index })) });
+  }
+  return result;
+}
+
+function compareNativeSources(expected, actual, allowAdditionalChunks = true) {
+  const problems = [], byId = new Map();
+  for (const source of actual) {
+    if (byId.has(source.sourceId)) problems.push('Duplicate native source ID ' + source.sourceId);
+    byId.set(source.sourceId, source);
+    for (let index = 0; index < source.chunks.length; index++) {
+      const chunk = source.chunks[index];
+      if (chunk.index !== index || chunk.sourceId !== source.sourceId ||
+          chunk.relativePath !== `native-sources/${source.sourceId}/chunks/chunk_${index}.webm`) problems.push('Invalid native source chunk identity ' + source.sourceId);
+    }
+  }
+  if (actual.length !== expected.length) problems.push('Unexpected native source inventory change');
+  for (const source of expected) {
+    const current = byId.get(source.sourceId);
+    if (!current) { problems.push('Previously durable native source disappeared: ' + source.sourceId); continue; }
+    if (source.kind !== current.kind || source.startOffsetMs !== current.startOffsetMs ||
+        JSON.stringify(source.metadata) !== JSON.stringify(current.metadata)) problems.push('Native source metadata changed: ' + source.sourceId);
+    if (!allowAdditionalChunks && source.chunks.length !== current.chunks.length) problems.push('Recovery changed native chunk count: ' + source.sourceId);
+    for (const chunk of source.chunks) {
+      const retained = current.chunks[chunk.index];
+      if (!retained || retained.relativePath !== chunk.relativePath || retained.sourceId !== chunk.sourceId ||
+          retained.index !== chunk.index || retained.bytes !== chunk.bytes || retained.sha256 !== chunk.sha256) problems.push(`Native source chunk changed or disappeared: ${source.sourceId}/${chunk.index}`);
+    }
+  }
+  return problems;
+}
+
+function nativeCrashMapping(snapshot, sources, expectedTimesliceMs = 1000) {
+  const observed = snapshot?.nativeCapture;
+  const native = observed?.records?.filter(record => record.role === 'native-microphone') || [];
+  const mixed = observed?.records?.filter(record => record.role === 'live-mix') || [];
+  if (observed?.errors?.length || observed?.acquisitions?.length !== 1 || observed.acquisitions[0].length !== 1 ||
+      observed.records.length !== 2 || native.length !== 1 || mixed.length !== 1 || sources.length !== 1 ||
+      sources[0].kind !== 'microphone' || !sources[0].started || !sources[0].interrupted ||
+      !Number.isFinite(sources[0].startOffsetMs) || sources[0].startOffsetMs < 0 || sources[0].startOffsetMs > 25) {
+    throw new Error('Native s15 requires exactly one initial microphone epoch and one live mix; extra sources or ambiguous mappings are not qualified');
+  }
+  const recorder = native[0];
+  if (observed.records.some(record => record.state !== 'recording' || record.startedAt === null ||
+      !Number.isFinite(record.startCalledAt) || record.timesliceMs !== expectedTimesliceMs)) throw new Error('Unexpected native crash recorder lifecycle or timeslice');
+  if (recorder.trackIds[0] !== observed.acquisitions[0][0] || !Number.isSafeInteger(recorder.acknowledgedCount) ||
+      recorder.acknowledgedCount < 0 || recorder.acknowledgedCount > recorder.chunks.length - 1) throw new Error('Missing conservative native acknowledgement evidence');
+  return { sourceId: sources[0].sourceId, kind: sources[0].kind, startOffsetMs: sources[0].startOffsetMs,
+    recorder, at: observed.at, acknowledgementBasis: observed.acknowledgementBasis,
+    acknowledgedCount: recorder.acknowledgedCount };
+}
+
+function compareNativeRecoveredContent(original, recovered, startOffsetS = 0, toleranceS = 0.1) {
+  const problems = [], target = new Map();
+  for (const group of recovered.groups || []) {
+    if (target.has(group.id)) problems.push('Repeated recovered marker ' + group.id);
+    target.set(group.id, group);
+  }
+  const interior = (original.groups || []).slice(1, -1), differences = [];
+  if (interior.length < 3) problems.push('Insufficient native source interior marker evidence');
+  let previous = -Infinity;
+  for (const group of interior) {
+    const final = target.get(group.id);
+    if (!final) { problems.push('Recovered output omitted durable native marker ' + group.id); continue; }
+    if (final.start <= previous) problems.push('Recovered native markers are reordered');
+    previous = final.start;
+    const difference = (final.start + final.end - group.start - group.end) / 2 - startOffsetS;
+    differences.push(difference);
+    if (Math.abs(difference) > toleranceS + 1e-9) problems.push('Recovered native marker moved on the active timeline: ' + group.id);
+  }
+  return { problems, requiredInteriorIds: interior.map(group => group.id), toleranceS,
+    maxAbsoluteTimingDifferenceS: differences.length ? Math.max(...differences.map(Math.abs)) : null };
+}
+
+function nativeAssemblyProblems(receipt, plan, sources) {
+  const problems = [], ids = sources.map(source => source.sourceId).sort();
+  const covers = actual => Array.isArray(actual) && JSON.stringify([...actual].sort()) === JSON.stringify(ids);
+  if (receipt?.version !== 3 || receipt.sourceMode !== 'native' || receipt.recovered !== true ||
+      receipt.systemPcmIncluded !== false || !covers(receipt.sourceIds)) problems.push('Recovered native output lacks a complete v3 source receipt');
+  if (plan?.version !== 1 || plan.recovery !== true || plan.codecPolicy !== 'opus-cbr-192k-20ms-reencoded-from-native-sources' ||
+      plan.systemPcmIncluded !== false || !covers(plan.sourceIds) || plan.onsetIsApproximate !== true ||
+      plan.sampleRate !== 48000 || !Number.isSafeInteger(plan.totalSamples) || plan.totalSamples <= 0) {
+    problems.push('Recovered native output lacks the explicit re-encoding and active-timeline assembly policy');
+  }
+  return problems;
+}
+
+function nativeEndpointCoverage(audio, toleranceS = 1.5) {
+  const { durationS, firstIdentifiedStartS, lastIdentifiedEndS } = audio || {};
+  if (![durationS, firstIdentifiedStartS, lastIdentifiedEndS].every(Number.isFinite) ||
+      firstIdentifiedStartS < 0 || lastIdentifiedEndS < firstIdentifiedStartS || lastIdentifiedEndS > durationS) {
+    return { problems: ['Missing measured native prefix boundary positions'] };
+  }
+  const leadingUnidentifiedS = firstIdentifiedStartS, trailingUnidentifiedS = durationS - lastIdentifiedEndS;
+  return { leadingUnidentifiedS, trailingUnidentifiedS, toleranceS,
+    problems: [...(leadingUnidentifiedS > toleranceS ? ['Recovered native prefix begins with excessive unidentified audio'] : []),
+      ...(trailingUnidentifiedS > toleranceS ? ['Recovered native prefix ends with excessive unidentified audio'] : [])] };
+}
 
 function assertSyntheticPath(filename) {
   const target = path.resolve(filename), root = path.resolve(WORK_DIR);
@@ -103,9 +290,12 @@ async function killOwnedApp(app, operations = {}) {
       // AppDriver launches this exact child in its own detached process group.
       (operations.kill || process.kill)(-pid, 'SIGKILL');
     }
+    const signalReturnedAtMs = performance.now();
     const exit = await exited;
+    const exitObservedAtMs = performance.now();
     app.proc = null; // Never let later cleanup target a recycled operating-system PID.
-    return { pid, platform, method: platform === 'win32' ? 'taskkill /T /F' : 'process-group SIGKILL', ...exit, elapsedMs: performance.now() - started };
+    return { pid, platform, method: platform === 'win32' ? 'taskkill /T /F' : 'process-group SIGKILL', ...exit,
+      requestAtMs: started, signalReturnedAtMs, exitObservedAtMs, elapsedMs: exitObservedAtMs - started };
   } finally {
     clearTimeout(timer); child.removeListener('exit', exitHandler);
   }
@@ -134,7 +324,8 @@ async function recordingSnapshot(app) {
     const pinia = window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia;
     const state = pinia?.state?.value?.recording;
     return { phase: state?.phase, recordId: state?.recordId, acknowledgedChunks: state?.chunkIndex,
-      chunkSaveErrors: state?.chunkSaveErrors, capture: window.__suisseCaptureDiagnostics?.snapshot() };
+      chunkSaveErrors: state?.chunkSaveErrors, capture: window.__suisseCaptureDiagnostics?.snapshot(),
+      nativeCapture: window.__nativeCrashEvidence?.snapshot() || null };
   });
 }
 
@@ -254,7 +445,7 @@ async function runMainCrashQualification(opts = {}) {
     const fd = fs.openSync(summaryPath, 'w');
     try { fs.writeFileSync(fd, JSON.stringify(result, null, 2)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   };
-  let first = null, recovered = null, mock = null;
+  let first = null, recovered = null, mock = null, nativeMode = false;
   try {
     checkpoint('preparing-reference');
     const reference = buildCodedScenario(name, [{ type: 'speech', seconds: referenceSeconds }]);
@@ -267,6 +458,18 @@ async function runMainCrashQualification(opts = {}) {
     if (await first.evalTimed(() => window.electronAPI.config.getApiUrl()) !== mock.url) throw new Error('Crash qualification must use only the local backend');
     result.bundleSha = opts.bundleSha || process.env.SUISSE_E2E_BUNDLE_SHA || null;
     result.profile = first.userDataDir; result.beforeDiagnostics = first.diagnosticsDir;
+    nativeMode = await first.evalTimed(() => typeof window.electronAPI.recording.beginSource === 'function');
+    result.captureMode = nativeMode ? 'native-sources-v1' : 'legacy-live-mix';
+    if (nativeMode) {
+      result.nativeMaxTailExposureS = Math.min(maxTailExposureS, 2.5);
+      result.nativeExpectedTimesliceMs = expectedTimesliceMs ?? 1000;
+      result.notes.push('Native qualification is bounded to one microphone epoch; no system audio or source transitions. Concurrent source durations are never summed.');
+      result.notes.push('The native acknowledged prefix is a lower bound: next Blob conversion proves the preceding serial save returned success; the latest completed save may be deliberately excluded.');
+      result.sourceWriterProvenance = ['src/services/recordingChunkWriter.js', 'src/services/nativeSourceRecorder.js'].map(filename => ({
+        path: filename, sha256: crypto.createHash('sha256').update(fs.readFileSync(path.resolve(__dirname, '../..', filename))).digest('hex'),
+      }));
+      await first.page.evaluate(installNativeCrashObserver);
+    }
     await first.startRecording();
     const started = performance.now();
     while (performance.now() - started < seconds * 1000) {
@@ -277,24 +480,41 @@ async function runMainCrashQualification(opts = {}) {
       if (state.phase !== 'recording') throw new Error('Capture left recording phase before crash injection');
       await sleep(Math.min(5000, Math.max(1, seconds * 1000 - (performance.now() - started))));
     }
-    let before, chunks, observation;
+    let before, chunks, observation, nativeMapping, acknowledgedNative;
     for (let attempt = 0; attempt < 5; attempt++) {
       const state = await recordingSnapshot(first);
       if (!/^[a-f0-9-]{36}$/i.test(state.recordId || '')) throw new Error('Invalid synthetic recording ID');
       result.recordId = state.recordId;
       const recordingDir = assertSyntheticPath(path.join(first.recordingsDir, state.recordId));
-      chunks = await snapshotChunks(recordingDir, state.acknowledgedChunks);
+      if (nativeMode) {
+        const mapping = nativeCrashMapping(state, inspectNativeSources(recordingDir), result.nativeExpectedTimesliceMs);
+        acknowledgedNative = await snapshotNativeSources(recordingDir, { [mapping.sourceId]: mapping.acknowledgedCount });
+      } else chunks = await snapshotChunks(recordingDir, state.acknowledgedChunks);
       observation = await bracketRecordingSnapshot(first);
       before = observation.snapshot;
-      if (before.acknowledgedChunks === state.acknowledgedChunks) break;
+      if (nativeMode) {
+        nativeMapping = nativeCrashMapping(before, acknowledgedNative, result.nativeExpectedTimesliceMs);
+        if (nativeMapping.acknowledgedCount === acknowledgedNative[0].chunks.length) break;
+      } else if (before.acknowledgedChunks === state.acknowledgedChunks) break;
       before = null;
     }
-    if (!before || before.phase !== 'recording' || before.chunkSaveErrors || chunks.length < 5 || chunks.length !== before.acknowledgedChunks) {
+    if (!before || before.phase !== 'recording' || before.chunkSaveErrors || (nativeMode
+      ? acknowledgedNative[0].chunks.length < 5
+      : chunks.length < 5 || chunks.length !== before.acknowledgedChunks)) {
       throw new Error('Could not establish a stable, acknowledged durable prefix before the crash');
     }
-    result.beforeCrash = before; result.acknowledgedChunks = chunks;
-    result.captureTiming = captureTimingEvidence(before, expectedTimesliceMs);
-    result.problems.push(...result.captureTiming.problems);
+    result.beforeCrash = before;
+    if (nativeMode) {
+      result.acknowledgedNativeSources = acknowledgedNative;
+      result.nativeSourceMapping = nativeMapping;
+      for (const chunk of acknowledgedNative[0].chunks) {
+        if (nativeMapping.recorder.chunks[chunk.index]?.bytes !== chunk.bytes) throw new Error('Acknowledged native Blob size differs from its source file');
+      }
+    } else {
+      result.acknowledgedChunks = chunks;
+      result.captureTiming = captureTimingEvidence(before, expectedTimesliceMs);
+      result.problems.push(...result.captureTiming.problems);
+    }
     const recordingDir = assertSyntheticPath(path.join(first.recordingsDir, result.recordId));
     if (first.findOutputFile()) throw new Error('An output already existed before the abrupt crash');
     checkpoint('durable-prefix-established');
@@ -302,19 +522,23 @@ async function runMainCrashQualification(opts = {}) {
     result.observationTiming = observationExitEvidence(observation, performance.now());
     result.observationToExitSeconds = result.observationTiming.requestToExitUpperSeconds;
     await first.close({ keepProfile: true });
-    result.crashSurvivors = await snapshotChunks(recordingDir);
-    const survivorProblems = compareChunks(chunks, result.crashSurvivors);
+    if (nativeMode) result.nativeCrashSurvivors = await snapshotNativeSources(recordingDir);
+    else result.crashSurvivors = await snapshotChunks(recordingDir);
+    const survivorProblems = nativeMode ? compareNativeSources(acknowledgedNative, result.nativeCrashSurvivors)
+      : compareChunks(chunks, result.crashSurvivors);
     result.problems.push(...survivorProblems);
     if (survivorProblems.length) throw new Error('An acknowledged source did not survive full process termination');
     const rawPrefix = assertSyntheticPath(path.join(evidenceDir, 'crash-durable-prefix.webm'));
-    await concatenateFiles(result.crashSurvivors.map(chunk => path.join(recordingDir, chunk.relativePath)), rawPrefix);
+    const survivingChunks = nativeMode ? result.nativeCrashSurvivors[0].chunks : result.crashSurvivors;
+    const acknowledgedChunks = nativeMode ? acknowledgedNative[0].chunks : chunks;
+    await concatenateFiles(survivingChunks.map(chunk => path.join(recordingDir, chunk.relativePath)), rawPrefix);
     result.rawPrefix = rawPrefix;
     // A chunk may finish writing after the last acknowledgement snapshot but
     // before termination. It belongs in recovery, not in the earlier snapshot.
-    const acknowledgedIndices = new Set(chunks.map(chunk => chunk.index));
-    const acknowledgedSources = result.crashSurvivors.filter(chunk => acknowledgedIndices.has(chunk.index));
-    if (acknowledgedSources.length !== chunks.length) throw new Error('Missing acknowledged source for timing verification');
-    const acknowledgedPrefix = acknowledgedSources.length === result.crashSurvivors.length ? rawPrefix
+    const acknowledgedIndices = new Set(acknowledgedChunks.map(chunk => chunk.index));
+    const acknowledgedSources = survivingChunks.filter(chunk => acknowledgedIndices.has(chunk.index));
+    if (acknowledgedSources.length !== acknowledgedChunks.length) throw new Error('Missing acknowledged source for timing verification');
+    const acknowledgedPrefix = acknowledgedSources.length === survivingChunks.length ? rawPrefix
       : assertSyntheticPath(path.join(evidenceDir, 'acknowledged-prefix.webm'));
     if (acknowledgedPrefix !== rawPrefix) await concatenateFiles(acknowledgedSources.map(chunk => path.join(recordingDir, chunk.relativePath)), acknowledgedPrefix);
     result.acknowledgedPrefix = acknowledgedPrefix;
@@ -342,9 +566,14 @@ async function runMainCrashQualification(opts = {}) {
     if (result.upload.localSha256 !== remote?.sha256 || result.upload.localBytes !== remote?.fileSize) result.problems.push('Recovered upload differs from the finalized local file');
     if (result.upload.attempts !== 1) result.problems.push('Recovery should upload once against the healthy mock');
     if (receipt.canDelete !== false || !fs.existsSync(output)) result.problems.push('Recovery did not retain its local backup');
-    result.retainedChunks = await snapshotChunks(recordingDir);
-    result.problems.push(...compareChunks(result.crashSurvivors, result.retainedChunks));
-    if (result.retainedChunks.length !== result.crashSurvivors.length) result.problems.push('Recovery unexpectedly added source chunks without recording new audio');
+    if (nativeMode) {
+      result.retainedNativeSources = await snapshotNativeSources(recordingDir);
+      result.problems.push(...compareNativeSources(result.nativeCrashSurvivors, result.retainedNativeSources, false));
+    } else {
+      result.retainedChunks = await snapshotChunks(recordingDir);
+      result.problems.push(...compareChunks(result.crashSurvivors, result.retainedChunks));
+      if (result.retainedChunks.length !== result.crashSurvivors.length) result.problems.push('Recovery unexpectedly added source chunks without recording new audio');
+    }
 
     await recovered.navigate('/history');
     const historyDeadline = performance.now() + 15000;
@@ -353,6 +582,52 @@ async function runMainCrashQualification(opts = {}) {
     if (!result.history.visible || !result.history.recovered || result.history.uploadStatus !== 'uploaded') result.problems.push('Recovered, uploaded recording is not visible in its history card');
     result.screenshot = await recovered.screenshot(name + '-recovered-history');
     checkpoint('verifying-durable-prefix');
+    if (nativeMode) {
+      const finalReceipt = JSON.parse(fs.readFileSync(path.join(recordingDir, 'finalized.json'), 'utf8'));
+      const plans = fs.readdirSync(recordingDir, { withFileTypes: true }).filter(entry => entry.isDirectory() && entry.name.startsWith('native-finalization-'))
+        .map(entry => path.join(recordingDir, entry.name, 'plan.json')).filter(filename => fs.existsSync(filename));
+      if (plans.length !== 1) throw new Error('Expected exactly one completed native recovery assembly plan');
+      const plan = JSON.parse(fs.readFileSync(plans[0], 'utf8'));
+      result.nativeAssembly = { receipt: finalReceipt, plan, planPath: plans[0], planSha256: await sha256(plans[0]),
+        codecPolicy: plan.codecPolicy, exactDecodedPcmEqualityRequired: false,
+        equalityPolicy: 'Retained original source bytes must remain exact; the explicitly re-encoded final must preserve source identities and active-time positions.' };
+      result.problems.push(...nativeAssemblyProblems(finalReceipt, plan, result.nativeCrashSurvivors));
+      if (fs.existsSync(path.join(recordingDir, 'finalization-pending.json')) || finalReceipt.sha256 !== result.upload.localSha256) result.problems.push('Native recovery has not published its complete output transaction');
+      await recovered.close({ keepProfile: true });
+      result.originalPcm = await decodedFingerprint(rawPrefix);
+      result.acknowledgedPcm = acknowledgedPrefix === rawPrefix ? result.originalPcm : await decodedFingerprint(acknowledgedPrefix);
+      result.nativePrefixArtifacts = { sourceId: nativeMapping.sourceId, rawPrefix, rawSha256: await sha256(rawPrefix),
+        acknowledgedPrefix, acknowledgedSha256: await sha256(acknowledgedPrefix) };
+      const sourceAnalysis = await analyzeCodedAudio(rawPrefix), finalAnalysis = await analyzeCodedAudio(output);
+      result.nativeContent = compareNativeRecoveredContent(sourceAnalysis, finalAnalysis, nativeMapping.startOffsetMs / 1000);
+      result.problems.push(...result.nativeContent.problems);
+      fs.writeFileSync(path.join(evidenceDir, 'native-source-analysis.json'), JSON.stringify(sourceAnalysis, null, 2));
+      fs.writeFileSync(path.join(evidenceDir, 'recovered-final-analysis.json'), JSON.stringify(finalAnalysis, null, 2));
+      result.nativeSourceAudio = await verifyCodedAudio(rawPrefix, reference);
+      result.problems.push(...result.nativeSourceAudio.problems.map(problem => 'Native source: ' + problem));
+      // This fixture has one epoch and no intended gaps. Use its surviving
+      // source extent, never add simultaneous source durations or UI downtime.
+      result.audio = await verifyCodedAudio(output, reference, { expectedDurationS: result.originalPcm.durationS + nativeMapping.startOffsetMs / 1000, durationToleranceS: 0.03 });
+      result.problems.push(...result.audio.problems);
+      result.endpointCoverage = nativeEndpointCoverage(result.audio);
+      result.problems.push(...result.endpointCoverage.problems);
+      const recorder = nativeMapping.recorder;
+      const exposure = { sourceId: nativeMapping.sourceId, kind: nativeMapping.kind,
+        ...calculateTailExposure({ nativeSecondsAtLastObservation: (nativeMapping.at - recorder.startedAt) / 1000,
+          startCallSecondsAtLastObservation: (nativeMapping.at - recorder.startCalledAt) / 1000,
+          acknowledgedAudioSeconds: result.acknowledgedPcm.durationS, durableAudioSeconds: result.originalPcm.durationS,
+          observationToExitSeconds: result.observationToExitSeconds }),
+        acknowledgementBasis: nativeMapping.acknowledgementBasis, acknowledgedChunkCount: acknowledgedChunks.length,
+        nativeEventsAtLastObservation: recorder.events, nativeBytesAtLastObservation: recorder.bytes,
+        acknowledgedBytes: acknowledgedChunks.reduce((total, chunk) => total + chunk.bytes, 0),
+        crashSurvivingBytes: survivingChunks.reduce((total, chunk) => total + chunk.bytes, 0) };
+      result.nativeTailExposures = [exposure];
+      result.problems.push(...tailExposureProblems(exposure, result.nativeMaxTailExposureS).map(problem => `${nativeMapping.sourceId}: ${problem}`));
+      if (exposure.tailUpperBoundIncludingTerminationDelayS > result.nativeMaxTailExposureS) result.problems.push('Native source conservative termination-inclusive deficit exceeded the configured ' + result.nativeMaxTailExposureS + '-second test budget');
+      result.notes.push('Each source is assessed independently; this single-microphone fixture does not qualify simultaneous microphone/system alignment or device replacement.');
+    } else {
+    // Preserve the historical legacy/remux PCM equality oracle verbatim. Native
+    // re-encoding has its own explicit source-custody and content oracle above.
     result.originalPcm = await decodedFingerprint(rawPrefix);
     result.acknowledgedPcm = acknowledgedPrefix === rawPrefix ? result.originalPcm : await decodedFingerprint(acknowledgedPrefix);
     result.recoveredPcm = await decodedFingerprint(output);
@@ -374,6 +649,7 @@ async function runMainCrashQualification(opts = {}) {
       nativeEventsAtLastObservation: native.events, nativeBytesAtLastObservation: native.bytes,
       acknowledgedBytes: chunks.reduce((total, chunk) => total + chunk.bytes, 0), crashSurvivingBytes: result.crashSurvivors.reduce((total, chunk) => total + chunk.bytes, 0) };
     result.problems.push(...tailExposureProblems(result.tailExposure, maxTailExposureS));
+    }
     result.pass = result.problems.length === 0;
   } catch (error) { result.failureStage = result.stage; result.problems.push(error.stack || error.message); }
   finally {
@@ -391,4 +667,6 @@ async function runMainCrashQualification(opts = {}) {
 }
 
 module.exports = { runMainCrashQualification, killOwnedApp, snapshotChunks, compareChunks, prefixEndpointCoverage, assertSyntheticPath,
-  parseCrashOptions, captureTimingEvidence, tailExposureProblems, calculateTailExposure, bracketRecordingSnapshot, observationExitEvidence };
+  parseCrashOptions, captureTimingEvidence, tailExposureProblems, calculateTailExposure, bracketRecordingSnapshot, observationExitEvidence,
+  installNativeCrashObserver, snapshotNativeSources, compareNativeSources, nativeCrashMapping, compareNativeRecoveredContent,
+  nativeAssemblyProblems, nativeEndpointCoverage };

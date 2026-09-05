@@ -15,9 +15,11 @@ Codec padding and partial first/last frames have explicit tolerances; this is no
 a sample-perfect comparison. The oracle has regression cases for real Opus
 encoding, missing audio, repetition, reordering and planned silence.
 
-The four cases cover baseline capture, a four-second renderer JavaScript freeze,
-a fourteen-second Blob conversion delay, and source rotation plus an interrupted
-upload. Every case checks the mock's received audio SHA-256 against the local
+The cases cover baseline capture, a four-second renderer JavaScript freeze,
+a fourteen-second live-mix Blob conversion delay, and source rotation plus an
+interrupted upload. Native-source builds add a separate fourteen-second native
+Blob delay. Recorder roles are identified by their input tracks. Every case
+checks the mock's received audio SHA-256 against the local
 file and verifies that the local backup remains. Original chunks, files, profiles
 and diagnostics survive failures. A successful upload alone is not an audio pass.
 
@@ -28,7 +30,8 @@ prefix chunks and coded audio outside the deliberately silent intervals. These
 are synthetic application tests; they do not reproduce physical USB/Bluetooth
 drivers, radio loss, codec-profile changes or actual permission prompts.
 
-Native Windows, Intel Mac and Apple Silicon Mac CI runs `s11`, `s12` and `s15` on pull requests.
+Native Windows, Intel Mac and Apple Silicon Mac CI runs `s11`, `s12`, `s15` and
+the forced mixer-suspension preservation test on pull requests.
 See [hosted qualification](ci/README.md) for exact scope, isolation and artifacts.
 A failed hosted capture is a failure to investigate, not a reason to skip an OS.
 
@@ -47,7 +50,10 @@ node tests/e2e-harness/run.js s12-device-qualification
 The strict endurance runner defaults to **five hours and five minutes of actual
 capture**. It checks available disk space, samples progress into an append-only
 log, streams the mock upload hash, verifies numbered audio across the natural
-4h55 rotation, and retains every source chunk. It requires a frozen bundle:
+4h55 rotation, and retains every source chunk. Native-source builds also track
+each source's event/acknowledgement/committed progress and original hashes,
+compare native and finalized numbered audio, and budget reconstruction scratch.
+The retained live mix is checked separately. It requires a frozen bundle:
 
 ```powershell
 $env:SUISSE_ENDURANCE_SECONDS='18300'
@@ -80,8 +86,11 @@ passing PCM fixture. This is not a production runtime fix.
 durable chunks, abruptly terminates only its own Electron process tree, and
 restarts the same isolated profile. It exercises the real startup recovery scan
 without changing file timestamps. Recovery must retain every original hash,
-preserve the decoded durable audio exactly, upload matching bytes and show a
-recovered History entry. Crash exposure is estimated separately;
+upload matching bytes and show a recovered History entry. The legacy remux path
+requires exact decoded PCM equality. Native reconstruction re-encodes audio and
+instead checks original source custody, decoded numbered identities, order,
+timing and extent, plus the explicit version 3 receipt and encoding policy.
+Crash exposure is estimated separately;
 no audio can be captured while the process is absent. This differs from the
 older renderer-only crash scenario and does not emulate a disk losing power.
 
@@ -97,6 +106,11 @@ Future termination estimates include the entire snapshot-request-to-exit interva
 and record the snapshot round-trip uncertainty. Older evidence measured only
 reply-to-exit time; its omitted reply delay cannot be reconstructed as an upper
 bound. This does not affect the call-to-acknowledged metric at the snapshot.
+
+For native-source builds, conversion of the next Blob proves the preceding
+serial save acknowledged. This is a conservative acknowledged-prefix lower
+bound, not a direct observation of the latest IPC acknowledgement; additional
+surviving chunks remain separate evidence.
 
 The CLI/CI crash case asserts a native 1000 ms timeslice and a 2.5-second
 call-to-acknowledged regression budget (one-second policy plus the prior 1.5-second
