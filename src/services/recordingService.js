@@ -6,6 +6,7 @@
 import { isAndroid, isElectron } from '../utils/platform';
 import { captureMessage } from '../boot/sentry';
 import { createRecordingChunkWriter } from './recordingChunkWriter';
+import { createNativeSourceRecorder } from './nativeSourceRecorder';
 
 let BackgroundRecording = null;
 
@@ -145,6 +146,69 @@ let chunkWriter = null;
 let splitInFlightPromise = null;
 let recorderStopObserved = false;
 let finalStopPending = false;
+let nativeArchive = null;
+let nativeSourceFailure = null;
+let nativeStopAttempted = false;
+let nativeTimelineStarted = false;
+let nativeTimelineRunAt = null;
+let nativeTimelineBaseMs = 0;
+let stopSystemAudioRef = null;
+let sourceTransitionPromise = null;
+let systemSwitchGeneration = 0;
+const nativeOwnedStreams = new Set();
+
+export function isNativeSourceRetained(source) {
+  return nativeOwnedStreams.has(source) && nativeArchive?.retainsSource(source);
+}
+
+function startNativeTimeline() {
+  if (nativeTimelineRunAt !== null) return;
+  nativeTimelineStarted = true;
+  nativeTimelineRunAt = performance.now();
+}
+
+function freezeNativeTimeline() {
+  if (nativeTimelineRunAt === null) return;
+  nativeTimelineBaseMs += Math.max(0, performance.now() - nativeTimelineRunAt);
+  nativeTimelineRunAt = null;
+}
+
+// One monotonic active timeline for independent sources and AudioTee. This is
+// separate from the integer display counter and starts at the first source.
+export function getActiveRecordingOffsetMs() {
+  if (!nativeArchive) return getWallClockSeconds() * 1000;
+  return nativeTimelineBaseMs + (nativeTimelineRunAt === null ? 0 : Math.max(0, performance.now() - nativeTimelineRunAt));
+}
+
+function nativeFailure(failure, generation = recorderGeneration) {
+  if (generation !== recorderGeneration || nativeSourceFailure) return;
+  nativeSourceFailure = { ...failure, nativeSource: true, retriesExhausted: true };
+  freezeNativeTimeline();
+  stopDurationTracking();
+  const store = recordingStoreRef;
+  if (store) {
+    store.chunkSaveErrorWarning = true;
+    store.setError?.(failure.error || 'Native audio could not be saved');
+    Promise.resolve(window.electronAPI?.recording?.setUnsavedAudio?.(store.recordId)).catch(() => {});
+    Promise.resolve(window.electronAPI?.recording?.saveMetadata?.(store.recordId, {
+      captureWarnings: ['native-source-failed'], nativeSourceFailure,
+    })).catch(() => {});
+  }
+  try { if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop(); } catch (_) { /* preserve handlers */ }
+  // The startup catch owns rollback and reports its retained recording through
+  // the start result. A mounted emergency listener must not race that rollback.
+  if (!startInProgress) emit('chunkSaveFailure', nativeSourceFailure);
+  // Startup owns its rollback. Once active, saving must stop even if no page
+  // is mounted or no UI listener handles the failure.
+  if (store && !startInProgress) queueMicrotask(() => {
+    if (generation === recorderGeneration) stopRecording(store, stopSystemAudioRef).catch(() => {});
+  });
+}
+
+function requireNativeResult(result) {
+  if (result?.success !== true) throw Object.assign(new Error(result?.error || 'Native audio could not be saved'), result || {});
+  return result;
+}
 // Auto-split ref captured at start so verifyRecordingState can tell an
 // intentional split-pause from a stuck recorder (see verifyRecordingState).
 let isAutoSplittingRef = null;
@@ -556,6 +620,7 @@ export function getState() {
     hasStream: stream !== null,
     systemAudioActive,
     micMuted,
+    nativeSources: nativeArchive?.getState() || null,
     recordingHealth: {
       ...micHealthState,
       systemAudioActive
@@ -752,19 +817,42 @@ function stopSystemAudioSilenceMonitor() {
 /**
  * Add system audio to the active recording mix
  */
-export function addSystemAudioStream(sysStream) {
+export async function addSystemAudioStream(sysStream) {
   if (!mixingContext || !mixingDest) {
     console.warn('No active mixing pipeline to add system audio to');
     return false;
   }
 
-  // Remove existing system audio first
-  removeSystemAudioStream();
-
+  const generation = recorderGeneration;
+  const switchId = ++systemSwitchGeneration;
+  const context = mixingContext;
+  let replacement;
   try {
-    systemSourceNode = mixingContext.createMediaStreamSource(sysStream);
-    systemSourceNode.connect(mixingDest);
+    replacement = context.createMediaStreamSource(sysStream);
+    // Validate the full graph connection while the current native source still
+    // records. A graph failure must not retire the only working archive epoch.
+    replacement.connect(mixingDest);
+    if (nativeArchive) {
+      nativeOwnedStreams.add(sysStream);
+      requireNativeResult(await nativeArchive.attach('system', sysStream));
+    }
+    if (generation !== recorderGeneration || switchId !== systemSwitchGeneration || context !== mixingContext || !mixingDest || nativeSourceFailure) {
+      try { replacement.disconnect(); } catch (_) { /* graph never committed */ }
+      if (!isNativeSourceRetained(sysStream)) {
+        sysStream.getTracks().forEach(track => track.stop());
+        nativeOwnedStreams.delete(sysStream);
+      }
+      return false;
+    }
+    stopSystemAudioSilenceMonitor();
+    try { systemSourceNode?.disconnect(); } catch (_) { /* disconnected */ }
+    const previous = systemStream;
+    systemSourceNode = replacement;
     systemStream = sysStream;
+    if (previous && previous !== sysStream) {
+      previous.getTracks().forEach(track => track.stop());
+      nativeOwnedStreams.delete(previous);
+    }
     systemAudioActive = true;
     emit('systemAudioChange', true);
     updateMicHealthState(
@@ -779,6 +867,9 @@ export function addSystemAudioStream(sysStream) {
     console.log('System audio added to recording mix');
     return true;
   } catch (e) {
+    try { replacement?.disconnect(); } catch (_) { /* graph never committed */ }
+    if (generation === recorderGeneration && switchId === systemSwitchGeneration && isNativeSourceRetained(sysStream)) nativeFailure({ error: e.message });
+    if (!isNativeSourceRetained(sysStream)) nativeOwnedStreams.delete(sysStream);
     console.error('Error adding system audio:', e);
     return false;
   }
@@ -812,7 +903,13 @@ export function setSystemAudioActive(active) {
 /**
  * Remove system audio from the active recording mix
  */
-export function removeSystemAudioStream() {
+export async function removeSystemAudioStream() {
+  const generation = ++systemSwitchGeneration;
+  if (nativeArchive && ['open', 'paused'].includes(nativeArchive.getState().phase)) {
+    const result = await nativeArchive.detach('system');
+    if (!result.success) { nativeFailure(result); return false; }
+  } else if (systemStream && isNativeSourceRetained(systemStream)) return false;
+  if (generation !== systemSwitchGeneration) return false;
   stopSystemAudioSilenceMonitor();
   if (systemSourceNode) {
     try {
@@ -824,6 +921,7 @@ export function removeSystemAudioStream() {
   }
   if (systemStream) {
     systemStream.getTracks().forEach(track => track.stop());
+    nativeOwnedStreams.delete(systemStream);
     systemStream = null;
   }
   if (systemAudioActive) {
@@ -837,6 +935,7 @@ export function removeSystemAudioStream() {
     );
     console.log('System audio removed from recording mix');
   }
+  return true;
 }
 
 /**
@@ -952,6 +1051,13 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
     liveTrack.enabled = !micMuted;
     replacementNode = targetContext.createMediaStreamSource(newStream);
     replacementNode.connect(mixingDest);
+    if (nativeArchive) {
+      nativeOwnedStreams.add(newStream);
+      requireNativeResult(await nativeArchive.attach('microphone', newStream));
+      if (generation !== recorderGeneration || switchId !== micSwitchGeneration || mixingContext !== targetContext || nativeSourceFailure) {
+        throw new Error('Microphone switch superseded or recording stopped');
+      }
+    }
 
     // Step 2: Stop old health monitoring (uses the old mic stream)
     if (micHealthInterval) {
@@ -978,6 +1084,7 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
         track.onended = null; // Remove old listener
         track.stop();
       });
+      nativeOwnedStreams.delete(stream);
     }
 
     // Step 4: Connect new mic to mixing pipeline
@@ -1077,7 +1184,8 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
   } catch (e) {
     if (stream !== newStream) {
       try { replacementNode?.disconnect(); } catch (_) { /* setup failed */ }
-      newStream?.getTracks().forEach(track => track.stop());
+      if (!isNativeSourceRetained(newStream)) newStream?.getTracks().forEach(track => track.stop());
+      else if (generation === recorderGeneration && switchId === micSwitchGeneration) nativeFailure({ error: e.message });
     }
     console.error('Error switching microphone:', e);
     return { success: false, error: e.message };
@@ -2021,7 +2129,7 @@ function startDurationTracking(recordingStore, isAutoSplitting, maxSeconds = nul
 
   durationInterval = setInterval(async () => {
     if (recordingStore.isRecording) {
-      const elapsed = Math.floor((performance.now() - startTime) / 1000);
+      const elapsed = Math.floor(nativeArchive ? getActiveRecordingOffsetMs() / 1000 : (performance.now() - startTime) / 1000);
       lastWallClockSec = elapsed;
       // Honest duration: persist/show captured-audio seconds, not wall-clock,
       // so a capture stall is visible. Limit + auto-split below intentionally
@@ -2097,6 +2205,7 @@ export function getMinutesLimitSeconds() {
  * ffprobe can't read the file (A6)).
  */
 export function getWallClockSeconds() {
+  if (nativeArchive) return getActiveRecordingOffsetMs() / 1000;
   return durationRunStartedAt === null
     ? lastWallClockSec
     : durationBaseSec + Math.max(0, performance.now() - durationRunStartedAt) / 1000;
@@ -2344,7 +2453,8 @@ export async function startRecording(options = {}) {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     return { success: false, error: 'Recording already in progress' };
   }
-  if (stopInFlightPromise || finalStopPending || chunkWriter?.pendingCount) {
+  if (stopInFlightPromise || sourceTransitionPromise || finalStopPending || chunkWriter?.pendingCount ||
+      (nativeArchive && !['closed', 'cancelled'].includes(nativeArchive.getState().phase))) {
     return { success: false, error: 'The previous recording still has unsaved audio. Retry saving it before starting another recording.' };
   }
   startInProgress = true;
@@ -2362,6 +2472,12 @@ async function startRecordingInternal(options) {
   const myGeneration = ++recorderGeneration;
   orphanRecorderWarned = false;
   micWarningPersistence = new Map();
+  nativeArchive = null;
+  nativeSourceFailure = null;
+  nativeStopAttempted = false;
+  nativeTimelineStarted = false;
+  nativeTimelineRunAt = null;
+  nativeTimelineBaseMs = 0;
 
   // Layer 3 — belt-and-braces: nothing from a previous pipeline may survive
   // into a new session.
@@ -2382,6 +2498,7 @@ async function startRecordingInternal(options) {
   // Store references for mid-recording operations (mic switching, state
   // verification during auto-split, etc.)
   recordingStoreRef = recordingStore;
+  stopSystemAudioRef = options.stopSystemAudio || (async () => window.electronAPI?.systemAudio?.stop?.());
   isAutoSplittingRef = isAutoSplitting || null;
   // DREC-3: remember the requested device and start fresh recovery state.
   lastRequestedDeviceId = deviceId || null;
@@ -2389,6 +2506,7 @@ async function startRecordingInternal(options) {
 
   let sysStream = null;
   let audioTeeActive = false;
+  let mixedCaptureStarted = false;
   try {
     resetMicHealthState();
     clearSilenceWarning();
@@ -2437,11 +2555,33 @@ async function startRecordingInternal(options) {
     // Establish the new ID and durable directory BEFORE AudioTee starts.
     // Start recording session in store (pass userId for multi-account handling)
     const userId = authStore?.user?.id || authStore?.user?.userId || null;
-    const sessionResult = await recordingStore.startRecording(userId, { deferCaptureStart: true });
+    const sessionResult = await recordingStore.startRecording(userId, {
+      deferCaptureStart: true, ...(isElectron() ? { captureMode: 'native-sources-v1' } : {}),
+    });
     if (!sessionResult.success) {
       throw new Error(sessionResult.error || 'Failed to create recording session');
     }
     if (myGeneration !== recorderGeneration) throw Object.assign(new Error('Recording start was cancelled'), { cancelled: true });
+
+    if (isElectron()) {
+      nativeArchive = createNativeSourceRecorder({ recordId: recordingStore.recordId,
+        bridge: window.electronAPI.recording, MediaRecorder, MediaStream,
+        activeOffsetMs: getActiveRecordingOffsetMs, beforeStart: startNativeTimeline,
+        onFatal: failure => nativeFailure(failure, myGeneration), timesliceMs: MEDIA_RECORDER_TIMESLICE_MS,
+        onSourceEnded: failure => {
+          if (myGeneration !== recorderGeneration) return;
+          const warning = failure.kind === 'microphone' ? 'microphone-disconnected' : 'system-audio-interrupted';
+          Promise.resolve(window.electronAPI.recording.saveMetadata?.(recordingStore.recordId, {
+            captureWarnings: [warning], lastNativeSourceEnded: failure,
+          })).catch(() => {});
+        },
+      });
+      if (stream) {
+        nativeOwnedStreams.add(stream);
+        requireNativeResult(await nativeArchive.attach('microphone', stream));
+      }
+      if (myGeneration !== recorderGeneration || nativeSourceFailure) throw new Error(nativeSourceFailure?.error || 'Recording start was cancelled');
+    }
 
     // Start system audio capture — AFTER the mic is acquired, never before.
     // Opening a Bluetooth headset's microphone forces the headset from A2DP
@@ -2454,23 +2594,31 @@ async function startRecordingInternal(options) {
     // - Windows: desktopCapturer returns a MediaStream for real-time mixing
     if (systemAudioEnabled && captureSystemAudio) {
       try {
-        const result = await captureSystemAudio(recordingStore.recordId);
+        // AudioTee-only capture has no renderer recorder to establish zero.
+        if (nativeArchive && !nativeTimelineStarted) startNativeTimeline();
+        const result = await captureSystemAudio(recordingStore.recordId, getActiveRecordingOffsetMs());
         if (!result) {
           emit('systemAudioError', 'System audio capture could not start');
         } else if (result instanceof MediaStream) {
           // Windows: desktopCapturer returns a stream to mix in renderer
           sysStream = result;
+          if (nativeArchive) {
+            nativeOwnedStreams.add(sysStream);
+            requireNativeResult(await nativeArchive.attach('system', sysStream));
+          }
         } else {
           // macOS: result is true, AudioTee handles file-based capture
           audioTeeActive = true;
         }
       } catch (e) {
+        if (nativeSourceFailure) throw e;
         console.warn('Could not start system audio capture:', e);
         emit('systemAudioError', e.message || 'System audio capture failed');
       }
     }
 
     if (myGeneration !== recorderGeneration) throw Object.assign(new Error('Recording start was cancelled'), { cancelled: true });
+    if (nativeSourceFailure) throw new Error(nativeSourceFailure.error);
     if (!stream) {
       if (sysStream || audioTeeActive) {
         let micErrorMsg = micCaptureError?.message || 'No microphone available';
@@ -2564,7 +2712,7 @@ async function startRecordingInternal(options) {
         savedChunkCount++;
         // One old write completing does not repair an accumulating backlog.
         // Keep its warning until successful finalization or explicit reset.
-        if (backpressureStopped) return;
+        if (backpressureStopped || nativeSourceFailure) return;
         if (stallWarned) { stallWarned = false; emit('captureRecovered', { savedChunks: savedChunkCount }); }
         recordingStore.chunkSaveErrors = 0;
         if (recordingStore.chunkSaveErrorWarning) {
@@ -2647,6 +2795,7 @@ async function startRecordingInternal(options) {
     // Native dispatch and disk writes can be delayed; this is not a loss bound.
     // Timeslice is overridable in dev/test via VITE_SUISSE_MEDIA_RECORDER_TIMESLICE_MS.
     mediaRecorder.start(MEDIA_RECORDER_TIMESLICE_MS);
+    mixedCaptureStarted = true;
     recordingStore.confirmCaptureStarted?.();
 
     // Start monitoring the mixed recording stream (what actually gets recorded)
@@ -2745,6 +2894,44 @@ async function startRecordingInternal(options) {
       : startError;
     console.error('Error starting recording:', error);
 
+    freezeNativeTimeline();
+    const sourceResult = nativeArchive && nativeArchive.getState().phase !== 'cancelled' ? await nativeArchive.stop() : { success: true };
+    const pcmResult = audioTeeActive
+      ? await window.electronAPI?.systemAudio?.stop?.().catch(failure => ({ success: false, error: failure.message }))
+      : null;
+    if (!error.cancelled && mediaRecorder && !mixedCaptureStarted) {
+      // A constructor/start failure has no future stop event to wait for.
+      mediaRecorder = null;
+      recorderStopObserved = true;
+    } else if (!error.cancelled && mediaRecorder && !recorderStopObserved) {
+      const recorder = mediaRecorder;
+      await new Promise(resolve => {
+        const timer = setTimeout(() => { finalStopPending = true; resolve(); }, 10000);
+        recorder.onstop = () => {
+          recorderStopObserved = true; finalStopPending = false;
+          clearTimeout(timer); resolve();
+        };
+        try { if (recorder.state !== 'inactive') recorder.stop(); }
+        catch { finalStopPending = true; clearTimeout(timer); resolve(); }
+      });
+    }
+    const mixedSaved = !error.cancelled && chunkWriter ? await chunkWriter.drain() : { success: true };
+    const saveError = sourceResult.error || mixedSaved.error ||
+      (pcmResult?.success === false ? pcmResult.error || 'System audio did not finish saving' : null) ||
+      (finalStopPending ? 'The recorder has not confirmed its final audio. Retry saving this recording.' : null);
+    const sourceSaved = sourceResult.success === true && mixedSaved.success && !saveError;
+    // A startup failure after native capture began is still a real recording.
+    // Keep its identity and source manifests so Retry/History can recover it.
+    const hasNativeAudio = audioTeeActive || nativeArchive?.getState().sources.some(source => source.started || source.pendingCount || source.chunkCount);
+    if (!sourceSaved) {
+      await window.electronAPI?.recording?.setInProgress?.(false);
+      await window.electronAPI?.recording?.setProcessing?.(false);
+      await window.electronAPI?.recording?.setUnsavedAudio?.(recordingStore.recordId);
+      recordingStore.setError?.(saveError || error.message);
+      return { success: false, error: saveError || error.message, unsavedAudio: true,
+        partialRecovery: true, recordId: recordingStore.recordId };
+    }
+
     stopLevelMonitoring();
 
     stopDurationTracking();
@@ -2774,6 +2961,7 @@ async function startRecordingInternal(options) {
     if (sysStream) {
       sysStream.getTracks().forEach(track => track.stop());
     }
+    nativeOwnedStreams.clear();
 
     let errorMessage = error.message;
     if (error.name === 'NotAllowedError') {
@@ -2794,22 +2982,42 @@ async function startRecordingInternal(options) {
       await window.electronAPI?.recording?.setInProgress(false);
       await window.electronAPI?.recording?.setProcessing(false);
     }
-    if (!error.cancelled) recordingStore.reset();
-    return { success: false, error: errorMessage, ...(error.cancelled ? { cancelled: true } : {}) };
+    if (!error.cancelled && !hasNativeAudio) recordingStore.reset();
+    else if (!error.cancelled) recordingStore.setError?.(errorMessage);
+    return { success: false, error: errorMessage, ...(hasNativeAudio ? { partialRecovery: true, recordId: recordingStore.recordId } : {}), ...(error.cancelled ? { cancelled: true } : {}) };
   }
 }
 
 /**
  * Pause recording
  */
-export function pauseRecording(recordingStore) {
+export async function pauseRecording(recordingStore) {
+  if (sourceTransitionPromise) await sourceTransitionPromise;
+  if (stopInFlightPromise) return { success: false, error: 'Recording is stopping' };
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     mediaRecorder.pause();
-    window.electronAPI?.systemAudio?.setPaused?.(true).catch(() => {});
+    freezeNativeTimeline();
+    const sourcePause = nativeArchive?.pause();
+    const systemPause = window.electronAPI?.systemAudio?.setPaused?.(true);
     recordingStore.pauseRecording();
     stopDurationTracking();
     emit('stateChange', { isRecording: false, isPaused: true });
+    if (nativeArchive) {
+      const transition = Promise.all([sourcePause, systemPause]).then(results => {
+        requireNativeResult(results[0]);
+        if (results[1]) requireNativeResult(results[1]);
+        return { success: true };
+      }).catch(error => {
+        if (!stopInFlightPromise) nativeFailure({ error: error.message });
+        return { success: false, error: error.message };
+      });
+      sourceTransitionPromise = transition;
+      try { return await transition; } finally { if (sourceTransitionPromise === transition) sourceTransitionPromise = null; }
+    }
+    Promise.resolve(systemPause).catch(() => {});
+    return { success: true };
   }
+  return { success: false, error: 'Recording is not active' };
 }
 
 /**
@@ -2818,10 +3026,32 @@ export function pauseRecording(recordingStore) {
  * @param {Object} isAutoSplitting - Ref for auto-splitting state
  * @param {number|null} maxRecordingSeconds - Maximum recording duration in seconds (minutes limit)
  */
-export function resumeRecording(recordingStore, isAutoSplitting, maxRecordingSeconds = null) {
+export async function resumeRecording(recordingStore, isAutoSplitting, maxRecordingSeconds = null) {
+  if (sourceTransitionPromise) await sourceTransitionPromise;
+  if (stopInFlightPromise) return { success: false, error: 'Recording is stopping' };
   if (mediaRecorder && mediaRecorder.state === 'paused') {
+    if (nativeArchive) {
+      startNativeTimeline();
+      const transition = nativeArchive.resume();
+      sourceTransitionPromise = transition;
+      let resumed;
+      try { resumed = await transition; } finally { if (sourceTransitionPromise === transition) sourceTransitionPromise = null; }
+      if (!resumed.success || stopInFlightPromise || nativeSourceFailure) {
+        freezeNativeTimeline();
+        if (!stopInFlightPromise) nativeFailure(resumed);
+        return resumed.success ? { success: false, error: 'Recording is stopping' } : resumed;
+      }
+    }
     mediaRecorder.resume();
-    window.electronAPI?.systemAudio?.setPaused?.(false).catch(() => {});
+    const systemResume = window.electronAPI?.systemAudio?.setPaused?.(false);
+    if (nativeArchive) {
+      try { if (systemResume) requireNativeResult(await systemResume); }
+      catch (error) { nativeFailure({ error: error.message }); return { success: false, error: error.message }; }
+      if (stopInFlightPromise || !mediaRecorder || nativeArchive.getState().phase !== 'open') {
+        freezeNativeTimeline();
+        return { success: false, error: 'Recording is stopping' };
+      }
+    } else Promise.resolve(systemResume).catch(() => {});
     recordingStore.resumeRecording();
 
     // Resume from the wall-clock accumulator, NOT recordingStore.duration — the
@@ -2867,7 +3097,7 @@ export function resumeRecording(recordingStore, isAutoSplitting, maxRecordingSec
     durationInterval = setInterval(async () => {
       if (recordingStore.isRecording) {
         const elapsed = Math.floor((performance.now() - resumeTime) / 1000);
-        const newDuration = currentDuration + elapsed;
+        const newDuration = nativeArchive ? Math.floor(getActiveRecordingOffsetMs() / 1000) : currentDuration + elapsed;
         lastWallClockSec = newDuration;
         const shown = capturedDisplaySeconds(newDuration);
         recordingStore.updateDuration(shown);
@@ -2900,7 +3130,9 @@ export function resumeRecording(recordingStore, isAutoSplitting, maxRecordingSec
     }, 1000);
 
     emit('stateChange', { isRecording: true, isPaused: false });
+    return { success: true };
   }
+  return { success: false, error: 'Recording is not paused' };
 }
 
 /**
@@ -2922,13 +3154,22 @@ async function stopRecordingInternal(recordingStore, stopSystemAudio) {
   // Compare decoded audio with independent active time. The display is
   // clamped by saved chunks, which can conceal the very loss we must detect.
   const expectedDurationSec = getWallClockSeconds();
+  freezeNativeTimeline();
+  systemSwitchGeneration++;
+  micSwitchGeneration++;
   stopDurationTracking();
   const recorder = mediaRecorder;
   const stopGeneration = recorderGeneration;
   const writer = chunkWriter;
   const retryingSave = !recorder;
+  const sourceStop = nativeArchive
+    ? (nativeStopAttempted ? nativeArchive.retry() : nativeArchive.stop())
+    : Promise.resolve({ success: true });
+  nativeStopAttempted = true;
+  const stopPcm = nativeArchive ? Promise.resolve(window.electronAPI?.systemAudio?.stop?.()).catch(error => ({ success: false, error: error.message })) : null;
   let stopError = finalStopPending ? 'The recorder has not delivered its final audio yet. Wait and retry; saved chunks remain available for recovery.' : null;
   if (splitInFlightPromise) await splitInFlightPromise;
+  if (sourceTransitionPromise) await sourceTransitionPromise;
 
   if (recorder && !recorderStopObserved) {
     // stop queues its FINAL dataavailable before stop. Keep the same ordered
@@ -2953,29 +3194,34 @@ async function stopRecordingInternal(recordingStore, stopSystemAudio) {
     finalStopPending = true;
     stopError = stopError || 'The recorder has not confirmed its final audio. Saved chunks remain available for recovery.';
   }
-  // Releasing capture resources must not clear the unsaved-blob queue.
-  cleanup();
-  if (stopSystemAudio) {
+  const sourcesSaved = await sourceStop;
+  const pcmStopped = stopPcm ? await stopPcm : null;
+  if (pcmStopped?.success === false) stopError = pcmStopped.error || 'System audio did not finish saving';
+  // A native stop timeout retains its shared tracks/handlers for the late final
+  // events. Retry must settle that epoch before releasing hardware or combining.
+  if (sourcesSaved.success) await cleanup();
+  if (sourcesSaved.success && stopSystemAudio) {
     try { await stopSystemAudio(); } catch (error) { stopError = error.message; }
   }
   await hideRecordingNotification();
   const saved = writer ? await writer.drain({ retry: retryingSave }) : { success: true };
-  if (!saved.success || stopError) {
-    const error = saved.error || stopError;
+  if (!saved.success || !sourcesSaved.success || stopError) {
+    const error = saved.error || sourcesSaved.error || stopError;
     recordingStore.setError(error);
     if (isElectron()) {
       if (finalStopPending) {
         await window.electronAPI?.recording?.saveMetadata?.(recordingStore.recordId, { captureWarnings: ['final-stop-unconfirmed'] }).catch(() => {});
       }
-      await window.electronAPI?.recording?.setUnsavedAudio?.(!saved.success || finalStopPending ? recordingStore.recordId : null);
+      await window.electronAPI?.recording?.setUnsavedAudio?.(!saved.success || !sourcesSaved.success || finalStopPending ? recordingStore.recordId : null);
       await window.electronAPI?.recording?.setInProgress(false);
       await window.electronAPI?.recording?.setProcessing(false);
     }
-    return { success: false, error, diskFull: saved.diskFull, unsavedAudio: !saved.success || finalStopPending, partialRecovery: true, recordId: recordingStore.recordId };
+    return { success: false, error, diskFull: saved.diskFull || nativeSourceFailure?.diskFull, unsavedAudio: !saved.success || !sourcesSaved.success || finalStopPending, partialRecovery: true, recordId: recordingStore.recordId };
   }
   if (!recordingStore.recordId) return { success: false, error: 'No active recording' };
   await window.electronAPI?.recording?.setUnsavedAudio?.(null);
   const result = await recordingStore.stopRecording(expectedDurationSec);
+  if (result?.success) nativeSourceFailure = null;
   if (result?.success && writer?.backpressure && stopGeneration === recorderGeneration) {
     recordingStore.chunkSaveErrors = 0;
     recordingStore.chunkSaveErrorWarning = false;
@@ -2990,6 +3236,10 @@ async function stopRecordingInternal(recordingStore, stopSystemAudio) {
  */
 export async function cancelRecording(recordingStore, stopSystemAudio) {
   recorderGeneration++; // Late events from an explicitly discarded recorder must never write again.
+  systemSwitchGeneration++;
+  micSwitchGeneration++;
+  freezeNativeTimeline();
+  if (nativeArchive) await nativeArchive.cancel();
   // This is the explicit discard path. Drain any active write before the caller
   // deletes the recording directory so a late write cannot resurrect it.
   // Stop level monitoring, duration tracking, auth keepalive
@@ -3018,9 +3268,14 @@ export async function cancelRecording(recordingStore, stopSystemAudio) {
   if (chunkWriter) await chunkWriter.drain();
   chunkWriter = null;
   finalStopPending = false;
+  nativeSourceFailure = null;
   await window.electronAPI?.recording?.setUnsavedAudio?.(null);
 
   // Clean up all audio streams and contexts
+  for (const candidate of nativeOwnedStreams) {
+    if (candidate !== stream && candidate !== systemStream) candidate.getTracks().forEach(track => track.stop());
+  }
+  nativeOwnedStreams.clear();
   if (stream) {
     stream.getTracks().forEach(track => track.stop());
     stream = null;
@@ -3070,6 +3325,8 @@ export async function cancelRecording(recordingStore, stopSystemAudio) {
  * @returns {Promise<{flushed: boolean, timedOut: boolean}>}
  */
 export async function flushRecordingData() {
+  const nativeFlush = nativeArchive && ['open', 'paused'].includes(nativeArchive.getState().phase)
+    ? nativeArchive.flush() : null;
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     try {
       let didTimeout = false;
@@ -3096,13 +3353,15 @@ export async function flushRecordingData() {
       if (didTimeout) {
         console.warn('Flush timed out after 6s without ondataavailable');
       }
-      return { flushed: !didTimeout && saved?.success === true, timedOut: didTimeout };
+      const nativeSaved = nativeFlush ? await nativeFlush : { success: true };
+      return { flushed: !didTimeout && saved?.success === true && nativeSaved.success, timedOut: didTimeout || nativeSaved.timedOut === true };
     } catch (e) {
       console.warn('Could not flush recording data:', e);
       return { flushed: false, timedOut: false };
     }
   }
-  return { flushed: false, timedOut: false };
+  const nativeSaved = nativeFlush ? await nativeFlush : null;
+  return { flushed: nativeSaved?.success === true, timedOut: nativeSaved?.timedOut === true };
 }
 
 /**
@@ -3115,8 +3374,13 @@ export function isActive() {
 /**
  * Clean up all resources (only call when intentionally stopping)
  */
-export function cleanup(stopSystemAudio) {
+export async function cleanup(stopSystemAudio) {
   if (startInProgress) recorderGeneration++; // A pending startup must not revive a disposed pipeline.
+  if (nativeArchive && !['closed', 'cancelled'].includes(nativeArchive.getState().phase)) {
+    freezeNativeTimeline();
+    const result = await nativeArchive.stop();
+    if (!result.success) return result;
+  }
   stopLevelMonitoring();
   stopDurationTracking();
   stopAuthKeepAlive();
@@ -3126,6 +3390,11 @@ export function cleanup(stopSystemAudio) {
     clearInterval(stateVerificationInterval);
     stateVerificationInterval = null;
   }
+
+  for (const candidate of nativeOwnedStreams) {
+    if (candidate !== stream && candidate !== systemStream) candidate.getTracks().forEach(track => track.stop());
+  }
+  nativeOwnedStreams.clear();
 
   if (stream) {
     stream.getTracks().forEach(track => track.stop());
@@ -3150,7 +3419,7 @@ export function cleanup(stopSystemAudio) {
   micMuted = false;
   resetMicHealthState();
   clearSilenceWarning();
-  if (stopSystemAudio) stopSystemAudio();
+  if (stopSystemAudio) await stopSystemAudio();
 
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     mediaRecorder.stop();

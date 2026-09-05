@@ -2,12 +2,20 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 // Timeout wrapper for IPC calls to prevent indefinite blocking
 function withTimeout(promise, timeoutMs, operationName) {
+  let timer;
   return Promise.race([
     promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs)
-    )
-  ]);
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs);
+    })
+  ]).finally(() => clearTimeout(timer));
+}
+
+function finalizationTimeoutMs(expectedDurationSec) {
+  // Multi-hour native reconstruction re-encodes the meeting. The old fixed
+  // five-minute renderer deadline could expire while main was still saving.
+  const seconds = Number(expectedDurationSec);
+  return Math.min(2 * 3600000, 15 * 60000 + (Number.isFinite(seconds) && seconds > 0 ? seconds * 500 : 0));
 }
 
 // Default timeouts for different operations
@@ -81,12 +89,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Recording (WhisperTranscribe pattern)
   recording: {
-    createSession: (id, ext, userId) =>
+    createSession: (id, ext, userId, options) =>
       withTimeout(
-        ipcRenderer.invoke('recording:createSession', id, ext, userId),
+        ipcRenderer.invoke('recording:createSession', id, ext, userId, options),
         IPC_TIMEOUTS.default,
         'Create session'
       ),
+    beginSource: (id, descriptor) => withTimeout(
+      ipcRenderer.invoke('recording:beginSource', id, descriptor), IPC_TIMEOUTS.save, 'Reserve native source'),
+    markSourceStarted: (id, sourceId, descriptor) => withTimeout(
+      ipcRenderer.invoke('recording:markSourceStarted', id, sourceId, descriptor), IPC_TIMEOUTS.save, 'Start native source'),
+    saveSourceChunk: (id, sourceId, bytes, index) => withTimeout(
+      ipcRenderer.invoke('recording:saveSourceChunk', id, sourceId, bytes, index), IPC_TIMEOUTS.save, 'Save native source'),
+    endSource: (id, sourceId, descriptor) => withTimeout(
+      ipcRenderer.invoke('recording:endSource', id, sourceId, descriptor), IPC_TIMEOUTS.save, 'Finish native source'),
     saveChunk: (id, chunkData, chunkIndex, ext, userId) =>
       withTimeout(
         ipcRenderer.invoke('recording:saveChunk', id, chunkData, chunkIndex, ext, userId),
@@ -104,7 +120,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     combineChunks: (id, ext, expectedDurationSec) =>
       withTimeout(
         ipcRenderer.invoke('recording:combineChunks', id, ext, expectedDurationSec),
-        IPC_TIMEOUTS.combine,
+        finalizationTimeoutMs(expectedDurationSec),
         'Combine chunks'
       ),
     isRecoveryRunning: () => ipcRenderer.invoke('recording:isRecoveryRunning'),

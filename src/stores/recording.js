@@ -30,6 +30,7 @@ export const useRecordingStore = defineStore('recording', {
     startTime: null,
     duration: 0, // in seconds
     chunkIndex: 0,
+    captureMode: null,
     audioFilePath: null,
     uploadProgress: 0,
     bytesUploaded: 0,
@@ -216,7 +217,7 @@ export const useRecordingStore = defineStore('recording', {
       }
     },
 
-    async startRecording(userId = null, { deferCaptureStart = false } = {}) {
+    async startRecording(userId = null, { deferCaptureStart = false, captureMode = null } = {}) {
       // Re-entrancy guard (double-start incident): a new session must not start
       // while a capture lifecycle is live — the body below regenerates recordId
       // and resets chunkIndex, which would corrupt the active chunk sequence.
@@ -266,6 +267,7 @@ export const useRecordingStore = defineStore('recording', {
         this.startTime = Date.now();
         this.duration = 0;
         this.chunkIndex = 0;
+        this.captureMode = captureMode;
         this.error = null;
         this.integrity = createRecordingIntegrity(this.recordId);
 
@@ -274,7 +276,9 @@ export const useRecordingStore = defineStore('recording', {
           await window.electronAPI.recording.setInProgress(true);
 
           // Pass userId to createSession for metadata.json persistence
-          const result = await window.electronAPI.recording.createSession(this.recordId, '.webm', userId);
+          const result = captureMode
+            ? await window.electronAPI.recording.createSession(this.recordId, '.webm', userId, { captureMode })
+            : await window.electronAPI.recording.createSession(this.recordId, '.webm', userId);
 
           if (!result.success) {
             await window.electronAPI.recording.setInProgress(false);
@@ -385,7 +389,7 @@ export const useRecordingStore = defineStore('recording', {
               shortfallMB: result.shortfallMB,
               neededMB: result.neededMB,
               error: this.error,
-              partialRecovery: this.chunkIndex > 0,
+              partialRecovery: this.chunkIndex > 0 || this.captureMode === 'native-sources-v1',
               chunkCount: this.chunkIndex,
               recordId: this.recordId
             };
@@ -427,7 +431,7 @@ export const useRecordingStore = defineStore('recording', {
           success: false,
           error: error.message,
           diskFull: /ENOSPC|no space left/i.test(error.message || ''),
-          partialRecovery: this.chunkIndex > 0,
+          partialRecovery: this.chunkIndex > 0 || this.captureMode === 'native-sources-v1',
           chunkCount: this.chunkIndex,
           recordId: this.recordId
         };
@@ -474,7 +478,7 @@ export const useRecordingStore = defineStore('recording', {
         // Best-effort system-audio teardown (desktop only; no-op on mobile).
         const stopSystemAudio = async () => {
           try {
-            svc.removeSystemAudioStream?.();
+            await svc.removeSystemAudioStream?.();
             svc.setSystemAudioActive?.(false);
             if (isElectron() && window.electronAPI?.systemAudio?.stop) {
               await window.electronAPI.systemAudio.stop();
@@ -1120,6 +1124,7 @@ export const useRecordingStore = defineStore('recording', {
       this.startTime = null;
       this.duration = 0;
       this.chunkIndex = 0;
+      this.captureMode = null;
       this.audioFilePath = null;
       this.uploadProgress = 0;
       this.bytesUploaded = 0;

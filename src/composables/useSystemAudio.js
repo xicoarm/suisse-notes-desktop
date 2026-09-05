@@ -1,6 +1,6 @@
 import { ref } from 'vue';
 import { isElectron } from '../utils/platform';
-import { addSystemAudioStream } from '../services/recordingService';
+import { addSystemAudioStream, isNativeSourceRetained } from '../services/recordingService';
 
 // The loopback capture is inherently a singleton (one recording, one mix), but
 // this composable is instantiated fresh on every RecordPage mount while a
@@ -292,7 +292,7 @@ export function useSystemAudio() {
       captureGeneration++;
       const stoppedStream = systemAudioStream.value;
       systemAudioStream.value = null;
-      stoppedStream?.getTracks().forEach(track => track.stop());
+      if (!isNativeSourceRetained(stoppedStream)) stoppedStream?.getTracks().forEach(track => track.stop());
     }
   };
 
@@ -342,7 +342,11 @@ export function useSystemAudio() {
       const oldStream = systemAudioStream.value;
       // addSystemAudioStream detaches + stops the previous stream, then wires
       // the new one into the live mixing pipeline.
-      const attached = addSystemAudioStream(newStream);
+      const attached = await addSystemAudioStream(newStream);
+      if (operation !== activeRebind || operation.generation !== captureGeneration || _activeMonitorRemove !== removeRebindMonitor) {
+        if (!isNativeSourceRetained(newStream)) newStream.getTracks().forEach(track => track.stop());
+        return;
+      }
       systemAudioStream.value = newStream;
       watchTrackEnded(newStream);
 
@@ -351,7 +355,7 @@ export function useSystemAudio() {
       } else {
         // No active mixing pipeline (not recording right now): just carry the
         // fresh binding forward and release the stale one ourselves.
-        try { oldStream.getTracks().forEach(t => t.stop()); } catch { /* ignore */ }
+        try { if (!isNativeSourceRetained(oldStream)) oldStream.getTracks().forEach(t => t.stop()); } catch { /* ignore */ }
         diag('info', `loopback rebound after ${reason} (no active recording mix to attach to)`);
       }
     } catch (e) {
@@ -407,7 +411,7 @@ export function useSystemAudio() {
     removeRebindMonitor();
     // Stop desktopCapturer stream (Windows)
     if (systemAudioStream.value) {
-      systemAudioStream.value.getTracks().forEach(track => track.stop());
+      if (!isNativeSourceRetained(systemAudioStream.value)) systemAudioStream.value.getTracks().forEach(track => track.stop());
       systemAudioStream.value = null;
     }
     // Stop AudioTee (macOS)

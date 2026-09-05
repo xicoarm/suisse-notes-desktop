@@ -13,6 +13,25 @@ function declaration(file, start, end) {
 }
 
 describe('backlog emergency handling', () => {
+  it('routes desktop save retries through the service owner before any finalization or upload', async () => {
+    const source = declaration('src/pages/RecordPage.vue', 'const retryChunkCombine =', '// Clear auto-save timer helper');
+    const stopped = vi.fn().mockResolvedValue({ success: false, unsavedAudio: true });
+    const retry = new Function('isElectron', 'handleStop', source + '\nreturn retryChunkCombine;')(() => true, stopped);
+    expect(await retry()).toEqual({ success: false, unsavedAudio: true });
+    expect(stopped).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves recording identity when a new-recording click encounters retained native data', () => {
+    const source = declaration('src/pages/RecordPage.vue', 'const handleNewRecording =', '// "Start new while uploading"');
+    const store = { recordId: 'pending-native', reset: vi.fn() }, stopped = vi.fn();
+    const reset = new Function('getRecordingServiceState', 'recordingStore', 'handleStop', source + '\nreturn handleNewRecording;')(
+      () => ({ nativeSources: { phase: 'closing' } }), store, stopped);
+    reset();
+    expect(store.recordId).toBe('pending-native');
+    expect(store.reset).not.toHaveBeenCalled();
+    expect(stopped).toHaveBeenCalledTimes(1);
+  });
+
   it('revokes device rebind ownership before pageless stream and helper teardown', async () => {
     const source = declaration('src/services/recordingSafetyNet.js', 'async function stopSystemAudioStandalone()', '/**\n * Emergency stop-with-save');
     const order = [];

@@ -3,6 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { sourceFingerprint: nativeSourceFingerprint, inspectNativeSources } = require('./native-source-persistence');
+const { usesNativeSources, NATIVE_CAPTURE_MARKER, readNativeCaptureMarker } = require('./native-recording-session');
 const {
   archiveChunkBatch, listChunkBatches, concatenateFiles,
   publishFile, writeFileAtomic,
@@ -26,7 +28,7 @@ function listSessions(recordPath, ext = '.webm') {
 // Dependencies do the media work; this module owns the on-disk transaction.
 // A readable header alone is NOT permission to delete the original audio.
 // Source batches and sessions remain available for retry, export and support.
-function createRecordingPersistence({ prepareRaw, remux, concatSessions, merge, validate, probe, fromPcm }) {
+function createRecordingPersistence({ prepareRaw, remux, concatSessions, merge, validate, probe, fromPcm, nativeBuild }) {
   async function assertValid(filePath) {
     const result = await validate(filePath);
     if (!result.valid) throw new Error(result.error || 'Invalid recording output');
@@ -64,7 +66,37 @@ function createRecordingPersistence({ prepareRaw, remux, concatSessions, merge, 
     return [...legacySessions, finalPath];
   }
 
-  async function finalize(recordPath, ext = '.webm') {
+  async function finalizeNative(recordPath, ext, options) {
+    if (!nativeBuild) throw new Error('Native audio finalization is unavailable; all source audio is retained');
+    const fingerprint = nativeRecordingFingerprint(recordPath);
+    const buildingPath = path.join(recordPath, `audio_native_building${ext}`);
+    const outputPath = path.join(recordPath, `audio${ext}`);
+    await writeFileAtomic(path.join(recordPath, 'finalization-plan.json'), JSON.stringify({
+      version: 2, sourceMode: 'native', sourceFingerprint: fingerprint,
+    }));
+    const result = await nativeBuild(recordPath, buildingPath, options);
+    if (result?.success !== true || result.outputPath !== buildingPath) throw new Error('Native audio was not finalized');
+    assertNativeSourceCoverage(recordPath, result);
+    await assertValid(buildingPath);
+    const duration = await probe(buildingPath);
+    if (!Number.isFinite(duration) || duration <= 0) throw new Error('Native audio duration could not be verified');
+    const sha256 = await checksum(buildingPath);
+    const size = fs.statSync(buildingPath).size;
+    if (nativeRecordingFingerprint(recordPath) !== fingerprint) throw new Error('Native recording sources changed during finalization; originals retained for retry');
+    await publishFile(buildingPath, outputPath);
+    const receipt = { version: 3, sourceMode: 'native', sourceFingerprint: fingerprint,
+      filename: path.basename(outputPath), size, sha256, duration,
+      sourceIds: result.sourceIds, systemPcmIncluded: result.systemPcmIncluded === true,
+      recovered: options.recovery === true, warnings: result.warnings || [],
+      completedAt: new Date().toISOString() };
+    await writeFileAtomic(path.join(recordPath, 'finalized.json'), JSON.stringify(receipt));
+    // Keep originals and failed scratch for diagnosis. Generated scratch cleanup
+    // is deliberately separate from the durable publication transaction.
+    return { ...result, outputPath, filename: receipt.filename, duration, fileSize: size, fileSizeMb: (size / 1048576).toFixed(2) };
+  }
+
+  async function finalize(recordPath, ext = '.webm', options = {}) {
+    if (usesNativeSources(recordPath)) return finalizeNative(recordPath, ext, options);
     const sessions = await createSessions(recordPath, ext);
     const pcmPath = path.join(recordPath, 'system_audio.raw');
     const hasPcm = fs.existsSync(pcmPath) && fs.statSync(pcmPath).size > 0;
@@ -135,7 +167,10 @@ function sourceFingerprint(recordPath) {
 async function readFinalizedRecording(recordPath) {
   try {
     const receipt = JSON.parse(await fs.promises.readFile(path.join(recordPath, 'finalized.json'), 'utf8'));
-    if (![1, 2].includes(receipt.version) || receipt.filename !== 'audio.webm' || !/^[a-f0-9]{64}$/.test(receipt.sha256)) return null;
+    if (![1, 2, 3].includes(receipt.version) || receipt.filename !== 'audio.webm' || !/^[a-f0-9]{64}$/.test(receipt.sha256)) return null;
+    const native = usesNativeSources(recordPath);
+    if (native !== (receipt.version === 3) || (native && receipt.sourceMode !== 'native')) return null;
+    if (native) assertNativeSourceCoverage(recordPath, receipt);
     const pcmPath = path.join(recordPath, 'system_audio.raw');
     const hasPcm = fs.existsSync(pcmPath) && fs.statSync(pcmPath).size > 0;
     // Version 1 could acknowledge a mic-only file even after its system merge
@@ -144,12 +179,29 @@ async function readFinalizedRecording(recordPath) {
     if (receipt.version === 2 && (hasPcm
       ? !['microphone-and-system', 'system-only'].includes(receipt.sourceMode)
       : receipt.sourceMode !== 'microphone')) return null;
-    if (receipt.sourceFingerprint !== sourceFingerprint(recordPath)) return null;
+    if (receipt.sourceFingerprint !== (native ? nativeRecordingFingerprint(recordPath) : sourceFingerprint(recordPath))) return null;
     const outputPath = path.join(recordPath, receipt.filename);
     const size = fs.statSync(outputPath).size;
     if (size !== receipt.size || await checksum(outputPath) !== receipt.sha256) return null;
-    return { success: true, outputPath, duration: receipt.duration || 0, fileSize: size, fileSizeMb: (size / 1048576).toFixed(2) };
+    return { success: true, outputPath, duration: receipt.duration || 0, fileSize: size, fileSizeMb: (size / 1048576).toFixed(2), warnings: receipt.warnings || [] };
   } catch (_) { return null; }
+}
+
+function nativeRecordingFingerprint(recordPath) {
+  const marker = fs.existsSync(path.join(recordPath, NATIVE_CAPTURE_MARKER)) ? readNativeCaptureMarker(recordPath) : null;
+  return crypto.createHash('sha256').update(JSON.stringify({
+    marker, native: nativeSourceFingerprint(recordPath), retained: sourceFingerprint(recordPath),
+  })).digest('hex');
+}
+
+function assertNativeSourceCoverage(recordPath, result) {
+  const ids = inspectNativeSources(recordPath).filter(source => source.hasAudio).map(source => source.sourceId).sort();
+  if (!Array.isArray(result.sourceIds) || JSON.stringify([...result.sourceIds].sort()) !== JSON.stringify(ids)) {
+    throw new Error('Native finalization did not account for every saved audio source');
+  }
+  const pcm = path.join(recordPath, 'system_audio.raw');
+  const hasPcm = fs.existsSync(pcm) && fs.statSync(pcm).size > 0;
+  if (result.systemPcmIncluded !== hasPcm) throw new Error('Native finalization did not account for system PCM');
 }
 
 module.exports = { createRecordingPersistence, readFinalizedRecording, listSessions, checksum };

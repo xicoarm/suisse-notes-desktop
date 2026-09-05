@@ -147,6 +147,7 @@ function getRecordingSourceBytes(recordPath) {
   addDir(path.join(recordPath, 'chunks'));
   addDir(path.join(recordPath, 'source-chunks'));
   addDir(path.join(recordPath, 'sessions'));
+  addDir(path.join(recordPath, 'native-sources'));
   try {
     const sysAudio = path.join(recordPath, 'system_audio.raw');
     if (fs.existsSync(sysAudio)) total += fs.statSync(sysAudio).size;

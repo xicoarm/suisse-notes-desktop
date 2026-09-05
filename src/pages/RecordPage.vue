@@ -540,10 +540,10 @@
             color="negative"
           />
           <h3>{{ $t('recordingErrorTitle') }}</h3>
-          <p>{{ $t('recordingErrorMessage') }}</p>
+          <p>{{ recordingStore.error || $t('recordingErrorMessage') }}</p>
           <div class="error-card-actions">
             <q-btn
-              v-if="recordingStore.chunkIndex > 0"
+              v-if="recordingStore.chunkIndex > 0 || recordingStore.captureMode === 'native-sources-v1'"
               color="primary"
               :label="$t('retrySaving')"
               icon="refresh"
@@ -857,7 +857,7 @@ import { useMicSwitchNotifications } from '../composables/useMicSwitchNotificati
 import { isElectron, isCapacitor, isAndroid } from '../utils/platform';
 import { humanizeStorageError } from '../utils/storageErrors';
 import { uploadWithVerification } from '../services/upload';
-import { forceCaptureRecovery } from '../services/recordingService';
+import { forceCaptureRecovery, getState as getRecordingServiceState } from '../services/recordingService';
 import { getApiUrlSync } from '../services/api';
 import { stopStorageMonitor } from '../services/storageMonitor';
 import { setRecordingActive } from '../boot/lifecycle';
@@ -1270,7 +1270,8 @@ const isUploadedFromRecording = computed(() => {
 const showUploadSection = computed(() => {
   // Show blocking overlay during processing, uploading, and error only.
   // Once uploaded, overlay dismisses — success shown inline on the record page.
-  return ['processing', 'uploading', 'error'].includes(recordingStore.phase);
+  return ['processing', 'uploading'].includes(recordingStore.phase) ||
+    (recordingStore.phase === 'error' && Boolean(recordingStore.uploadError));
 });
 
 // Hide tab switcher when recording is in progress
@@ -1647,8 +1648,9 @@ const doStartRecordingInternal = async () => {
   }
 
   const result = await startRecording();
-  if (result.success) {
-    // Add to history immediately so recording survives app kill
+  if (result.success || (result.partialRecovery && !result.cancelled && recordingStore.recordId)) {
+    // Native capture can precede a mixer startup failure. Keep that partial
+    // meeting visible and retryable even when no mixed chunk was produced.
     await historyStore.addRecording({
       id: recordingStore.recordId,
       userId: authStore.user?.id || authStore.user?.userId || null,
@@ -1656,11 +1658,13 @@ const doStartRecordingInternal = async () => {
       duration: 0,
       fileSize: 0,
       filePath: null,
-      uploadStatus: 'recording',
+      uploadStatus: result.success ? 'recording' : 'failed',
+      ...(!result.success ? { uploadError: result.error } : {}),
       storagePreference: currentStoragePreference.value,
       prep: prepStore.historySnapshot
     });
-  } else {
+  }
+  if (!result.success) {
     $q.notify({
       type: 'negative',
       message: result.error || 'Failed to start recording'
@@ -2152,14 +2156,15 @@ const retryUpload = async () => {
 };
 
 const retryChunkCombine = async () => {
+  // The service must drain late native final events and retry retained blobs
+  // before the main process is allowed to publish or upload this meeting.
+  if (isElectron()) return handleStop();
   recordingStore.phase = 'processing';
   recordingStore.error = null;
   recordingStore.phase = 'stopped';
 
   let result;
-  if (isElectron()) {
-    result = await window.electronAPI.recording.combineChunks(recordingStore.recordId, '.webm');
-  } else if (isCapacitor()) {
+  if (isCapacitor()) {
     result = await recordingStore.combineChunksNative();
   } else {
     result = { success: false, error: 'Unsupported platform' };
@@ -2269,6 +2274,12 @@ const handleDiscardDeadRecording = () => {
 };
 
 const handleNewRecording = () => {
+  const nativePhase = getRecordingServiceState().nativeSources?.phase;
+  if (nativePhase && !['closed', 'cancelled'].includes(nativePhase)) {
+    // Preserve the identity used by in-flight source writes. The save flow
+    // already offers an explicit discard if the user cannot finish saving.
+    return handleStop();
+  }
   recordingStore.reset();
   // phase transition handled by subsequent action (setUploading/setError/reset)
   // phase reset handled by store actions

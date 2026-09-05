@@ -193,6 +193,23 @@ describe('native source recorder custody', () => {
     await f.coordinator.stop();
   });
 
+  it('retires the previous encoder at the new start call without waiting for its marker IPC', async () => {
+    const f = fixture();
+    await f.coordinator.attach('microphone', f.source());
+    const marker = deferred();
+    f.bridge.markSourceStarted.mockImplementationOnce(() => marker.promise);
+    f.setClock(25);
+    const replacing = f.coordinator.attach('microphone', f.source());
+    await tick();
+    expect(f.recorders[1].state).toBe('recording');
+    expect(f.recorders[0].state).toBe('inactive');
+    f.setClock(800);
+    marker.resolve({ success: true });
+    expect(await replacing).toMatchObject({ success: true, startOffsetMs: 25 });
+    expect(f.bridge.endSource.mock.calls[0][2].endOffsetMs).toBe(25);
+    await f.coordinator.stop();
+  });
+
   it('does not start a late durable reservation after stop or explicit cancel', async () => {
     for (const ending of ['stop', 'cancel']) {
       const f = fixture();

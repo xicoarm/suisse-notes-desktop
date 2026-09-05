@@ -40,7 +40,10 @@ async function start(platform, { production = true, override = '250', maxSeconds
   vi.stubEnv('VITE_SUISSE_MEDIA_RECORDER_TIMESLICE_MS', override);
   delete window.electronAPI;
   delete window.Capacitor;
-  if (platform === 'electron') window.electronAPI = {};
+  if (platform === 'electron') window.electronAPI = { recording: {
+    beginSource: vi.fn(async () => ({ success: true })), markSourceStarted: vi.fn(async () => ({ success: true })),
+    saveSourceChunk: vi.fn(async () => ({ success: true })), endSource: vi.fn(async () => ({ success: true })),
+  } };
   if (platform === 'ios') window.Capacitor = { isNativePlatform: () => true, getPlatform: () => 'ios' };
   vi.stubGlobal('MediaRecorder', Recorder);
   vi.stubGlobal('MediaStream', Stream);
@@ -66,8 +69,8 @@ async function start(platform, { production = true, override = '250', maxSeconds
   return store;
 }
 
-afterEach(() => {
-  service?.cleanup();
+afterEach(async () => {
+  await service?.cleanup();
   service = null;
   vi.clearAllTimers();
   vi.useRealTimers();
@@ -111,11 +114,11 @@ describe('native recording slice policy', () => {
     const limit = vi.fn();
     service.addEventListener('limitReached', limit);
     await vi.advanceTimersByTimeAsync(2000);
-    service.pauseRecording(store);
+    await service.pauseRecording(store);
     await vi.advanceTimersByTimeAsync(10000);
     expect(service.getWallClockSeconds()).toBe(2);
     expect(limit).not.toHaveBeenCalled();
-    service.resumeRecording(store, { value: false }, 5);
+    await service.resumeRecording(store, { value: false }, 5);
     await vi.advanceTimersByTimeAsync(3000);
     expect(service.getWallClockSeconds()).toBe(5);
     expect(store.updateDuration).toHaveBeenLastCalledWith(1);

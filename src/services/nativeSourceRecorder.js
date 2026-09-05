@@ -26,7 +26,7 @@ import { createRecordingChunkWriter } from './recordingChunkWriter';
 export function createNativeSourceRecorder({
   recordId, bridge, MediaRecorder: Recorder = globalThis.MediaRecorder,
   MediaStream: Stream = globalThis.MediaStream, now = () => performance.now(),
-  activeOffsetMs = now, createSourceId = uuidv4, onFatal = () => {},
+  activeOffsetMs = now, createSourceId = uuidv4, onFatal = () => {}, beforeStart = () => {}, onSourceEnded = () => {},
   mimeType = 'audio/webm;codecs=opus', timesliceMs = 1000,
   stopTimeoutMs = 10000, flushTimeoutMs = 6000,
   maxPendingBytes = 16 * 1024 * 1024, maxPendingMs = 15000,
@@ -159,7 +159,7 @@ export function createNativeSourceRecorder({
     } catch (error) { fatal(error, epoch); return failed(error); }
   }
 
-  async function prepare(kind, source, token, selectionToken) {
+  async function prepare(kind, source, token, selectionToken, previous = null) {
     const tracks = source?.getAudioTracks?.();
     if (!tracks?.length || tracks.some(track => track.readyState === 'ended')) throw new Error('Native source has no live audio track');
     const epoch = {
@@ -214,14 +214,27 @@ export function createNativeSourceRecorder({
       recorder.onstop = () => {
         epoch.stopObserved = true;
         epoch.stopWaiters.forEach(resolve => resolve({ success: true }));
-        if (!epoch.stopRequested && phase !== 'cancelled') fatal(new Error('Native audio source stopped unexpectedly'), epoch);
+        if (!epoch.stopRequested && phase !== 'cancelled') {
+          if (epoch.source.getAudioTracks().every(track => track.readyState === 'ended')) {
+            requestStop(epoch, 'device-ended');
+            if (active.get(kind) === epoch) active.delete(kind);
+            try { onSourceEnded({ kind, sourceId: epoch.sourceId, endOffsetMs: epoch.endOffsetMs }); } catch (_) { /* warnings cannot break preservation */ }
+            void enqueue(() => finishEpoch(epoch)).then(result => { if (!result.success) fatal(result, epoch); });
+          } else fatal(new Error('Native audio source stopped unexpectedly'), epoch);
+        }
       };
       recorder.onerror = event => fatal(event.error || new Error('Native source recorder failed'), epoch);
+      beforeStart();
       epoch.startOffsetMs = offset();
       epoch.startCallAt = now();
       epoch.started = true;
       try { recorder.start(timesliceMs); }
       catch (error) { epoch.started = false; throw error; }
+      // The new source is now recording against a durable reservation. Retire
+      // the previous encoder at this cut, rather than duplicating microphone
+      // speech during the new start-marker IPC round trip. Its final bytes and
+      // shared track remain owned until the old writer drains successfully.
+      if (previous) requestStop(previous, 'replacement', epoch.startOffsetMs);
       // A synchronous test/native event may already have begun this marker.
       await markStarted(epoch);
       if (token !== generation || selectionToken !== selectionGeneration.get(kind) || phase !== 'open') {
@@ -244,7 +257,7 @@ export function createNativeSourceRecorder({
     if (selected.get(kind) === source && (previous || phase === 'paused')) return { success: true, unchanged: true };
     if (phase === 'paused') { selected.set(kind, source); return { success: true, paused: true }; }
     try {
-      const next = await prepare(kind, source, token, selectionToken);
+      const next = await prepare(kind, source, token, selectionToken, previous);
       if (!next) {
         if (phase === 'paused' && token === generation && selectionToken === selectionGeneration.get(kind)) {
           selected.set(kind, source);
@@ -401,5 +414,9 @@ export function createNativeSourceRecorder({
         recorderState: epoch.recorder?.state || 'not-started' })),
     };
   }
-  return { attach, detach, pause, resume, stop, retry, cancel, flush, getState };
+  const retainsSource = source => phase !== 'cancelled' && (
+    [...epochs].some(epoch => epoch.source === source && !epoch.ended) ||
+    (canMutate() && [...selected.values()].includes(source))
+  );
+  return { attach, detach, pause, resume, stop, retry, cancel, flush, getState, retainsSource };
 }

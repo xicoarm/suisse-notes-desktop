@@ -113,6 +113,18 @@ describe('Recording Store', () => {
         expect(store.isRecording).toBe(true);
       });
 
+      it('durably selects native mode and retains retry visibility without any mixed chunks', async () => {
+        const store = useRecordingStore();
+        mockElectronAPI.recording.createSession.mockResolvedValue({ success: true });
+        await store.startRecording(null, { deferCaptureStart: true, captureMode: 'native-sources-v1' });
+        expect(mockElectronAPI.recording.createSession).toHaveBeenCalledWith(store.recordId, '.webm', null, { captureMode: 'native-sources-v1' });
+        expect(store.captureMode).toBe('native-sources-v1');
+        mockElectronAPI.recording.combineChunks.mockResolvedValue({ success: false, error: 'Cannot finalize yet' });
+        expect(await store.stopRecording()).toMatchObject({ success: false, partialRecovery: true, chunkCount: 0 });
+        store.reset();
+        expect(store.captureMode).toBeNull();
+      });
+
       it('should handle session creation failure', async () => {
         const store = useRecordingStore();
         mockElectronAPI.recording.createSession.mockResolvedValue({

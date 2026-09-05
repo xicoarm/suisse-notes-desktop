@@ -43,7 +43,7 @@ export function setRecordPageActive(active) {
 async function stopSystemAudioStandalone() {
   try {
     stopSystemAudioRebindMonitor();
-    recordingService.removeSystemAudioStream();
+    await recordingService.removeSystemAudioStream();
     recordingService.setSystemAudioActive(false);
     if (isElectron() && window.electronAPI?.systemAudio?.stop) {
       await window.electronAPI.systemAudio.stop();

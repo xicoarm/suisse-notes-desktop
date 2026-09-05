@@ -368,6 +368,7 @@ export function useRecorder() {
       deviceId: micId,
       systemAudioEnabled: systemAudioEnabled.value,
       captureSystemAudio,
+      stopSystemAudio,
       isAutoSplitting,
       maxRecordingSeconds: maxSeconds > 0 ? maxSeconds : null
     });
@@ -379,7 +380,7 @@ export function useRecorder() {
 
   // Pause recording
   const pauseRecording = () => {
-    recordingService.pauseRecording(recordingStore);
+    return recordingService.pauseRecording(recordingStore);
   };
 
   // Resume recording
@@ -393,7 +394,7 @@ export function useRecorder() {
     const alreadyRecorded = recordingStore.duration;
     const maxSeconds = remainingMinutesSeconds > 0 ? remainingMinutesSeconds + alreadyRecorded : null;
 
-    recordingService.resumeRecording(recordingStore, isAutoSplitting, maxSeconds);
+    return recordingService.resumeRecording(recordingStore, isAutoSplitting, maxSeconds);
   };
 
   // Stop recording
@@ -451,7 +452,7 @@ export function useRecorder() {
       // captured-duration in recordingStore.duration (which under-counts after a
       // stall or at start-latency) — using the clamp would mis-pad the
       // system-audio PCM against the mic timeline.
-      const offsetMs = Math.max(0, Math.round((recordingService.getWallClockSeconds() || 0) * 1000));
+      const offsetMs = Math.max(0, recordingService.getActiveRecordingOffsetMs());
       const result = await captureSystemAudio(recordingStore.recordId, offsetMs);
       if (!result) {
         return { success: false, error: 'Failed to start system audio capture' };
@@ -460,14 +461,14 @@ export function useRecorder() {
       if (result instanceof MediaStream) {
         // Windows: desktopCapturer returns a MediaStream that must be wired
         // into the active mixing pipeline.
-        const attached = recordingService.addSystemAudioStream(result);
+        const attached = await recordingService.addSystemAudioStream(result);
         if (!attached) {
           // bug_001: mixing pipeline torn down OR createMediaStreamSource
           // threw. Tear down the captured stream and the OS-level capture
           // so the recording indicator and OS resources are released,
           // and DO NOT flip the toggle ON — the user would otherwise see
           // "system audio recording" in the UI while nothing was in the mix.
-          try { result.getTracks().forEach(t => t.stop()); } catch { /* ignore */ }
+          try { if (!recordingService.isNativeSourceRetained(result)) result.getTracks().forEach(t => t.stop()); } catch { /* ignore */ }
           await stopSystemAudio();
           return { success: false, error: 'Could not attach system audio to the active recording' };
         }
@@ -486,7 +487,8 @@ export function useRecorder() {
       // capture source. removeSystemAudioStream is a no-op if no Windows
       // stream was attached; the explicit setSystemAudioActive(false) covers
       // the macOS path where systemStream is null.
-      recordingService.removeSystemAudioStream();
+      const removed = await recordingService.removeSystemAudioStream();
+      if (removed === false) return { success: false, error: 'System audio is still being saved. Retry stopping the recording.' };
       recordingService.setSystemAudioActive(false);
       await stopSystemAudio();
       await setSystemAudioEnabled(false);

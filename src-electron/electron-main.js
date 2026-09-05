@@ -3,6 +3,9 @@ const path = require('path');
 const fs = require('fs');
 const { writeFileAtomic, writeFileAtomicSync, publishFile, concatenateFiles, archiveChunkBatch, listChunkBatches, syncDirectorySync } = require('./durable-files');
 const { createRecordingPersistence, readFinalizedRecording, listSessions } = require('./recording-persistence');
+const nativeSourcePersistence = require('./native-source-persistence');
+const { createNativeSourceFinalization } = require('./native-source-finalization');
+const { NATIVE_CAPTURE_MODE, usesNativeSources, readNativeCaptureMarker, markNativeCaptureSession } = require('./native-recording-session');
 const { assessRecordingUpload, FINALIZATION_PENDING_MARKER } = require('./recording-upload-eligibility');
 const { withCaptureWarnings, hydrateHistoryCaptureWarnings } = require('./recording-history-warnings');
 const { createPcmCapture } = require('./pcm-capture');
@@ -364,7 +367,7 @@ const API_BASE_URL = getApiUrl();
 log.info('Environment:', getEnvironmentInfo());
 
 // Disk space utilities for recording safety
-const { canStartRecording, shouldForceStopRecording, canFinalizeRecording, formatBytes } = require('./disk-utils');
+const { canStartRecording, shouldForceStopRecording, canFinalizeRecording, getAvailableSpaceDetailed, formatBytes } = require('./disk-utils');
 
 // Signal forensics for the macOS system-audio PCM stream (see pcm-signal.js):
 // AudioTee only captures audio going to the DEFAULT output device, so a capture
@@ -608,7 +611,8 @@ async function recoverOrphanedRecordings() {
         const hasOutput = fs.existsSync(audioPath);
         const pcmPath = path.join(dirPath, 'system_audio.raw');
         const hasPcm = fs.existsSync(pcmPath) && fs.statSync(pcmPath).size > 0;
-        if (!hasChunks && !hasSessions && !hasBatches && !hasOutput && !hasPcm) continue;
+        const hasNative = usesNativeSources(dirPath);
+        if (!hasChunks && !hasSessions && !hasBatches && !hasOutput && !hasPcm && !hasNative) continue;
 
         // Never touch a recording that is being written RIGHT NOW. This scan
         // runs ~5s after launch — a recording started inside that window
@@ -649,7 +653,7 @@ async function recoverOrphanedRecordings() {
         let result = finalized;
         // Older releases removed sources after finalization. Restore a surviving
         // legacy output into history instead of making it invisible.
-        if (!result && hasOutput && !hasChunks && !hasSessions && !hasBatches) {
+        if (!result && hasOutput && !hasChunks && !hasSessions && !hasBatches && !hasNative) {
           const eligibility = await assessRecordingUpload({ recordId: dir, filePath: audioPath, recordingsRoot: recordingsPath });
           const validation = eligibility.allowed && validateAudioOutput(audioPath);
           if (validation?.valid) {
@@ -826,7 +830,7 @@ ipcMain.handle('recording:isRecoveryRunning', () => isRecoveryRunning);
 async function combineChunksForRecovery(recordId) {
   return withRecordingLock(recordId, () => inFlightUploads.has(recordId)
     ? { success: false, error: 'This recording is still uploading' }
-    : finalizeRecording(recordId, '.webm'));
+    : finalizeRecording(recordId, '.webm', 0, { recovery: true }));
 }
 
 // === Cleanup Old Orphaned Directories ===
@@ -854,6 +858,7 @@ async function cleanupOldOrphanedDirectories() {
         // Check if this directory has a combined audio file
         const audioPath = path.join(dirPath, 'audio.webm');
         const hasAudioFile = fs.existsSync(audioPath) ||
+          usesNativeSources(dirPath) ||
           listChunkBatches(dirPath).length > 0 ||
           (fs.existsSync(path.join(dirPath, 'system_audio.raw')) && fs.statSync(path.join(dirPath, 'system_audio.raw')).size > 0);
 
@@ -3090,7 +3095,7 @@ ipcMain.handle('recording:loadMetadata', async (event, recordId) => {
 });
 
 // 1. Create recording session (creates directories)
-ipcMain.handle('recording:createSession', async (event, recordId, ext, userId) => {
+ipcMain.handle('recording:createSession', async (event, recordId, ext, userId, options = {}) => {
   // Step-timing for Sentry breadcrumbs. Renderer wraps this IPC in a 30s
   // timeout; if it fires, breadcrumbs reveal which step was slow.
   const tStart = Date.now();
@@ -3109,6 +3114,7 @@ ipcMain.handle('recording:createSession', async (event, recordId, ext, userId) =
     const validRecordId = validateRecordId(recordId);
     const validExt = validateExtension(ext);
     const validUserId = userId ? validateUserId(userId) : null;
+    if (options?.captureMode !== undefined && options.captureMode !== NATIVE_CAPTURE_MODE) throw new Error('Unknown recording capture mode');
     step('validated', tValidate, { recordId: validRecordId });
 
     // Check disk space before creating session (statfs syscall, bounded to 3s
@@ -3141,6 +3147,10 @@ ipcMain.handle('recording:createSession', async (event, recordId, ext, userId) =
       fs.mkdirSync(chunksPath, { recursive: true });
     }
     step('dirs-created', tDirs);
+
+    // Persist authority before ANY capture starts, including macOS system-only
+    // sessions. A failed native start must never fall back to the live mix.
+    if (options?.captureMode === NATIVE_CAPTURE_MODE) await markNativeCaptureSession(recordPath);
 
     // Write metadata.json for recording persistence and multi-account handling
     const tMeta = Date.now();
@@ -3188,6 +3198,24 @@ ipcMain.handle('recording:createSession', async (event, recordId, ext, userId) =
     return { success: false, error: error.message };
   }
 });
+
+// Native source transactions share the same lock as finalization/deletion.
+// Every source operation is idempotent after an IPC timeout or lost reply.
+for (const operation of ['beginSource', 'markSourceStarted', 'saveSourceChunk', 'endSource']) {
+  ipcMain.handle(`recording:${operation}`, async (event, recordId, ...args) => {
+    try {
+      const id = validateRecordId(recordId);
+      return await withRecordingLock(id, async () => {
+        if (inFlightUploads.has(id)) throw new Error('This recording is still uploading');
+        const recordPath = getRecordingPath(id);
+        readNativeCaptureMarker(recordPath);
+        return nativeSourcePersistence[operation](recordPath, ...args);
+      });
+    } catch (error) {
+      return { success: false, error: error.message, code: error.code || null, diskFull: error.code === 'ENOSPC' };
+    }
+  });
+}
 
 // 2. Save recording chunk - SYNCHRONOUS write (WhisperTranscribe pattern)
 ipcMain.handle('recording:saveChunk', async (event, recordId, chunkData, chunkIndex, ext, userId) => {
@@ -3319,7 +3347,7 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext, expectedD
   }
 });
 
-async function finalizeRecording(recordId, ext, expectedDurationSec = 0) {
+async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options = {}) {
   const recordPath = getRecordingPath(recordId);
   try {
     // A failed rebuild must not let automatic upload retries send an older
@@ -3331,8 +3359,21 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0) {
       return { success: false, diskFull: true, ...spaceCheck, error: 'Insufficient disk space to finalize recording; source audio is preserved' };
     }
     // Ensure all AudioTee stdout and disk writes have finished before merging.
-    if (activeAudioTee?.recordId === recordId) await stopSystemAudio();
+    if (activeAudioTee?.recordId === recordId) {
+      const stopped = await stopSystemAudio();
+      if (stopped?.success === false) throw new Error(stopped.error || 'System audio did not finish saving; source audio is retained');
+    }
     const persistence = createRecordingPersistence({
+      nativeBuild: (directory, outputPath, nativeOptions) => createNativeSourceFinalization({
+        ffmpeg, run: ffmpegWithTimeout, validate: validateAudioOutput,
+        probe: async file => Number((await getAudioMetadata(file))?.format?.duration) || 0,
+        checkSpace: async neededBytes => {
+          const available = await getAvailableSpaceDetailed(directory);
+          if (!available.fallback && available.free < neededBytes) {
+            throw Object.assign(new Error(`Insufficient disk space to finalize native audio: ${Math.ceil(neededBytes / 1048576)} MB needed; original audio is retained`), { code: 'ENOSPC' });
+          }
+        },
+      }).build(directory, outputPath, nativeOptions),
       fromPcm: async (pcmPath, outputPath) => {
         await ffmpegWithTimeout(ffmpeg(pcmPath).inputOptions(['-f', 's16le', '-ar', '48000', '-ac', '1']).output(outputPath), FFMPEG_TIMEOUT_MS, 'Recover system audio');
         recordCaptureWarning(recordId, 'microphone-source-missing');
@@ -3362,9 +3403,12 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0) {
       },
       merge: outputPath => mergeSystemAudio(outputPath, recordId),
       validate: validateAudioOutput,
-      probe: async outputPath => safeParseDuration(await getAudioMetadata(outputPath)),
+      probe: async outputPath => Number((await getAudioMetadata(outputPath))?.format?.duration) || 0,
     });
-    const result = await persistence.finalize(recordPath, ext);
+    const result = await persistence.finalize(recordPath, ext, { ...options, expectedDurationSec: Number(expectedDurationSec) || 0 });
+    for (const warning of result.warnings || []) {
+      recordCaptureWarning(recordId, typeof warning === 'string' ? warning : warning.kind || warning.code || 'native-source-recovery');
+    }
     await fs.promises.unlink(pendingPath);
     syncDirectorySync(recordPath);
     updateRecordingMetadataOnCompletion(recordId, result.duration, true);
@@ -3409,7 +3453,9 @@ ipcMain.handle('recording:checkForChunks', async (event, recordId, ext) => {
     }
 
     return {
-      hasChunks: chunkCount > 0 || sessionCount > 0 || listChunkBatches(getRecordingPath(recordId)).length > 0,
+      hasChunks: chunkCount > 0 || sessionCount > 0 || listChunkBatches(getRecordingPath(recordId)).length > 0 ||
+        usesNativeSources(getRecordingPath(recordId)) ||
+        (fs.existsSync(path.join(getRecordingPath(recordId), 'system_audio.raw')) && fs.statSync(path.join(getRecordingPath(recordId), 'system_audio.raw')).size > 0),
       chunkCount,
       sessionCount,
       lastChunkIndex

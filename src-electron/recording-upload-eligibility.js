@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { readFinalizedRecording } = require('./recording-persistence');
+const { usesNativeSources } = require('./native-recording-session');
 
 // Main should publish this before finalization and remove it only after a new
 // complete receipt is durable. Its presence is authoritative even if an older
@@ -81,12 +82,9 @@ async function assessRecordingUpload({ recordId, filePath, recordingsRoot } = {}
       assertSourceFiles(sessions, /^(?:session_\d+|source_(?:raw|building|final))\.webm$/);
       hasSources ||= sessions.length > 0;
     }
-    const nativeSources = await sourceDirectory(path.join(recordPath, 'native-sources'));
-    if (nativeSources?.length) {
-      // Existing mixed-output receipts do not fingerprint these independent sources.
-      // They cannot prove that the uploaded mix includes the native archive.
-      return recoveryRequired('Native audio sources must be combined and verified before this recording can upload.');
-    }
+    // Version 3 receipts bind the native archive, its session authority marker,
+    // retained live mix and AudioTee PCM. Older mix-only receipts cannot pass.
+    hasSources ||= usesNativeSources(recordPath);
     const pcm = await statOptional(path.join(recordPath, 'system_audio.raw'));
     if (pcm && (!pcm.isFile() || pcm.isSymbolicLink())) throw new Error('The system audio source is malformed');
     hasSources ||= Boolean(pcm?.size);

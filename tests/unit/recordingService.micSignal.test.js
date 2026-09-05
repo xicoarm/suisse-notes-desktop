@@ -64,12 +64,15 @@ class MockAudioContext {
 MockAudioContext.instances = [];
 
 class MockMediaRecorder {
-  constructor() {
+  constructor(source) {
     this.state = 'inactive';
     this.ondataavailable = null;
     this.onstop = null;
     this.onerror = null;
-    MockMediaRecorder.last = this;
+    this.source = source;
+    // These existing signal/backlog assertions target the live mixer recorder.
+    // Native source archives receive their own independent instance.
+    if (!source?.getAudioTracks().length) MockMediaRecorder.last = this;
   }
 
   start() { this.state = 'recording'; }
@@ -123,6 +126,11 @@ function createMockRecordingStore() {
 }
 
 async function startHealthyRecording(recordingStore, opts = {}) {
+  if (window.electronAPI?.recording) {
+    for (const method of ['beginSource', 'markSourceStarted', 'saveSourceChunk', 'endSource', 'setInProgress', 'setProcessing', 'setUnsavedAudio']) {
+      window.electronAPI.recording[method] ||= vi.fn(async () => ({ success: true }));
+    }
+  }
   const micTrack = createTrack({ deviceId: 'mic-1', label: 'BT Speakerphone' });
   const micStream = new MockMediaStream([micTrack]);
   global.navigator.mediaDevices.getUserMedia.mockResolvedValue(micStream);
@@ -589,13 +597,13 @@ describe('recordingService mic signal forensics (MSIG)', () => {
     } finally { window.electronAPI = previousApi; }
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     // Deregister — the service is a module singleton, so leaked listeners
     // from earlier tests would multiply-push into the current events object.
     for (const [evt, fn] of Object.entries(listeners)) {
       recordingService.removeEventListener(evt, fn);
     }
-    recordingService.cleanup();
+    await recordingService.cleanup();
     vi.clearAllTimers();
     vi.restoreAllMocks();
     vi.useRealTimers();
