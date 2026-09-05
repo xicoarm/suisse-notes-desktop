@@ -23,6 +23,7 @@ import { useRecordingStore } from '../stores/recording';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { isElectron } from '../utils/platform';
 import { captureMessage } from '../boot/sentry';
+import { stopSystemAudioRebindMonitor } from '../composables/useSystemAudio';
 
 let initialized = false;
 let recordPageActive = false;
@@ -41,6 +42,7 @@ export function setRecordPageActive(active) {
  *  page-scoped composable instance. */
 async function stopSystemAudioStandalone() {
   try {
+    stopSystemAudioRebindMonitor();
     recordingService.removeSystemAudioStream();
     recordingService.setSystemAudioActive(false);
     if (isElectron() && window.electronAPI?.systemAudio?.stop) {
