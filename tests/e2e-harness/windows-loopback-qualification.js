@@ -188,18 +188,82 @@ function requireNumberedLoopbackFrames(audio) {
 
 // Installed before login/RecordPage mounts. Microphone requests NEVER reach the
 // native API; only desktop-loopback requests pass through, unchanged. The zero
-// source is never connected to a speaker, and playback is never connected to a
-// MediaStream destination or to the recording graph.
+// source uses an explicit AudioData sample clock, never WebAudio or a speaker.
+// Playback is never connected to a MediaStream destination or the recording graph.
 function installLoopbackFixture({ apiUrl }) {
   if (window.__windowsLoopbackQualification) return;
   if (!['localhost', '127.0.0.1', '[::1]'].includes(new URL(apiUrl).hostname)) throw new Error('Loopback fixture requires localhost');
+  const performance = window.performance;
   const devices = navigator.mediaDevices;
   const originalGet = devices.getUserMedia;
   const originalStart = MediaRecorder.prototype.start;
   const originalStop = MediaRecorder.prototype.stop;
-  const issued = [], desktopCalls = [], recorders = [], recorderStops = [], samples = [], errors = [];
-  let zeroContext, zeroSource, zeroDestination, playbackContext, playbackSource, playbackBuffer;
-  let playback = null, disposed = false;
+  const issued = [], generators = [], desktopCalls = [], recorders = [], recorderStops = [], samples = [], errors = [];
+  let playbackContext, playbackSource, playbackBuffer;
+  let playback = null, disposed = false, disposalPromise;
+  const generatorFeatures = { generator: typeof window.MediaStreamTrackGenerator, audioData: typeof window.AudioData,
+    userAgent: navigator.userAgent, mechanism: 'timestamped-zero-generator-v1' };
+  const silentStream = () => {
+    if (generatorFeatures.generator !== 'function' || generatorFeatures.audioData !== 'function') {
+      throw new Error('Timestamped silent microphone fixture requires MediaStreamTrackGenerator and AudioData; hardware fallback is forbidden');
+    }
+    const track = new window.MediaStreamTrackGenerator({ kind: 'audio' });
+    track.enabled = false;
+    let writer, stream;
+    try { writer = track.writable.getWriter(); stream = new MediaStream([track]); }
+    catch (error) {
+      track.stop();
+      try { Promise.resolve(writer?.abort()).catch(() => {}); writer?.releaseLock(); } catch (_) { /* startup failed */ }
+      throw error;
+    }
+    const source = { track, writer, startedAt: performance.now(), framesWritten: 0, maxLatenessMs: 0,
+      stoppedAt: null, active: true, timer: null, wake: null, done: null, failure: null };
+    generators.push(source); issued.push(stream);
+    const stop = () => {
+      if (!source.active) return;
+      source.active = false; source.stoppedAt = performance.now();
+      clearTimeout(source.timer); source.wake?.(); source.wake = null;
+      try { track.stop(); } catch (_) { /* continue releasing writer resources */ }
+      // Abort is initiated synchronously. A pending write is independently
+      // bounded below, so disposal cannot leave a producer awaiting forever.
+      try { Promise.resolve(writer.abort()).catch(() => {}); } catch (_) { /* write deadline still bounds disposal */ }
+    };
+    source.stop = stop;
+    source.done = (async () => {
+      const zero = new Float32Array(480);
+      try {
+        while (source.active && !disposed && track.readyState === 'live') {
+          if (source.framesWritten >= 12000) throw new Error('Silent generator exceeded its 120-second sample budget');
+          const target = source.startedAt + source.framesWritten * 10;
+          const delay = target - performance.now();
+          if (delay > 0) await new Promise(resolve => { source.wake = resolve; source.timer = setTimeout(resolve, delay); });
+          source.wake = null; source.timer = null;
+          if (!source.active || disposed || track.readyState !== 'live') break;
+          const lateness = performance.now() - target;
+          source.maxLatenessMs = Math.max(source.maxLatenessMs, lateness);
+          if (lateness > 250) throw new Error('Silent generator pacing exceeded 250ms');
+          const audio = new window.AudioData({ format: 'f32', sampleRate: 48000, numberOfFrames: 480,
+            numberOfChannels: 1, timestamp: 1000000 + source.framesWritten * 10000, data: zero });
+          let deadline;
+          try {
+            await Promise.race([writer.write(audio), new Promise((_, reject) => {
+              deadline = setTimeout(() => reject(new Error('Silent generator write exceeded 1000ms')), 1000);
+            })]);
+            source.framesWritten++;
+          } finally { clearTimeout(deadline); audio.close(); }
+        }
+      } catch (error) {
+        if (!disposed && source.active && track.readyState === 'live') {
+          source.failure = error.message;
+          if (errors.length < 20) errors.push('Timestamped zero input: ' + error.message);
+        }
+      } finally {
+        stop();
+        try { writer.releaseLock(); } catch (_) { /* pending abort owns its remaining settlement */ }
+      }
+    })();
+    return stream;
+  };
   const trace = async stage => {
     await window.electronAPI.systemAudio.diag('info', '[s14 output] ' + stage);
   };
@@ -220,19 +284,7 @@ function installLoopbackFixture({ apiUrl }) {
       } catch (error) { call.error = error.name + ': ' + error.message; throw error; }
     }
     if (!constraints?.audio || constraints.video) throw new Error('Unexpected non-microphone acquisition');
-    if (!zeroContext) {
-      zeroContext = new AudioContext({ sampleRate: 48000 });
-      zeroDestination = zeroContext.createMediaStreamDestination();
-      zeroSource = zeroContext.createConstantSource();
-      zeroSource.offset.value = 0;
-      zeroSource.connect(zeroDestination); zeroSource.start();
-      // A blocked resume cannot open a hardware microphone or emit sound.
-      zeroContext.resume().catch(error => errors.push('Zero input context: ' + error.message));
-    }
-    const stream = zeroDestination.stream.clone();
-    stream.getAudioTracks().forEach(track => { track.enabled = false; });
-    issued.push(stream);
-    return stream;
+    return silentStream();
   };
   MediaRecorder.prototype.start = function (...args) {
     const entry = { events: 0, bytes: 0, startedAt: null, stoppedAt: null };
@@ -250,6 +302,10 @@ function installLoopbackFixture({ apiUrl }) {
     const store = (window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia)?.state?.value?.recording;
     const tracks = issued.flatMap(stream => stream.getAudioTracks()).filter(track => track.readyState === 'live');
     return { at: performance.now(), phase: store?.phase, playback, desktopCalls, recorders, recorderStops, errors,
+      generatorFeatures, generators: generators.map(source => ({ trackId: source.track.id, startedAt: source.startedAt,
+        stoppedAt: source.stoppedAt, active: source.active, framesWritten: source.framesWritten,
+        sampleClockSeconds: source.framesWritten / 100, maxLatenessMs: source.maxLatenessMs, failure: source.failure,
+        enabled: source.track.enabled, readyState: source.track.readyState })),
       microphoneTrackIds: issued.flatMap(stream => stream.getAudioTracks().map(track => track.id)),
       microphoneTracks: tracks.map(track => ({ id: track.id, enabled: track.enabled, readyState: track.readyState })),
       mutedUi: [...document.querySelectorAll('.recording-controls .q-icon')].some(icon => icon.textContent.trim() === 'mic_off'),
@@ -314,14 +370,15 @@ function installLoopbackFixture({ apiUrl }) {
       return playback;
     },
     dispose: () => {
-      if (disposed) return;
+      if (disposed) return disposalPromise;
       disposed = true; clearInterval(timer);
       devices.getUserMedia = originalGet; MediaRecorder.prototype.start = originalStart;
       MediaRecorder.prototype.stop = originalStop;
-      try { playbackSource?.stop(); zeroSource?.stop(); } catch (_) { /* already stopped */ }
-      for (const stream of issued) stream.getTracks().forEach(track => track.stop());
-      zeroDestination?.stream.getTracks().forEach(track => track.stop());
-      zeroContext?.close().catch(() => {}); playbackContext?.close().catch(() => {});
+      try { playbackSource?.stop(); } catch (_) { /* already stopped */ }
+      for (const source of generators) source.stop();
+      playbackContext?.close().catch(() => {});
+      disposalPromise = Promise.allSettled(generators.map(source => source.done));
+      return disposalPromise;
     },
   };
   const timer = setInterval(() => { if (playback && !playback.endedAt) samples.push(snapshot()); }, 500);
@@ -330,7 +387,8 @@ function installLoopbackFixture({ apiUrl }) {
 async function runSystemAudioQualification() {
   const result = { name: NAME, pass: false, problems: [], notes: [
     'LOCAL PRIVATE EVIDENCE: real WASAPI loopback can include other Windows playback; never publish these artifacts.',
-    'Microphone requests use disabled zero-valued WebAudio tracks; no hardware microphone is acquired.',
+    'Microphone requests use disabled timestamped all-zero MediaStreamTrackGenerator/AudioData tracks; no hardware microphone or microphone WebAudio graph is acquired.',
+    'Silent generator probe zero-generator-vSDlwV on Electron 28.3.3 / Chromium 120.0.6099.291 produced exactly 12s of zero PCM with no timestamp overlaps/gaps. Each source uses 480 samples/10ms, a 120s sample budget, 250ms pacing and 1000ms write deadlines; current runtime features are recorded.',
     'Qualifies unchanged default Windows output through native Chromium desktop capture, recording, finalization and localhost upload.',
     'Playout fixture uses strict PCM WAV parsing and createBuffer; earlier async decode preparation crashed before capture. This variant does not fix that runtime crash.',
     'Does not qualify physical USB/Bluetooth switching, the communications endpoint, or the 90-second silence warning lifecycle.',
@@ -425,11 +483,17 @@ async function runSystemAudioQualification() {
     if (!result.fixture?.playback?.endedAt) throw new Error('Native playback exceeded bounded deadline');
     await sleep(2000);
     await app.stopRecording(45000);
-    result.fixture = await app.evalTimed(() => {
+    result.fixture = await app.evalTimed(async () => {
       const state = window.__windowsLoopbackQualification.snapshot();
       state.recorderRoles = window.__recordingRoleEvidence?.snapshot();
-      window.__windowsLoopbackQualification.dispose(); return state;
+      await window.__windowsLoopbackQualification.dispose();
+      state.generatorCleanup = window.__windowsLoopbackQualification.snapshot().generators;
+      return state;
     });
+    if (result.fixture.errors.length) throw new Error(result.fixture.errors.join('; '));
+    if (result.fixture.generatorCleanup.some(source => source.active || source.readyState !== 'ended' || source.failure)) {
+      throw new Error('Timestamped silent microphone fixture failed or did not finish cleanup');
+    }
     await app.waitForPhase(['uploaded', 'error'], 120000);
     result.phase = await app.getPhase();
     if (result.phase !== 'uploaded') result.problems.push('Local mock upload did not complete');
@@ -499,7 +563,7 @@ async function runSystemAudioQualification() {
   finally {
     result.profile = app?.userDataDir || null; result.resultFile = resultFile;
     if (app) {
-      await app.evalTimed(() => { window.__windowsLoopbackQualification?.dispose(); window.__recordingRoleEvidence?.dispose(); }, undefined, 3000).catch(() => {});
+      await app.evalTimed(async () => { await window.__windowsLoopbackQualification?.dispose(); window.__recordingRoleEvidence?.dispose(); }, undefined, 3000).catch(() => {});
       await app.close({ keepProfile: true }).catch(error => { result.pass = false; result.problems.push('Cleanup: ' + error.message); });
       fs.writeFileSync(path.join(directory, 'app-output.log'), app.log.join(''));
     }
