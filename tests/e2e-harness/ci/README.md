@@ -33,6 +33,25 @@ Dispatch after reviewing/pushing the intended branch:
 gh workflow run audio-reliability.yml --ref REVIEWED_BRANCH --field run_capture_clock=true
 ```
 
+An optional `--field capture_buffer_trace=true` adds a 30-second trace near the
+middle of each case, using Chromium's `disabled-by-default-mediastream` events.
+The trace has a 16 MiB native buffer, independent 45-second stop deadline and
+64 MiB export cap. Collection stops during capture; bytes are exported only after
+both recorders stop, and analysis runs after the app closes. Missing events,
+buffer loss and export failures stay visible. Trace overhead is an additional
+experimental variable; compare against the retained untraced run. Several health
+and recording AudioContexts are present, so a FIFO event alone does not identify
+the recording mixer. The trace is disabled in ordinary qualification and releases.
+
+Untraced run `33972112297` reproduced a short Intel Mac failure: with processing
+disabled, two numbered markers split only in the actual mixed output, with 650 ms
+relative drift over the common interval. The direct branch retains single marker
+groups. The mixed packet span exceeds decoded sample duration by 808 ms, versus
+80 ms in the direct branch. All original mixed chunks, final packets/timestamps,
+decoded PCM and upload bytes match. Windows and Apple Silicon completed without
+split/missing/reordered groups; Apple Silicon still measured 190 ms relative
+drift with processing disabled. These are diagnostic findings, not release passes.
+
 ## Existing qualification suites
 
 `audio-reliability.yml` runs `s11-capture-qualification`, `s12-device-qualification`, and `s15-main-crash-qualification` on pull requests to `main` and ordinary manual workflow dispatch. Its matrix uses Windows Server 2022 x64, macOS 15 Intel, and macOS 26 Apple Silicon. These are native OS jobs using the installed Electron runtime and the unsigned `dist/electron/UnPackaged` test bundle. The device suite exercises synthetic microphone track loss/reconnection and exact-zero input with live warnings, saved-source checks and decoded audio verification. The crash suite forcibly stops the owned test application's process tree, relaunches its isolated profile, and checks durable audio recovery, upload bytes, retained source chunks, and visible recording history. It does not simulate a power cut or test hardware disk caches. No installer, signature, release, tag, backend deployment, or publication is produced.

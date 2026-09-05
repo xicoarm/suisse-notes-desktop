@@ -110,6 +110,7 @@ async function main() {
     runnerImage: process.env.ImageOS || null, runnerImageVersion: process.env.ImageVersion || null,
     scope: 'Generated microphone input through native Electron; local mock upload only. Hardware capture, AudioTee, TCC, and Bluetooth/USB are not qualified.',
     ...(captureClock ? { diagnosticOnly: true, secondsPerCase: 180, processingModes: ['default', 'disabled'],
+      bufferTraceEnabled: process.env.SUISSE_CAPTURE_CLOCK_TRACE === '1',
       successMeaning: 'Measurements completed under valid controls; does not clear existing endurance or capture failures.' } : {}),
     ...(endurance ? { captureSeconds: 18300, naturalRotationSeconds: 17700, processingDisabled: false,
       productionBackendQualified: false, referenceGeneration: { generator: 'tests/e2e-harness/lib/coded-audio.js',

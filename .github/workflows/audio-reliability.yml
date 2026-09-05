@@ -15,6 +15,11 @@ on:
         type: boolean
         required: false
         default: false
+      capture_buffer_trace:
+        description: Add a bounded 30-second native buffer trace to the capture-clock diagnostic
+        type: boolean
+        required: false
+        default: false
 
 # This workflow never signs, publishes, pushes, or creates a release.
 permissions:
@@ -96,6 +101,8 @@ jobs:
 
       - name: Compare native-input and actual app-mixer clocks
         if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.run_capture_clock }}
+        env:
+          SUISSE_CAPTURE_CLOCK_TRACE: ${{ inputs.capture_buffer_trace && '1' || '0' }}
         timeout-minutes: 23
         run: node tests/e2e-harness/ci/run-qualification.js s16-capture-clock-diagnostic
 

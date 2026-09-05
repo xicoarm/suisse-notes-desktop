@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const net = require('net');
 const { execFileSync } = require('child_process');
 const { performance } = require('perf_hooks');
+const { startBufferTrace, summarizeTrace } = require('./lib/capture-buffer-trace');
 const ROOT = path.resolve(__dirname, '../..');
 const WORK = path.join(__dirname, 'work');
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -28,6 +29,7 @@ function provenance(appDirectory, applicationBuildCommit) {
     electronSha256: hash(fs.readFileSync(executable)),
     inputs: Object.fromEntries([__filename, path.join(ROOT, 'package-lock.json'),
       path.join(__dirname, 'lib/app-driver.js'), path.join(__dirname, 'lib/coded-audio.js'), path.join(__dirname, 'lib/mock-backend.js'),
+      path.join(__dirname, 'lib/capture-buffer-trace.js'),
       require('@ffmpeg-installer/ffmpeg').path].map(file => [path.relative(ROOT, file).replaceAll('\\', '/'), hash(fs.readFileSync(file))])) };
 }
 
@@ -225,7 +227,7 @@ async function capture(directory, options, expectedProvenance) {
       'The additional witness is an experimental workload. Passing this diagnostic is not production or five-hour qualification.',
     ] };
   const checkpoint = () => writeJson(path.join(directory, 'result.json'), result);
-  let mock = null, app = null;
+  let mock = null, app = null, trace = null;
   try {
     verifyUnchanged(expectedProvenance);
     const name = path.basename(path.dirname(directory)) + '-' + path.basename(directory);
@@ -253,8 +255,14 @@ async function capture(directory, options, expectedProvenance) {
     await app.startRecording(); result.recordId = await app.getRecordId();
     console.log('Both diagnostic branches are recording: ' + directory);
     const began = performance.now();
+    const traceStartS = Math.max(5, options.seconds / 2 - 15);
     while (performance.now() - began < options.seconds * 1000) {
       const before = performance.now();
+      if (options.traceBuffers && !trace && (before - began) / 1000 >= traceStartS) {
+        trace = await startBufferTrace(app.page);
+        result.bufferTrace = trace.state; result.bufferTrace.requestedStartElapsedS = (before - began) / 1000;
+      }
+      if (trace && trace.state.stopRequestedAt === null && performance.now() - trace.state.startedAt >= 30000) await trace.stop();
       const renderer = await app.evalTimed(() => window.__directMixedWitness.snapshot(), undefined, 10000);
       result.samples.push({ before, after: performance.now(), elapsedS: (before - began) / 1000, renderer });
       checkpoint();
@@ -266,6 +274,11 @@ async function capture(directory, options, expectedProvenance) {
     // Capture branches may have different endpoints; common source IDs are compared offline.
     await app.stopRecording(60000);
     await app.evalTimed(() => window.__directMixedWitness.stopDirect(), undefined, 15000);
+    if (trace) {
+      await trace.exportTo(path.join(directory, 'audio-buffer-trace.json'));
+      await trace.dispose();
+      if (trace.state.problems.length) throw new Error(trace.state.problems.join('; '));
+    }
     result.finalSnapshot = await app.evalTimed(() => window.__directMixedWitness.snapshot());
     result.clockReadout = clockReadout(result.samples, result.finalSnapshot);
     const directDir = path.join(directory, 'direct-chunks'); fs.mkdirSync(directDir);
@@ -300,6 +313,10 @@ async function capture(directory, options, expectedProvenance) {
     await app.close({ keepProfile: true }); app = null;
     await mock.close(); mock = null;
     // No live capture, playback, or app process overlaps decoding.
+    if (result.bufferTrace?.exportCompleted) {
+      result.bufferTrace.summary = summarizeTrace(JSON.parse(fs.readFileSync(result.bufferTrace.file, 'utf8')));
+      if (!Object.keys(result.bufferTrace.summary.counts).length) throw new Error('No native media-stream events in audio trace');
+    }
     checkpoint();
     const directAnalysis = await analyzeCodedAudio(result.directPath);
     writeJson(path.join(directory, 'direct-analysis.json'), directAnalysis);
@@ -314,6 +331,16 @@ async function capture(directory, options, expectedProvenance) {
     if (app) {
       try { result.failureSnapshot = await app.evalTimed(() => window.__directMixedWitness?.snapshot(), undefined, 3000); } catch (_) { /* retain available evidence */ }
       try { await app.evalTimed(() => window.__directMixedWitness?.dispose(), undefined, 12000); } catch (error) { result.problems.push('Renderer cleanup: ' + error.message); }
+      if (trace) {
+        if (!trace.state.exportCompleted) {
+          try {
+            const snapshot = await app.evalTimed(() => window.__directMixedWitness?.snapshot(), undefined, 3000);
+            if (snapshot?.recorders.every(recorder => recorder.state === 'inactive')) await trace.exportTo(path.join(directory, 'failed-audio-buffer-trace.json'));
+            else result.problems.push('Trace export skipped because capture did not stop');
+          } catch (error) { result.problems.push('Trace preservation: ' + error.message); }
+        }
+        await trace.dispose();
+      }
       // Preserve whatever the diagnostic witness captured on a failed case too.
       // The normal success path already exported it; never overwrite that output.
       if (!result.directPath) {
@@ -345,6 +372,7 @@ async function capture(directory, options, expectedProvenance) {
 
 async function runCaptureClockDiagnostic(opts = {}) {
   const seconds = opts.seconds ?? 180;
+  const traceBuffers = opts.traceBuffers ?? process.env.SUISSE_CAPTURE_CLOCK_TRACE === '1';
   if (!Number.isInteger(seconds) || seconds < 45 || seconds > 240) throw new Error('Diagnostic capture must be 45–240 seconds');
   if (!['win32', 'darwin'].includes(process.platform)) throw new Error('Native Windows or macOS required');
   if (process.env.SUISSE_E2E_HOOKS !== '1' || process.env.SUISSE_TEST_NETWORK_ISOLATION !== '1') throw new Error('Explicit synthetic/network-isolation flags required');
@@ -357,7 +385,7 @@ async function runCaptureClockDiagnostic(opts = {}) {
   const directory = fs.mkdtempSync(path.join(parent, 's16-capture-clock-'));
   const result = { name: 's16-capture-clock-diagnostic', pass: false, measurementCompleted: false, problems: [],
     fiveHourQualificationPassed: false, productionBackendQualified: false, physicalHardwareQualified: false,
-    secondsPerCase: seconds, evidenceDir: directory, cases: [],
+    secondsPerCase: seconds, traceBuffers, evidenceDir: directory, cases: [],
     notes: ['Success means the diagnostic completed with valid controls; it does not clear existing capture or endurance failures.',
       'Default and disabled processing may negotiate different sample rates/channel counts. Read the observed settings before attributing a difference to processing.',
       'Direct and mixed endpoints differ; source identities are compared only over their common interior interval.'] };
@@ -366,7 +394,7 @@ async function runCaptureClockDiagnostic(opts = {}) {
   for (const processingDisabled of [false, true]) {
     const caseDir = path.join(directory, processingDisabled ? 'processing-disabled' : 'default-processing');
     fs.mkdirSync(caseDir);
-    const caseResult = await capture(caseDir, { seconds, processingDisabled }, recorded);
+    const caseResult = await capture(caseDir, { seconds, processingDisabled, traceBuffers }, recorded);
     result.cases.push(caseResult);
     if (!caseResult.measurementCompleted || !caseResult.controlsValid || caseResult.problems.length) {
       result.problems.push(...caseResult.problems.map(problem => path.basename(caseDir) + ': ' + problem));
