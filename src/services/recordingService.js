@@ -231,7 +231,7 @@ let micSignalFloatBuf = null;
 //
 // Supported overrides (set in .env.local — Vite only exposes VITE_ prefixed vars):
 //   VITE_SUISSE_MAX_DURATION_SECONDS            — auto-split interval (default 17700 = 4h55m)
-//   VITE_SUISSE_MEDIA_RECORDER_TIMESLICE_MS     — MediaRecorder chunk size (default 3000)
+//   VITE_SUISSE_MEDIA_RECORDER_TIMESLICE_MS     — default 1000 desktop / 3000 mobile and web
 function envNumDev(key, fallback) {
   if (import.meta.env?.PROD) return fallback;
   const raw = import.meta.env?.[key];
@@ -240,7 +240,7 @@ function envNumDev(key, fallback) {
 }
 
 const MAX_DURATION_SECONDS = envNumDev('VITE_SUISSE_MAX_DURATION_SECONDS', 4 * 60 * 60 + 55 * 60); // 4h 55m
-const MEDIA_RECORDER_TIMESLICE_MS = envNumDev('VITE_SUISSE_MEDIA_RECORDER_TIMESLICE_MS', 3000);
+const MEDIA_RECORDER_TIMESLICE_MS = envNumDev('VITE_SUISSE_MEDIA_RECORDER_TIMESLICE_MS', isElectron() ? 1000 : 3000);
 const AUTH_KEEP_ALIVE_INTERVAL = 30 * 60 * 1000; // Refresh auth every 30 min during recording
 
 export const MIC_HEALTH_STATUS = Object.freeze({
@@ -1927,8 +1927,8 @@ let receivedDataBytes = 0;
 let lastDataEventAt = null;
 // C3: latch the disk-full emergency-stop event. The recorder keeps emitting a
 // blob every timeslice, so without a latch the diskFull chunkSaveFailure re-fires
-// every ~3s and launches concurrent stopRecording() calls (double-combine/thrash).
-const STALL_WARN_MS = 30000; // ~10 timeslices with no persisted chunk while 'recording'
+// on each chunk and launches concurrent stopRecording() calls (double-combine/thrash).
+const STALL_WARN_MS = 30000; // No persisted chunk while 'recording'.
 const FIRST_CHUNK_WARN_MS = Math.max(10000, MEDIA_RECORDER_TIMESLICE_MS * 3);
 
 function captureProgressSnapshot() {
@@ -2643,7 +2643,8 @@ async function startRecordingInternal(options) {
       }
     };
 
-    // P0 Data Loss Fix: Reduced from 5s to 3s to minimize crash data loss (V8).
+    // Publish desktop audio every second to reduce the volatile crash tail.
+    // Native dispatch and disk writes can be delayed; this is not a loss bound.
     // Timeslice is overridable in dev/test via VITE_SUISSE_MEDIA_RECORDER_TIMESLICE_MS.
     mediaRecorder.start(MEDIA_RECORDER_TIMESLICE_MS);
     recordingStore.confirmCaptureStarted?.();
@@ -2838,7 +2839,7 @@ export function resumeRecording(recordingStore, isAutoSplitting, maxRecordingSec
     // INT-2: mediaRecorder.resume() resumes a WEDGED recorder just as happily
     // as a healthy one (the Nyberg incident: the user's pause→resume "worked"
     // at the store level while capture stayed dead for another hour). Verify
-    // chunks actually flow within ~3 timeslices of resuming; if not, start
+    // chunks actually flow within 10 seconds of resuming; if not, start
     // the recovery loop (resume contexts, re-acquire mic). Identity compare:
     // lastSuccessfulChunkAt was just reset above, so only a REAL chunk save
     // (which stamps a fresh Date.now()) changes it.
