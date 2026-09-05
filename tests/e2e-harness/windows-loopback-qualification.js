@@ -10,6 +10,10 @@ const { performance } = require('perf_hooks');
 const { AppDriver, sleep } = require('./lib/app-driver');
 const { startMockBackend } = require('./lib/mock-backend');
 const { buildCodedScenario, verifyCodedAudio } = require('./lib/coded-audio');
+const { installRecordingRoleObserver } = require('./lib/native-recorder-evidence');
+const { inspectNativeSources } = require('../../src-electron/native-source-persistence');
+const { concatenateFiles } = require('../../src-electron/durable-files');
+const { readFinalizedRecording } = require('../../src-electron/recording-persistence');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const PRIVATE_ROOT = path.join(ROOT, 'work', 'private-system-audio');
@@ -65,6 +69,123 @@ function chunksIn(directory) {
   });
 }
 
+function assessNativeLoopbackTimeline(sources, evidence, fixture, stopped = true) {
+  const records = evidence?.records || [], mixed = records.filter(record => record.role === 'live-mix');
+  const native = records.filter(record => record.role === 'native-input');
+  const desktop = fixture?.desktopCalls || [];
+  if (records.length !== 3 || mixed.length !== 1 || native.length !== 2 || sources.length !== 2 ||
+      !Number.isFinite(fixture?.playback?.startedAt) ||
+      desktop.length !== 1 || desktop[0].error || desktop[0].tracks?.filter(track => track.kind === 'audio').length !== 1) {
+    throw new Error('Native loopback requires one microphone, one system source and one live mix without rebinds');
+  }
+  const systemId = desktop[0].tracks.find(track => track.kind === 'audio').id;
+  const micIds = new Set(fixture.microphoneTrackIds || []);
+  const microphone = native.filter(record => record.trackIds?.length === 1 && micIds.has(record.trackIds[0]));
+  const system = native.filter(record => record.trackIds?.length === 1 && record.trackIds[0] === systemId);
+  if (microphone.length !== 1 || system.length !== 1 || microphone[0] === system[0]) throw new Error('Ambiguous native microphone/system input identity');
+  for (const record of records) {
+    if (record.trackIds?.length !== 1 || record.timesliceMs !== 1000 || !Number.isFinite(record.startCalledAt) ||
+        record.state !== (stopped ? 'inactive' : 'recording') ||
+        (stopped && (!record.bytes || !record.events || !Number.isFinite(record.startedAt) ||
+          !Number.isFinite(record.stoppedAt) || record.stoppedAt < record.startCalledAt || record.convertedBytes !== record.bytes))) {
+      throw new Error('Missing native loopback recorder lifecycle, timeslice or converted bytes');
+    }
+  }
+  const origin = microphone[0].startCalledAt, used = new Set();
+  const nativeIds = new Set(native.map(record => record.trackIds[0]));
+  const nativeStops = (fixture.recorderStops || []).filter(call => call.trackIds?.length === 1 && nativeIds.has(call.trackIds[0]));
+  // Both lanes share a frozen meeting endpoint. Native stop() calls happen
+  // sequentially and may take different amounts of time to return.
+  const stopOffsetMs = stopped ? Math.min(...nativeStops.map(call => call.at)) - origin : null;
+  const epochs = sources.map(source => {
+    const record = source.kind === 'microphone' ? microphone[0] : source.kind === 'system' ? system[0] : null;
+    if (!record || used.has(source.kind) || !source.started || source.gaps.length || source.terminalMismatch ||
+        !Number.isFinite(source.startOffsetMs) || source.startOffsetMs < 0 ||
+        Math.abs(record.startCalledAt - origin - source.startOffsetMs) > 2 ||
+        (stopped && (!source.complete || source.interrupted || source.reason !== 'stopped' || !Number.isFinite(source.endOffsetMs)))) {
+      throw new Error('Native loopback epoch cannot be matched to its source and active timeline');
+    }
+    used.add(source.kind);
+    if (stopped) {
+      const stops = (fixture.recorderStops || []).filter(call => call.trackIds?.length === 1 &&
+        call.trackIds[0] === record.trackIds[0] && call.at >= record.startCalledAt && call.at <= record.stoppedAt);
+      if (stops.length !== 1 || !Number.isFinite(stopOffsetMs) || Math.abs(stopOffsetMs - source.endOffsetMs) > 2 ||
+          source.endOffsetMs < source.startOffsetMs || source.chunkCount !== record.events - record.emptyEvents ||
+          source.chunks.reduce((total, chunk) => total + chunk.size, 0) !== record.bytes ||
+          source.chunks.some((chunk, index) => chunk.index !== index)) {
+        throw new Error('Native loopback terminal clock or saved chunks differ from its recorder');
+      }
+    }
+    return { sourceId: source.sourceId, kind: source.kind, recorderId: record.id, trackId: record.trackIds[0],
+      startCalledAt: record.startCalledAt, startOffsetMs: source.startOffsetMs, endOffsetMs: source.endOffsetMs };
+  });
+  return { epochs, origin, expectedDurationS: stopped ? stopOffsetMs / 1000 : null,
+    expectedSourceOffsetS: (origin - fixture.playback.startedAt) / 1000,
+    systemExpectedSourceOffsetS: (system[0].startCalledAt - fixture.playback.startedAt) / 1000 };
+}
+
+async function snapshotLoopbackCustody(recordDir, sources, limit = Infinity) {
+  const describe = async file => {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Invalid native custody file');
+    return { relativePath: path.relative(recordDir, file).split(path.sep).join('/'), bytes: stat.size, sha256: await sha256(file) };
+  };
+  return Promise.all(sources.map(async source => ({ sourceId: source.sourceId, kind: source.kind, startOffsetMs: source.startOffsetMs,
+    metadata: await Promise.all([source.manifestPath, source.startedPath, source.endPath].filter(Boolean).map(describe)),
+    chunks: await Promise.all(source.chunks.slice(0, limit).map(async chunk => {
+      const item = { index: chunk.index, ...await describe(chunk.path) };
+      if (item.relativePath !== `native-sources/${source.sourceId}/chunks/chunk_${chunk.index}.webm`) throw new Error('Native custody source/index path mismatch');
+      return item;
+    })) })));
+}
+
+function verifyLoopbackCustody(expected, retained, allowAdditionalChunks = true) {
+  const byId = new Map(retained.map(source => [source.sourceId, source]));
+  if (byId.size !== retained.length || retained.length !== expected.length) throw new Error('Native source custody inventory changed');
+  for (const source of expected) {
+    const current = byId.get(source.sourceId);
+    if (!current || current.kind !== source.kind || current.startOffsetMs !== source.startOffsetMs) throw new Error('Native source custody identity changed');
+    for (const field of ['metadata', 'chunks']) {
+      const items = new Map(current[field].map(item => [item.relativePath, item]));
+      if (items.size !== current[field].length || (field === 'chunks' && !allowAdditionalChunks && current[field].length !== source[field].length)) throw new Error('Native custody entries changed');
+      for (const item of source[field]) {
+        const actual = items.get(item.relativePath);
+        if (!actual || actual.index !== item.index || actual.bytes !== item.bytes || actual.sha256 !== item.sha256) throw new Error('Native source bytes or metadata changed: ' + item.relativePath);
+      }
+    }
+  }
+}
+
+function assessNativeLoopbackPublication(finalized, plan, timeline, output) {
+  const ids = timeline.epochs.map(epoch => epoch.sourceId).sort();
+  const sameIds = value => Array.isArray(value) && JSON.stringify([...value].sort()) === JSON.stringify(ids);
+  if (finalized?.version !== 3 || finalized.sourceMode !== 'native' || finalized.recovered !== false ||
+      finalized.systemPcmIncluded !== false || !sameIds(finalized.sourceIds) || finalized.sha256 !== output.sha256 ||
+      finalized.size !== output.bytes || finalized.filename !== 'audio.webm') throw new Error('Final publication does not cover both native loopback sources');
+  if (plan?.version !== 1 || plan.recovery !== false || plan.systemPcmIncluded !== false || !sameIds(plan.sourceIds) ||
+      plan.codecPolicy !== 'opus-cbr-192k-20ms-reencoded-from-native-sources' || plan.mixingPolicy !== 'unity-sum-no-limiter' ||
+      plan.onsetIsApproximate !== true || plan.sampleRate !== 48000 || plan.channels !== 2 ||
+      JSON.stringify((plan.lanes || []).map(lane => lane.kind).sort()) !== JSON.stringify(['microphone', 'system']) ||
+      !sameIds(plan.sourceEvidence?.map(source => source.sourceId)) || plan.validation?.status !== 'passed' ||
+      !Number.isSafeInteger(plan.totalSamples) || plan.totalSamples <= 0 || plan.validation.expectedDecodedSamples !== plan.totalSamples ||
+      !Number.isFinite(plan.validation.observedDecodedSamples) || Math.abs(plan.validation.observedDecodedSamples - plan.totalSamples) > 1 ||
+      !Number.isFinite(finalized.duration) || Math.abs(finalized.duration - plan.validation.observedDecodedSamples / 48000) > 1 / 48000) {
+    throw new Error('Native loopback assembly plan lacks two validated source lanes');
+  }
+  for (const epoch of timeline.epochs) {
+    const source = plan.sourceEvidence.find(item => item.sourceId === epoch.sourceId);
+    if (source.kind !== epoch.kind || source.startOffsetMs !== epoch.startOffsetMs || source.endOffsetMs !== epoch.endOffsetMs || source.interrupted) {
+      throw new Error('Native loopback assembly changed a source timeline');
+    }
+  }
+}
+
+function requireNumberedLoopbackFrames(audio) {
+  if (audio.firstFrame !== 0 || audio.lastFrame !== SECONDS * 2 - 1 || audio.identifiedFrames !== SECONDS * 2) {
+    throw new Error('Native loopback did not preserve every supplied numbered frame, including both reference boundaries');
+  }
+}
+
 // Installed before login/RecordPage mounts. Microphone requests NEVER reach the
 // native API; only desktop-loopback requests pass through, unchanged. The zero
 // source is never connected to a speaker, and playback is never connected to a
@@ -75,7 +196,8 @@ function installLoopbackFixture({ apiUrl }) {
   const devices = navigator.mediaDevices;
   const originalGet = devices.getUserMedia;
   const originalStart = MediaRecorder.prototype.start;
-  const issued = [], desktopCalls = [], recorders = [], samples = [], errors = [];
+  const originalStop = MediaRecorder.prototype.stop;
+  const issued = [], desktopCalls = [], recorders = [], recorderStops = [], samples = [], errors = [];
   let zeroContext, zeroSource, zeroDestination, playbackContext, playbackSource, playbackBuffer;
   let playback = null, disposed = false;
   const trace = async stage => {
@@ -120,10 +242,15 @@ function installLoopbackFixture({ apiUrl }) {
     this.addEventListener('dataavailable', event => { entry.events++; entry.bytes += event.data?.size || 0; });
     return Reflect.apply(originalStart, this, args);
   };
+  MediaRecorder.prototype.stop = function (...args) {
+    recorderStops.push({ at: performance.now(), trackIds: this.stream.getAudioTracks().map(track => track.id) });
+    return Reflect.apply(originalStop, this, args);
+  };
   const snapshot = () => {
     const store = (window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia)?.state?.value?.recording;
     const tracks = issued.flatMap(stream => stream.getAudioTracks()).filter(track => track.readyState === 'live');
-    return { at: performance.now(), phase: store?.phase, playback, desktopCalls, recorders, errors,
+    return { at: performance.now(), phase: store?.phase, playback, desktopCalls, recorders, recorderStops, errors,
+      microphoneTrackIds: issued.flatMap(stream => stream.getAudioTracks().map(track => track.id)),
       microphoneTracks: tracks.map(track => ({ id: track.id, enabled: track.enabled, readyState: track.readyState })),
       mutedUi: [...document.querySelectorAll('.recording-controls .q-icon')].some(icon => icon.textContent.trim() === 'mic_off'),
       systemAudioActive: Boolean(document.querySelector('.system-audio-indicator')),
@@ -187,8 +314,10 @@ function installLoopbackFixture({ apiUrl }) {
       return playback;
     },
     dispose: () => {
+      if (disposed) return;
       disposed = true; clearInterval(timer);
       devices.getUserMedia = originalGet; MediaRecorder.prototype.start = originalStart;
+      MediaRecorder.prototype.stop = originalStop;
       try { playbackSource?.stop(); zeroSource?.stop(); } catch (_) { /* already stopped */ }
       for (const stream of issued) stream.getTracks().forEach(track => track.stop());
       zeroDestination?.stream.getTracks().forEach(track => track.stop());
@@ -232,6 +361,13 @@ async function runSystemAudioQualification() {
     // Unique private profiles are never moved into the shared CI evidence tree.
     await app.launch({ freshProfile: false });
     if (await app.page.$('[data-test=record-start]')) throw new Error('Fresh private profile unexpectedly authenticated before mic interception');
+    result.nativeArchiveExpected = await app.evalTimed(() => typeof window.electronAPI.recording.beginSource === 'function');
+    result.captureMode = result.nativeArchiveExpected ? 'native-sources-v1' : 'legacy-live-mix';
+    if (result.nativeArchiveExpected) {
+      await app.page.evaluateOnNewDocument(installRecordingRoleObserver);
+      await app.evalTimed(installRecordingRoleObserver);
+      result.notes.push('Native mode requires microphone and system source epochs plus a live mix. The microphone lane is silent; simultaneous audible microphone/system fidelity is not qualified.');
+    }
     await app.page.evaluateOnNewDocument(installLoopbackFixture, { apiUrl: mock.url });
     await app.evalTimed(installLoopbackFixture, { apiUrl: mock.url });
     await app.login();
@@ -271,9 +407,16 @@ async function runSystemAudioQualification() {
       if (!result.fixture.mutedUi || result.fixture.microphoneTracks.some(track => track.enabled)) throw new Error('App microphone mute did not remain active');
       if (result.fixture.phase !== 'recording') throw new Error('Recording ended during system playback');
       if (!result.prefix && result.fixture.at - result.fixture.playback.startedAt > 10000) {
-        const files = chunksIn(recordDir).slice(0, 3);
+        const files = chunksIn(recordDir).filter(file => !path.relative(recordDir, file).startsWith('native-sources' + path.sep)).slice(0, 3);
         if (files.length < 2) throw new Error('No persisted recording prefix during native loopback');
         result.prefix = await Promise.all(files.map(async file => ({ file, sha256: await sha256(file) })));
+        if (result.nativeArchiveExpected) {
+          const sources = inspectNativeSources(recordDir);
+          const roles = await app.evalTimed(() => window.__recordingRoleEvidence.snapshot());
+          assessNativeLoopbackTimeline(sources, roles, result.fixture, false);
+          if (sources.some(source => source.chunkCount < 2)) throw new Error('Both native lanes need an observed persisted prefix');
+          result.nativePrefix = await snapshotLoopbackCustody(recordDir, sources, 3);
+        }
       }
       save();
       if (result.fixture.playback.endedAt) break;
@@ -284,33 +427,70 @@ async function runSystemAudioQualification() {
     await app.stopRecording(45000);
     result.fixture = await app.evalTimed(() => {
       const state = window.__windowsLoopbackQualification.snapshot();
+      state.recorderRoles = window.__recordingRoleEvidence?.snapshot();
       window.__windowsLoopbackQualification.dispose(); return state;
     });
     await app.waitForPhase(['uploaded', 'error'], 120000);
     result.phase = await app.getPhase();
     if (result.phase !== 'uploaded') result.problems.push('Local mock upload did not complete');
-    const recorder = result.fixture.recorders.at(-1);
-    if (!recorder?.bytes || !recorder.events || recorder.startedAt === null || recorder.stoppedAt === null) throw new Error('Missing native MediaRecorder output/timing evidence');
-    result.expectedDurationS = (recorder.stoppedAt - recorder.startedAt) / 1000;
+    let sources;
+    if (result.nativeArchiveExpected) {
+      sources = inspectNativeSources(recordDir);
+      result.nativeTimeline = assessNativeLoopbackTimeline(sources, result.fixture.recorderRoles, result.fixture);
+      result.expectedDurationS = result.nativeTimeline.expectedDurationS;
+      result.expectedSourceOffsetS = result.nativeTimeline.expectedSourceOffsetS;
+      result.nativeSources = await snapshotLoopbackCustody(recordDir, sources);
+      if (!result.nativePrefix?.length) throw new Error('Missing native per-lane prefix observation');
+      verifyLoopbackCustody(result.nativePrefix, result.nativeSources);
+    } else {
+      const recorder = result.fixture.recorders.at(-1);
+      if (!recorder?.bytes || !recorder.events || recorder.startedAt === null || recorder.stoppedAt === null) throw new Error('Missing native MediaRecorder output/timing evidence');
+      result.expectedDurationS = (recorder.stoppedAt - recorder.startedAt) / 1000;
+      result.expectedSourceOffsetS = (recorder.startedAt - result.fixture.playback.startedAt) / 1000;
+    }
     const output = app.findOutputFile();
     if (!output || path.dirname(output) !== recordDir) throw new Error('Missing finalized native loopback audio');
     result.output = output;
     result.audio = await verifyCodedAudio(output, reference, { expectedDurationS: result.expectedDurationS, durationToleranceS: 1.5 });
     result.problems.push(...result.audio.problems);
-    if (result.audio.firstFrame !== 0 || result.audio.lastFrame !== SECONDS * 2 - 1 || result.audio.identifiedFrames !== SECONDS * 2) {
-      result.problems.push('Native loopback did not preserve every supplied numbered frame, including both reference boundaries');
-    }
-    result.expectedSourceOffsetS = (recorder.startedAt - result.fixture.playback.startedAt) / 1000;
-    if (result.audio.sourceOffsetS === null || Math.abs(result.audio.sourceOffsetS - result.expectedSourceOffsetS) > 1) {
+    requireNumberedLoopbackFrames(result.audio);
+    if (!Number.isFinite(result.audio.sourceOffsetS) || Math.abs(result.audio.sourceOffsetS - result.expectedSourceOffsetS) > 1) {
       result.problems.push('Decoded source timing differs from scheduled real output by more than one second');
     }
     result.localSha256 = await sha256(output);
+    if (result.nativeArchiveExpected) {
+      const system = sources.find(source => source.kind === 'system');
+      result.nativeSystemOriginal = path.join(directory, 'native-system-original.webm');
+      await concatenateFiles(system.chunkPaths, result.nativeSystemOriginal);
+      result.nativeSystemAudio = await verifyCodedAudio(result.nativeSystemOriginal, reference, {
+        expectedDurationS: (system.endOffsetMs - system.startOffsetMs) / 1000, durationToleranceS: 1.5 });
+      result.problems.push(...result.nativeSystemAudio.problems.map(problem => 'Native system original: ' + problem));
+      requireNumberedLoopbackFrames(result.nativeSystemAudio);
+      if (!Number.isFinite(result.nativeSystemAudio.sourceOffsetS) ||
+          Math.abs(result.nativeSystemAudio.sourceOffsetS - result.nativeTimeline.systemExpectedSourceOffsetS) > 1 ||
+          Math.abs(result.nativeSystemAudio.sourceOffsetS - result.audio.sourceOffsetS - system.startOffsetMs / 1000) > 1) {
+        result.problems.push('Native system source/final placement differs from the output clock by more than one second');
+      }
+      result.finalized = JSON.parse(fs.readFileSync(path.join(recordDir, 'finalized.json'), 'utf8'));
+      const plans = fs.readdirSync(recordDir, { withFileTypes: true }).filter(entry => entry.isDirectory() && entry.name.startsWith('native-finalization-'))
+        .map(entry => path.join(recordDir, entry.name, 'plan.json')).filter(file => fs.existsSync(file));
+      if (plans.length !== 1) throw new Error('Expected one unambiguous native loopback finalization plan');
+      result.nativePlan = { file: plans[0], sha256: await sha256(plans[0]), ...JSON.parse(fs.readFileSync(plans[0], 'utf8')) };
+      assessNativeLoopbackPublication(result.finalized, result.nativePlan, result.nativeTimeline,
+        { sha256: result.localSha256, bytes: fs.statSync(output).size });
+      if (!(await readFinalizedRecording(recordDir))) throw new Error('Native finalized source fingerprint or output validation failed');
+    }
     const receipt = JSON.parse(fs.readFileSync(path.join(recordDir, 'upload-receipt.json'), 'utf8'));
     if (mock.state.uploads.get(receipt.audioFileId)?.sha256 !== result.localSha256) result.problems.push('Mock upload differs from the finalized native loopback file');
     if (receipt.canDelete !== false || receipt.contentVerified !== false) result.problems.push('Native loopback backup retention receipt is incorrect');
-    const retained = await Promise.all(chunksIn(recordDir).map(async file => ({ file, sha256: await sha256(file) })));
+    const retained = await Promise.all(chunksIn(recordDir).filter(file => !path.relative(recordDir, file).startsWith('native-sources' + path.sep))
+      .map(async file => ({ file, sha256: await sha256(file) })));
     result.retainedPrefix = (result.prefix || []).map(original => retained.find(item => item.sha256 === original.sha256) || null);
     if (!result.prefix?.length || result.retainedPrefix.some(item => !item)) result.problems.push('Original persisted prefix changed or disappeared after upload');
+    if (result.nativeArchiveExpected) {
+      result.nativeSourcesAfterVerification = await snapshotLoopbackCustody(recordDir, inspectNativeSources(recordDir));
+      verifyLoopbackCustody(result.nativeSources, result.nativeSourcesAfterVerification, false);
+    }
     result.endpointsAfter = readEndpoints();
     if (JSON.stringify(result.endpointsBefore.defaults) !== JSON.stringify(result.endpointsAfter.defaults)) result.problems.push('Windows default endpoints changed during qualification');
     if (result.fixture.samples.some(sample => sample.silentWarning)) result.problems.push('Unexpected system-audio silence warning during supplied output');
@@ -319,7 +499,7 @@ async function runSystemAudioQualification() {
   finally {
     result.profile = app?.userDataDir || null; result.resultFile = resultFile;
     if (app) {
-      await app.evalTimed(() => window.__windowsLoopbackQualification?.dispose(), undefined, 3000).catch(() => {});
+      await app.evalTimed(() => { window.__windowsLoopbackQualification?.dispose(); window.__recordingRoleEvidence?.dispose(); }, undefined, 3000).catch(() => {});
       await app.close({ keepProfile: true }).catch(error => { result.pass = false; result.problems.push('Cleanup: ' + error.message); });
       fs.writeFileSync(path.join(directory, 'app-output.log'), app.log.join(''));
     }
@@ -330,4 +510,5 @@ async function runSystemAudioQualification() {
   return result;
 }
 
-module.exports = { runSystemAudioQualification, readEndpoints, installLoopbackFixture };
+module.exports = { runSystemAudioQualification, readEndpoints, installLoopbackFixture, assessNativeLoopbackTimeline,
+  snapshotLoopbackCustody, verifyLoopbackCustody, assessNativeLoopbackPublication, requireNumberedLoopbackFrames };
