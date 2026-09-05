@@ -9,7 +9,8 @@ import vm from 'node:vm';
 const require = createRequire(import.meta.url);
 const { AppDriver, installSyntheticCaptureProbe } = require('../e2e-harness/lib/app-driver');
 const { killOwnedApp, snapshotChunks, compareChunks, prefixEndpointCoverage, assertSyntheticPath,
-  parseCrashOptions, captureTimingEvidence, tailExposureProblems } = require('../e2e-harness/crash-qualification');
+  parseCrashOptions, captureTimingEvidence, tailExposureProblems, calculateTailExposure,
+  bracketRecordingSnapshot, observationExitEvidence } = require('../e2e-harness/crash-qualification');
 const workRoot = path.resolve('tests/e2e-harness/work');
 let fixtureRoot;
 beforeEach(() => {
@@ -96,6 +97,55 @@ describe('passive native recording provenance', () => {
 });
 
 describe('fractional crash requests and explicit limits', () => {
+  const timing = { nativeSecondsAtLastObservation: 50.4, startCallSecondsAtLastObservation: 51,
+    acknowledgedAudioSeconds: 49.4, durableAudioSeconds: 50.4, observationToExitSeconds: 0.5 };
+
+  it('includes a delayed CDP reply in the termination bound without changing the acknowledged deficit', async () => {
+    let hostClock = 10000, reply;
+    const response = new Promise(resolve => { reply = resolve; });
+    const app = { evalTimed: vi.fn(() => response) };
+    const pending = bracketRecordingSnapshot(app, () => hostClock);
+    // The renderer has sampled; its clock origin is independent of the host.
+    const snapshot = { capture: { at: 50000 }, acknowledgedChunks: 50 };
+    hostClock = 11000;
+    reply(snapshot);
+    const observation = await pending;
+    expect(observation.snapshot).toBe(snapshot);
+    const bracket = observationExitEvidence(observation, 11500);
+    expect(bracket).toMatchObject({ roundTripSeconds: 1, responseToExitSeconds: 0.5, requestToExitUpperSeconds: 1.5 });
+    const exposure = calculateTailExposure({ ...timing, observationToExitSeconds: bracket.requestToExitUpperSeconds });
+    expect(exposure.callToAcknowledgedDeficitS).toBeCloseTo(1.6);
+    expect(exposure.callToRecoveredDeficitIncludingTerminationS).toBeCloseTo(2.1);
+    expect(exposure.callToRecoveredDeficitIncludingTerminationS -
+      calculateTailExposure({ ...timing, observationToExitSeconds: bracket.responseToExitSeconds }).callToRecoveredDeficitIncludingTerminationS).toBeCloseTo(1);
+  });
+
+  it.each([{ requestAtMs: null, responseAtMs: 11000 }, { requestAtMs: 12000, responseAtMs: 11000 },
+    { requestAtMs: 10000, responseAtMs: 12000 }])('rejects an unavailable or inconsistent host timing bracket %j', observation => {
+    expect(() => observationExitEvidence(observation, 11500)).toThrow('snapshot request/response/exit timing');
+  });
+
+  it('does not count a later surviving chunk as acknowledged at the earlier observation', () => {
+    const exposure = calculateTailExposure(timing);
+    expect(exposure.notYetDurableSecondsAtLastObservation).toBeCloseTo(1.6);
+    expect(exposure.eventClockUnacknowledgedEstimateS).toBeCloseTo(1);
+    expect(exposure.tailUpperBoundIncludingTerminationDelayS).toBeCloseTo(1.1);
+  });
+
+  it('keeps start-event delay visible instead of subtracting it from primary exposure', () => {
+    const exposure = calculateTailExposure({ ...timing, nativeSecondsAtLastObservation: 49.7 });
+    expect(exposure.startEventDelayS).toBeCloseTo(1.3);
+    expect(exposure.notYetDurableSecondsAtLastObservation).toBeCloseTo(1.6);
+    expect(exposure.eventClockUnacknowledgedEstimateS).toBeCloseTo(0.3);
+    expect(tailExposureProblems(exposure, 1.5)).toHaveLength(1);
+  });
+
+  it.each([{ startCallSecondsAtLastObservation: null }, { acknowledgedAudioSeconds: NaN },
+    { observationToExitSeconds: -1 }, { acknowledgedAudioSeconds: 51 },
+    { nativeSecondsAtLastObservation: 52 }])('rejects missing or inconsistent timing evidence %j', change => {
+    expect(() => calculateTailExposure({ ...timing, ...change })).toThrow();
+  });
+
   it('keeps the historical defaults and rounds only the spare reference to complete coded frames', () => {
     expect(parseCrashOptions()).toEqual({ seconds: 50, expectedTimesliceMs: null, maxTailExposureS: 4.5, referenceSeconds: 75 });
     for (const seconds of [45, 50.15, 50.5, 50.85, 60]) {
@@ -126,7 +176,7 @@ describe('fractional crash requests and explicit limits', () => {
   it('applies an explicit tighter measured-tail limit while preserving the default threshold and separate termination bound', () => {
     const exposure = { notYetDurableSecondsAtLastObservation: 1.3, tailUpperBoundIncludingTerminationDelayS: 1.9 };
     expect(tailExposureProblems(exposure)).toEqual([]);
-    expect(tailExposureProblems(exposure, 1.25)).toEqual(['Observed undurable tail exceeded the configured 1.25-second limit']);
+    expect(tailExposureProblems(exposure, 1.25)).toEqual(['Conservative call-to-acknowledged deficit exceeded the configured 1.25-second test budget']);
     expect(tailExposureProblems({ notYetDurableSecondsAtLastObservation: 4.5 })).toEqual([]);
     expect(tailExposureProblems({ notYetDurableSecondsAtLastObservation: 4.5001 })).toHaveLength(1);
     expect(tailExposureProblems({ notYetDurableSecondsAtLastObservation: 0 }, 0)).toEqual([]);

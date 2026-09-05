@@ -138,6 +138,27 @@ async function recordingSnapshot(app) {
   });
 }
 
+async function bracketRecordingSnapshot(app, clock = () => performance.now()) {
+  const requestAtMs = clock();
+  const snapshot = await recordingSnapshot(app);
+  return { snapshot, requestAtMs, responseAtMs: clock() };
+}
+
+function observationExitEvidence(observation, exitAtMs) {
+  const { requestAtMs, responseAtMs } = observation;
+  if (![requestAtMs, responseAtMs, exitAtMs].every(Number.isFinite) ||
+      requestAtMs < 0 || responseAtMs < requestAtMs || exitAtMs < responseAtMs) {
+    throw new Error('Missing or invalid snapshot request/response/exit timing');
+  }
+  // The renderer samples between request and response on a different clock.
+  // Starting at response omits an unknown part of the CDP round trip; starting
+  // at request safely includes it without equating the two clock origins.
+  return { requestAtMs, responseAtMs, exitAtMs,
+    roundTripSeconds: (responseAtMs - requestAtMs) / 1000,
+    responseToExitSeconds: (exitAtMs - responseAtMs) / 1000,
+    requestToExitUpperSeconds: (exitAtMs - requestAtMs) / 1000 };
+}
+
 async function visibleHistory(app, recordId) {
   return app.evalTimed(rid => {
     const pinia = window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia;
@@ -170,18 +191,46 @@ function captureTimingEvidence(snapshot, expectedTimesliceMs = null) {
     ? (capture.at - native.startedAt) / 1000 : null;
   const lastDataAgeS = Number.isFinite(capture?.at) && Number.isFinite(native?.lastDataAt)
     ? (capture.at - native.lastDataAt) / 1000 : null;
+  const startCallElapsedS = Number.isFinite(capture?.at) && Number.isFinite(native?.startCalledAt)
+    ? (capture.at - native.startCalledAt) / 1000 : null;
   const problems = [];
   if (expectedTimesliceMs !== null && observedTimesliceMs !== expectedTimesliceMs) {
     problems.push(`Observed MediaRecorder timeslice ${observedTimesliceMs === null ? 'unavailable' : observedTimesliceMs + 'ms'} differs from expected ${expectedTimesliceMs}ms`);
   }
   return { observedTimesliceMs, startCalledAt: native?.startCalledAt ?? null,
-    successfulStartCalls: native?.successfulStartCalls ?? null, nativeElapsedS, lastDataAgeS, problems };
+    successfulStartCalls: native?.successfulStartCalls ?? null, nativeElapsedS, startCallElapsedS,
+    startEventDelayS: startCallElapsedS !== null && nativeElapsedS !== null ? startCallElapsedS - nativeElapsedS : null,
+    lastDataAgeS, problems };
+}
+
+function calculateTailExposure({ nativeSecondsAtLastObservation, startCallSecondsAtLastObservation,
+  acknowledgedAudioSeconds, durableAudioSeconds, observationToExitSeconds }) {
+  for (const value of [nativeSecondsAtLastObservation, startCallSecondsAtLastObservation,
+    acknowledgedAudioSeconds, durableAudioSeconds, observationToExitSeconds]) {
+    if (!Number.isFinite(value) || value < 0) throw new Error('Missing or invalid crash timing/prefix duration');
+  }
+  if (acknowledgedAudioSeconds > durableAudioSeconds + 1e-9) throw new Error('Acknowledged prefix exceeds the surviving audio');
+  if (nativeSecondsAtLastObservation > startCallSecondsAtLastObservation + 1e-9) throw new Error('Native start event precedes its observed start call');
+  const callToAcknowledgedDeficitS = Math.max(0, startCallSecondsAtLastObservation - acknowledgedAudioSeconds);
+  const callToRecoveredDeficitIncludingTerminationS = Math.max(0, startCallSecondsAtLastObservation + observationToExitSeconds - durableAudioSeconds);
+  return { nativeSecondsAtLastObservation, startCallSecondsAtLastObservation, acknowledgedAudioSeconds, durableAudioSeconds,
+    // onstart is queued asynchronously and can be raised after capture begins.
+    // Use the earlier start() call for conservative primary estimates; this
+    // includes initialization/dispatch uncertainty, not proven missing audio.
+    startEventDelayS: startCallSecondsAtLastObservation - nativeSecondsAtLastObservation,
+    timingBasis: 'Conservative start-call deficit; includes initialization uncertainty, not exact lost audio.',
+    callToAcknowledgedDeficitS, callToRecoveredDeficitIncludingTerminationS,
+    // Keep legacy result keys readable by existing evidence summaries.
+    notYetDurableSecondsAtLastObservation: callToAcknowledgedDeficitS,
+    tailUpperBoundIncludingTerminationDelayS: callToRecoveredDeficitIncludingTerminationS,
+    eventClockUnacknowledgedEstimateS: Math.max(0, nativeSecondsAtLastObservation - acknowledgedAudioSeconds),
+    eventClockTailUpperEstimateS: Math.max(0, nativeSecondsAtLastObservation + observationToExitSeconds - durableAudioSeconds) };
 }
 
 function tailExposureProblems(exposure, maxTailExposureS = 4.5) {
-  if (!Number.isFinite(exposure?.notYetDurableSecondsAtLastObservation)) return ['Missing measured undurable tail exposure'];
+  if (!Number.isFinite(exposure?.notYetDurableSecondsAtLastObservation)) return ['Missing conservative call-to-acknowledged deficit'];
   return exposure.notYetDurableSecondsAtLastObservation > maxTailExposureS
-    ? [`Observed undurable tail exceeded the configured ${maxTailExposureS}-second limit`] : [];
+    ? [`Conservative call-to-acknowledged deficit exceeded the configured ${maxTailExposureS}-second test budget`] : [];
 }
 
 async function runMainCrashQualification(opts = {}) {
@@ -196,6 +245,8 @@ async function runMainCrashQualification(opts = {}) {
     'Abrupt whole-app process termination; no graceful stop or renderer-only crash.',
     'Only audio that reached durable storage can survive this crash. No audio is expected during process downtime.',
     'Requested seconds begin after UI recording readiness. Prefix hashing and process termination add delay; fractional requests do not control an exact native recording phase.',
+    'Primary exposure uses the observed start() call and the separately decoded acknowledged prefix. Start-event and initialization delays are uncertainty, not proven capture loss.',
+    'Termination timing includes the full snapshot request/response interval. Older evidence without observationTiming has an unknown response gap and cannot supply this upper bound.',
     'Synthetic microphone and localhost upload; physical devices, power-loss disk caches, and production backend acceptance are outside this test.',
   ], requestedSeconds: seconds, expectedTimesliceMs, maxTailExposureS, referenceSeconds, progress: [], evidenceDir, summaryPath };
   const checkpoint = stage => {
@@ -226,15 +277,15 @@ async function runMainCrashQualification(opts = {}) {
       if (state.phase !== 'recording') throw new Error('Capture left recording phase before crash injection');
       await sleep(Math.min(5000, Math.max(1, seconds * 1000 - (performance.now() - started))));
     }
-    let before, chunks, observationHostAt;
+    let before, chunks, observation;
     for (let attempt = 0; attempt < 5; attempt++) {
       const state = await recordingSnapshot(first);
       if (!/^[a-f0-9-]{36}$/i.test(state.recordId || '')) throw new Error('Invalid synthetic recording ID');
       result.recordId = state.recordId;
       const recordingDir = assertSyntheticPath(path.join(first.recordingsDir, state.recordId));
       chunks = await snapshotChunks(recordingDir, state.acknowledgedChunks);
-      before = await recordingSnapshot(first);
-      observationHostAt = performance.now();
+      observation = await bracketRecordingSnapshot(first);
+      before = observation.snapshot;
       if (before.acknowledgedChunks === state.acknowledgedChunks) break;
       before = null;
     }
@@ -248,7 +299,8 @@ async function runMainCrashQualification(opts = {}) {
     if (first.findOutputFile()) throw new Error('An output already existed before the abrupt crash');
     checkpoint('durable-prefix-established');
     result.crash = await killOwnedApp(first);
-    result.observationToExitSeconds = (performance.now() - observationHostAt) / 1000;
+    result.observationTiming = observationExitEvidence(observation, performance.now());
+    result.observationToExitSeconds = result.observationTiming.requestToExitUpperSeconds;
     await first.close({ keepProfile: true });
     result.crashSurvivors = await snapshotChunks(recordingDir);
     const survivorProblems = compareChunks(chunks, result.crashSurvivors);
@@ -257,6 +309,15 @@ async function runMainCrashQualification(opts = {}) {
     const rawPrefix = assertSyntheticPath(path.join(evidenceDir, 'crash-durable-prefix.webm'));
     await concatenateFiles(result.crashSurvivors.map(chunk => path.join(recordingDir, chunk.relativePath)), rawPrefix);
     result.rawPrefix = rawPrefix;
+    // A chunk may finish writing after the last acknowledgement snapshot but
+    // before termination. It belongs in recovery, not in the earlier snapshot.
+    const acknowledgedIndices = new Set(chunks.map(chunk => chunk.index));
+    const acknowledgedSources = result.crashSurvivors.filter(chunk => acknowledgedIndices.has(chunk.index));
+    if (acknowledgedSources.length !== chunks.length) throw new Error('Missing acknowledged source for timing verification');
+    const acknowledgedPrefix = acknowledgedSources.length === result.crashSurvivors.length ? rawPrefix
+      : assertSyntheticPath(path.join(evidenceDir, 'acknowledged-prefix.webm'));
+    if (acknowledgedPrefix !== rawPrefix) await concatenateFiles(acknowledgedSources.map(chunk => path.join(recordingDir, chunk.relativePath)), acknowledgedPrefix);
+    result.acknowledgedPrefix = acknowledgedPrefix;
     checkpoint('restarting-same-profile');
 
     recovered = new AppDriver({ name: name + '-restarted', appDir, userDataDir: first.userDataDir,
@@ -293,6 +354,7 @@ async function runMainCrashQualification(opts = {}) {
     result.screenshot = await recovered.screenshot(name + '-recovered-history');
     checkpoint('verifying-durable-prefix');
     result.originalPcm = await decodedFingerprint(rawPrefix);
+    result.acknowledgedPcm = acknowledgedPrefix === rawPrefix ? result.originalPcm : await decodedFingerprint(acknowledgedPrefix);
     result.recoveredPcm = await decodedFingerprint(output);
     if (result.originalPcm.sha256 !== result.recoveredPcm.sha256 || result.originalPcm.bytes !== result.recoveredPcm.bytes) {
       result.problems.push('Final recovery changed or omitted audio from the crash-surviving durable prefix');
@@ -303,12 +365,14 @@ async function runMainCrashQualification(opts = {}) {
     result.problems.push(...result.endpointCoverage.problems);
     const native = before.capture?.recorders?.at(-1);
     if (native?.startedAt == null || native.state !== 'recording') throw new Error('Missing active native recording evidence at crash');
-    result.tailExposure = { nativeSecondsAtLastObservation: (before.capture.at - native.startedAt) / 1000,
-      durableAudioSeconds: result.originalPcm.durationS, acknowledgedChunkCount: chunks.length,
+    result.tailExposure = { ...calculateTailExposure({
+      nativeSecondsAtLastObservation: (before.capture.at - native.startedAt) / 1000,
+      startCallSecondsAtLastObservation: result.captureTiming.startCallElapsedS,
+      acknowledgedAudioSeconds: result.acknowledgedPcm.durationS,
+      durableAudioSeconds: result.originalPcm.durationS, observationToExitSeconds: result.observationToExitSeconds }),
+      acknowledgedChunkCount: chunks.length,
       nativeEventsAtLastObservation: native.events, nativeBytesAtLastObservation: native.bytes,
       acknowledgedBytes: chunks.reduce((total, chunk) => total + chunk.bytes, 0), crashSurvivingBytes: result.crashSurvivors.reduce((total, chunk) => total + chunk.bytes, 0) };
-    result.tailExposure.notYetDurableSecondsAtLastObservation = Math.max(0, result.tailExposure.nativeSecondsAtLastObservation - result.originalPcm.durationS);
-    result.tailExposure.tailUpperBoundIncludingTerminationDelayS = Math.max(0, result.tailExposure.nativeSecondsAtLastObservation + result.observationToExitSeconds - result.originalPcm.durationS);
     result.problems.push(...tailExposureProblems(result.tailExposure, maxTailExposureS));
     result.pass = result.problems.length === 0;
   } catch (error) { result.failureStage = result.stage; result.problems.push(error.stack || error.message); }
@@ -327,4 +391,4 @@ async function runMainCrashQualification(opts = {}) {
 }
 
 module.exports = { runMainCrashQualification, killOwnedApp, snapshotChunks, compareChunks, prefixEndpointCoverage, assertSyntheticPath,
-  parseCrashOptions, captureTimingEvidence, tailExposureProblems };
+  parseCrashOptions, captureTimingEvidence, tailExposureProblems, calculateTailExposure, bracketRecordingSnapshot, observationExitEvidence };

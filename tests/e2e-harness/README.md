@@ -81,9 +81,31 @@ durable chunks, abruptly terminates only its own Electron process tree, and
 restarts the same isolated profile. It exercises the real startup recovery scan
 without changing file timestamps. Recovery must retain every original hash,
 preserve the decoded durable audio exactly, upload matching bytes and show a
-recovered History entry. Any tail not yet persisted is measured separately;
+recovered History entry. Crash exposure is estimated separately;
 no audio can be captured while the process is absent. This differs from the
 older renderer-only crash scenario and does not emulate a disk losing power.
+
+The primary estimate subtracts separately decoded **acknowledged-prefix** duration
+from elapsed time since the observed native `start()` call. Extra chunks found
+after termination count toward recovery, but cannot retroactively count as
+acknowledged at the earlier snapshot. The `start` event can arrive after capture
+begins, so event-clock estimates are retained only as secondary diagnostics.
+The conservative call-clock deficit includes initialization uncertainty; it is
+not an exact measurement of lost audio. Legacy `notYetDurable...` and
+`tailUpperBound...` JSON fields alias these estimates for existing readers.
+Future termination estimates include the entire snapshot-request-to-exit interval
+and record the snapshot round-trip uncertainty. Older evidence measured only
+reply-to-exit time; its omitted reply delay cannot be reconstructed as an upper
+bound. This does not affect the call-to-acknowledged metric at the snapshot.
+
+The CLI/CI crash case asserts a native 1000 ms timeslice and a 2.5-second
+call-to-acknowledged regression budget (one-second policy plus the prior 1.5-second
+scheduling allowance). This is not a guaranteed maximum loss interval. Three local
+Windows cases on application commit `2d18544` preserved all acknowledged audio;
+their corrected deficits were 1.43–1.69 seconds, including startup uncertainty.
+Two exceed a stricter 1.5-second budget. Original results used an optimistic
+event-clock/all-survivor calculation and remain preserved separately from the
+corrected analysis; they do not establish a one-second loss guarantee.
 
 Do not rebuild the active bundle, run competing captures, or run unrelated heavy
 tests during a baseline. Intentional contention should be a named fault case.
