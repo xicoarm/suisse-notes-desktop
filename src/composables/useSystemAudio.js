@@ -14,6 +14,13 @@ import { addSystemAudioStream } from '../services/recordingService';
 // system audio into a subsequent recording where the user had it DISABLED.
 let _activeMonitorRemove = null;
 
+// App-lifetime stop paths have no RecordPage/composable instance to call.
+// Release the owning Windows capture and revoke its asynchronous rebinds;
+// the caller still owns recording-mix teardown and macOS helper shutdown.
+export function stopSystemAudioRebindMonitor() {
+  _activeMonitorRemove?.({ releaseCapture: true });
+}
+
 export function useSystemAudio() {
   let captureGeneration = 0;
   const systemAudioEnabled = ref(false);
@@ -268,17 +275,24 @@ export function useSystemAudio() {
     navigator.mediaDevices.addEventListener('devicechange', _onDeviceChange);
   };
 
-  const removeRebindMonitor = () => {
+  const removeRebindMonitor = ({ releaseCapture = false } = {}) => {
     // Acquisitions cannot be cancelled, but a detached monitor no longer owns
     // their result. A subsequent capture may start its own rebind immediately.
     activeRebind = null;
-    if (!monitorInstalled) return;
-    monitorInstalled = false;
-    if (_activeMonitorRemove === removeRebindMonitor) _activeMonitorRemove = null;
-    navigator.mediaDevices.removeEventListener('devicechange', _onDeviceChange);
+    if (monitorInstalled) {
+      monitorInstalled = false;
+      if (_activeMonitorRemove === removeRebindMonitor) _activeMonitorRemove = null;
+      navigator.mediaDevices.removeEventListener('devicechange', _onDeviceChange);
+    }
     if (rebindTimer) {
       clearTimeout(rebindTimer);
       rebindTimer = null;
+    }
+    if (releaseCapture) {
+      captureGeneration++;
+      const stoppedStream = systemAudioStream.value;
+      systemAudioStream.value = null;
+      stoppedStream?.getTracks().forEach(track => track.stop());
     }
   };
 

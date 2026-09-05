@@ -20,7 +20,7 @@ vi.mock('../../src/services/recordingService', () => ({
   addSystemAudioStream: vi.fn()
 }));
 
-import { useSystemAudio } from '../../src/composables/useSystemAudio';
+import { useSystemAudio, stopSystemAudioRebindMonitor } from '../../src/composables/useSystemAudio';
 import { addSystemAudioStream } from '../../src/services/recordingService';
 
 class FakeMediaStream {
@@ -179,6 +179,69 @@ describe('useSystemAudio — Windows loopback rebind on devicechange', () => {
 
     expect(mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
     expect(addSystemAudioStream).not.toHaveBeenCalled();
+  });
+
+  it('releases the page-owned capture and cancels its scheduled rebind from a standalone stop', async () => {
+    const initial = await startCapture();
+    fireDeviceChange();
+    await vi.advanceTimersByTimeAsync(500);
+    stopSystemAudioRebindMonitor();
+    stopSystemAudioRebindMonitor(); // App/page stop paths may both participate.
+
+    expect(deviceChangeListeners.size).toBe(0);
+    expect(sysAudio.systemAudioStream.value).toBeNull();
+    initial.getAudioTracks().forEach(track => expect(track.stop).toHaveBeenCalledOnce());
+    fireDeviceChange();
+    // Even an already-queued ended callback from the old track cannot rebind.
+    const ended = initial.getAudioTracks()[0].addEventListener.mock.calls.find(([event]) => event === 'ended')[1];
+    ended();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
+    expect(addSystemAudioStream).not.toHaveBeenCalled();
+  });
+
+  it('disposes a rebind that returns after standalone stop without any page-owned stop call', async () => {
+    await startCapture();
+    const pending = deferred();
+    mediaDevices.getUserMedia.mockReturnValueOnce(pending.promise);
+    fireDeviceChange();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+    stopSystemAudioRebindMonitor();
+
+    const late = makeLoopbackStream();
+    pending.resolve(late);
+    await vi.advanceTimersByTimeAsync(0);
+    late.getTracks().forEach(track => expect(track.stop).toHaveBeenCalledOnce());
+    expect(sysAudio.systemAudioStream.value).toBeNull();
+    expect(addSystemAudioStream).not.toHaveBeenCalled();
+    fireDeviceChange();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+  });
+
+  it('allows fresh capture after standalone stop while disposing the previous pending rebind', async () => {
+    await startCapture();
+    const pending = deferred();
+    mediaDevices.getUserMedia.mockReturnValueOnce(pending.promise);
+    fireDeviceChange();
+    await vi.advanceTimersByTimeAsync(1500);
+    stopSystemAudioRebindMonitor();
+    const replacement = await sysAudio.startCapture('rec-2');
+    expect(replacement).toBeTruthy();
+    expect(deviceChangeListeners.size).toBe(1);
+
+    const late = makeLoopbackStream();
+    pending.resolve(late);
+    await vi.advanceTimersByTimeAsync(0);
+    late.getAudioTracks().forEach(track => expect(track.stop).toHaveBeenCalledOnce());
+    expect(sysAudio.systemAudioStream.value).toBe(replacement);
+    expect(addSystemAudioStream).not.toHaveBeenCalled();
+    fireDeviceChange();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mediaDevices.getUserMedia).toHaveBeenCalledTimes(4);
+    expect(addSystemAudioStream).toHaveBeenCalledTimes(1);
+    await sysAudio.stopCapture();
   });
 
   it('disposes a late loopback stream after stop while permission acquisition was pending', async () => {
