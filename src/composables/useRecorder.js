@@ -359,8 +359,11 @@ export function useRecorder() {
     captureRecoveryFailed.value = null;
     chunkSaveError.value = null;
 
-    // Use user's remaining minutes as max duration if not specified
-    const maxSeconds = maxRecordingSeconds ?? minutesStore.remainingSeconds;
+    // No automatic cap at the remaining minutes: the server accepts a recording
+    // started with minutes left in full and stops the balance at 0. Stopping at
+    // the balance cut meetings off, and the ~1 s overshoot alone got the whole
+    // recording rejected. An explicit cap from the caller still applies.
+    const maxSeconds = maxRecordingSeconds;
 
     const startResult = await recordingService.startRecording({
       recordingStore,
@@ -388,12 +391,9 @@ export function useRecorder() {
     minutesLimitWarning.value = null;
     minutesLimitReached.value = false;
 
-    // Calculate remaining seconds based on already recorded duration
-    const remainingMinutesSeconds = minutesStore.remainingSeconds;
-    const alreadyRecorded = recordingStore.duration;
-    const maxSeconds = remainingMinutesSeconds > 0 ? remainingMinutesSeconds + alreadyRecorded : null;
-
-    recordingService.resumeRecording(recordingStore, isAutoSplitting, maxSeconds);
+    // No cap at the remaining minutes (see startRecording); null keeps the
+    // recording's existing limit.
+    recordingService.resumeRecording(recordingStore, isAutoSplitting, null);
   };
 
   // Stop recording
