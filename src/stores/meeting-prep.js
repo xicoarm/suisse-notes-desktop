@@ -12,7 +12,7 @@
  *   (contextText / templateId / templatePrefill / contextFileIds). The same
  *   object is persisted on the history record (`prep`) so offline retries and
  *   crash recovery re-send it — see LOCAL_ONLY_FIELDS in recordings-history.
- * - Device-sync settings (ask on Suisse Notes Pro sync / defaults) live here
+ * - Device-sync settings (ask on Suisse Meets Pro sync / defaults) live here
  *   too and are persisted like transcription settings.
  */
 
@@ -81,7 +81,7 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
     templatesFetchedAt: 0,
     sectionsByTemplate: {},   // { templateId: [{ key, label, kind }] }
 
-    // --- device-sync (Suisse Notes Pro) settings, persisted ---
+    // --- device-sync (Suisse Meets Pro) settings, persisted ---
     askOnDeviceSync: true,
     deviceSyncDefaultTemplateId: null,
     deviceSyncDefaultContext: '',
@@ -409,7 +409,7 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
     },
 
     // ------------------------------------------------------------------
-    // Suisse Notes Pro device-sync prompt ("context? template?" before the
+    // Suisse Meets Pro device-sync prompt ("context? template?" before the
     // upload of a device recording). The pipeline WAITS until answered —
     // skipping is always possible, and with askOnDeviceSync=false the saved
     // defaults are applied fully automatically.

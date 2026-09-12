@@ -170,11 +170,9 @@
             <span>{{ $t('deviceRecordingsSection') }}</span>
             <span class="section-count">{{ historyStore.deviceRecordings.length }}</span>
           </div>
-          <RecordingHistoryCard
-            v-for="recording in historyStore.deviceRecordings"
-            :key="recording.id"
-            :recording="recording"
-            :uploading="uploadingRecordingId === recording.id"
+          <HistoryDayGroups
+            :recordings="historyStore.deviceRecordings"
+            :uploading-id="uploadingRecordingId"
             @upload="handleUpload"
             @retry="handleUpload"
             @reupload="handleReupload"
@@ -197,11 +195,9 @@
             <span>{{ $t('appRecordingsSection') }}</span>
             <span class="section-count">{{ historyStore.appRecordings.length }}</span>
           </div>
-          <RecordingHistoryCard
-            v-for="recording in historyStore.appRecordings"
-            :key="recording.id"
-            :recording="recording"
-            :uploading="uploadingRecordingId === recording.id"
+          <HistoryDayGroups
+            :recordings="historyStore.appRecordings"
+            :uploading-id="uploadingRecordingId"
             @upload="handleUpload"
             @retry="handleUpload"
             @reupload="handleReupload"
@@ -213,7 +209,21 @@
         </div>
       </template>
 
-      <!-- Desktop or no device recordings: flat chronological list -->
+      <!-- Mobile without device recordings: one chronological list, grouped by day -->
+      <HistoryDayGroups
+        v-else-if="isMobile"
+        :recordings="historyStore.allRecordings"
+        :uploading-id="uploadingRecordingId"
+        @upload="handleUpload"
+        @retry="handleUpload"
+        @reupload="handleReupload"
+        @deleted="onRecordingDeleted"
+        @cancel-transfer="handleCancelTransfer"
+        @resync="handleResync"
+        @answer-prep="handleAnswerPrep"
+      />
+
+      <!-- Desktop: flat chronological list -->
       <template v-else>
         <RecordingHistoryCard
           v-for="recording in historyStore.allRecordings"
@@ -245,8 +255,10 @@ import { isElectron, isCapacitor, isMobile as isMobilePlatform } from '../utils/
 import { uploadWithVerification } from '../services/upload';
 import { getApiUrlSync } from '../services/api';
 import { pickAudioFile } from '../services/filePicker';
-import { captureException, captureMessage } from '../boot/sentry';
+import { captureException, addBreadcrumb } from '../boot/sentry';
 import RecordingHistoryCard from '../components/RecordingHistoryCard.vue';
+import HistoryDayGroups from '../components/HistoryDayGroups.vue';
+import { humanizeBleError } from '../utils/bleErrors';
 
 // An upload can "fail" for reasons that are normal product states rather than
 // defects — most commonly the user is out of transcription minutes. The backend
@@ -261,15 +273,19 @@ const isExpectedUploadFailure = (info) => {
   if (info.insufficientMinutes === true) return true;
   if (info.status === 402) return true;
   if (info.code === 'INSUFFICIENT_MINUTES') return true;
+  // Any final server verdict (no speech detected, too long, …) or a plain
+  // network outage is a product/environment state, not an app defect.
+  if (info.canRetry === false) return true;
   const text = info.error || info.message || '';
-  return /insufficient minutes|min remaining|purchase more minutes|upgrade your plan|out of minutes/i.test(text);
+  return /insufficient minutes|min remaining|purchase more minutes|upgrade your plan|out of minutes|keine Sprache|no speech|Failed to fetch|Load failed|Network error|No internet/i.test(text);
 };
 
 export default {
   name: 'HistoryPage',
 
   components: {
-    RecordingHistoryCard
+    RecordingHistoryCard,
+    HistoryDayGroups
   },
 
   setup() {
@@ -287,9 +303,9 @@ export default {
 
     const uploadStatusText = computed(() => {
       if (retryAttempt.value > 0) {
-        return `Retry attempt ${retryAttempt.value}... ${uploadProgress.value}%`;
+        return t('historyRetryProgress', { attempt: retryAttempt.value, percent: uploadProgress.value });
       }
-      return `Uploading... ${uploadProgress.value}%`;
+      return t('historyUploadingProgress', { percent: uploadProgress.value });
     });
 
     const goToRecord = () => {
@@ -311,7 +327,7 @@ export default {
       if (!authStore.isAuthenticated) {
         $q.notify({
           type: 'warning',
-          message: 'Please login to upload recordings'
+          message: t('historyLoginRequired')
         });
         return;
       }
@@ -319,7 +335,7 @@ export default {
       if (!recording.filePath) {
         $q.notify({
           type: 'negative',
-          message: 'Recording file not found. It may have been deleted.'
+          message: t('historyFileMissing')
         });
         return;
       }
@@ -406,27 +422,15 @@ export default {
             uploadError: null
           });
 
-          // P0 Data Loss Fix: Handle delete after upload with lock check
-          if (recording.storagePreference === 'delete_after_upload') {
-            if (result.canDelete && recordingStore.canDelete(recording.id)) {
-              try {
-                if (isElectron()) {
-                  await window.electronAPI.recording.deleteRecording(recording.id);
-                }
-                // On mobile, skip file deletion for now (files managed by storage service)
-                await historyStore.updateRecording(recording.id, { filePath: null });
-                recordingStore.unlockFile(recording.id);
-              } catch (e) {
-                console.warn('Could not delete file after upload:', e);
-              }
-            } else {
-              console.warn('File not deleted: upload not verified or file is locked');
-            }
+          // "Delete after upload" — one implementation for both platforms.
+          recordingStore.unlockFile(recording.id);
+          if (result.canDelete) {
+            try { await historyStore.applyStoragePreference(recording.id); } catch (e) { console.warn('Could not delete file after upload:', e); }
           }
 
           $q.notify({
             type: 'positive',
-            message: 'Recording uploaded successfully'
+            message: t('uploadSuccessful')
           });
         } else {
           await historyStore.updateRecording(recording.id, {
@@ -435,9 +439,9 @@ export default {
           });
 
           if (isExpectedUploadFailure(result)) {
-            // Out of minutes / payment required — expected product state, not a
-            // defect. Log at info for trend visibility; no error-level alert.
-            captureMessage(`History upload declined (expected): ${result.error || 'quota'}`, 'info');
+            // Out of minutes / server verdict / offline — expected state, not a
+            // defect. Breadcrumb for context; no Sentry event.
+            addBreadcrumb({ category: 'upload', message: `History upload declined (expected): ${result.error || 'quota'}`, level: 'info' });
           } else {
             captureException(new Error(`History upload failed: ${result.error || 'unknown'}`), {
               tags: { action: 'history_upload', upload_path: 'history_card' },
@@ -447,7 +451,7 @@ export default {
 
           $q.notify({
             type: 'negative',
-            message: result.error || 'Upload failed',
+            message: result.error || t('uploadFailed'),
             timeout: 5000
           });
         }
@@ -458,7 +462,7 @@ export default {
         });
 
         if (isExpectedUploadFailure(error)) {
-          captureMessage(`History upload declined (expected): ${error.message || 'quota'}`, 'info');
+          addBreadcrumb({ category: 'upload', message: `History upload declined (expected): ${error.message || 'quota'}`, level: 'info' });
         } else {
           captureException(error, {
             tags: { action: 'history_upload', upload_path: 'history_card' },
@@ -468,7 +472,7 @@ export default {
 
         $q.notify({
           type: 'negative',
-          message: error.message || 'Upload error',
+          message: error.message || t('uploadFailed'),
           timeout: 5000
         });
       } finally {
@@ -495,7 +499,7 @@ export default {
       }
     };
 
-    // Suisse Notes Pro: record is waiting for the context/template answer
+    // Suisse Meets Pro: record is waiting for the context/template answer
     // ('pending_prep'). Re-open the prompt; on answer the record becomes
     // 'pending' and the auto-retry/upload paths take over with the prep set.
     const handleAnswerPrep = async (recording) => {
@@ -557,6 +561,8 @@ export default {
         }
       } catch (e) {
         console.warn('Resync error:', e);
+        if (e?.message === 'cancelled') return;
+        $q.notify({ type: 'negative', message: t('syncFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
         captureException(e, {
           tags: { action: 'history_resync' },
           extra: { recordingId: recording.id, deviceFilename: recording.deviceFilename }
@@ -617,7 +623,7 @@ export default {
     const onRecordingDeleted = () => {
       $q.notify({
         type: 'info',
-        message: 'Recording deleted'
+        message: t('recordingDeleted')
       });
     };
 

@@ -161,6 +161,7 @@
           no-caps
           color="grey-7"
           :label="$t('deviceSyncSkip')"
+          data-test="prep-skip"
           :disable="uploading"
           @click="answer(null)"
         />
@@ -169,6 +170,7 @@
           no-caps
           color="primary"
           :label="$t('deviceSyncContinue')"
+          data-test="prep-continue"
           :loading="uploading"
           :disable="uploading"
           @click="answer(buildFields())"

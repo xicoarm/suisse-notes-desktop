@@ -69,6 +69,7 @@ export const useRecordingStore = defineStore('recording', {
     // Recovery state
     recoveryInProgress: false,
     _recoveryPromise: null, // P1 Fix: Promise to await before starting new recording
+    _recoveryRunPromise: null, // in-flight checkRecoveryState() — concurrent callers join it
     // Mobile-specific state
     appInBackground: false,
     networkConnected: true,
@@ -143,6 +144,14 @@ export const useRecordingStore = defineStore('recording', {
               }
             } catch (e) {
               console.warn('Could not refresh minutes on foreground:', e);
+            }
+            // Custom vocabulary may have been edited on the web meanwhile (throttled).
+            try {
+              const { useTranscriptionSettingsStore } = await import('./transcription-settings');
+              const settingsStore = useTranscriptionSettingsStore();
+              if (settingsStore.loaded) settingsStore.syncFromServer();
+            } catch (e) {
+              console.warn('Could not refresh custom vocabulary on foreground:', e);
             }
             // Check for recovery needs when coming back
             await this._processRecovery('foreground');
@@ -250,14 +259,23 @@ export const useRecordingStore = defineStore('recording', {
 
         // Check storage before starting (V1 fix)
         const storageCheck = await checkStorageBeforeRecording();
+        const storageWarning = storageCheck.status === 'low'
+          ? t('storageLowWarning', { freeMB: storageCheck.freeMB })
+          : (storageCheck.status === 'critical'
+            ? t('storageCriticalCannotStart', { freeMB: storageCheck.freeMB, minMB: PlatformConstants.MIN_STORAGE_MB })
+            : storageCheck.message);
         this.storageStatus = {
           status: storageCheck.status,
           freeMB: storageCheck.freeMB,
-          warning: storageCheck.message
+          warning: storageWarning
         };
 
         if (!storageCheck.canStart) {
-          throw new Error(storageCheck.message || 'Insufficient storage to start recording');
+          // Localized, actionable — not squeezed through the disk-error humanizer.
+          this.error = storageWarning || 'Insufficient storage to start recording';
+          this.phase = 'error';
+          sentryRecordingError(this.recordId, new Error(`cannot start: storage critical (${storageCheck.freeMB}MB free)`));
+          return { success: false, error: this.error, storageCritical: true };
         }
 
         this.recordId = uuidv4();
@@ -315,7 +333,7 @@ export const useRecordingStore = defineStore('recording', {
         });
 
         sentryRecordingStart(this.recordId);
-        return { success: true, recordId: this.recordId, storageWarning: storageCheck.message };
+        return { success: true, recordId: this.recordId, storageWarning };
       } catch (error) {
         this.error = describeStorageError(error);
         this.phase ='error';
@@ -402,7 +420,18 @@ export const useRecordingStore = defineStore('recording', {
               this.duration = nativeDuration;
             }
             sentryRecordingStop(this.recordId, this.duration);
-            return { success: true, filePath: result.outputPath, fileSize: result.fileSize, duration: nativeDuration };
+            return {
+              success: true,
+              filePath: result.outputPath,
+              fileSize: result.fileSize,
+              duration: nativeDuration,
+              // Gap forensics so the page can warn the user and persist it on
+              // the history entry (never silently ship a file with holes).
+              hadGaps: result.hadGaps,
+              gapCount: result.gapCount || 0,
+              expectedCount: result.expectedCount || 0,
+              chunkCount: result.chunkCount || 0
+            };
           } else {
             throw new Error(result.error || 'Failed to combine recording chunks');
           }
@@ -511,8 +540,19 @@ export const useRecordingStore = defineStore('recording', {
       }
     },
 
-    // Check for recordings that need recovery — auto-combines chunks and returns recovered recordings
+    // Check for recordings that need recovery — auto-combines chunks and returns recovered recordings.
+    // Concurrent callers (App.vue startup scan, the 3s cold-start scan, a
+    // foreground scan) share ONE run: two scans combining the same orphaned
+    // recording at once would race the native combiner against the chunk GC.
     async checkRecoveryState() {
+      if (this._recoveryRunPromise) return this._recoveryRunPromise;
+      this._recoveryRunPromise = this._checkRecoveryStateInternal().finally(() => {
+        this._recoveryRunPromise = null;
+      });
+      return this._recoveryRunPromise;
+    },
+
+    async _checkRecoveryStateInternal() {
       this.recoveryInProgress = true;
       try {
         if (isElectron()) {
@@ -521,11 +561,15 @@ export const useRecordingStore = defineStore('recording', {
           console.log('Recovery check: Electron handles recovery on startup');
           return { success: true, recovered: false, recordings: [] };
         } else if (isCapacitor()) {
+          // Android: move legacy public-Documents data into the app-private
+          // directory BEFORE scanning, so a recording is never combined in one
+          // location while being moved to the other.
+          try { await storage.ensureAndroidStorageMigrated(); } catch (e) { /* best-effort */ }
+
           // Capacitor: Scan for recordings with 'recording' or 'interrupted' status
           const listResult = await storage.listFiles('recordings');
 
-          if (!listResult.success || !listResult.files) {
-            console.log('No recordings directory or empty');
+          if (!listResult.success || !listResult.files || listResult.files.length === 0) {
             return { success: true, recovered: false, recordings: [] };
           }
 
@@ -796,18 +840,19 @@ export const useRecordingStore = defineStore('recording', {
 
           const gapMsg = `Chunk sequence has ${validation.gaps.length} gap(s) at indices [${validation.gaps.slice(0, 10).join(', ')}${validation.gaps.length > 10 ? '...' : ''}]. Found ${validation.chunkCount}/${validation.expectedCount} chunks.`;
 
-          if (!isRecovery) {
-            // Normal path: hard fail — do not produce audio with hidden gaps
-            console.error('Chunk gap detected (hard fail):', gapMsg);
-            return { success: false, error: `Chunk integrity failure: ${gapMsg}`, gapDetected: true, gaps: validation.gaps };
-          }
-
-          // Recovery path: ALWAYS proceed with whatever chunks exist. For a
-          // crashed/orphaned recording, partial audio is strictly better than
-          // discarding the user's recording — previously a <50% recovery was
-          // refused, throwing away e.g. an hour of a gappy 3h meeting. The gap
-          // is reported below so the loss is quantified, never hidden.
-          console.warn(`Chunk gap detected (recovery mode, proceeding with ${validation.chunkCount}/${validation.expectedCount} chunks): ${gapMsg}`);
+          // ALWAYS proceed with whatever chunks exist, on the normal stop path
+          // too. Until 3.9.36 a gap at stop time was a hard failure: the user
+          // saw "Failed to process recording", the file only reappeared after
+          // the next app launch as a "recovered" recording — with exactly the
+          // same gaps. Partial audio NOW, with the loss quantified and shown
+          // (the caller persists a capture warning on the history entry), is
+          // strictly better than an error followed by the same partial audio
+          // later. Sentry keeps the signal so the root cause stays visible.
+          console.warn(`Chunk gap detected (${isRecovery ? 'recovery' : 'stop'} mode, proceeding with ${validation.chunkCount}/${validation.expectedCount} chunks): ${gapMsg}`);
+          try {
+            const { captureMessage } = await import('../boot/sentry');
+            captureMessage(`recording: chunk gaps at ${isRecovery ? 'recovery' : 'stop'} — ${gapMsg}`, 'warning');
+          } catch (e) { /* sentry optional */ }
         }
 
         // Use native plugin for proper M4A/AAC combining via platform APIs
@@ -845,7 +890,9 @@ export const useRecordingStore = defineStore('recording', {
             fileSize: result.fileSize,
             chunkCount: result.chunkCount,
             duration: result.duration ? Math.round(result.duration) : null,
-            hadGaps: validation.gaps.length > 0 ? validation.gaps : undefined
+            hadGaps: validation.gaps.length > 0 ? validation.gaps : undefined,
+            gapCount: validation.gaps.length,
+            expectedCount: validation.expectedCount
           };
         }
         return { success: false, error: result.error || 'Native combine failed' };

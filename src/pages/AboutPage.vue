@@ -227,7 +227,7 @@
         <div class="legal-links">
           <a
             href="#"
-            @click.prevent="openLegalLink('https://suisse-notes.ch/privacy')"
+            @click.prevent="openLegalLink('https://suisse-meets.ch/privacy')"
           >
             <q-icon
               name="privacy_tip"
@@ -238,7 +238,7 @@
           <span class="divider">|</span>
           <a
             href="#"
-            @click.prevent="openLegalLink('https://suisse-notes.ch/terms')"
+            @click.prevent="openLegalLink('https://suisse-meets.ch/terms')"
           >
             <q-icon
               name="description"
@@ -249,7 +249,7 @@
           <span class="divider">|</span>
           <a
             href="#"
-            @click.prevent="openLegalLink('https://suisse-notes.ch/impressum')"
+            @click.prevent="openLegalLink('https://suisse-meets.ch/impressum')"
           >
             <q-icon
               name="info"

@@ -3,22 +3,23 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   isElectron: vi.fn(() => false),
   isCapacitor: vi.fn(() => false),
-  fsStat: vi.fn(),
-  fsCopy: vi.fn(),
-  fsDelete: vi.fn(),
-  fsGetUri: vi.fn(),
+  statFile: vi.fn(),
+  copyToCache: vi.fn(),
+  getFileUri: vi.fn(),
   share: vi.fn(),
   captureMessage: vi.fn(),
+  addBreadcrumb: vi.fn(),
 }));
 
 vi.mock('../../src/utils/platform', () => ({
   isElectron: mocks.isElectron,
   isCapacitor: mocks.isCapacitor,
 }));
-vi.mock('../../src/boot/sentry', () => ({ captureMessage: mocks.captureMessage }));
-vi.mock('@capacitor/filesystem', () => ({
-  Filesystem: { stat: mocks.fsStat, copy: mocks.fsCopy, deleteFile: mocks.fsDelete, getUri: mocks.fsGetUri },
-  Directory: { Documents: 'DOCUMENTS', Cache: 'CACHE' },
+vi.mock('../../src/boot/sentry', () => ({ captureMessage: mocks.captureMessage, addBreadcrumb: mocks.addBreadcrumb }));
+vi.mock('../../src/services/storage', () => ({
+  statFile: mocks.statFile,
+  copyToCache: mocks.copyToCache,
+  getFileUri: mocks.getFileUri,
 }));
 vi.mock('@capacitor/share', () => ({ Share: { share: mocks.share } }));
 
@@ -78,22 +79,16 @@ describe('exportAudio', () => {
 
   it('on Capacitor, checks source, copies into Cache, then shares the copy uri; returns shared:true', async () => {
     mocks.isCapacitor.mockReturnValue(true);
-    mocks.fsStat.mockResolvedValue({ size: 12345 });
-    mocks.fsDelete.mockRejectedValue(new Error('not found')); // no stale copy
-    mocks.fsCopy.mockResolvedValue({ uri: 'file:///cache/Call_2026-05-29.webm' });
+    mocks.statFile.mockResolvedValue({ success: true, size: 12345 });
+    mocks.copyToCache.mockResolvedValue({ success: true, uri: 'file:///cache/Call_2026-05-29.webm' });
     mocks.share.mockResolvedValue({});
 
     const res = await exportAudio({
       title: 'Call', createdAt: '2026-05-29T10:00:00Z', filePath: 'recordings/r1/combined.webm',
     });
 
-    expect(mocks.fsStat).toHaveBeenCalledWith({ path: 'recordings/r1/combined.webm', directory: 'DOCUMENTS' });
-    expect(mocks.fsCopy).toHaveBeenCalledWith({
-      from: 'recordings/r1/combined.webm',
-      directory: 'DOCUMENTS',
-      to: 'Call_2026-05-29.webm',
-      toDirectory: 'CACHE',
-    });
+    expect(mocks.statFile).toHaveBeenCalledWith('recordings/r1/combined.webm');
+    expect(mocks.copyToCache).toHaveBeenCalledWith('recordings/r1/combined.webm', 'Call_2026-05-29.webm');
     expect(mocks.share).toHaveBeenCalledWith({
       title: 'Call_2026-05-29.webm',
       files: ['file:///cache/Call_2026-05-29.webm'],
@@ -103,34 +98,32 @@ describe('exportAudio', () => {
 
   it('on Capacitor, falls back to sharing the original in place if the cache copy fails', async () => {
     mocks.isCapacitor.mockReturnValue(true);
-    mocks.fsStat.mockResolvedValue({ size: 10 });
-    mocks.fsDelete.mockResolvedValue({});
-    mocks.fsCopy.mockRejectedValue(new Error('copy not permitted'));
-    mocks.fsGetUri.mockResolvedValue({ uri: 'file:///docs/recordings/r1/combined.webm' });
+    mocks.statFile.mockResolvedValue({ success: true, size: 10 });
+    mocks.copyToCache.mockResolvedValue({ success: false, error: 'copy not permitted' });
+    mocks.getFileUri.mockResolvedValue({ success: true, uri: 'file:///docs/recordings/r1/combined.webm' });
     mocks.share.mockResolvedValue({});
 
     const res = await exportAudio({ title: 'x', filePath: 'recordings/r1/combined.webm' });
 
-    expect(mocks.fsGetUri).toHaveBeenCalledWith({ path: 'recordings/r1/combined.webm', directory: 'DOCUMENTS' });
+    expect(mocks.getFileUri).toHaveBeenCalledWith('recordings/r1/combined.webm');
     expect(mocks.share).toHaveBeenCalledWith({ title: 'x.webm', files: ['file:///docs/recordings/r1/combined.webm'] });
     expect(res).toEqual({ success: true, shared: true });
   });
 
   it('on Capacitor, returns source_missing (without copying) when the file is gone', async () => {
     mocks.isCapacitor.mockReturnValue(true);
-    mocks.fsStat.mockRejectedValue(new Error('File does not exist'));
+    mocks.statFile.mockResolvedValue({ success: false, error: 'File does not exist' });
 
     const res = await exportAudio({ title: 'x', filePath: 'recordings/gone/combined.webm' });
     expect(res).toEqual({ success: false, error: 'source_missing' });
-    expect(mocks.fsCopy).not.toHaveBeenCalled();
+    expect(mocks.copyToCache).not.toHaveBeenCalled();
     expect(mocks.share).not.toHaveBeenCalled();
   });
 
   it('on Capacitor, treats a dismissed share sheet as cancelled (not an error)', async () => {
     mocks.isCapacitor.mockReturnValue(true);
-    mocks.fsStat.mockResolvedValue({ size: 1 });
-    mocks.fsDelete.mockResolvedValue({});
-    mocks.fsCopy.mockResolvedValue({ uri: 'file:///cache/x.webm' });
+    mocks.statFile.mockResolvedValue({ success: true, size: 1 });
+    mocks.copyToCache.mockResolvedValue({ success: true, uri: 'file:///cache/x.webm' });
     mocks.share.mockRejectedValue(new Error('Share canceled'));
 
     const res = await exportAudio({ title: 'x', filePath: 'recordings/r1/combined.webm' });

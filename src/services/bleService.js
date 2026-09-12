@@ -92,6 +92,12 @@ export class BleDeviceManager {
     this._onDisconnectCallback = null;
     this._recordingStateCallback = null;
     this._downloadAborted = false;
+    // True only while downloadFile() is consuming audio frames. Outside a
+    // download, TYPE_AUDIO frames (real-time recording stream 0x14, or a
+    // stale 0x1C stream the device kept sending after a dropped link) are
+    // discarded in _onNotify instead of poisoning the next command's reply —
+    // the "handshake step1 byte[3]=0x33 raw=[0x02 0x1c …]" failures.
+    this._downloadInProgress = false;
 
     // Command lock: prevents concurrent BLE commands from interleaving responses.
     // Without this, auto-sync keepalive (getBattery) can fire during getFileList,
@@ -120,14 +126,17 @@ export class BleDeviceManager {
     const { BleClient } = await import('@capacitor-community/bluetooth-le');
     this.ble = BleClient;
     const neverForLocation = true;
-    captureMessage(`BLE initialize: androidNeverForLocation=${neverForLocation}, platform=${isAndroid() ? 'android' : 'ios'}`, 'info');
+    addBreadcrumb({ category: 'ble', message: `BLE initialize: androidNeverForLocation=${neverForLocation}, platform=${isAndroid() ? 'android' : 'ios'}`, level: 'info' });
     try {
       await this.ble.initialize({ androidNeverForLocation: neverForLocation });
       this._initialized = true;
-      captureMessage('BLE initialize: SUCCESS — permissions granted', 'info');
+      addBreadcrumb({ category: 'ble', message: 'BLE initialize: SUCCESS — permissions granted', level: 'info' });
     } catch (e) {
       this._initialized = false;
-      captureMessage(`BLE initialize: FAILED — ${e.message}`, 'error');
+      // A denied Bluetooth permission is a user decision, not a defect —
+      // record it as a warning so it stays visible in aggregate without
+      // paging anyone (it was the #3 error-level issue in Sentry).
+      captureMessage(`BLE initialize: FAILED — ${e.message}`, 'warning');
       throw new Error('Bluetooth permissions are required. Please enable Bluetooth and Location permissions in your device settings.');
     }
   }
@@ -144,13 +153,20 @@ export class BleDeviceManager {
     // Check Bluetooth is enabled — prompt user to turn it on if not
     try {
       const bleEnabled = await this.ble.isEnabled();
-      captureMessage(`BLE scan pre-check: bluetooth=${bleEnabled}`, 'info');
+      addBreadcrumb({ category: 'ble', message: `BLE scan pre-check: bluetooth=${bleEnabled}`, level: 'info' });
       if (!bleEnabled) {
-        captureMessage('BLE scan: Bluetooth disabled — requesting enable', 'warning');
-        await this.ble.requestEnable();
-        const rechecked = await this.ble.isEnabled();
+        addBreadcrumb({ category: 'ble', message: 'BLE scan: Bluetooth disabled — requesting enable', level: 'warning' });
+        // requestEnable exists on Android only; iOS users switch Bluetooth on
+        // in Control Center / Settings.
+        let rechecked = false;
+        if (isAndroid()) {
+          await this.ble.requestEnable();
+          rechecked = await this.ble.isEnabled();
+        }
         if (!rechecked) {
-          throw new Error('Bluetooth is required for device scanning. Please enable Bluetooth.');
+          const err = new Error('Bluetooth is required for device scanning. Please enable Bluetooth.');
+          err.code = 'BLE_DISABLED';
+          throw err;
         }
       }
     } catch (e) {
@@ -231,8 +247,9 @@ export class BleDeviceManager {
       await new Promise(r => setTimeout(r, duration));
       await this.stopScan();
 
-      // Log all nearby names to Sentry so we can identify new device variants
-      captureMessage(`BLE name-scan: found=[${[...seen].length}] all_nearby=[${allSeen.join(', ')}]`, 'info');
+      // Only counts leave the device: the names of nearby Bluetooth devices
+      // are the user's environment (people's headphones, cars, TVs).
+      addBreadcrumb({ category: 'ble', message: `BLE name-scan: found=${[...seen].length} nearby_named=${allSeen.length}`, level: 'info' });
     }
 
     addBreadcrumb({
@@ -242,7 +259,7 @@ export class BleDeviceManager {
     });
 
     if (devicesFound === 0) {
-      captureMessage(`BLE scan: 0 devices found. All nearby: [${allSeen.join(', ')}]`, 'warning');
+      captureMessage(`BLE scan: 0 recording devices found (${allSeen.length} other named devices nearby)`, 'warning');
     }
   }
 
@@ -261,10 +278,20 @@ export class BleDeviceManager {
    * Connect to a device and perform handshake
    * @param {string} bleDeviceId - Platform BLE device ID
    * @param {string} appUuid - App's UUID for pairing
+   * @param {Object} [opts]
+   * @param {boolean} [opts.silent] - automatic reconnect: an unreachable device
+   *   is the expected outcome, so failures are breadcrumbs, not Sentry errors
    * @returns {Promise<Object>} Device info from handshake
    */
-  async connect(bleDeviceId, appUuid) {
+  async connect(bleDeviceId, appUuid, { silent = false } = {}) {
     if (!this.ble) await this.initialize();
+    const report = (e, action, extra) => {
+      if (silent) {
+        addBreadcrumb({ category: 'ble', message: `${action} failed (auto): ${e?.message}`, level: 'warning' });
+      } else {
+        captureException(e, { tags: { action }, extra });
+      }
+    };
 
     addBreadcrumb({
       category: 'ble',
@@ -283,32 +310,52 @@ export class BleDeviceManager {
 
     // Ensure the BLE plugin knows about this device (needed for reconnection
     // to previously paired devices without a fresh scan)
+    let knownToPlugin = true;
     try {
       await this.ble.getDevices([bleDeviceId]);
       addBreadcrumb({ category: 'ble', message: 'BLE getDevices OK', level: 'info' });
     } catch (e) {
+      knownToPlugin = false;
       addBreadcrumb({ category: 'ble', message: `BLE getDevices failed: ${e.message}, will try connect anyway`, level: 'warning' });
     }
 
-    // Connect
+    const onDisconnect = (deviceId) => {
+      this.connected = false;
+      this.deviceId = null;
+      addBreadcrumb({ category: 'ble', message: `BLE disconnected: ${deviceId}`, level: 'warning' });
+      // BT-2: immediately fail any in-flight notification read so an active
+      // download/getFileList doesn't block for the full 30s-per-chunk timeout
+      // — a lost device could otherwise hang a multi-chunk transfer for ~50
+      // minutes. Uses a disconnect error (NOT the cancel sentinel) so the
+      // caller retries the file on reconnect instead of skipping it.
+      this._failInflightOnDisconnect();
+      if (this._onDisconnectCallback) {
+        this._onDisconnectCallback(deviceId);
+      }
+    };
+
+    // Connect (BT-4: bound the attempt so an unreachable device can't hang indefinitely)
     try {
-      await this.ble.connect(bleDeviceId, (deviceId) => {
-        this.connected = false;
-        this.deviceId = null;
-        addBreadcrumb({ category: 'ble', message: `BLE disconnected: ${deviceId}`, level: 'warning' });
-        // BT-2: immediately fail any in-flight notification read so an active
-        // download/getFileList doesn't block for the full 30s-per-chunk timeout
-        // — a lost device could otherwise hang a multi-chunk transfer for ~50
-        // minutes. Uses a disconnect error (NOT the cancel sentinel) so the
-        // caller retries the file on reconnect instead of skipping it.
-        this._failInflightOnDisconnect();
-        if (this._onDisconnectCallback) {
-          this._onDisconnectCallback(deviceId);
+      try {
+        await this.ble.connect(bleDeviceId, onDisconnect, { timeout: 15000 });
+      } catch (e) {
+        // Android: after a process restart the plugin may have forgotten a
+        // paired peripheral it never scanned in this process ("Device not
+        // found. Call requestDevice, requestLEScan or getDevices first").
+        // A short service-filtered scan re-registers it; retry once.
+        if (isAndroid() && (!knownToPlugin || /not found/i.test(e?.message || ''))) {
+          addBreadcrumb({ category: 'ble', message: 'Android connect: device unknown to plugin — rediscovery scan + retry', level: 'info' });
+          const seen = await this._rediscover(bleDeviceId, 6000);
+          if (!seen) throw e;
+          await this.ble.connect(bleDeviceId, onDisconnect, { timeout: 15000 });
+        } else {
+          throw e;
         }
-      }, { timeout: 15000 }); // BT-4: bound the connect attempt so an unreachable device can't hang indefinitely
+      }
       addBreadcrumb({ category: 'ble', message: 'BLE connected, starting notifications', level: 'info' });
     } catch (e) {
-      captureException(e, { tags: { action: 'ble_connect' }, extra: { bleDeviceId } });
+      this.deviceId = null;
+      report(e, 'ble_connect', { bleDeviceId });
       throw new Error(`Connection failed: ${e.message}`);
     }
 
@@ -322,7 +369,7 @@ export class BleDeviceManager {
       );
       addBreadcrumb({ category: 'ble', message: 'BLE notifications started, waiting for device handshake', level: 'info' });
     } catch (e) {
-      captureException(e, { tags: { action: 'ble_notifications' }, extra: { bleDeviceId } });
+      report(e, 'ble_notifications', { bleDeviceId });
       throw new Error(`Notification setup failed: ${e.message}`);
     }
 
@@ -345,7 +392,7 @@ export class BleDeviceManager {
         const release = await this._acquireLock();
         try {
           await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
-          await this._readNotification(2000);
+          await this._readResponse(CMD_SYNC_STATE, 2000);
           addBreadcrumb({ category: 'ble', message: 'Cleared potential stale sync-state after connect', level: 'info' });
         } finally {
           release();
@@ -356,10 +403,49 @@ export class BleDeviceManager {
 
       return deviceInfo;
     } catch (e) {
-      captureException(e, { tags: { action: 'ble_handshake' }, extra: { bleDeviceId } });
+      // "already paired to another app" and response timeouts are device
+      // states, not app defects: keep them visible as warnings.
+      if (silent || /rejected pairing|response timeout/i.test(e?.message || '')) {
+        captureMessage(`BLE handshake failed: ${e?.message}`, 'warning');
+      } else {
+        captureException(e, { tags: { action: 'ble_handshake' }, extra: { bleDeviceId } });
+      }
       await this.disconnect();
       throw new Error(`Handshake failed: ${e.message}`);
     }
+  }
+
+  /**
+   * Run a short service-UUID-filtered scan and report whether `bleDeviceId`
+   * advertised. Repopulates the platform's peripheral cache as a side effect
+   * (what makes a subsequent connect() resolve on iOS after a long suspension
+   * and on Android after a process restart).
+   * @returns {Promise<boolean>} true if the device was seen
+   */
+  async _rediscover(bleDeviceId, timeoutMs) {
+    let found = false;
+    const scanStart = Date.now();
+    try {
+      await this.ble.requestLEScan(
+        { services: [BLE_SERVICE_UUID], allowDuplicates: false },
+        (result) => {
+          if (result?.device?.deviceId === bleDeviceId) found = true;
+        }
+      );
+      while (!found && Date.now() - scanStart < timeoutMs) {
+        await new Promise(r => setTimeout(r, 200));
+      }
+    } catch (e) {
+      addBreadcrumb({ category: 'ble', message: `rediscovery scan error: ${e.message}`, level: 'warning' });
+    } finally {
+      try { await this.ble.stopLEScan(); } catch { /* ignore */ }
+    }
+    addBreadcrumb({
+      category: 'ble',
+      message: `rediscovery: target ${found ? 'located' : 'NOT located'} in ${Date.now() - scanStart}ms`,
+      level: found ? 'info' : 'warning'
+    });
+    return found;
   }
 
   /**
@@ -375,46 +461,18 @@ export class BleDeviceManager {
    * Android's connect() handles known peripherals natively, so we skip the
    * scan there to avoid extra latency.
    */
-  async connectWithRediscovery(bleDeviceId, appUuid, { rediscoveryTimeoutMs = 12000 } = {}) {
+  async connectWithRediscovery(bleDeviceId, appUuid, { rediscoveryTimeoutMs = 12000, silent = false } = {}) {
     if (!this.ble) await this.initialize();
 
     if (!isIOS()) {
-      return this.connect(bleDeviceId, appUuid);
+      return this.connect(bleDeviceId, appUuid, { silent });
     }
 
-    captureMessage(`BLE rediscovery scan starting (target=${bleDeviceId}, timeout=${rediscoveryTimeoutMs}ms)`, 'info');
-
-    let found = false;
-    let scanError = null;
-    const scanStart = Date.now();
-    try {
-      await this.ble.requestLEScan(
-        { services: [BLE_SERVICE_UUID], allowDuplicates: false },
-        (result) => {
-          if (result?.device?.deviceId === bleDeviceId) {
-            found = true;
-          }
-        }
-      );
-
-      while (!found && Date.now() - scanStart < rediscoveryTimeoutMs) {
-        await new Promise(r => setTimeout(r, 200));
-      }
-    } catch (e) {
-      scanError = e;
-      captureMessage(`BLE rediscovery scan error: ${e.message}`, 'warning');
-    } finally {
-      try { await this.ble.stopLEScan(); } catch { /* ignore */ }
-    }
-
-    const elapsedMs = Date.now() - scanStart;
-    if (found) {
-      captureMessage(`BLE rediscovery: target located in ${elapsedMs}ms, proceeding to connect`, 'info');
-    } else {
-      captureMessage(`BLE rediscovery: NOT located in ${elapsedMs}ms${scanError ? ' (scan errored)' : ''} — falling through to connect anyway`, 'warning');
-    }
-
-    return this.connect(bleDeviceId, appUuid);
+    // Deliberately falls through to connect() even when the scan did not see
+    // the device: iOS can connect to a peripheral that is connectable but not
+    // advertising. The caller (device store) backs off between attempts.
+    await this._rediscover(bleDeviceId, rediscoveryTimeoutMs);
+    return this.connect(bleDeviceId, appUuid, { silent });
   }
 
   /**
@@ -446,7 +504,7 @@ export class BleDeviceManager {
     try {
       await this._write(buildCmd(CMD_FORMAT));
       // Format can take a while on large storage — use generous timeout
-      const resp = await this._readNotification(30000);
+      const resp = await this._readResponse(CMD_FORMAT, 30000);
       const status = resp[3];
       addBreadcrumb({ category: 'ble', message: `Format device: status=0x${status.toString(16)}`, level: 'info' });
       return status === 0x00;
@@ -465,8 +523,8 @@ export class BleDeviceManager {
       this.abortDownload();
       const release = await this._acquireLock();
       try {
-        await this._write(buildCmd(CMD_UNPAIR));
-        await this._readNotification(3000);
+        await this._write(buildCmd(CMD_UNPAIR, [0x00])); // 0x00 = keep the recordings on the device
+        await this._readResponse(CMD_UNPAIR, 3000);
       } catch { /* ignore */ }
       finally { release(); }
       await this.disconnect();
@@ -496,13 +554,9 @@ export class BleDeviceManager {
     const release = await this._acquireLock();
     try {
       await this._write(buildCmd(CMD_BATTERY));
-      const resp = await this._readNotification(5000);
-      // Response: 0x01 0x09 0x00 <level>
-      // Validate this is actually a battery response before reading the value
-      if (resp.length < 4 || resp[0] !== TYPE_CMD || resp[1] !== CMD_BATTERY[0] || resp[2] !== CMD_BATTERY[1]) {
-        addBreadcrumb({ category: 'ble', message: `getBattery: unexpected response [${Array.from(resp.slice(0, 6)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(', ')}]`, level: 'warning' });
-        return -1; // Signal invalid reading — caller should ignore
-      }
+      // Response: 0x01 0x09 0x00 <level> — unsolicited frames are skipped
+      const resp = await this._readResponse(CMD_BATTERY, 5000);
+      if (resp.length < 4) return -1; // Signal invalid reading — caller should ignore
       const level = resp[3];
       return (level >= 0 && level <= 100) ? level : -1;
     } finally {
@@ -518,7 +572,7 @@ export class BleDeviceManager {
     const release = await this._acquireLock();
     try {
       await this._write(buildCmd(CMD_STORAGE));
-      const resp = await this._readNotification(5000);
+      const resp = await this._readResponse(CMD_STORAGE, 5000);
       return parseJsonFromBuffer(resp, 3);
     } finally {
       release();
@@ -540,7 +594,7 @@ export class BleDeviceManager {
         now.getSeconds().toString().padStart(2, '0');
       const timeBytes = new TextEncoder().encode(timeStr);
       await this._write(buildCmd(CMD_TIME_SYNC, [...timeBytes]));
-      await this._readNotification(3000);
+      await this._readResponse(CMD_TIME_SYNC, 3000);
     } finally {
       release();
     }
@@ -553,7 +607,7 @@ export class BleDeviceManager {
     const release = await this._acquireLock();
     try {
       await this._write(buildCmd(CMD_DEVICE_INFO));
-      const resp = await this._readNotification(5000);
+      const resp = await this._readResponse(CMD_DEVICE_INFO, 5000);
       return parseJsonFromBuffer(resp, 3);
     } finally {
       release();
@@ -577,58 +631,99 @@ export class BleDeviceManager {
 
       // Enter sync state
       await this._write(buildCmd(CMD_SYNC_STATE, [0x01]));
-      await this._readNotification(5000);
+      await this._readResponse(CMD_SYNC_STATE, 5000);
       inSyncState = true;
 
       // Request file list
       await this._write(buildCmd(CMD_FILE_LIST));
 
-      // First response: file count
-      const countResp = await this._readNotification(10000);
-      addBreadcrumb({ category: 'ble', message: `getFileList countResp raw: [${Array.from(countResp.slice(0, 20)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(', ')}...] len=${countResp.length}`, level: 'info' });
-
-      const countJson = parseJsonFromBuffer(countResp, 3);
-      addBreadcrumb({ category: 'ble', message: `getFileList countJson: ${JSON.stringify(countJson)}`, level: 'info' });
-
-      // Check for error (device busy)
-      if (countJson.FileList) {
-        throw new Error(countJson.FileList);
-      }
-
-      fileCount = countJson.FileNum || 0;
-      addBreadcrumb({ category: 'ble', message: `getFileList fileCount=${fileCount}`, level: 'info' });
+      // The count frame and every entry frame look identical on the wire
+      // (0x01 0x1B 0x00 + JSON), so the stream is parsed by JSON SHAPE, never
+      // by position: {"FileNum":N} is the count (and a restart marker if it
+      // arrives again), {"file":…} is an entry, {"…FileList":"Memory…"} is a
+      // device error. Trusting the order made ONE leftover frame desynchronize
+      // every later request — files then disappeared from the list entirely.
       const files = [];
+      const seen = new Set();
       let skipped = 0;
+      let sawCount = false;
+      let reads = 0;
+      // Enough reads for the whole list plus the stale frames of one
+      // abandoned list request, so a shifted stream still completes.
+      const maxReads = () => (sawCount ? fileCount * 2 + 8 : 8);
 
-      // Read each file info — skip corrupt entries instead of aborting.
-      // All fileCount notifications MUST be consumed, otherwise the device
-      // keeps streaming and stale data floods subsequent commands.
-      for (let i = 0; i < fileCount; i++) {
+      while (reads < maxReads() && (!sawCount || files.length < fileCount)) {
+        reads++;
+        let resp;
         try {
-          const fileResp = await this._readNotification(10000);
+          resp = await this._readResponse(CMD_FILE_LIST, 10000);
+        } catch (readErr) {
+          if (!sawCount) throw readErr;              // no list at all — real failure
+          addBreadcrumb({ category: 'ble', message: `getFileList: stream ended after ${files.length}/${fileCount} entries (${readErr.message})`, level: 'warning' });
+          break;
+        }
+        let json;
+        try {
+          json = parseJsonFromBuffer(resp, 3);
+        } catch (parseErr) {
+          skipped++;
+          addBreadcrumb({ category: 'ble', message: `getFileList: unparsable frame skipped (${parseErr.message})`, level: 'warning' });
+          continue;
+        }
 
-          // Validate: must be a CMD response for FILE_LIST
-          if (fileResp.length < 4 || fileResp[0] !== TYPE_CMD ||
-              fileResp[1] !== CMD_FILE_LIST[0] || fileResp[2] !== CMD_FILE_LIST[1]) {
+        // Device-side error instead of a list. The document shows
+        // {"FileList":"MemoryBusy"}; the shipped firmware actually sends
+        // {"AudioFileList":"MemoryBusy"} (Sentry CAPACITOR-RY breadcrumbs,
+        // while the recorder was recording) — that case used to read as
+        // "0 files". Surface a code the UI translates; the next poll retries
+        // once the card is free again.
+        const deviceStatus = Object.entries(json)
+          .find(([k, v]) => typeof v === 'string' && (/FileList$/i.test(k) || /^Memory(Busy|Err|Full)$/i.test(v)));
+        if (deviceStatus) {
+          const err = new Error(String(deviceStatus[1]));
+          err.code = 'DEVICE_' + String(deviceStatus[1]).toUpperCase();
+          throw err;
+        }
+
+        if (typeof json.FileNum === 'number') {
+          // The count frame. Seeing it again means the frames so far belonged
+          // to an earlier request — start the collection over.
+          if (sawCount && files.length) {
+            addBreadcrumb({ category: 'ble', message: `getFileList: second count frame — discarding ${files.length} stale entr(ies)`, level: 'warning' });
+            files.length = 0;
+            seen.clear();
+          }
+          sawCount = true;
+          fileCount = json.FileNum;
+          addBreadcrumb({ category: 'ble', message: `getFileList fileCount=${fileCount}`, level: 'info' });
+          continue;
+        }
+        if (json.file) {
+          if (seen.has(json.file)) {
+            // The same name twice can only be a stale frame of an earlier
+            // request — never two recordings (the name carries the timestamp).
             skipped++;
-            addBreadcrumb({ category: 'ble', message: `getFileList file[${i}]: skipped non-file-list response (byte[1]=0x${fileResp[1]?.toString(16)})`, level: 'warning' });
+            addBreadcrumb({ category: 'ble', message: `getFileList: duplicate entry ${json.file} ignored (stale frame)`, level: 'warning' });
             continue;
           }
-
-          const fileJson = parseJsonFromBuffer(fileResp, 3);
-          if (fileJson.file) {
-            files.push(fileJson);
-          } else {
-            skipped++;
-            addBreadcrumb({ category: 'ble', message: `getFileList file[${i}]: skipped entry without filename: ${JSON.stringify(fileJson)}`, level: 'warning' });
-          }
-        } catch (entryErr) {
-          skipped++;
-          addBreadcrumb({ category: 'ble', message: `getFileList file[${i}]: parse error (${entryErr.message}), skipping`, level: 'warning' });
+          seen.add(json.file);
+          files.push(json);
+          continue;
         }
+        skipped++;
+        addBreadcrumb({ category: 'ble', message: `getFileList: frame without filename skipped: ${JSON.stringify(json).slice(0, 120)}`, level: 'warning' });
       }
 
-      addBreadcrumb({ category: 'ble', message: `getFileList done: ${files.length} files, ${skipped} skipped out of ${fileCount}`, level: 'info' });
+      const complete = sawCount && files.length >= fileCount;
+      addBreadcrumb({ category: 'ble', message: `getFileList done: ${files.length}/${fileCount} files, ${skipped} skipped, ${reads} reads, complete=${complete}`, level: 'info' });
+      if (!complete) {
+        // A partial list must never REPLACE what the app already knows —
+        // that is how a recording silently disappears from the device page.
+        const err = new Error(`Incomplete file list: ${files.length} of ${fileCount} entries`);
+        err.code = 'LIST_INCOMPLETE';
+        err.files = files;
+        throw err;
+      }
       return files;
     } finally {
       // Always exit sync state — even on error/timeout. Without this, the
@@ -636,7 +731,7 @@ export class BleDeviceManager {
       if (inSyncState) {
         try {
           await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
-          await this._readNotification(3000);
+          await this._readResponse(CMD_SYNC_STATE, 3000);
         } catch { /* best effort */ }
       }
       // If the read loop bailed early (stream timeout / corrupt entry), the
@@ -679,6 +774,11 @@ export class BleDeviceManager {
    * and re-throws 'cancelled' to the caller.
    */
   abortDownload() {
+    // Outside a download there is nothing to abort. Setting the flag anyway
+    // used to make EVERY later read (keepalive battery poll, file list) fail
+    // with "BLE download cancelled" until the next connect — the auto-sync
+    // then stopped silently (Sentry CAPACITOR-H9/YX).
+    if (!this._downloadInProgress) return;
     this._downloadAborted = true;
     if (this._notifyWaiter && this._notifyWaiter.reject) {
       const waiter = this._notifyWaiter;
@@ -708,12 +808,15 @@ export class BleDeviceManager {
   async downloadFile(filename, onProgress = null, totalSize = 0) {
     const release = await this._acquireLock();
     this._downloadAborted = false;
+    this._downloadInProgress = true;
 
     // Track whether the device is in sync state so we only exit it when needed.
     // Declared here so the catch block can reference it.
     let inSyncState = false;
     const chunks = [];
     let receivedBytes = 0;
+    let expectedIndex = 0;
+    let staleFramesDropped = 0;
 
     try {
       // Drain any stale notifications from previous operations
@@ -721,7 +824,7 @@ export class BleDeviceManager {
 
       // Enter sync state
       await this._write(buildCmd(CMD_SYNC_STATE, [0x01]));
-      await this._readNotification(5000);
+      await this._readResponse(CMD_SYNC_STATE, 5000);
       inSyncState = true;
 
       // Send download command with filename
@@ -734,7 +837,36 @@ export class BleDeviceManager {
         const data = await this._readNotification(30000);
 
         if (data[0] === TYPE_AUDIO) {
-          // Audio data frame: type(1) + cmd(2) + index(2) + audio(N)
+          // Audio data frame: type(1) + cmd(2) + index(2) + audio(N). Only the
+          // local-sync stream (cmd 0x1C) belongs to this download; the
+          // real-time stream (0x14) is dropped in _onNotify.
+          if (!(data[1] === CMD_FILE_DOWNLOAD[0] && data[2] === CMD_FILE_DOWNLOAD[1])) continue;
+          // The 2-byte frame index is BIG-endian on the wire. The protocol
+          // document does not state the byte order; consecutive frames
+          // recorded in the field read 0x02 0xb7, 0x02 0xb8, 0x02 0xb9 —
+          // the SECOND byte increments (Sentry CAPACITOR-XN breadcrumbs).
+          const frameIndex = (data[3] << 8) | data[4];
+          const wanted = expectedIndex & 0xFFFF;
+          if (frameIndex !== wanted) {
+            // Frames the device was still streaming for an ABORTED transfer
+            // (cancel, CRC mismatch, dropped link) can arrive after the next
+            // download has started: their index is behind ours — and before
+            // frame 0 of this file, anything non-zero is stale by definition.
+            // Dropping them is what makes the retry of a failed file work at
+            // all; treating them as a gap failed every retry until the file
+            // was skipped (found by the mobile harness, m5).
+            const stale = expectedIndex === 0
+              ? frameIndex !== 0
+              : ((wanted - frameIndex) & 0xFFFF) < 0x8000;
+            if (stale) {
+              staleFramesDropped++;
+              continue;
+            }
+            // A real hole in the sequence can only end in a CRC mismatch
+            // after the whole file — fail fast instead.
+            throw new Error(`CRC mismatch: frame ${frameIndex} received, expected ${wanted} (frame gap)`);
+          }
+          expectedIndex++;
           const audioData = data.slice(5);
           chunks.push(audioData);
           receivedBytes += audioData.length;
@@ -749,6 +881,14 @@ export class BleDeviceManager {
         } else if (data[0] === TYPE_CMD && data[1] === CMD_FILE_DONE[0] && data[2] === CMD_FILE_DONE[1]) {
           // Transfer complete: 0x01 0x1D 0x00 crcL crcH
           const expectedCrc = data[3] | (data[4] << 8);
+
+          if (receivedBytes === 0) {
+            // A zero-length recording on the card (device-side write failure).
+            // Retrying it every poll can never succeed — the caller skips it.
+            const empty = new Error('Device file is empty');
+            empty.code = 'EMPTY_FILE';
+            throw empty;
+          }
 
           // Concatenate all chunks
           const fileData = new Uint8Array(receivedBytes);
@@ -765,10 +905,13 @@ export class BleDeviceManager {
           }
 
           if (onProgress) onProgress({ percent: 100, bytesReceived: receivedBytes, bytesTotal: totalSize });
+          if (staleFramesDropped) {
+            addBreadcrumb({ category: 'ble', message: `downloadFile ${filename}: dropped ${staleFramesDropped} stale frame(s) of an earlier transfer`, level: 'warning' });
+          }
 
           // Success path: exit sync state cleanly
           await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
-          await this._readNotification(3000);
+          await this._readResponse(CMD_SYNC_STATE, 3000);
           inSyncState = false;
 
           return fileData;
@@ -782,9 +925,11 @@ export class BleDeviceManager {
       // (Bug 3). Scales drain wait by estimated stale frames so large-file
       // aborts don't truncate prematurely.
       if (inSyncState) {
+        // The cancel flag would make this exit-sync-state read fail too.
+        this._downloadAborted = false;
         try {
           await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
-          await this._readNotification(3000);
+          await this._readResponse(CMD_SYNC_STATE, 3000);
         } catch { /* best effort */ }
       }
       try {
@@ -795,6 +940,9 @@ export class BleDeviceManager {
       } catch { /* best effort */ }
       throw err;
     } finally {
+      // The cancel sentinel belongs to THIS download only.
+      this._downloadAborted = false;
+      this._downloadInProgress = false;
       release();
     }
   }
@@ -809,7 +957,7 @@ export class BleDeviceManager {
     try {
       const filenameBytes = new TextEncoder().encode(filename);
       await this._write(buildCmd(CMD_DELETE_FILE, [...filenameBytes]));
-      const resp = await this._readNotification(5000);
+      const resp = await this._readResponse(CMD_DELETE_FILE, 5000);
       // 0x01 = success, 0x02 = failure
       return resp[3] === 0x01;
     } finally {
@@ -853,10 +1001,14 @@ export class BleDeviceManager {
       step1 = await this._readNotification(Math.min(remaining, 5000));
       step1Attempts++;
 
-      captureMessage(`BLE handshake step1 raw (attempt ${step1Attempts}): ${hexDump(step1, 30)}`, 'info');
+      addBreadcrumb({ category: 'ble', message: `handshake step1 raw (attempt ${step1Attempts}): ${hexDump(step1, 30)}`, level: 'info' });
 
-      // Valid step 1: byte[3]=0x00, followed by JSON with device UUID
-      if (step1.length >= 5 && step1[3] === 0x00) {
+      // Valid step 1: 0x01 0x01 0x00 0x00 + JSON with the device UUID
+      // (protocol §二.1.1). Checking only byte[3] let a late reply of another
+      // command (e.g. battery 0 % = 0x01 0x09 0x00 0x00) pass as step 1 and
+      // fail in JSON.parse with a confusing error.
+      if (step1.length >= 5 && step1[0] === TYPE_CMD && step1[1] === CMD_HANDSHAKE[0] &&
+          step1[2] === CMD_HANDSHAKE[1] && step1[3] === 0x00) {
         break;
       }
 
@@ -876,7 +1028,7 @@ export class BleDeviceManager {
     const deviceJson = parseJsonFromBuffer(step1, 4);
     this.deviceUuid = deviceJson.uuid;
 
-    captureMessage(`BLE handshake step1 OK: uuid=${deviceJson.uuid}`, 'info');
+    addBreadcrumb({ category: 'ble', message: `handshake step1 OK: uuid=${deviceJson.uuid}`, level: 'info' });
 
     // Step 2: Send app UUID + timestamp
     const timestamp = Math.floor(Date.now() / 1000);
@@ -884,13 +1036,14 @@ export class BleDeviceManager {
     const appJsonBytes = new TextEncoder().encode(appJson);
     await this._write(new Uint8Array([TYPE_CMD, CMD_HANDSHAKE[0], CMD_HANDSHAKE[1], 0x01, ...appJsonBytes]));
 
-    // Step 3: Wait for device verification
-    const step3 = await this._readNotification(5000);
+    // Step 3: Wait for the device's verdict — the frame echoing the
+    // handshake command; any other frame is skipped (bounded to 5 s).
+    const step3 = await this._readResponse(CMD_HANDSHAKE, 5000);
 
-    captureMessage(`BLE handshake step3 raw: ${hexDump(step3, 30)}`, 'info');
+    addBreadcrumb({ category: 'ble', message: `handshake step3 raw: ${hexDump(step3, 30)}`, level: 'info' });
 
     // Response: 0x01 0x01 0x00 0x02 <status> [json if status=0x00]
-    if (step3[3] !== 0x02) {
+    if (step3.length < 5 || step3[3] !== 0x02) {
       const err = new Error(`Unexpected handshake step3: byte[3]=0x${step3[3].toString(16)}, raw=${hexDump(step3, 30)}`);
       captureException(err, { tags: { action: 'ble_handshake_step3' }, extra: { rawHex: hexDump(step3, 50) } });
       throw err;
@@ -904,13 +1057,13 @@ export class BleDeviceManager {
         0x04: 'Handshake timeout'
       };
       const errMsg = errors[status] || `Handshake failed with code 0x${status.toString(16)}`;
-      captureMessage(`BLE handshake step3 rejected: status=0x${status.toString(16)} (${errMsg})`, 'warning');
+      addBreadcrumb({ category: 'ble', message: `handshake step3 rejected: status=0x${status.toString(16)} (${errMsg})`, level: 'warning' });
       throw new Error(errMsg);
     }
 
     // Parse device info from successful handshake
     const info = parseJsonFromBuffer(step3, 5);
-    captureMessage(`BLE handshake OK: name=${info.name}, SN=${info.SN}, model=${info.model}`, 'info');
+    addBreadcrumb({ category: 'ble', message: `handshake OK: name=${info.name}, SN=${info.SN}, model=${info.model}`, level: 'info' });
     return info;
   }
 
@@ -918,6 +1071,12 @@ export class BleDeviceManager {
    * Write data to the BLE write characteristic
    */
   async _write(data) {
+    if (!this.deviceId) {
+      // The link dropped (the disconnect callback nulls deviceId) while a
+      // command was queued. Fail with the transport error the callers already
+      // classify as retryable instead of the plugin's "deviceId required."
+      throw new Error('BLE disconnected during transfer');
+    }
     const dataView = new DataView(data.buffer, data.byteOffset, data.byteLength);
     await this.ble.writeWithoutResponse(
       this.deviceId,
@@ -942,8 +1101,43 @@ export class BleDeviceManager {
         return;
       }
 
-      // Recording started via device button (TYPE_CMD, cmd 0x14 0x00)
+      // Any other audio frame is only meaningful inside downloadFile(). A
+      // device that kept streaming a file after a dropped link, or a stale
+      // stream on reconnect, must not become "the reply" of a command.
+      if (data[0] === TYPE_AUDIO && !this._downloadInProgress) {
+        if (!this._strayAudioWarned) {
+          this._strayAudioWarned = true;
+          addBreadcrumb({ category: 'ble', message: 'Dropping stray audio frames outside a download', level: 'warning' });
+        }
+        return;
+      }
+      if (data[0] === TYPE_AUDIO) this._strayAudioWarned = false;
+
+      // Unsolicited state reports the device pushes at any time: toggle
+      // switch position (0x6E, protocol §15) and WiFi socket state (0x0C,
+      // §24). Never a command reply — keep them out of the queue.
+      if (data[0] === TYPE_CMD && data[2] === 0x00 && (data[1] === 0x6E || data[1] === 0x0C)) {
+        addBreadcrumb({ category: 'ble', message: `Unsolicited device report cmd=0x${data[1].toString(16)} dropped`, level: 'info' });
+        return;
+      }
+
+      // Recording started via device button (TYPE_CMD, cmd 0x14 0x00 + JSON
+      // {file, creat_time, toggle_switch}). The same frame with
+      // {"RecordStartErr":"MemoryErr"|"MemoryFull"} means the recording did
+      // NOT start (protocol §三.1.1) — card missing / unsupported / full.
       if (data[0] === TYPE_CMD && data[1] === 0x14 && data[2] === 0x00) {
+        let startErr = null;
+        try {
+          const json = data.length > 3 ? parseJsonFromBuffer(data, 3) : {};
+          if (json && json.RecordStartErr) startErr = String(json.RecordStartErr);
+        } catch { /* no / partial JSON — treat as started */ }
+        if (startErr) {
+          this.isRecording = false;
+          this.lastRecordStartError = startErr;
+          addBreadcrumb({ category: 'ble', message: `Device could not start recording: ${startErr}`, level: 'warning' });
+          if (this._recordingStateCallback) this._recordingStateCallback(false, startErr);
+          return;
+        }
         this.isRecording = true;
         addBreadcrumb({ category: 'ble', message: 'Device started recording (button)', level: 'info' });
         if (this._recordingStateCallback) this._recordingStateCallback(true);
@@ -1024,6 +1218,32 @@ export class BleDeviceManager {
 
     if (totalDrained > 0) {
       addBreadcrumb({ category: 'ble', message: `Drained ${totalDrained} stale BLE notification(s) in ${Date.now() - startTime}ms (expectedCount=${expectedCount})`, level: 'warning' });
+    }
+  }
+
+  /**
+   * Read the next notification that is the reply to `cmd` (TYPE_CMD followed
+   * by the two command bytes). Frames that are not that reply — a late reply
+   * to an abandoned command, a device report — are skipped, so a caller
+   * never parses the wrong frame as its answer. Bounded by `timeout` overall.
+   * @param {number[]} cmd
+   * @param {number} timeout
+   * @returns {Promise<Uint8Array>}
+   */
+  async _readResponse(cmd, timeout = 10000) {
+    const deadline = Date.now() + timeout;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error('BLE response timeout');
+      const resp = await this._readNotification(remaining);
+      if (resp.length >= 3 && resp[0] === TYPE_CMD && resp[1] === cmd[0] && resp[2] === cmd[1]) {
+        return resp;
+      }
+      addBreadcrumb({
+        category: 'ble',
+        message: `skipped frame while waiting for cmd 0x${cmd[0].toString(16)}: [${Array.from(resp.slice(0, 5)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ')}]`,
+        level: 'warning'
+      });
     }
   }
 

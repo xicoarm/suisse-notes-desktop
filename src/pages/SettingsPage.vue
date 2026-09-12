@@ -312,8 +312,8 @@
 
         <div class="vocabulary-container">
           <CustomVocabularyInput
-            :session-words="globalVocabulary"
-            :global-words="[]"
+            :session-words="personalVocabulary"
+            :global-words="organizationVocabulary"
             :show-help="false"
             @add-word="addGlobalWord"
             @remove-word="removeGlobalWord"
@@ -321,7 +321,7 @@
         </div>
       </div>
 
-      <!-- Suisse Notes Pro: context prompt on device sync (mobile only) -->
+      <!-- Suisse Meets Pro: context prompt on device sync (mobile only) -->
       <div
         v-if="isMobileApp"
         class="settings-section"
@@ -598,6 +598,8 @@ import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
 import { useMeetingPrepStore } from '../stores/meeting-prep';
 import { useDeviceStore } from '../stores/device';
+import { useRecordingStore } from '../stores/recording';
+import { humanizeBleError } from '../utils/bleErrors';
 import { useLanguage } from '../composables/useLanguage';
 import { isCapacitor, isElectron } from '../utils/platform';
 import CustomVocabularyInput from '../components/CustomVocabularyInput.vue';
@@ -621,6 +623,7 @@ const prepTemplateOptions = computed(() => [
 ]);
 const { languages, currentLang, setLanguage, initLanguage } = useLanguage();
 const deviceStore = useDeviceStore();
+const recordingStore = useRecordingStore();
 const isMobileApp = isCapacitor();
 
 const appVersion = ref('1.0.0');
@@ -644,14 +647,23 @@ const storageOptions = computed(() => [
   { value: 'delete_after_upload', label: t('deleteAfterUpload') }
 ]);
 
-const globalVocabulary = computed(() => transcriptionStore.globalVocabulary);
+// Personal words are editable; organization words are shown locked (the app
+// cannot delete them — they are managed on the web).
+const personalVocabulary = computed(() => transcriptionStore.personalVocabulary);
+const organizationVocabulary = computed(() => transcriptionStore.organizationOnlyVocabulary);
 
-const addGlobalWord = (word) => {
-  transcriptionStore.addGlobalWord(word);
+const addGlobalWord = async (word) => {
+  const result = await transcriptionStore.addGlobalWord(word);
+  if (result && result.ok === false) {
+    $q.notify({ type: 'warning', message: t('vocabularySyncFailed'), position: 'top' });
+  }
 };
 
-const removeGlobalWord = (word) => {
-  transcriptionStore.removeGlobalWord(word);
+const removeGlobalWord = async (word) => {
+  const result = await transcriptionStore.removeGlobalWord(word);
+  if (result && result.ok === false && result.error !== 'organization') {
+    $q.notify({ type: 'warning', message: t('vocabularySyncFailed'), position: 'top' });
+  }
 };
 
 onMounted(async () => {
@@ -703,7 +715,7 @@ const handleDeleteAll = async () => {
     if (!userId) {
       $q.notify({
         type: 'negative',
-        message: 'You must be logged in to delete recordings'
+        message: t('deleteAllLoginRequired')
       });
       return;
     }
@@ -712,9 +724,8 @@ const handleDeleteAll = async () => {
     if (isElectron()) {
       result = await window.electronAPI.history.deleteAll(userId);
     } else {
-      // Mobile: clear via history store
-      await historyStore.deleteAll();
-      result = { success: true, deletedCount: recordingsCount.value };
+      // Mobile: the history store deletes local audio + local-only entries
+      result = await historyStore.deleteAll();
     }
 
     if (result.success) {
@@ -726,20 +737,20 @@ const handleDeleteAll = async () => {
 
       $q.notify({
         type: 'positive',
-        message: `Successfully deleted ${result.deletedCount} recording(s)`,
+        message: t('deleteAllDone', { count: result.deletedCount }),
         icon: 'check_circle'
       });
     } else {
       $q.notify({
         type: 'negative',
-        message: result.error || 'Failed to delete recordings'
+        message: result.error || t('deleteAllFailed')
       });
     }
   } catch (error) {
     console.error('Error deleting all recordings:', error);
     $q.notify({
       type: 'negative',
-      message: 'An error occurred while deleting recordings'
+      message: t('deleteAllFailed')
     });
   } finally {
     isDeleting.value = false;
@@ -786,7 +797,7 @@ const startDeviceScan = async () => {
   try {
     await deviceStore.startScan();
   } catch (e) {
-    $q.notify({ type: 'warning', message: e.message });
+    $q.notify({ type: 'warning', message: humanizeBleError(e, t), timeout: 6000 });
   }
 };
 
@@ -795,7 +806,7 @@ const pairDevice = async (device) => {
     await deviceStore.connectAndPair(device.deviceId);
     $q.notify({ type: 'positive', message: t('deviceConnected') });
   } catch (e) {
-    $q.notify({ type: 'negative', message: t('pairingFailed'), caption: e.message, timeout: 5000 });
+    $q.notify({ type: 'negative', message: t('pairingFailed'), caption: humanizeBleError(e, t), timeout: 8000 });
   }
 };
 
@@ -803,7 +814,7 @@ const reconnectDevice = async () => {
   try {
     await deviceStore.autoConnect();
   } catch (e) {
-    $q.notify({ type: 'negative', message: t('connectionFailed'), caption: e.message, timeout: 5000 });
+    $q.notify({ type: 'negative', message: t('connectionFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
   }
 };
 
@@ -823,6 +834,13 @@ const confirmForgetDevice = () => {
 };
 
 const handleLogout = async () => {
+  // Logging out resets the history store and drops the user id that every
+  // history write is keyed on — under an active recording/upload that
+  // orphans the in-flight recording's bookkeeping.
+  if (recordingStore.isBlocking) {
+    $q.notify({ type: 'warning', message: t('logoutBlockedWhileRecording'), icon: 'lock', timeout: 5000 });
+    return;
+  }
   await authStore.logout();
   router.push('/login');
 };

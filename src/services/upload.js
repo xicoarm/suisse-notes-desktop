@@ -13,8 +13,11 @@ import { isElectron, isCapacitor, isMobile, PlatformConstants } from '../utils/p
 import { calculateUploadChecksum, verifyUploadChecksum } from './integrity';
 import { readFile, deleteFile } from './storage';
 import { sentryUploadStart, sentryUploadSuccess, sentryUploadFail } from './sentryHelpers';
-import { captureMessage } from '../boot/sentry';
+import { addBreadcrumb, captureMessage } from '../boot/sentry';
+
+const crumb = (message, level = 'info') => addBreadcrumb({ category: 'upload', message, level });
 import { uploadViaPresignedSas, isTransientUploadError, readBlobFromCapacitorPath } from './upload-direct';
+import { fetchWithTimeout } from './api';
 
 // --- Persistent Mobile Upload Queue (localStorage + Preferences backup) ---
 const MOBILE_UPLOAD_QUEUE_KEY = 'mobile_upload_queue';
@@ -388,8 +391,10 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
           const historyStore = useRecordingsHistoryStore();
           await historyStore.updateRecording(item.recordId, {
             uploadStatus: 'uploaded',
+            transcriptionId: result.transcriptionId,
             audioFileId: result.audioFileId
           });
+          await historyStore.applyStoragePreference(item.recordId);
         } catch (e) {
           console.warn('Could not update history after queued upload:', e);
         }
@@ -415,11 +420,13 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
           }
         }
 
-        // Non-retryable (403, checksum mismatch, invalid format)? Mark as
-        // unrecoverable and stop retrying automatically. Old behavior
-        // incremented retries until hit MAX_QUEUE_RETRIES then silently
-        // dropped — user lost the recording with no signal.
-        if (!_isRetryableError(result.error)) {
+        // Non-retryable (final 4xx verdict, checksum mismatch, invalid format,
+        // local file gone)? Mark as unrecoverable and stop retrying
+        // automatically. Old behavior incremented retries until hit
+        // MAX_QUEUE_RETRIES then silently dropped — user lost the recording
+        // with no signal.
+        const finalVerdict = (result.canRetry === false && result.status !== 401) || result.localFileMissing;
+        if (finalVerdict || !_isRetryableError(result.error)) {
           _markQueueItemUnrecoverable(item.recordId, result.error || 'unknown');
           unrecoverableRecordIds.push(item.recordId);
           failed++;
@@ -645,7 +652,9 @@ const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts 
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const response = await fetch(`${apiUrl}/api/desktop/upload/${audioFileId}/status`, { headers: buildHeaders() });
+      // 20s deadline per poll: a black-holed status request used to hang the
+      // whole upload flow (and its in-flight guard) until the OS gave up.
+      const response = await fetchWithTimeout(`${apiUrl}/api/desktop/upload/${audioFileId}/status`, { headers: buildHeaders(), timeoutMs: 20000 });
 
       if (!response.ok) {
         // Server doesn't support status endpoint yet, fall back to trust-based
@@ -779,6 +788,13 @@ export const uploadWithVerification = async (options) => {
     getAuthStore = null // For token refresh
   } = options;
 
+  // A missing recordId would upload to "recordings/null/…" and register a
+  // meeting nobody can find again (seen in production: CAPACITOR-TX/TY).
+  if (!recordId) {
+    captureMessage('upload: refused — no recordId', 'error');
+    return { success: false, canDelete: false, canRetry: false, error: 'Missing recording id' };
+  }
+
   // Helper to get a fresh token
   const getFreshToken = async () => {
     if (getAuthStore) {
@@ -807,7 +823,7 @@ export const uploadWithVerification = async (options) => {
   }
 
   if (!_beginMobileUpload(recordId)) {
-    captureMessage(`upload: skipped duplicate in-flight mobile upload recordId=${recordId}`, 'info');
+    crumb(`skipped duplicate in-flight mobile upload recordId=${recordId}`);
     return {
       success: false,
       canDelete: false,
@@ -878,7 +894,7 @@ export const uploadWithVerification = async (options) => {
         // Try direct-to-Azure-Blob via SAS URL (works on iOS, Android, browser
         // file picker). Falls through to simple POST when the server reports
         // mode: 'fallback' (i.e. running in local-storage mode).
-        captureMessage(`upload: uploadWithVerification entering SAS path — recordId=${recordId} hasFile=${!!file} hasFilePath=${!!filePath}`, 'info');
+        crumb(`uploadWithVerification entering SAS path — recordId=${recordId} hasFile=${!!file} hasFilePath=${!!filePath}`);
         let uploadResult;
         try {
           uploadResult = await uploadViaPresignedSas({
@@ -892,11 +908,13 @@ export const uploadWithVerification = async (options) => {
               onProgress(progress, bytesUploaded, bytesTotal);
             },
           });
-          captureMessage(`upload: uploadViaPresignedSas returned mode=${uploadResult?.mode} success=${uploadResult?.success}`, 'info');
+          crumb(`uploadViaPresignedSas returned mode=${uploadResult?.mode} success=${uploadResult?.success}`);
         } catch (transientErr) {
           // Bubbled-up transient error from upload-direct — only network
           // failures should land here. Surface to outer retry.
-          captureMessage(`upload: uploadViaPresignedSas THREW — transient=${isTransientUploadError(transientErr)} name=${transientErr.name} msg=${transientErr.message}`, 'error');
+          // Transient network failures (offline, DNS, timeouts) are expected on
+          // mobile and are retried by the queue — warning, not error.
+          captureMessage(`upload: uploadViaPresignedSas THREW — transient=${isTransientUploadError(transientErr)} name=${transientErr.name} msg=${transientErr.message}`, isTransientUploadError(transientErr) ? 'warning' : 'error');
           if (!isTransientUploadError(transientErr)) {
             throw transientErr;
           }
@@ -905,7 +923,7 @@ export const uploadWithVerification = async (options) => {
 
         if (uploadResult.mode === 'fallback') {
           // Server is in local-storage mode — use the legacy POST.
-          captureMessage(`upload: falling back to legacy POST /api/desktop/upload reason=${uploadResult.reason || '-'}`, 'info');
+          crumb(`falling back to legacy POST /api/desktop/upload reason=${uploadResult.reason || '-'}`);
           uploadResult = await uploadFileMobileSimple(
             filePath,
             apiUrl,
@@ -915,7 +933,15 @@ export const uploadWithVerification = async (options) => {
             file,
             recordId
           );
-          captureMessage(`upload: legacy POST returned success=${uploadResult?.success} status=${uploadResult?.status || '-'} error=${uploadResult?.error || '-'}`, uploadResult?.success ? 'info' : 'warning');
+          if (uploadResult?.success) {
+            crumb(`legacy POST returned success=true`);
+          } else if (uploadResult?.status === 401 || uploadResult?.canRetry === false) {
+            // Token refresh path / final server verdict — both handled below
+            // and reported by the caller; context only.
+            crumb(`legacy POST returned success=false status=${uploadResult?.status || '-'} error=${uploadResult?.error || '-'}`, 'warning');
+          } else {
+            captureMessage(`upload: legacy POST returned success=false status=${uploadResult?.status || '-'} error=${uploadResult?.error || '-'}`, 'warning');
+          }
         }
 
         if (!uploadResult.success) {
@@ -1016,16 +1042,55 @@ export const uploadWithVerification = async (options) => {
     console.error('Upload failed:', error);
     onStatusChange('error');
     sentryUploadFail(recordId, error);
+    // Keep the HTTP classification: the retry drivers decide "retry later"
+    // vs "terminal" on canRetry/status, and the local-file-missing case must
+    // clear the dead path instead of retrying forever (CAPACITOR-N2/N3).
+    const localFileMissing = /Could not read file \(status 404\)|File does not exist|source_missing|no such file/i.test(error?.message || '');
     return {
       success: false,
       audioFileId,
       canDelete: false,
-      error: error.message
+      error: error.message,
+      status: error.status,
+      canRetry: localFileMissing ? false : error.canRetry,
+      insufficientMinutes: error.insufficientMinutes,
+      localFileMissing
     };
   } finally {
     _endMobileUpload(recordId);
   }
 };
+
+/**
+ * Classify a non-2xx legacy-upload response. 4xx answers (bad file, no
+ * speech detected, recording too long, insufficient minutes, …) are final —
+ * the server will answer identically next time — so they are surfaced as a
+ * result with canRetry:false instead of being thrown into the generic retry
+ * loop (which re-uploaded whole files for days: CAPACITOR-RZ/R7/KM/JT).
+ * 401 stays retryable (token refresh), 408/429 and 5xx are transient.
+ * @param {number} status
+ * @param {string} responseText
+ * @returns {{success: false, error: string, status: number, canRetry: boolean, insufficientMinutes: boolean, code?: string}}
+ */
+export function classifyUploadHttpFailure(status, responseText) {
+  let errorMsg = `Upload failed with status ${status}`;
+  let code;
+  try {
+    const errData = JSON.parse(responseText || '');
+    errorMsg = errData.error || errData.message || errorMsg;
+    code = errData.code;
+  } catch (e) { /* non-JSON body */ }
+  if (status === 413) errorMsg = errorMsg === `Upload failed with status ${status}` ? 'File too large. Maximum size is 500MB.' : errorMsg;
+  const transient = status === 401 || status === 408 || status === 429 || status >= 500;
+  return {
+    success: false,
+    error: errorMsg,
+    status,
+    code,
+    canRetry: transient,
+    insufficientMinutes: status === 402 || code === 'INSUFFICIENT_MINUTES'
+  };
+}
 
 /**
  * Mobile-specific file upload using TUS protocol for resumable uploads
@@ -1278,24 +1343,16 @@ const uploadFileMobileSimple = async (filePath, apiUrl, authToken, metadata, onP
             errorMsg = errData.error || errData.message || 'Token expired';
           } catch (e) { /* ignore parse errors */ }
           resolve({ success: false, error: errorMsg, status: 401 });
-        } else if (xhr.status === 413) {
-          // DUREC-5: the recording exceeds the backend's 500MB cap (verified on
-          // the deployed /api/desktop/upload route). Retrying can never succeed,
-          // so mark it terminal (canRetry:false) and surface the server's clear
-          // "File too large. Maximum size is 500MB" message instead of looping.
-          let errorMsg = 'File too large. Maximum size is 500MB.';
-          try {
-            const errData = JSON.parse(xhr.responseText);
-            errorMsg = errData.error || errData.message || errorMsg;
-          } catch (e) { /* ignore parse errors */ }
-          resolve({ success: false, error: errorMsg, status: 413, canRetry: false });
+        } else if (xhr.status >= 400 && xhr.status < 500) {
+          // Final server verdicts (413 too large, 402 minutes, 400/422 no
+          // speech / duration, …) carry their status and canRetry:false.
+          resolve(classifyUploadHttpFailure(xhr.status, xhr.responseText));
         } else {
-          let errorMsg = `Upload failed with status ${xhr.status}`;
-          try {
-            const errData = JSON.parse(xhr.responseText);
-            errorMsg = errData.error || errData.message || errorMsg;
-          } catch (e) { /* ignore parse errors */ }
-          reject(new Error(errorMsg));
+          const classified = classifyUploadHttpFailure(xhr.status, xhr.responseText);
+          const err = new Error(classified.error);
+          err.status = xhr.status;
+          err.canRetry = true;
+          reject(err);
         }
       });
 
@@ -1320,7 +1377,7 @@ const uploadFileMobileSimple = async (filePath, apiUrl, authToken, metadata, onP
       // Telemetry: confirms the legacy POST is sending a disk-backed Blob.
       // If the renderer is OOM-killed mid-upload there is no JS exception, so a
       // missing "legacy POST returned" after this breadcrumb pinpoints send().
-      captureMessage(`upload: legacy POST sending blob size=${fileBlob.size} type=${fileBlob.type || '-'}`, 'info');
+      crumb(`legacy POST sending blob size=${fileBlob.size} type=${fileBlob.type || '-'}`);
       xhr.send(formData);
     });
   } catch (error) {

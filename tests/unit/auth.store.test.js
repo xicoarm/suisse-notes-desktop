@@ -89,7 +89,10 @@ describe('Auth Store', () => {
       const result = await store.login('test@example.com', 'password123');
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe('Network error');
+      // Network failures surface as the translated "no internet" message,
+      // not the raw transport error.
+      expect(result.error).toMatch(/internet|network|internet/i);
+      expect(result.error).not.toBe('Network error');
       expect(store.isAuthenticated).toBe(false);
     });
 

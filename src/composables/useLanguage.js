@@ -11,11 +11,12 @@ const languages = [
 export function useLanguage() {
   const { locale } = useI18n();
 
-  const currentLang = ref(localStorage.getItem('lang') || 'de');
+  // The i18n boot file already resolved saved choice → device language → 'de'.
+  const currentLang = ref(localStorage.getItem('lang') || locale.value || 'de');
 
   const currentLangShort = computed(() => {
     const lang = languages.find(l => l.value === currentLang.value);
-    return lang ? lang.short : 'DE';
+    return lang ? lang.short : String(currentLang.value || 'de').toUpperCase();
   });
 
   const setLanguage = (lang) => {

@@ -196,9 +196,10 @@ class ForegroundRecordingService : Service() {
         }
 
         try {
-            // P0 Data Loss Fix: Use the same directory that Capacitor's Directory.Documents resolves to
-            // so JS code can find native-saved chunks. Fallback to filesDir if unavailable.
-            val documentsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+            // Same base directory as Capacitor's Directory.External (the JS layer's
+            // recordings root since 3.9.37) so JS code can find native-saved chunks.
+            // Fallback to filesDir if external storage is unavailable.
+            val documentsDir = getExternalFilesDir(null)
                 ?: filesDir
             chunksDirectory = File(documentsDir, "recordings/$recordId/chunks").apply {
                 mkdirs()

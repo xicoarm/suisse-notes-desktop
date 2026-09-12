@@ -6,6 +6,19 @@
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
+// Native mobile version (Android versionName; the iOS MARKETING_VERSION is kept
+// in lock-step by the release runbook). Falls back to package.json only if the
+// gradle file cannot be read. ESM file: no __dirname, resolve via import.meta.url.
+function mobileAppVersion() {
+  try {
+    const fs = require('fs');
+    const gradle = fs.readFileSync(new URL('./src-capacitor/android/app/build.gradle', import.meta.url), 'utf8');
+    const m = /versionName\s+"([^"]+)"/.exec(gradle);
+    if (m) return m[1];
+  } catch (e) { /* fall through */ }
+  return require('./package.json').version;
+}
+
 export default function (ctx) {
   return {
     eslint: {
@@ -14,10 +27,12 @@ export default function (ctx) {
     },
 
     boot: [
+      // Mobile: Sentry boots FIRST so errors in the other boot files are
+      // captured (desktop keeps its established order).
+      ctx.mode.capacitor ? 'sentry' : '',
       'axios',
       'i18n',
-      // Load Sentry for both desktop (Electron renderer) and mobile (Capacitor)
-      (ctx.mode.capacitor || ctx.mode.electron) ? 'sentry' : '',
+      ctx.mode.electron ? 'sentry' : '',
       // Load lifecycle boot file only on Capacitor (mobile)
       ctx.mode.capacitor ? 'lifecycle' : ''
     ].filter(Boolean),
@@ -42,9 +57,12 @@ export default function (ctx) {
       // DEV ONLY: forward the API override into the renderer so the e2e
       // harness can point the whole app (renderer + main) at its local mock
       // backend. Never applied to production builds.
-      ...(ctx.dev && process.env.VITE_API_URL
-        ? { env: { VITE_API_URL: process.env.VITE_API_URL } }
-        : {}),
+      env: {
+        // Mobile release name for Sentry, known at build time (the same value
+        // the source maps are uploaded under).
+        MOBILE_APP_VERSION: ctx.mode.capacitor ? mobileAppVersion() : '',
+        ...(ctx.dev && process.env.VITE_API_URL ? { VITE_API_URL: process.env.VITE_API_URL } : {})
+      },
       // Enable source maps in CI for Sentry (when SENTRY_AUTH_TOKEN is set)
       ...(process.env.SENTRY_AUTH_TOKEN && ctx.mode.capacitor ? { sourcemap: true } : {}),
       extendViteConf(viteConf) {
@@ -57,11 +75,24 @@ export default function (ctx) {
               org: process.env.SENTRY_ORG || 'suisse-it-gmbh',
               project: process.env.SENTRY_PROJECT || 'capacitor',
               authToken: process.env.SENTRY_AUTH_TOKEN,
+              // MUST match the runtime release name in src/boot/sentry.js, which
+              // is the NATIVE app version (App.getInfo().version = Android
+              // versionName / iOS MARKETING_VERSION, e.g. 3.9.37). package.json
+              // carries the DESKTOP version (4.6.0): the plugin created phantom
+              // releases ch.suissenotes.mobile@4.4.1 ... @4.6.0 (zero events)
+              // while every mobile event comes from @3.9.x.
               release: {
-                name: `ch.suissenotes.mobile@${require('./package.json').version}`,
+                name: `ch.suissenotes.mobile@${mobileAppVersion()}`,
               },
               sourcemaps: {
-                assets: './dist/capacitor/www/**',
+                // Quasar writes the capacitor web build to src-capacitor/www
+                // (capacitor.config webDir "www"); the previous glob
+                // './dist/capacitor/www/**' matched nothing, so every CI build
+                // logged "Didn't find any matching sources for debug ID upload"
+                // and no mobile stack trace was ever symbolicated.
+                assets: ['./src-capacitor/www/**'],
+                // Never ship .map files inside the APK/IPA.
+                filesToDeleteAfterUpload: ['./src-capacitor/www/**/*.map'],
               },
             })
           );

@@ -42,6 +42,7 @@
           dense
           icon="more_vert"
           size="sm"
+          data-test="device-menu"
         >
           <q-menu>
             <q-list dense>
@@ -62,6 +63,7 @@
               <q-item
                 v-close-popup
                 clickable
+                data-test="device-forget"
                 @click="confirmForget"
               >
                 <q-item-section avatar>
@@ -229,6 +231,7 @@
         :icon="deviceStore.isScanning ? undefined : 'bluetooth_searching'"
         :label="deviceStore.isScanning ? $t('scanning') : $t('scanForDevices')"
         :loading="deviceStore.isScanning"
+        data-test="device-scan"
         @click="deviceStore.isScanning ? deviceStore.stopScan() : startScan()"
       />
     </div>
@@ -245,6 +248,7 @@
         v-for="device in deviceStore.scanResults"
         :key="device.deviceId"
         class="scan-result-item"
+        data-test="device-scan-result"
         @click="connectDevice(device)"
       >
         <div class="scan-result-left">
@@ -368,6 +372,7 @@
           no-caps
           :label="$t('cancelAll')"
           icon="stop"
+          data-test="device-cancel-all"
           @click="cancelSync"
         />
         <q-btn
@@ -378,6 +383,7 @@
           no-caps
           :label="$t('syncAll')"
           icon="sync"
+          data-test="device-sync-all"
           @click="syncAll"
         />
       </div>
@@ -400,6 +406,7 @@
         v-for="file in deviceStore.deviceFiles"
         :key="file.file"
         class="file-card"
+        :data-file="file.file"
       >
         <div class="file-info">
           <div class="file-name">
@@ -428,6 +435,7 @@
             icon="stop"
             :label="$t('cancelThisFile')"
             no-caps
+            data-test="device-cancel-current"
             @click="cancelCurrentFile"
           />
           <!-- Currently saving or uploading — show spinner only, no cancel -->
@@ -498,6 +506,7 @@
               icon="replay"
               size="sm"
               :disable="deviceStore.isSyncing"
+              data-test="device-file-retry"
               @click="retryUpload(file)"
             />
             <q-btn
@@ -540,6 +549,7 @@
               icon="replay"
               size="sm"
               :disable="deviceStore.isSyncing"
+              data-test="device-file-unskip"
               @click="unskipAndSync(file)"
             />
           </div>
@@ -557,6 +567,7 @@
               :label="$t('syncNow')"
               no-caps
               :disable="deviceStore.isSyncing"
+              data-test="device-file-sync"
               @click="syncFile(file)"
             />
             <q-btn
@@ -583,13 +594,14 @@ import { useI18n } from 'vue-i18n';
 import { useDeviceStore } from '../stores/device';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { isCapacitor } from '../utils/platform';
+import { humanizeBleError } from '../utils/bleErrors';
 
 export default {
   name: 'DevicePage',
 
   setup() {
     const $q = useQuasar();
-    const { t } = useI18n();
+    const { t, locale } = useI18n();
     const deviceStore = useDeviceStore();
     const historyStore = useRecordingsHistoryStore();
     const bleAvailable = ref(true);
@@ -609,7 +621,10 @@ export default {
     // Phase-specific error labels — user sees "Upload failed" instead of generic
     // "Sync failed", so they know what step broke and what to retry.
     const phaseErrorLabel = computed(() => {
-      const msg = deviceStore.syncError || '';
+      // Batch summary ("2/5 failed") stays as-is; a raw protocol/transport
+      // error becomes a translated, actionable sentence.
+      const rawErr = deviceStore.syncError || '';
+      const msg = /^\d+\/\d+ failed$/.test(rawErr) ? rawErr : humanizeBleError(rawErr, t);
       const params = { message: msg };
       switch (deviceStore.syncErrorPhase) {
         case 'downloading': return t('syncErrorDownload', params);
@@ -624,7 +639,7 @@ export default {
       try {
         await deviceStore.startScan();
       } catch (e) {
-        $q.notify({ type: 'warning', message: e.message });
+        $q.notify({ type: 'warning', message: humanizeBleError(e, t), timeout: 6000 });
       }
     };
 
@@ -633,7 +648,7 @@ export default {
         await deviceStore.connectAndPair(device.deviceId);
         $q.notify({ type: 'positive', message: t('deviceConnected') });
       } catch (e) {
-        $q.notify({ type: 'negative', message: t('pairingFailed'), caption: e.message, timeout: 5000 });
+        $q.notify({ type: 'negative', message: t('pairingFailed'), caption: humanizeBleError(e, t), timeout: 8000 });
       }
     };
 
@@ -641,7 +656,7 @@ export default {
       try {
         await deviceStore.autoConnect();
       } catch (e) {
-        $q.notify({ type: 'negative', message: t('connectionFailed'), caption: e.message, timeout: 5000 });
+        $q.notify({ type: 'negative', message: t('connectionFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
       }
     };
 
@@ -678,7 +693,7 @@ export default {
           }
         } catch (e) {
           $q.loading.hide();
-          $q.notify({ type: 'negative', message: t('resetDeviceFailed'), caption: e.message, timeout: 5000 });
+          $q.notify({ type: 'negative', message: t('resetDeviceFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
         }
       });
     };
@@ -688,7 +703,7 @@ export default {
         await deviceStore.syncFile(file);
         $q.notify({ type: 'positive', message: t('syncComplete') });
       } catch (e) {
-        $q.notify({ type: 'negative', message: t('syncFailed'), caption: e.message, timeout: 5000 });
+        $q.notify({ type: 'negative', message: t('syncFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
       }
     };
 
@@ -706,7 +721,7 @@ export default {
             timeout: 6000
           });
         } else {
-          $q.notify({ type: 'negative', message: t('syncFailed'), caption: e.message, timeout: 5000 });
+          $q.notify({ type: 'negative', message: t('syncFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
         }
       }
     };
@@ -724,7 +739,7 @@ export default {
         await deviceStore.retryConnect();
         $q.notify({ type: 'positive', message: t('deviceConnected') });
       } catch (e) {
-        $q.notify({ type: 'negative', message: t('connectionFailed'), caption: e.message, timeout: 5000 });
+        $q.notify({ type: 'negative', message: t('connectionFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
       }
     };
 
@@ -750,7 +765,7 @@ export default {
         await deviceStore.retryUpload(file.file);
         $q.notify({ type: 'positive', message: t('syncComplete') });
       } catch (e) {
-        $q.notify({ type: 'negative', message: t('syncFailed'), caption: e.message, timeout: 5000 });
+        $q.notify({ type: 'negative', message: t('syncFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
       }
     };
 
@@ -788,7 +803,8 @@ export default {
       const d = new Date(timestamp * 1000);
       const now = new Date();
       const isToday = d.toDateString() === now.toDateString();
-      const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const lang = locale.value || undefined;
+      const time = d.toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' });
       if (isToday) return time;
 
       const yesterday = new Date(now);
@@ -796,7 +812,7 @@ export default {
       if (d.toDateString() === yesterday.toDateString()) {
         return `${t('dateYesterday', { time })}`;
       }
-      return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + time;
+      return d.toLocaleDateString(lang, { month: 'short', day: 'numeric' }) + ' ' + time;
     };
 
     const formatFileName = (filename) => {

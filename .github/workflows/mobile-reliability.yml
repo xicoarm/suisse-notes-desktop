@@ -1,0 +1,115 @@
+name: Mobile Reliability
+
+# The mobile E2E harness: the real Capacitor web bundle in Chromium with a
+# virtual phone (native bridge shim, file system on disk), a virtual
+# Suisse Notes Pro recorder speaking the T240 protocol, synthetic microphone
+# audio and the adversarial mock backend. See tests/mobile-harness/README.md.
+
+on:
+  pull_request:
+    # `labeled`: adding the label "endurance" to a PR starts the 5h15 run for
+    # that PR (schedule and workflow_dispatch only work on the default branch).
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - 'src/**'
+      - 'quasar.config.js'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tests/mobile-harness/**'
+      - 'tests/e2e-harness/lib/**'
+      - '.github/workflows/mobile-reliability.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'quasar.config.js'
+      - 'tests/mobile-harness/**'
+  schedule:
+    # Nightly endurance run (5h15 recording) at 01:30 UTC
+    - cron: '30 1 * * *'
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'Scenario (m0-selftest … m7-repair, all, m2-endurance)'
+        default: 'all'
+      platform:
+        description: 'Persona'
+        type: choice
+        default: 'android'
+        options: [android, ios]
+      minutes:
+        description: 'Endurance minutes (m2 only)'
+        default: '315'
+
+jobs:
+  scenarios:
+    if: github.event_name != 'schedule' && github.event.action != 'labeled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [android, ios]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: Build the real Capacitor web bundle
+        run: npx quasar build -m capacitor -T android --skip-pkg
+        env:
+          NODE_ENV: production
+      - name: Run the mobile harness
+        env:
+          SUISSE_E2E_SYNTH_SPEECH: '1'
+          CHROME_PATH: /usr/bin/google-chrome
+        run: node tests/mobile-harness/run.js ${{ github.event.inputs.scenario || 'all' }} --platform ${{ github.event.inputs.platform || matrix.platform }}
+      - name: Upload evidence (results, screenshots, console logs, device file systems)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-harness-${{ matrix.platform }}-${{ github.run_id }}
+          path: |
+            tests/mobile-harness/work/
+            !tests/mobile-harness/work/**/*.wav
+            !tests/mobile-harness/work/profile/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  endurance:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event.inputs.scenario == 'm2-endurance' ||
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'endurance')
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: Build the real Capacitor web bundle
+        run: npx quasar build -m capacitor -T android --skip-pkg
+        env:
+          NODE_ENV: production
+      - name: 5h15 recording on the virtual phone
+        env:
+          SUISSE_E2E_SYNTH_SPEECH: '1'
+          CHROME_PATH: /usr/bin/google-chrome
+        run: node tests/mobile-harness/run.js m2-endurance --platform android --minutes ${{ github.event.inputs.minutes || '315' }}
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-endurance-${{ github.run_id }}
+          path: |
+            tests/mobile-harness/work/
+            !tests/mobile-harness/work/**/*.wav
+            !tests/mobile-harness/work/profile/**
+            !tests/mobile-harness/work/device/**/chunks/**
+          if-no-files-found: ignore
+          retention-days: 14

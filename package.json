@@ -26,7 +26,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:e2e": "node tests/e2e-harness/run.js"
+    "test:e2e": "node tests/e2e-harness/run.js",
+    "test:mobile": "node tests/mobile-harness/run.js"
   },
   "lint-staged": {
     "*.{js,vue}": [

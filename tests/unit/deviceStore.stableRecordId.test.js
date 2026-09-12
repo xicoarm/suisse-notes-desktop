@@ -9,7 +9,12 @@ import { setActivePinia, createPinia } from 'pinia';
 // ---------------------------------------------------------------------------
 
 const uuidState = vi.hoisted(() => ({ n: 0 }));
-vi.mock('uuid', () => ({ v4: () => `fresh-${++uuidState.n}` }));
+// v5 (deterministic per user+device+file) is what the sync path uses now;
+// the counter keeps every call distinguishable for the assertions below.
+vi.mock('uuid', () => ({
+  v4: () => `fresh-${++uuidState.n}`,
+  v5: (name) => `v5-${name}`
+}));
 
 vi.mock('../../src/utils/platform', () => ({
   isElectron: () => false,
@@ -144,13 +149,12 @@ const prefs = vi.hoisted(() => {
 });
 vi.mock('@capacitor/preferences', () => ({ Preferences: prefs.Preferences }));
 
-vi.mock('@capacitor/filesystem', () => ({
-  Filesystem: {
-    mkdir: async () => {},
-    writeFile: async () => {},
-    deleteFile: async () => {}
-  },
-  Directory: { Documents: 'DOCUMENTS' }
+// The device store persists BLE files through the storage service (which
+// owns the platform directory choice); stub it out here.
+vi.mock('../../src/services/storage', () => ({
+  createDirectory: async () => ({ success: true }),
+  writeFile: async () => ({ success: true }),
+  deleteFile: async () => ({ success: true })
 }));
 
 vi.mock('@capacitor/local-notifications', () => ({

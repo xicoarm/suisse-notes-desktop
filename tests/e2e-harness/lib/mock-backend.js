@@ -39,7 +39,30 @@ function makeToken() {
 
 // Port 3000 â€” the renderer's hardwired dev default (src/services/api.js
 // API_URLS.development). The main process is pointed here via API_BASE_URL.
-function startMockBackend({ port = 3000 } = {}) {
+function startMockBackend({ port = 3000, captureUploadsDir = null } = {}) {
+  const fs = require('fs');
+  const path = require('path');
+  if (captureUploadsDir) fs.mkdirSync(captureUploadsDir, { recursive: true });
+  // Pull the file part out of a multipart/form-data body (the legacy upload).
+  const extractUploadedFile = (body, contentType) => {
+    const m = /boundary=([^;]+)/.exec(contentType || '');
+    if (!m) return null;
+    const boundary = Buffer.from('--' + m[1].replace(/^"|"$/g, ''));
+    let pos = body.indexOf(boundary);
+    while (pos >= 0) {
+      const headerEnd = body.indexOf('\r\n\r\n', pos);
+      if (headerEnd < 0) break;
+      const headers = body.slice(pos, headerEnd).toString('utf8');
+      const next = body.indexOf(boundary, headerEnd);
+      if (next < 0) break;
+      if (/name="audio"/.test(headers)) {
+        const fname = (/filename="([^"]*)"/.exec(headers) || [])[1] || 'audio.bin';
+        return { name: fname, data: body.slice(headerEnd + 4, next - 2) }; // strip trailing CRLF
+      }
+      pos = next;
+    }
+    return null;
+  };
   const state = {
     mode: 'ok',
     requests: [],           // { t, method, url, bodyBytes }
@@ -60,7 +83,7 @@ function startMockBackend({ port = 3000 } = {}) {
   const cors = (req) => ({
     'Access-Control-Allow-Origin': req.headers.origin || '*',
     'Access-Control-Allow-Credentials': 'true',
-    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': req.headers['access-control-request-headers'] || 'Authorization,Content-Type,X-Requested-With',
     'Access-Control-Max-Age': '600',
   });
@@ -79,7 +102,9 @@ function startMockBackend({ port = 3000 } = {}) {
     const url = req.url.split('?')[0];
     let bodyBytes = 0;
     const chunks = [];
-    const wantBody = req.headers['content-type']?.includes('json') && url.startsWith('/__control');
+    const wantBody = (req.headers['content-type']?.includes('json') && url.startsWith('/__control')) ||
+      (url.startsWith('/api/custom-spelling/user') && req.method === 'POST') ||
+      (captureUploadsDir && url === '/api/desktop/upload' && req.method === 'POST');
 
     // CORS preflight â€” answer before any body handling.
     if (req.method === 'OPTIONS') {
@@ -145,7 +170,25 @@ function startMockBackend({ port = 3000 } = {}) {
         // scripting THIS endpoint, never by accident.
         return json(res, 200, { remaining: -1, total: -1, used: 0, unlimited: true }, req);
       }
-      if (url.startsWith('/api/custom-spelling')) return json(res, 200, { entries: [] }, req);
+      if (url.startsWith('/api/custom-spelling')) {
+        // Same shape as production (/api/custom-spelling/merged → { spellings, orgSpellings, userSpellings }).
+        state.vocabulary = state.vocabulary || { org: [], user: [] };
+        const v = state.vocabulary;
+        const merged = () => ({ spellings: [...new Set([...v.org, ...v.user])], orgSpellings: [...v.org], userSpellings: [...v.user] });
+        if (url.startsWith('/api/custom-spelling/merged')) return json(res, 200, merged(), req);
+        if (url.startsWith('/api/custom-spelling/user') && req.method === 'POST') {
+          let body = {};
+          try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch { body = {}; }
+          for (const term of body.terms || []) if (!v.user.includes(term)) v.user.push(term);
+          return json(res, 200, { spellings: [...v.user], added: body.terms || [] }, req);
+        }
+        if (url.startsWith('/api/custom-spelling/user') && req.method === 'DELETE') {
+          const term = new URL(req.url, 'http://mock').searchParams.get('term');
+          v.user = v.user.filter((w) => w !== term);
+          return json(res, 200, { spellings: [...v.user], removed: term }, req);
+        }
+        return json(res, 200, merged(), req);
+      }
       if (url.startsWith('/api/desktop/templates')) return json(res, 200, { templates: [] }, req);
       if (url.startsWith('/api/context-files')) return json(res, 200, { files: [] }, req);
       if (url === '/api/desktop/history') return json(res, 200, { recordings: [], meetings: [] }, req);
@@ -177,6 +220,16 @@ function startMockBackend({ port = 3000 } = {}) {
         }
         const audioFileId = `e2e-audio-${crypto.randomUUID()}`;
         state.uploads.set(audioFileId, { status: 'PROCESSING' });
+        if (captureUploadsDir) {
+          try {
+            const part = extractUploadedFile(Buffer.concat(chunks), req.headers['content-type']);
+            if (part) {
+              fs.writeFileSync(path.join(captureUploadsDir, `${audioFileId}.bin`), part.data);
+              fs.writeFileSync(path.join(captureUploadsDir, `${audioFileId}.json`), JSON.stringify({ name: part.name, bytes: part.data.length, attempt, at: Date.now() }));
+              state.uploads.get(audioFileId).bytes = part.data.length;
+            }
+          } catch (e) { console.warn('mock: could not capture upload body:', e.message); }
+        }
         return json(res, 200, { success: true, audioFileId, transcriptionId: audioFileId, meetingId: `e2e-meeting-${attempt}` }, req);
       }
 
