@@ -91,5 +91,6 @@ device file systems) is uploaded as a workflow artifact.
 The operating system itself: background kills and audio-session interruptions
 on a real iPhone, Android's foreground service and battery optimisation,
 permission dialogs, the Bluetooth stacks (MTU, rediscovery after a long
-suspension) and the physical recorder's firmware timing. Those stay on the
-device checklist in `RELEASE-RUNBOOK.md`.
+suspension) and the physical recorder's firmware timing. Those are covered by
+the release test plan in `docs/MOBILE_RELEASE_GUIDE.md` §9, where every manual
+case also names the scenario or unit test that already covers its logic.
