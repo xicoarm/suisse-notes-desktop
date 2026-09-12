@@ -61,6 +61,11 @@ const DISCOVERY_INTERVAL_MS = 15_000;  // Scan for new devices every 15s
 const DISCOVERY_SCAN_DURATION = 5000;  // Quick 5s scan for discovery
 const MAX_RECONNECT_ATTEMPTS = 10;     // After this, connectionState='lost' — manual retry required
 const MAX_CRC_FAILURES = 3;            // Corrupted transfers of one file before it is skipped
+// The file list runs inside the recorder's "sync state", which disables its
+// physical buttons for the duration (protocol §三.2.1). Fetch it on every
+// LIST_EVERY_N_TICKS keepalive tick (20 s each) instead of on every tick, and
+// immediately after the recorder reports that a recording stopped.
+const LIST_EVERY_N_TICKS = 3;
 
 /**
  * Errors that mean "the Bluetooth link is not there right now" — a device that
@@ -191,6 +196,9 @@ export const useDeviceStore = defineStore('device', {
 
     // Auto-sync polling
     _autoSyncTimer: null,
+    _pollInProgress: false,       // a slow tick (long list / sync) must not overlap the next one
+    _pollTick: 0,
+    _listRefreshRequested: false, // set by the recorder's "recording stopped" report
 
     // Auto-reconnect
     _reconnectTimer: null,
@@ -281,9 +289,13 @@ export const useDeviceStore = defineStore('device', {
         }
       });
 
-      // Track device recording state from unsolicited BLE notifications
-      manager.onRecordingStateChange((recording) => {
+      // Track device recording state from unsolicited BLE notifications.
+      // A stop report (0x17) means a new file exists on the card: refresh the
+      // list on the next keepalive tick instead of waiting for the periodic
+      // refresh. A start error (RecordStartErr) is not a recording.
+      manager.onRecordingStateChange((recording, startErr) => {
         this.isRecordingOnDevice = recording;
+        if (!recording && !startErr) this._listRefreshRequested = true;
       });
 
       // Listen for app foreground to reconnect (AirPods-style)
@@ -601,6 +613,16 @@ export const useDeviceStore = defineStore('device', {
       } catch (e) {
         this.connectionState = 'disconnected';
         this.error = e.message;
+        if (/rejected pairing/i.test(e.message || '')) {
+          // The recorder is bound to another app installation (handshake
+          // status 0x01). Reconnecting every few minutes can never succeed —
+          // stop the background loops; the device page shows the actionable
+          // message and its Retry button re-arms the loops.
+          this.connectionState = 'lost';
+          this._stopReconnect();
+          this._stopPersistentReconnect();
+          addBreadcrumb({ category: 'ble', message: 'Reconnect stopped: recorder is paired to another app installation', level: 'warning' });
+        }
         throw e;
       }
     },
@@ -765,8 +787,8 @@ export const useDeviceStore = defineStore('device', {
     /**
      * Sync all new (un-synced) files
      */
-    async syncAllNew() {
-      const newFiles = this.autoSyncableFiles;
+    async syncAllNew({ auto = false } = {}) {
+      const newFiles = auto ? this._filesForAutoSync() : this.autoSyncableFiles;
       if (newFiles.length === 0) return;
       const t = i18n.global.t;
 
@@ -906,6 +928,18 @@ export const useDeviceStore = defineStore('device', {
       const deviceKey = this.deviceSN || this.pairedDevice?.sn || this.deviceUuid || this.pairedDevice?.uuid || 'device';
       const recordId = existingRec?.id || deviceFileRecordId(authStore.user?.id || authStore.user?.userId, deviceKey, file.file);
       const prepAlreadyAnswered = existingRec?.prepAnswered === true;
+
+      // An earlier attempt may have saved the complete file on the phone and
+      // failed only at the upload. Re-use that file instead of transferring
+      // it over Bluetooth again (40 MB = minutes on BLE). The path is only
+      // written to history after a verified write, so its presence means the
+      // file is complete; a missing file simply falls back to a download.
+      let reusableFilePath = null;
+      if (existingRec?.filePath && (existingRec.uploadStatus === 'failed' || existingRec.uploadStatus === 'pending')) {
+        try {
+          if (await storage.exists(existingRec.filePath)) reusableFilePath = existingRec.filePath;
+        } catch { /* re-download */ }
+      }
       // The user's "keep / delete after upload" choice applies to device
       // recordings too (it was never recorded for them, so their audio stayed
       // on the phone regardless of the setting).
@@ -918,10 +952,10 @@ export const useDeviceStore = defineStore('device', {
         id: recordId,
         title,
         duration: durationSec,
-        filePath: null, // No local file yet
+        filePath: reusableFilePath, // null until the download is verified on disk
         fileSize: file.size || 0,
         createdAt,
-        uploadStatus: 'transferring',
+        uploadStatus: reusableFilePath ? 'pending' : 'transferring',
         source: 'device',
         deviceFilename: file.file,
         storagePreference
@@ -934,51 +968,65 @@ export const useDeviceStore = defineStore('device', {
       // claim "Sync complete" while recordings stayed visibly broken.
       let softUploadError = null;
 
+      let filePath = reusableFilePath;
       try {
-        // Phase 1: BLE download
-        if (this._cancelRequested) throw new Error('cancelled');
+        if (filePath) {
+          addBreadcrumb({ category: 'ble', message: `Re-using the saved copy of ${file.file} — upload only`, level: 'info' });
+        } else {
+          // Phase 1: BLE download
+          if (this._cancelRequested) throw new Error('cancelled');
 
-        this.syncPhase = 'downloading';
-        this.syncBytesTotal = file.size || 0;
-        this.syncBytesReceived = 0;
-        addBreadcrumb({ category: 'ble', message: `Downloading ${file.file} (${file.size} bytes)`, level: 'info' });
-        const fileData = await manager.downloadFile(
-          file.file,
-          (data) => {
-            this.syncProgress = data.percent;
-            this.syncBytesReceived = data.bytesReceived;
-          },
-          file.size
-        );
-        const header = Array.from(fileData.slice(0, 8)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
-        const headerAscii = String.fromCharCode(...fileData.slice(0, 4));
-        addBreadcrumb({ category: 'ble', message: `Downloaded ${file.file}: ${fileData.byteLength} bytes, header=[${header}] ascii="${headerAscii}"`, level: 'info' });
+          if (!(file.size > 0)) {
+            // A zero-byte entry on the card (device-side write failure) can
+            // never transfer — skip it with a reason instead of asking the
+            // recorder for it on every poll.
+            const empty = new Error('Device file is empty');
+            empty.code = 'EMPTY_FILE';
+            throw empty;
+          }
 
-        // Phase 2: Save to filesystem
-        if (this._cancelRequested) throw new Error('cancelled');
+          this.syncPhase = 'downloading';
+          this.syncBytesTotal = file.size || 0;
+          this.syncBytesReceived = 0;
+          addBreadcrumb({ category: 'ble', message: `Downloading ${file.file} (${file.size} bytes)`, level: 'info' });
+          const fileData = await manager.downloadFile(
+            file.file,
+            (data) => {
+              this.syncProgress = data.percent;
+              this.syncBytesReceived = data.bytesReceived;
+            },
+            file.size
+          );
+          const header = Array.from(fileData.slice(0, 8)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
+          const headerAscii = String.fromCharCode(...fileData.slice(0, 4));
+          addBreadcrumb({ category: 'ble', message: `Downloaded ${file.file}: ${fileData.byteLength} bytes, header=[${header}] ascii="${headerAscii}"`, level: 'info' });
 
-        this.syncPhase = 'saving';
-        let saveData = fileData;
-        if (isRawOpusPackets(fileData)) {
-          saveData = rawOpusToOgg(fileData);
-          addBreadcrumb({ category: 'ble', message: `Converted raw Opus to Ogg: ${fileData.byteLength} → ${saveData.byteLength} bytes`, level: 'info' });
+          // Phase 2: Save to filesystem
+          if (this._cancelRequested) throw new Error('cancelled');
+
+          this.syncPhase = 'saving';
+          let saveData = fileData;
+          if (isRawOpusPackets(fileData)) {
+            saveData = rawOpusToOgg(fileData);
+            addBreadcrumb({ category: 'ble', message: `Converted raw Opus to Ogg: ${fileData.byteLength} → ${saveData.byteLength} bytes`, level: 'info' });
+          }
+
+          // storage.writeFile owns the directory choice (app-private on Android,
+          // sandbox Documents on iOS) and verifies the bytes reached disk.
+          const dirPath = 'suissenotes_recordings';
+          await storage.createDirectory(dirPath);
+          filePath = `${dirPath}/${file.file}`;
+          const bytes = saveData instanceof Uint8Array ? saveData : new Uint8Array(saveData);
+          const writeResult = await storage.writeFile(
+            filePath,
+            bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+          );
+          if (!writeResult?.success) {
+            throw new Error(writeResult?.error || 'Could not save device file');
+          }
+
+          await historyStore.updateRecording(recordId, { filePath, uploadStatus: 'pending' });
         }
-
-        // storage.writeFile owns the directory choice (app-private on Android,
-        // sandbox Documents on iOS) and verifies the bytes reached disk.
-        const dirPath = 'suissenotes_recordings';
-        await storage.createDirectory(dirPath);
-        const filePath = `${dirPath}/${file.file}`;
-        const bytes = saveData instanceof Uint8Array ? saveData : new Uint8Array(saveData);
-        const writeResult = await storage.writeFile(
-          filePath,
-          bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
-        );
-        if (!writeResult?.success) {
-          throw new Error(writeResult?.error || 'Could not save device file');
-        }
-
-        await historyStore.updateRecording(recordId, { filePath, uploadStatus: 'pending' });
 
         // Phase 2b: Ask for pre-meeting context/template (Suisse Notes Pro flow).
         // The file is safely on the phone — we WAIT for the answer (product
@@ -1183,7 +1231,8 @@ export const useDeviceStore = defineStore('device', {
       const rec = historyStore.getRecordingByDeviceFilename(filename);
       if (!rec || !rec.filePath) return;
 
-      await historyStore.updateRecording(rec.id, { uploadStatus: 'uploading' });
+      // A manual retry re-arms a record parked after a final server verdict.
+      await historyStore.updateRecording(rec.id, { uploadStatus: 'uploading', uploadTerminal: null, retryCount: 0 });
 
       try {
         const result = await uploadWithVerification({
@@ -1336,8 +1385,30 @@ export const useDeviceStore = defineStore('device', {
       }, 5000);
     },
 
+    /**
+     * Files the automatic poll should sync. Files that already sit on the
+     * phone with a failed/pending upload belong to the history auto-retry
+     * (exponential backoff) — or are parked after a final server verdict
+     * until the user retries — so the poll must not re-download them over
+     * Bluetooth every tick. Manual "Sync all" / per-file sync still takes
+     * them (and re-uses the saved copy).
+     */
+    _filesForAutoSync() {
+      const historyStore = useRecordingsHistoryStore();
+      return this.autoSyncableFiles.filter(f => {
+        const rec = historyStore.getRecordingByDeviceFilename?.(f.file);
+        if (!rec) return true;
+        const parked = (rec.uploadStatus === 'failed' || rec.uploadStatus === 'pending') && (rec.filePath || rec.uploadTerminal);
+        return !parked;
+      });
+    },
+
     async _autoSyncPoll() {
       if (!this.isConnected || this.isSyncing) return;
+      // A slow tick (long file list, a multi-file sync) must not overlap the
+      // next interval tick — the command lock would only queue the second one.
+      if (this._pollInProgress) return;
+      this._pollInProgress = true;
 
       try {
         // Always send a battery request as BLE keepalive — prevents the
@@ -1354,35 +1425,53 @@ export const useDeviceStore = defineStore('device', {
         // entering sync state disables device buttons
         if (this.isRecordingOnDevice) return;
 
-        await this.fetchFileList();
+        // The list runs inside the recorder's sync state (buttons disabled):
+        // every LIST_EVERY_N_TICKS ticks, or right after a recording stopped.
+        this._pollTick += 1;
+        const due = this._listRefreshRequested || this._pollTick % LIST_EVERY_N_TICKS === 1;
+        if (!due) return;
+        this._listRefreshRequested = false;
+
+        try {
+          await this.fetchFileList();
+        } catch (e) {
+          // Busy card (a recording just stopped / the card is still being
+          // scanned) or a dropped link: nothing to do this tick. Ask for the
+          // list again on the next tick instead of waiting a full cycle.
+          this._listRefreshRequested = true;
+          addBreadcrumb({ category: 'ble', message: `auto-sync: file list unavailable this tick (${e.message})`, level: 'warning' });
+          return;
+        }
 
         // Re-check: recording may have started during file list fetch
         if (this.isRecordingOnDevice) return;
 
-        const newFiles = this.autoSyncableFiles;
+        const newFiles = this._filesForAutoSync();
         if (newFiles.length > 0) {
           addBreadcrumb({
             category: 'ble',
             message: `Auto-sync: ${newFiles.length} new file(s) detected`,
             level: 'info'
           });
-          await this.syncAllNew();
+          await this.syncAllNew({ auto: true });
         }
       } catch (e) {
-        // Connection may have dropped — stop polling to avoid noise.
-        // Record WHY auto-sync stopped instead of going dark: a dropped link
-        // or per-file sync failures (each already reported where it happened)
-        // are warnings; anything else is a real error.
+        // Per-file failures are reported where they happen and a dropped link
+        // ends polling through the disconnect handler — keep polling. Until
+        // 3.9.37 ANY error here stopped the poll for the rest of the session
+        // (a busy card during a device recording was enough): new recordings
+        // were then only picked up after a reconnect.
         console.log('Auto-sync poll error:', e.message);
         if (isBleTransportError(e) || e.failureCount) {
-          captureMessage(`auto-sync stopped: ${e.message}`, 'warning');
+          addBreadcrumb({ category: 'ble', message: `auto-sync tick failed: ${e.message}`, level: 'warning' });
         } else {
           captureException(e, {
             tags: { action: 'auto_sync_poll' },
             extra: { failureCount: e.failureCount, totalCount: e.totalCount }
           });
         }
-        this.stopAutoSync();
+      } finally {
+        this._pollInProgress = false;
       }
     },
 
@@ -1395,6 +1484,8 @@ export const useDeviceStore = defineStore('device', {
         clearInterval(this._autoSyncTimer);
         this._autoSyncTimer = null;
       }
+      this._pollTick = 0;
+      this._listRefreshRequested = false;
     },
 
     // ========== Auto-Reconnect (AirPods-style) ==========

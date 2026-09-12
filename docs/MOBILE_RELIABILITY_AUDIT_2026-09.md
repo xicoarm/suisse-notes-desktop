@@ -114,7 +114,7 @@ Every finding below is either **fixed on branch `fix/mobile-reliability-audit`**
   CRC16 verification, cancel/disconnect propagation.
 
 ## 5. Verification done
-- Unit tests: 242/242 pass (31 files; 79 new tests: lifecycle boot, redaction/scrubbing,
+- Unit tests: 262/262 pass (33 files; 99 new tests: recorder protocol simulation (download, file list, handshake), automatic sync policy, lifecycle boot, redaction/scrubbing,
   Android directory + legacy fallback + migration, disk-space probe, API timeout, BLE lazy
   init + backoff, locale detection, history day grouping, BLE error wording, upload
   verdict classification, storage preference / delete-all, BLE notification routing and
@@ -261,6 +261,55 @@ recorder (unpair flag byte, translated messages).
   confirm on the first real error event (frames must show `src/…` paths).
 - Consequence for §9: Sentry's "resolve in next release" bound the issues to the phantom
   4.6.0; they were re-bound explicitly to `ch.suissenotes.mobile@3.9.37`.
+
+### 8.7 Recorder protocol: conformance check against the T240 document
+Every command the app uses was checked byte by byte against the protocol document
+(2025-06-13), the code, and the raw frames the field devices produced (Sentry
+breadcrumbs carry the first bytes of every handshake, list and error frame). A scripted
+device model now exercises the whole local-sync path in the unit tests
+(`bleService.download.test.js`).
+
+| Command | Document | Code after this audit | Field frames | Result |
+|---|---|---|---|---|
+| Handshake step 1 | device → `01 01 00 00 {uuid}` after notify enable | waits for the full signature (was: byte 3 only, so a late `01 09 00 00` battery reply could pass and fail in JSON.parse) | `01 01 00 00 7b …` | OK (tightened) |
+| Handshake step 2 | app → `01 01 00 01 {time,uuid}` | as documented | — | OK |
+| Handshake step 3 | device → `01 01 00 02 status [json]`, status 0x00–0x04 | reply selected by command echo, statuses mapped | `01 01 00 02 00 7b …` | OK (tightened) |
+| Time sync 0x04 | `01 04 00 YYYYMMDDHHMMSS`, echoed | sent after the handshake, echo awaited | — | OK |
+| Battery 0x09 | `01 09 00` → `01 09 00 level` | echo validated | keepalive every 20 s | OK |
+| Storage 0x06 | JSON `unit/TotalCapacity/FreeCapacity` (KB) | echo validated | — | OK |
+| Sync state 0x74 | `01 74 00 x` echoed; buttons disabled while 1 | entered/left around every list and download, left on every error path | "Cleared potential stale sync-state" | OK |
+| File list 0x1B | `{"FileNum":N}` then N entries; busy → `{"FileList":"MemoryBusy"}` | count and entries by echo; **the firmware sends `{"AudioFileList":"MemoryBusy"}`** — the app read that as "0 files" | `{"AudioFileList":"MemoryBusy"}` while the recorder was recording | **FIXED** |
+| Download 0x1C | `02 1C 00 idx(2) audio≤320` … `01 1D 00 crcL crcH`; byte order of `idx` not stated | **the frame index is big-endian on the wire**; the continuity check added in round 2 assumed little-endian and would have rejected every file at its second frame — caught by this check before release. CRC16 matches the document | consecutive frames `02 1C 00 02 B7`, `02 B8`, `02 B9` | **FIXED** |
+| Delete 0x1E | → 0x01 ok / 0x02 fail | echo validated (not used by the UI) | — | OK |
+| Format 0x68 | → 0x00 ok; no commands until done | 30 s timeout | — | OK |
+| Unpair 0x05 | `01 05 00 flag` (0x00 keep), device disconnects itself | flag 0x00, echo awaited, no reconnect loop afterwards | — | OK |
+| Device-button recording 0x14 / 0x17 | `01 14 00 {file…}` or `{"RecordStartErr":…}`; audio `02 14 00 …`; stop `01 17 00 crc` | start/stop tracked, audio dropped, **RecordStartErr = not recording** (was: recording) | "Device started/stopped recording (button)" | OK (tightened) |
+| Unsolicited 0x6E / 0x0C | pushed at any time | dropped before the reply queue | — | OK |
+| Not used | mic gain, SN, auto-off, storage-disable, WiFi, screensaver, app-initiated recording, WiFi sync/OTA | not implemented (not needed) | — | n/a |
+
+Rules from the document the code follows: one command at a time until its reply arrives
+(command lock), no download before the complete list was received, list and download
+inside the sync state, sync state left after each file, handshake completed within the
+recorder's 5 s window.
+
+**Defects found by this check and fixed (all in `bleService.js` / `device.js`, covered
+by tests):**
+1. Frame index byte order — would have broken every transfer in 3.9.37 (see table).
+2. Busy-card JSON key — a recording in progress or a card scan was shown as an empty
+   recorder.
+3. The automatic poll ended for the rest of the session on **any** error, including the
+   busy card: a recording made on the recorder was then only picked up after a reconnect
+   (field trail CAPACITOR-RY). The poll now keeps running and asks for the list again on
+   the next tick.
+4. After a failed upload the whole file was transferred over Bluetooth again on every
+   20-second poll. The saved copy on the phone is re-used, and files that already sit on
+   the phone are left to the history auto-retry (exponential backoff) or, after a final
+   server verdict, to the user's Retry.
+5. A recorder bound to another installation was retried every few minutes forever;
+   the reconnect loops now stop with the actionable message (Retry re-arms them).
+6. The file list ran inside the sync state on every 20-second tick, disabling the
+   recorder's buttons for a second or two each time; it now runs every third tick and
+   immediately after the recorder reports a stopped recording.
 
 ## 9. Sentry, one issue at a time
 Source: Sentry project `capacitor`, every issue with status *unresolved* seen in the last 90 days, fetched on 2026-09-12 (461 issues, 63,333 events). Each issue was matched to exactly one row below; the issue IDs of every row are listed underneath so the mapping can be checked one by one.

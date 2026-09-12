@@ -644,12 +644,18 @@ export class BleDeviceManager {
       const countJson = parseJsonFromBuffer(countResp, 3);
       addBreadcrumb({ category: 'ble', message: `getFileList countJson: ${JSON.stringify(countJson)}`, level: 'info' });
 
-      // Device-side error instead of a count: {"FileList":"MemoryBusy"} while
-      // the recorder is still scanning its card. Surfaced with a code the UI
-      // translates; the next auto-sync poll retries.
-      if (countJson.FileList) {
-        const err = new Error(String(countJson.FileList));
-        err.code = 'DEVICE_' + String(countJson.FileList).toUpperCase();
+      // Device-side error instead of a count. The document shows
+      // {"FileList":"MemoryBusy"}; the shipped firmware actually sends
+      // {"AudioFileList":"MemoryBusy"} (Sentry CAPACITOR-RY breadcrumbs, while
+      // the recorder was recording). Until now that case was read as
+      // "0 files". Accept any *FileList key with a string value, and any
+      // Memory* status, and surface a code the UI translates; the next poll
+      // retries once the card is free again.
+      const deviceStatus = Object.entries(countJson)
+        .find(([k, v]) => typeof v === 'string' && (/FileList$/i.test(k) || /^Memory(Busy|Err|Full)$/i.test(v)));
+      if (deviceStatus) {
+        const err = new Error(String(deviceStatus[1]));
+        err.code = 'DEVICE_' + String(deviceStatus[1]).toUpperCase();
         throw err;
       }
 
@@ -797,7 +803,11 @@ export class BleDeviceManager {
           // local-sync stream (cmd 0x1C) belongs to this download; the
           // real-time stream (0x14) is dropped in _onNotify.
           if (!(data[1] === CMD_FILE_DOWNLOAD[0] && data[2] === CMD_FILE_DOWNLOAD[1])) continue;
-          const frameIndex = data[3] | (data[4] << 8);
+          // The 2-byte frame index is BIG-endian on the wire. The protocol
+          // document does not state the byte order; consecutive frames
+          // recorded in the field read 0x02 0xb7, 0x02 0xb8, 0x02 0xb9 —
+          // the SECOND byte increments (Sentry CAPACITOR-XN breadcrumbs).
+          const frameIndex = (data[3] << 8) | data[4];
           if (frameIndex !== (expectedIndex & 0xFFFF)) {
             // A hole in the frame sequence can only end in a CRC mismatch
             // after the whole file — fail fast instead.
@@ -937,8 +947,12 @@ export class BleDeviceManager {
 
       addBreadcrumb({ category: 'ble', message: `handshake step1 raw (attempt ${step1Attempts}): ${hexDump(step1, 30)}`, level: 'info' });
 
-      // Valid step 1: byte[3]=0x00, followed by JSON with device UUID
-      if (step1.length >= 5 && step1[3] === 0x00) {
+      // Valid step 1: 0x01 0x01 0x00 0x00 + JSON with the device UUID
+      // (protocol §二.1.1). Checking only byte[3] let a late reply of another
+      // command (e.g. battery 0 % = 0x01 0x09 0x00 0x00) pass as step 1 and
+      // fail in JSON.parse with a confusing error.
+      if (step1.length >= 5 && step1[0] === TYPE_CMD && step1[1] === CMD_HANDSHAKE[0] &&
+          step1[2] === CMD_HANDSHAKE[1] && step1[3] === 0x00) {
         break;
       }
 
@@ -966,13 +980,14 @@ export class BleDeviceManager {
     const appJsonBytes = new TextEncoder().encode(appJson);
     await this._write(new Uint8Array([TYPE_CMD, CMD_HANDSHAKE[0], CMD_HANDSHAKE[1], 0x01, ...appJsonBytes]));
 
-    // Step 3: Wait for device verification
-    const step3 = await this._readNotification(5000);
+    // Step 3: Wait for the device's verdict — the frame echoing the
+    // handshake command; any other frame is skipped (bounded to 5 s).
+    const step3 = await this._readResponse(CMD_HANDSHAKE, 5000);
 
     addBreadcrumb({ category: 'ble', message: `handshake step3 raw: ${hexDump(step3, 30)}`, level: 'info' });
 
     // Response: 0x01 0x01 0x00 0x02 <status> [json if status=0x00]
-    if (step3[3] !== 0x02) {
+    if (step3.length < 5 || step3[3] !== 0x02) {
       const err = new Error(`Unexpected handshake step3: byte[3]=0x${step3[3].toString(16)}, raw=${hexDump(step3, 30)}`);
       captureException(err, { tags: { action: 'ble_handshake_step3' }, extra: { rawHex: hexDump(step3, 50) } });
       throw err;
@@ -1050,8 +1065,23 @@ export class BleDeviceManager {
         return;
       }
 
-      // Recording started via device button (TYPE_CMD, cmd 0x14 0x00)
+      // Recording started via device button (TYPE_CMD, cmd 0x14 0x00 + JSON
+      // {file, creat_time, toggle_switch}). The same frame with
+      // {"RecordStartErr":"MemoryErr"|"MemoryFull"} means the recording did
+      // NOT start (protocol §三.1.1) — card missing / unsupported / full.
       if (data[0] === TYPE_CMD && data[1] === 0x14 && data[2] === 0x00) {
+        let startErr = null;
+        try {
+          const json = data.length > 3 ? parseJsonFromBuffer(data, 3) : {};
+          if (json && json.RecordStartErr) startErr = String(json.RecordStartErr);
+        } catch { /* no / partial JSON — treat as started */ }
+        if (startErr) {
+          this.isRecording = false;
+          this.lastRecordStartError = startErr;
+          addBreadcrumb({ category: 'ble', message: `Device could not start recording: ${startErr}`, level: 'warning' });
+          if (this._recordingStateCallback) this._recordingStateCallback(false, startErr);
+          return;
+        }
         this.isRecording = true;
         addBreadcrumb({ category: 'ble', message: 'Device started recording (button)', level: 'info' });
         if (this._recordingStateCallback) this._recordingStateCallback(true);
