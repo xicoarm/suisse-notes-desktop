@@ -95,6 +95,7 @@ Every finding below is either **fixed on branch `fix/mobile-reliability-audit`**
 | 3.9 | Hard-coded English notifications on History (login required, file missing, uploaded, deleted, progress) and the Record stop path; device-page dates in the WebView locale. | **Fixed** — localized en/de/fr/it. |
 | 3.10 | Sign-out possible mid-recording (resets the history store and orphans the in-flight recording's bookkeeping). | **Fixed** — blocked with a message while recording/uploading. |
 | 3.11 | `console.error` at every launch when the `recordings` folder does not exist yet. | **Fixed** — missing root lists as empty. |
+| 3.12 | History on the phone was a flat list of cards; scanning "which day was that" meant reading every timestamp. | **Fixed** — day groups (Today / Yesterday / localized long date, newest first) inside the device/app sections; desktop unchanged. |
 
 ## 4. What was verified as already solid (no change)
 - Recording engine: double-start latch + generation guard, honest duration, chunk-progress
@@ -108,9 +109,10 @@ Every finding below is either **fixed on branch `fix/mobile-reliability-audit`**
   CRC16 verification, cancel/disconnect propagation.
 
 ## 5. Verification done
-- Unit tests: 192/192 pass (25 files; 29 new tests: lifecycle boot, redaction/scrubbing,
+- Unit tests: 195/195 pass (26 files; 32 new tests: lifecycle boot, redaction/scrubbing,
   Android directory + legacy fallback + migration, disk-space probe, API timeout, BLE lazy
-  init + backoff, locale detection). Baseline on `main` before the change: 159/159.
+  init + backoff, locale detection, history day grouping). Baseline on `main` before the
+  change: 159/159.
 - ESLint: 0 errors on every changed file.
 - `quasar build -m capacitor -T android --skip-pkg`: bundle compiles.
 - Native Kotlin/Java changes compile only in CI (no Android SDK on this machine) — see the
