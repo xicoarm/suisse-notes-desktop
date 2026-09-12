@@ -64,6 +64,9 @@ async function captureCase(kind, seconds, opts = {}) {
     }
     const apiUrl = await app.evalTimed(() => window.electronAPI.config.getApiUrl());
     if (apiUrl !== mock.url) throw new Error('The app is not using the local test backend');
+    // Packaged qualification attests the owned main process before any capture.
+    // Ordinary cases have no hook and keep their existing behavior and gates.
+    if (opts.beforeRecording) await opts.beforeRecording(app, { reference, mock });
     result.nativeArchiveExpected = await app.evalTimed(() => typeof window.electronAPI.recording.beginSource === 'function');
     if (kind === 'native-blob-delay' && !result.nativeArchiveExpected) throw new Error('Native blob delay requires the native archive application');
     await app.evalTimed(installRecordingRoleObserver, { delayRole: kind === 'blob-delay' ? 'live-mix' : kind === 'native-blob-delay' ? 'native-input' : null });
