@@ -170,11 +170,9 @@
             <span>{{ $t('deviceRecordingsSection') }}</span>
             <span class="section-count">{{ historyStore.deviceRecordings.length }}</span>
           </div>
-          <RecordingHistoryCard
-            v-for="recording in historyStore.deviceRecordings"
-            :key="recording.id"
-            :recording="recording"
-            :uploading="uploadingRecordingId === recording.id"
+          <HistoryDayGroups
+            :recordings="historyStore.deviceRecordings"
+            :uploading-id="uploadingRecordingId"
             @upload="handleUpload"
             @retry="handleUpload"
             @reupload="handleReupload"
@@ -197,11 +195,9 @@
             <span>{{ $t('appRecordingsSection') }}</span>
             <span class="section-count">{{ historyStore.appRecordings.length }}</span>
           </div>
-          <RecordingHistoryCard
-            v-for="recording in historyStore.appRecordings"
-            :key="recording.id"
-            :recording="recording"
-            :uploading="uploadingRecordingId === recording.id"
+          <HistoryDayGroups
+            :recordings="historyStore.appRecordings"
+            :uploading-id="uploadingRecordingId"
             @upload="handleUpload"
             @retry="handleUpload"
             @reupload="handleReupload"
@@ -213,7 +209,21 @@
         </div>
       </template>
 
-      <!-- Desktop or no device recordings: flat chronological list -->
+      <!-- Mobile without device recordings: one chronological list, grouped by day -->
+      <HistoryDayGroups
+        v-else-if="isMobile"
+        :recordings="historyStore.allRecordings"
+        :uploading-id="uploadingRecordingId"
+        @upload="handleUpload"
+        @retry="handleUpload"
+        @reupload="handleReupload"
+        @deleted="onRecordingDeleted"
+        @cancel-transfer="handleCancelTransfer"
+        @resync="handleResync"
+        @answer-prep="handleAnswerPrep"
+      />
+
+      <!-- Desktop: flat chronological list -->
       <template v-else>
         <RecordingHistoryCard
           v-for="recording in historyStore.allRecordings"
@@ -247,6 +257,7 @@ import { getApiUrlSync } from '../services/api';
 import { pickAudioFile } from '../services/filePicker';
 import { captureException, captureMessage } from '../boot/sentry';
 import RecordingHistoryCard from '../components/RecordingHistoryCard.vue';
+import HistoryDayGroups from '../components/HistoryDayGroups.vue';
 
 // An upload can "fail" for reasons that are normal product states rather than
 // defects — most commonly the user is out of transcription minutes. The backend
@@ -269,7 +280,8 @@ export default {
   name: 'HistoryPage',
 
   components: {
-    RecordingHistoryCard
+    RecordingHistoryCard,
+    HistoryDayGroups
   },
 
   setup() {

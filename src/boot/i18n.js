@@ -510,7 +510,10 @@ const messages = {
     historyUploadingProgress: 'Uploading… {percent}%',
     historyRetryProgress: 'Retry attempt {attempt}… {percent}%',
     recordingDeleted: 'Recording deleted',
-    logoutBlockedWhileRecording: "You can't sign out while a recording or upload is in progress."
+    logoutBlockedWhileRecording: "You can't sign out while a recording or upload is in progress.",
+    historyToday: 'Today',
+    historyYesterday: 'Yesterday',
+    historyUndated: 'Undated'
   },
   de: {
     // Record Page
@@ -1021,7 +1024,10 @@ const messages = {
     historyUploadingProgress: 'Wird hochgeladen… {percent}%',
     historyRetryProgress: 'Erneuter Versuch {attempt}… {percent}%',
     recordingDeleted: 'Aufnahme gelöscht',
-    logoutBlockedWhileRecording: 'Abmelden ist nicht möglich, solange eine Aufnahme oder ein Upload läuft.'
+    logoutBlockedWhileRecording: 'Abmelden ist nicht möglich, solange eine Aufnahme oder ein Upload läuft.',
+    historyToday: 'Heute',
+    historyYesterday: 'Gestern',
+    historyUndated: 'Ohne Datum'
   },
   fr: {
     // Record Page
@@ -1532,7 +1538,10 @@ const messages = {
     historyUploadingProgress: 'Téléversement… {percent}%',
     historyRetryProgress: 'Nouvelle tentative {attempt}… {percent}%',
     recordingDeleted: 'Enregistrement supprimé',
-    logoutBlockedWhileRecording: 'Impossible de se déconnecter pendant un enregistrement ou un téléversement.'
+    logoutBlockedWhileRecording: 'Impossible de se déconnecter pendant un enregistrement ou un téléversement.',
+    historyToday: "Aujourd'hui",
+    historyYesterday: 'Hier',
+    historyUndated: 'Sans date'
   },
   it: {
     // Record Page
@@ -2043,7 +2052,10 @@ const messages = {
     historyUploadingProgress: 'Caricamento… {percent}%',
     historyRetryProgress: 'Nuovo tentativo {attempt}… {percent}%',
     recordingDeleted: 'Registrazione eliminata',
-    logoutBlockedWhileRecording: 'Non è possibile uscire mentre è in corso una registrazione o un caricamento.'
+    logoutBlockedWhileRecording: 'Non è possibile uscire mentre è in corso una registrazione o un caricamento.',
+    historyToday: 'Oggi',
+    historyYesterday: 'Ieri',
+    historyUndated: 'Senza data'
   }
 };
 
