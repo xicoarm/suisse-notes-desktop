@@ -266,7 +266,9 @@ also tests the update of an existing installation.
 8. **Weiter** (bottom right) → page **Vorschau anzeigen und bestätigen**.
 9. Read **Fehler, Warnungen und Meldungen**. Errors block. Expected warnings today:
    - "Mit diesem App Bundle ist keine Offenlegungsdatei verknüpft" (R8 mapping) — normal.
-   - "Deine App ist derzeit auf API-Ebene 35 ausgerichtet …" — see §11, must be fixed before 2026-11-01.
+   - "Deine App ist derzeit auf API-Ebene … ausgerichtet, sollte jedoch eine API-Mindestebene
+     von … haben" must **not** appear: it means `targetSdkVersion` is behind Google's
+     requirement (§11). Since versionCode 40 the app targets API 36.
    - "Geräte nicht mehr unterstützt" must be **0** in the device table.
 10. **Speichern und veröffentlichen** → dialog "Änderung bei Google Play veröffentlichen?" →
     **Speichern und veröffentlichen**.
@@ -289,7 +291,7 @@ update path (existing recordings, migrations) cannot be tested this way.
 ## 6. Phase C — test on real devices
 
 Run the release test plan in §9: every **P1** case, plus every **P2** case whose area the
-release touched. Minimum devices: one current Android (14+), one older Android (10 or 11),
+release touched. Minimum devices: one Android 16 phone, one older Android (10 or 11),
 one current iPhone, one Suisse Notes Pro recorder that can be wiped.
 
 Record the result per case (pass / fail + note) in the pull request. Any failure: fix on
@@ -537,6 +539,17 @@ one of them ≥ 30 minutes.
 | G17 | Reset recorder | Aufnahmegerät → ⋮ menu → "Gerät zurücksetzen" (**wipes the card**) | Recorder formatted and unpaired | P3 | — |
 | G18 | Error texts | Provoke G5, G6, G15, G16 | Every message translated and actionable, no raw codes | P1 | unit `bleErrors` |
 
+### K. Android 16 behaviour (target API 36)
+
+Run on a phone with **Android 16**. Apps targeting API 36 get Google's predictive back
+gesture, forced edge-to-edge drawing and free rotation on large screens.
+
+| ID | Case | Steps | Expected | Prio | Automated |
+|---|---|---|---|---|---|
+| K1 | Layout edge-to-edge | Open Aufnehmen, Verlauf, Einstellungen, Aufnahmegerät; open a dialog | Nothing hidden under the status bar or the navigation bar, bottom tabs fully tappable, with gesture navigation and with 3-button navigation | P2 | — |
+| K2 | Back gesture | Swipe back inside a dialog, on a sub-page and on the start page | Dialog closes; sub-page goes back; on the start page the app goes to the background with the system animation | P2 | — |
+| K3 | Tablet or foldable rotation | Rotate while recording and on History | Layout usable in landscape, recording continues | P3 | — |
+
 ### H. Notifications, permissions, battery
 
 | ID | Case | Steps | Expected | Prio | Automated |
@@ -557,16 +570,17 @@ one of them ≥ 30 minutes.
 | Scope | Cases | Time with 2 phones + recorder |
 |---|---|---|
 | P1 only | 26 | about 2 hours |
-| P1 + P2 | 54 | about 4 hours |
-| Everything | 63 | about 5 hours |
+| P1 + P2 | 56 | about 4 hours |
+| Everything | 66 | about 5 hours |
 
 ### Scope of 3.9.37
 
 This release changed storage location and migration, iOS background handling, disk-space
 checks, login error handling, language detection, History (day groups, no duplicates,
 skipped entries), delete after upload, delete all, upload retry policy and the whole
-recorder protocol layer. In scope: **all P1** plus A3, B3, B6, B8, C1, D2, D6, E2, E5,
-F1, F5, F7, F8, G8, G9, G10, G11, G12, G15, G16.
+recorder protocol layer, and versionCode 40 raised the Android target to API 36. In scope:
+**all P1** plus A3, B3, B6, B8, C1, D2, D6, E2, E5, F1, F5, F7, F8, G8, G9, G10, G11, G12,
+G15, G16, K1, K2.
 
 ---
 
@@ -591,8 +605,8 @@ F1, F5, F7, F8, G8, G9, G10, G11, G12, G15, G16.
 
 | Due | Store | Obligation | Status 2026-09-12 |
 |---|---|---|---|
-| **2026-09-30** | Google Play | Register the apps for **Android developer verification** (Play Console inbox). Unregistered Play apps are removed worldwide. | open — account owner |
-| **2026-11-01** | Google Play | Target **API level 36** (`targetSdkVersion` in `src-capacitor/android/variables.gradle`, today 35). After that date no updates can be published. | open — needs a code change + test round |
+| 2026-09-30 | Google Play | Register the apps for **Android developer verification**. Unregistered Play apps are removed worldwide. | **done** — `ch.suissenotes.app` registered since 2026-03-05 with 2 signing keys (Play Console → Identitätsbestätigung für Android-Entwickler → Paketnamen: "Registriert"). Check there that every new package name or new signing key is registered too. |
+| 2026-11-01 | Google Play | Target **API level 36**. After that date no updates can be published. | **done** in versionCode 40 (`targetSdkVersion = 36` in `src-capacitor/android/variables.gradle`). Google raises the level every year around August — check the Play Console warning on every upload. |
 | 2026-09-07 | App Store | Social-media age-rating questions (App-Informationen banner) | check in App Store Connect |
 | — | both | Store screenshots still show the old "Suisse Notes" UI | open |
 
