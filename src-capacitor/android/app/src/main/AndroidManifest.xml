@@ -44,6 +44,21 @@
          restored session token is a credential leak, and restored queue/
          history state without the recording files behind it is just wrong.
          Users re-login on a new phone — that is the correct behaviour. -->
+    <!--
+      @capacitor/browser opens the Custom Tab from its own translucent activity.
+      That activity closes itself with a non-persisted flag, so a configuration
+      change (rotation, fold, dark mode, font scale, WebView update) while the
+      tab is open recreates it and it then never finishes — leaving a
+      transparent window that swallows every touch after the user returns to the
+      app (Android "frozen" report, 3.9.38). MainActivity is already hardened
+      against these; the library activity is not, so declare it here with the
+      same configChanges (manifest merge adds the attribute to the library's).
+    -->
+    <activity
+        android:name="com.capacitorjs.plugins.browser.BrowserControllerActivity"
+        android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density|fontScale|layoutDirection"
+        tools:node="merge" />
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"

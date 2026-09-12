@@ -240,9 +240,16 @@ export const initializeLifecycle = async () => {
   if (isAndroid()) {
     await step('backButton', async () => {
       const { App } = await import('@capacitor/app');
-      await App.addListener('backButton', (event) => {
-        console.log('Lifecycle: Back button pressed', event);
-        // Let Vue Router handle back navigation by default
+      await App.addListener('backButton', async ({ canGoBack }) => {
+        // Registering ANY backButton listener disables the plugin's default
+        // handling, so we must act: go back through the (hash) router history,
+        // and at the root send the app to the background instead of leaving
+        // the button dead.
+        if (canGoBack || (typeof window !== 'undefined' && window.history.length > 1)) {
+          window.history.back();
+        } else {
+          try { await App.minimizeApp(); } catch { /* not available — ignore */ }
+        }
       });
     });
   }
