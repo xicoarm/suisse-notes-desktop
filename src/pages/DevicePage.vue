@@ -583,6 +583,7 @@ import { useI18n } from 'vue-i18n';
 import { useDeviceStore } from '../stores/device';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { isCapacitor } from '../utils/platform';
+import { humanizeBleError } from '../utils/bleErrors';
 
 export default {
   name: 'DevicePage',
@@ -609,7 +610,10 @@ export default {
     // Phase-specific error labels — user sees "Upload failed" instead of generic
     // "Sync failed", so they know what step broke and what to retry.
     const phaseErrorLabel = computed(() => {
-      const msg = deviceStore.syncError || '';
+      // Batch summary ("2/5 failed") stays as-is; a raw protocol/transport
+      // error becomes a translated, actionable sentence.
+      const rawErr = deviceStore.syncError || '';
+      const msg = /^\d+\/\d+ failed$/.test(rawErr) ? rawErr : humanizeBleError(rawErr, t);
       const params = { message: msg };
       switch (deviceStore.syncErrorPhase) {
         case 'downloading': return t('syncErrorDownload', params);
@@ -624,7 +628,7 @@ export default {
       try {
         await deviceStore.startScan();
       } catch (e) {
-        $q.notify({ type: 'warning', message: e.message });
+        $q.notify({ type: 'warning', message: humanizeBleError(e, t), timeout: 6000 });
       }
     };
 
@@ -633,7 +637,7 @@ export default {
         await deviceStore.connectAndPair(device.deviceId);
         $q.notify({ type: 'positive', message: t('deviceConnected') });
       } catch (e) {
-        $q.notify({ type: 'negative', message: t('pairingFailed'), caption: e.message, timeout: 5000 });
+        $q.notify({ type: 'negative', message: t('pairingFailed'), caption: humanizeBleError(e, t), timeout: 8000 });
       }
     };
 
@@ -641,7 +645,7 @@ export default {
       try {
         await deviceStore.autoConnect();
       } catch (e) {
-        $q.notify({ type: 'negative', message: t('connectionFailed'), caption: e.message, timeout: 5000 });
+        $q.notify({ type: 'negative', message: t('connectionFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
       }
     };
 
@@ -678,7 +682,7 @@ export default {
           }
         } catch (e) {
           $q.loading.hide();
-          $q.notify({ type: 'negative', message: t('resetDeviceFailed'), caption: e.message, timeout: 5000 });
+          $q.notify({ type: 'negative', message: t('resetDeviceFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
         }
       });
     };
@@ -688,7 +692,7 @@ export default {
         await deviceStore.syncFile(file);
         $q.notify({ type: 'positive', message: t('syncComplete') });
       } catch (e) {
-        $q.notify({ type: 'negative', message: t('syncFailed'), caption: e.message, timeout: 5000 });
+        $q.notify({ type: 'negative', message: t('syncFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
       }
     };
 
@@ -706,7 +710,7 @@ export default {
             timeout: 6000
           });
         } else {
-          $q.notify({ type: 'negative', message: t('syncFailed'), caption: e.message, timeout: 5000 });
+          $q.notify({ type: 'negative', message: t('syncFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
         }
       }
     };
@@ -724,7 +728,7 @@ export default {
         await deviceStore.retryConnect();
         $q.notify({ type: 'positive', message: t('deviceConnected') });
       } catch (e) {
-        $q.notify({ type: 'negative', message: t('connectionFailed'), caption: e.message, timeout: 5000 });
+        $q.notify({ type: 'negative', message: t('connectionFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
       }
     };
 
@@ -750,7 +754,7 @@ export default {
         await deviceStore.retryUpload(file.file);
         $q.notify({ type: 'positive', message: t('syncComplete') });
       } catch (e) {
-        $q.notify({ type: 'negative', message: t('syncFailed'), caption: e.message, timeout: 5000 });
+        $q.notify({ type: 'negative', message: t('syncFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
       }
     };
 

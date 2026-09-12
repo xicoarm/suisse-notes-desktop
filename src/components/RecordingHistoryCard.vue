@@ -53,6 +53,19 @@
           </div>
         </div>
 
+        <!-- Why the upload failed / the file was skipped — previously the
+             card only said "FAILED" and the reason lived in Sentry. -->
+        <div
+          v-if="failureText"
+          class="card-failure-text"
+        >
+          <q-icon
+            name="error_outline"
+            size="12px"
+          />
+          <span>{{ failureText }}</span>
+        </div>
+
         <!-- Capture warning: the saved file has holes (segments were lost
              between capture and combine). Stays on the card so the user can
              judge the transcript accordingly. -->
@@ -366,6 +379,7 @@ import { useShareLink } from '../composables/useShareLink';
 import { isElectron } from '../utils/platform';
 import { exportAudio } from '../services/export';
 import { captureMessage } from '../boot/sentry';
+import { humanizeBleError } from '../utils/bleErrors';
 import AudioPlayback from './AudioPlayback.vue';
 
 export default {
@@ -432,6 +446,15 @@ export default {
     const currentStatus = computed(() =>
       props.uploading ? 'uploading' : props.recording.uploadStatus
     );
+
+    const failureText = computed(() => {
+      const status = props.recording.uploadStatus;
+      const raw = props.recording.uploadError;
+      if (!raw || (status !== 'failed' && status !== 'skipped')) return '';
+      if (raw === 'EMPTY_FILE' || raw === 'CRC_GAVE_UP') return humanizeBleError({ code: raw, message: '' }, t);
+      if (/Local file missing|Could not read file|File does not exist/i.test(raw)) return t('historyFileMissing');
+      return String(raw).slice(0, 160);
+    });
 
     const captureWarningText = computed(() => {
       const w = props.recording.captureWarning;
@@ -521,7 +544,8 @@ export default {
           // User-cancelled save/share is silent; anything else is an error.
           // Log to Sentry AND surface the underlying reason in the toast so the
           // exact failure is diagnosable both remotely and on-device.
-          captureMessage(`export: onExport failure reason=${res.error || 'unknown'}`, 'error');
+          // source_missing is already reported (as a warning) by the export service.
+          captureMessage(`export: onExport failure reason=${res.error || 'unknown'}`, res.error === 'source_missing' ? 'warning' : 'error');
           $q.notify({ type: 'negative', message: t('exportFailed'), caption: res.error, timeout: 6000 });
         }
       } catch (e) {
@@ -565,6 +589,7 @@ export default {
       formattedDuration,
       formattedSize,
       currentStatus,
+      failureText,
       captureWarningText,
       isUploaded,
       isRecoverable,
@@ -671,6 +696,16 @@ export default {
     font-size: 12px;
     color: #1e293b;
   }
+}
+
+.card-failure-text {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #b91c1c;
+  line-height: 1.3;
 }
 
 .capture-warning {

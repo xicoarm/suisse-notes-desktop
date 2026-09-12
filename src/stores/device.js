@@ -4,7 +4,28 @@
  */
 
 import { defineStore } from 'pinia';
-import { v4 as uuidv4 } from 'uuid';
+import { v4 as uuidv4, v5 as uuidv5 } from 'uuid';
+
+// Namespace for deterministic (v5) ids of device files: the SAME user syncing
+// the SAME file from the SAME recorder always gets the same recordId, so the
+// server's dedupe (botSessionId = "desktop:<recordId>") holds across an app
+// reinstall, a purged localStorage or a second phone — no duplicate meetings.
+const DEVICE_FILE_ID_NAMESPACE = '5f8b7e3a-2c7d-4c5e-9a0f-3d2e1b4c6a71';
+
+export function deviceFileRecordId(userId, deviceKey, filename) {
+  const name = `${userId || 'anon'}|${deviceKey || 'device'}|${filename}`;
+  return uuidv5(name, DEVICE_FILE_ID_NAMESPACE);
+}
+
+// Bluetooth pairing identity of this app for this USER. Deterministic per
+// user so a reinstall (or a second phone of the same user) presents the same
+// UUID to a recorder that is already bound — the device firmware binds
+// exactly one app UUID and only that app can ever unpair it.
+const APP_UUID_NAMESPACE = '0c1f7a2e-9b6d-4e3a-8c5f-2d7e4b1a9c63';
+export function userAppUuid(userId) {
+  if (!userId) return null;
+  return uuidv5(`suisse-meets-ble-app|${userId}`, APP_UUID_NAMESPACE);
+}
 import { isCapacitor } from '../utils/platform';
 import { getBleManager } from '../services/bleService';
 import { addBreadcrumb, captureException, captureMessage } from '../boot/sentry';
@@ -39,6 +60,7 @@ const RECONNECT_INTERVAL_MAX_MS = 5 * 60_000; // Cap after repeated failures (de
 const DISCOVERY_INTERVAL_MS = 15_000;  // Scan for new devices every 15s
 const DISCOVERY_SCAN_DURATION = 5000;  // Quick 5s scan for discovery
 const MAX_RECONNECT_ATTEMPTS = 10;     // After this, connectionState='lost' — manual retry required
+const MAX_CRC_FAILURES = 3;            // Corrupted transfers of one file before it is skipped
 
 /**
  * Errors that mean "the Bluetooth link is not there right now" — a device that
@@ -47,8 +69,8 @@ const MAX_RECONNECT_ATTEMPTS = 10;     // After this, connectionState='lost' —
  * errors (they were the top error-level issues in Sentry for months).
  */
 export function isBleTransportError(err) {
-  const msg = (err && err.message) || String(err || '');
-  return /connection timeout|connection failed|disconnected during transfer|not connected|deviceId required|response timeout|device not found|BLE download cancelled|rejected pairing|connect(ing)? (failed|error)/i.test(msg);
+  const msg = ((err && err.code) ? err.code + ' ' : '') + ((err && err.message) || String(err || ''));
+  return /connection timeout|connection failed|disconnected during transfer|not connected|deviceId required|response timeout|device not found|BLE download cancelled|rejected pairing|connect(ing)? (failed|error)|writing descriptor|DEVICE_MEMORYBUSY|MemoryBusy/i.test(msg);
 }
 
 // Notification IDs
@@ -103,7 +125,9 @@ async function getOrCreateAppUuid() {
       }
     }
 
-    const newUuid = uuidv4();
+    // Fresh install: prefer the user-derived UUID so a recorder this user
+    // paired on a previous install (or another phone) accepts us again.
+    const newUuid = userAppUuid(userId) || uuidv4();
     await Preferences.set({ key: PREF_APP_UUID, value: newUuid });
     return newUuid;
   }
@@ -158,6 +182,9 @@ export const useDeviceStore = defineStore('device', {
 
     // Cancel flag for in-progress sync
     _cancelRequested: false,
+    // Consecutive corrupted transfers per device file (session-scoped); after
+    // MAX_CRC_FAILURES the file is skipped instead of retried forever.
+    _crcFailures: {},
 
     // Scan results
     scanResults: [],
@@ -452,31 +479,42 @@ export const useDeviceStore = defineStore('device', {
         try {
           deviceInfo = await manager.connect(bleDeviceId, appUuid);
         } catch (e) {
-          // If device rejects because it's paired to a different UUID (0x01),
-          // try user-scoped UUIDs from the migration period
+          // The recorder binds exactly ONE app UUID (protocol §1, status 0x01).
+          // If it rejects ours, try every UUID this user may have paired with
+          // before: the legacy user-scoped one from the migration period and
+          // the user-derived one (same user, previous install / other phone).
           if (e.message?.includes('rejected pairing')) {
-            const altUuid = await this._findAlternativeAppUuid(appUuid);
-            if (altUuid) {
-              addBreadcrumb({ category: 'ble', message: 'Retrying handshake with alternative UUID (migration recovery)', level: 'info' });
-              deviceInfo = await manager.connect(bleDeviceId, altUuid);
-              // It worked — adopt this UUID as the installation UUID
-              if (isCapacitor()) {
-                const { Preferences } = await import('@capacitor/preferences');
-                await Preferences.set({ key: PREF_APP_UUID, value: altUuid });
-              }
-              appUuid = altUuid;
-            } else {
-              // No alternative UUID found — device is paired to another phone/app.
-              // Send unpair command to release the binding, then re-pair with our UUID.
-              addBreadcrumb({ category: 'ble', message: 'No alternative UUID — sending unpair to release device binding', level: 'warning' });
+            const auth = useAuthStore();
+            const candidates = [];
+            const legacy = await this._findAlternativeAppUuid(appUuid);
+            if (legacy) candidates.push({ uuid: legacy, why: 'legacy user-scoped UUID' });
+            const derived = userAppUuid(auth.user?.id);
+            if (derived && derived !== appUuid && derived !== legacy) candidates.push({ uuid: derived, why: 'user-derived UUID' });
+
+            let paired = false;
+            for (const candidate of candidates) {
+              addBreadcrumb({ category: 'ble', message: `Retrying handshake with ${candidate.why}`, level: 'info' });
               try {
-                await manager.unpair();
-              } catch { /* unpair best-effort */ }
-              await manager.disconnect();
-              // Short delay for device to process unpair
-              await new Promise(r => setTimeout(r, 1000));
-              // Reconnect and pair with our UUID
-              deviceInfo = await manager.connect(bleDeviceId, appUuid);
+                await new Promise(r => setTimeout(r, 800)); // the device drops the link after a rejection
+                deviceInfo = await manager.connect(bleDeviceId, candidate.uuid);
+                if (isCapacitor()) {
+                  const { Preferences } = await import('@capacitor/preferences');
+                  await Preferences.set({ key: PREF_APP_UUID, value: candidate.uuid });
+                }
+                appUuid = candidate.uuid;
+                paired = true;
+                break;
+              } catch (retryErr) {
+                if (!retryErr.message?.includes('rejected pairing')) throw retryErr;
+              }
+            }
+            if (!paired) {
+              // Bound to an app installation we cannot reproduce. Only that
+              // installation can release the binding (protocol §6 requires a
+              // completed handshake) — say so instead of a raw protocol string.
+              const bound = new Error('Device rejected pairing (already paired to another app)');
+              bound.code = 'BLE_PAIRED_ELSEWHERE';
+              throw bound;
             }
           } else {
             throw e;
@@ -653,12 +691,14 @@ export const useDeviceStore = defineStore('device', {
       } catch (e) {
         console.warn('Failed to fetch file list:', e.message);
         if (isBleTransportError(e)) {
-          // Link dropped / device busy — the reconnect loop owns this.
+          // Link dropped / device busy (card still being scanned) — keep the
+          // last known list on screen; the reconnect loop / next poll retries.
           addBreadcrumb({ category: 'ble', message: `getFileList failed (transport): ${e.message}`, level: 'warning' });
-        } else {
-          // Send to Sentry so the diagnostic breadcrumbs from getFileList are captured
-          captureException(e, { tags: { action: 'ble_file_list' } });
+          this.fileListLoaded = true;
+          throw e;
         }
+        // Send to Sentry so the diagnostic breadcrumbs from getFileList are captured
+        captureException(e, { tags: { action: 'ble_file_list' } });
         this.deviceFiles = [];
         this.fileListLoaded = true;
       }
@@ -863,8 +903,13 @@ export const useDeviceStore = defineStore('device', {
         return;
       }
 
-      const recordId = existingRec?.id || uuidv4();
+      const deviceKey = this.deviceSN || this.pairedDevice?.sn || this.deviceUuid || this.pairedDevice?.uuid || 'device';
+      const recordId = existingRec?.id || deviceFileRecordId(authStore.user?.id || authStore.user?.userId, deviceKey, file.file);
       const prepAlreadyAnswered = existingRec?.prepAnswered === true;
+      // The user's "keep / delete after upload" choice applies to device
+      // recordings too (it was never recorded for them, so their audio stayed
+      // on the phone regardless of the setting).
+      const storagePreference = existingRec?.storagePreference || historyStore.defaultStoragePreference || 'keep';
 
       // Add to history immediately so it's visible in the History tab during
       // transfer. Idempotent: with a reused id this updates the existing
@@ -878,7 +923,8 @@ export const useDeviceStore = defineStore('device', {
         createdAt,
         uploadStatus: 'transferring',
         source: 'device',
-        deviceFilename: file.file
+        deviceFilename: file.file,
+        storagePreference
       });
 
       // Captures a soft upload failure (uploadWithVerification returned
@@ -1018,15 +1064,26 @@ export const useDeviceStore = defineStore('device', {
           // through per-card retry. The local filePath is preserved so the
           // user's per-card retry button still works without a re-download.
           await this._addSyncedFile(file.file);
+          delete this._crcFailures[file.file];
+          // "Delete after upload": the cloud copy is verified — drop the local audio.
+          try { await historyStore.applyStoragePreference(recordId); } catch (e) { /* best-effort */ }
         } else {
           await historyStore.updateRecording(recordId, {
             uploadStatus: 'failed',
             uploadError: result.error || 'Upload failed'
           });
-          captureException(new Error(`Device file upload failed: ${result.error}`), {
-            tags: { action: 'ble_upload' },
-            extra: { filename: file.file, recordId, error: result.error }
-          });
+          // A final server verdict (out of minutes, no speech, …) or an
+          // offline phone is not an app defect — warn, don't page.
+          const expected = result.canRetry === false || result.insufficientMinutes ||
+            /Failed to fetch|Load failed|Network error|min remaining|keine Sprache|no speech/i.test(result.error || '');
+          if (expected) {
+            captureMessage(`Device file upload declined (expected): ${result.error}`, 'warning');
+          } else {
+            captureException(new Error(`Device file upload failed: ${result.error}`), {
+              tags: { action: 'ble_upload' },
+              extra: { filename: file.file, recordId, error: result.error }
+            });
+          }
           softUploadError = result.error || 'Upload failed';
         }
 
@@ -1034,6 +1091,22 @@ export const useDeviceStore = defineStore('device', {
         const isCancelled = this._cancelRequested ||
           err.message === 'BLE download cancelled' ||
           err.message === 'cancelled';
+
+        // Transfers that can never succeed by retrying: an empty file on the
+        // card, or a file that keeps arriving corrupted. Skip them with a
+        // translated reason (the user can un-skip from the device page)
+        // instead of retrying on every 20-second poll forever.
+        const isCrc = /CRC mismatch/i.test(err.message || '');
+        if (isCrc) this._crcFailures[file.file] = (this._crcFailures[file.file] || 0) + 1;
+        if (!isCancelled && (err.code === 'EMPTY_FILE' || (isCrc && this._crcFailures[file.file] >= MAX_CRC_FAILURES))) {
+          const reason = err.code === 'EMPTY_FILE' ? 'EMPTY_FILE' : 'CRC_GAVE_UP';
+          await historyStore.updateRecording(recordId, { uploadStatus: 'skipped', filePath: null, uploadError: reason });
+          await this._addSkippedFile(file.file);
+          captureMessage(`BLE sync skipped ${file.file}: ${reason} (${err.message})`, 'warning');
+          const skipErr = new Error(err.message);
+          skipErr.code = reason;
+          throw skipErr;
+        }
 
         if (isCancelled) {
           // User-chosen semantics: "Delete partial on phone, keep file on device,
@@ -1053,12 +1126,14 @@ export const useDeviceStore = defineStore('device', {
             }
           }
 
-          // 2) Remove the history record entirely — nothing to show the user
-          //    since we never completed upload and deleted the local file
+          // 2) Keep the history record as 'skipped' (no local file) so the
+          //    recording stays findable — the card offers "re-sync from
+          //    device". Deleting the record here used to make a cancelled
+          //    device recording vanish from History entirely.
           try {
-            await historyStore.deleteRecording(recordId, true);
+            await historyStore.updateRecording(recordId, { uploadStatus: 'skipped', filePath: null, uploadError: null });
           } catch (histErr) {
-            addBreadcrumb({ category: 'ble', message: `History delete failed (best-effort): ${histErr.message}`, level: 'warning' });
+            addBreadcrumb({ category: 'ble', message: `History skip-mark failed (best-effort): ${histErr.message}`, level: 'warning' });
           }
 
           // 3) Mark skipped so auto-sync ignores it (user can re-sync via "Sync again")
@@ -1139,6 +1214,8 @@ export const useDeviceStore = defineStore('device', {
             transcriptionId: result.transcriptionId,
             audioFileId: result.audioFileId
           });
+          await this._addSyncedFile(filename);
+          try { await historyStore.applyStoragePreference(rec.id); } catch (e) { /* best-effort */ }
         } else {
           await historyStore.updateRecording(rec.id, {
             uploadStatus: 'failed',

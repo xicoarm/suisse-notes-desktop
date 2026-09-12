@@ -305,6 +305,24 @@ export const authenticatedRequest = async (endpoint, token, options = {}) => {
 };
 
 /**
+ * Parse a JSON body defensively. A proxy error page or captive portal returns
+ * HTML with any status; that must read as a server error, not crash the
+ * caller with "JSON Parse error: Unrecognized token".
+ * @param {Response} response
+ * @returns {Promise<object>} parsed body, or { error } when it is not JSON
+ */
+export const parseJsonSafe = async (response) => {
+  let text = '';
+  try { text = await response.text(); } catch { text = ''; }
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: `Unexpected server response (HTTP ${response.status})`, nonJson: true };
+  }
+};
+
+/**
  * Get user's remaining minutes from the desktop-specific endpoint
  * @param {string} token - Authentication token
  * @returns {Promise<{remaining: number, unlimited: boolean, total: number, used: number}>}
@@ -312,10 +330,10 @@ export const authenticatedRequest = async (endpoint, token, options = {}) => {
 export const getUserMinutes = async (token) => {
   const response = await authenticatedRequest(API_ENDPOINTS.desktopMinutes, token);
   if (!response.ok) {
-    const data = await response.json();
+    const data = await parseJsonSafe(response);
     throw new Error(data.error || 'Failed to fetch minutes');
   }
-  return response.json();
+  return parseJsonSafe(response);
 };
 
 /**
@@ -339,10 +357,10 @@ export const submitSalesInquiry = async (inquiry, token = null) => {
     : await apiRequest(API_ENDPOINTS.salesInquiry, options);
 
   if (!response.ok) {
-    const data = await response.json();
+    const data = await parseJsonSafe(response);
     throw new Error(data.error || 'Failed to submit inquiry');
   }
-  return response.json();
+  return parseJsonSafe(response);
 };
 
 /**
@@ -353,10 +371,10 @@ export const submitSalesInquiry = async (inquiry, token = null) => {
 export const getMergedSpellings = async (token) => {
   const response = await authenticatedRequest(API_ENDPOINTS.customSpellingMerged, token);
   if (!response.ok) {
-    const data = await response.json();
+    const data = await parseJsonSafe(response);
     throw new Error(data.error || 'Failed to fetch spellings');
   }
-  return response.json();
+  return parseJsonSafe(response);
 };
 
 /**
@@ -371,10 +389,10 @@ export const addUserSpellings = async (token, terms) => {
     body: JSON.stringify({ terms })
   });
   if (!response.ok) {
-    const data = await response.json();
+    const data = await parseJsonSafe(response);
     throw new Error(data.error || 'Failed to add spellings');
   }
-  return response.json();
+  return parseJsonSafe(response);
 };
 
 /**
@@ -390,10 +408,10 @@ export const removeUserSpelling = async (token, term) => {
     { method: 'DELETE' }
   );
   if (!response.ok) {
-    const data = await response.json();
+    const data = await parseJsonSafe(response);
     throw new Error(data.error || 'Failed to remove spelling');
   }
-  return response.json();
+  return parseJsonSafe(response);
 };
 
 // Export environments for external use

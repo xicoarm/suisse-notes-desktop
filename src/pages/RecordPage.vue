@@ -1785,6 +1785,21 @@ const handleStopInternal = async () => {
     } else {
       // phase transition handled by subsequent action (setUploading/setError/reset)
 
+      // Stopped before a single 3-second chunk landed (a tap on start followed
+      // by an immediate stop): there is nothing to combine. Treat it like a
+      // cancel — no "failed" entry, no orphan folder — and tell the user why.
+      if (isCapacitor() && /No chunks found|No valid chunk files found/i.test(result.error || '')) {
+        const emptyRecordId = recordingStore.recordId;
+        try {
+          const storage = await import('../services/storage');
+          await storage.deleteDirectory(`recordings/${emptyRecordId}`);
+        } catch (e) { /* best-effort */ }
+        try { await historyStore.deleteRecording(emptyRecordId, true); } catch (e) { /* may not exist */ }
+        recordingStore.reset();
+        $q.notify({ type: 'info', message: t('recordingTooShort'), icon: 'timer_off', timeout: 4000 });
+        return;
+      }
+
       // Update existing history entry (created at recording start) to 'failed' status
       // Do NOT call addRecording — the entry already exists with uploadStatus 'recording'
       // Try to resolve the file path even on failure — the audio file may still exist
@@ -2028,30 +2043,23 @@ const startAutoUpload = async () => {
         ...(ownerUserId ? { userId: ownerUserId } : {})
       });
 
-      // P0 Data Loss Fix: Only delete if upload was verified AND canDelete returns true
-      // Schedule deletion after a safety delay — gives server time to persist
-      if (currentStoragePreference.value === 'delete_after_upload') {
-        if (result.canDelete && recordingStore.canDelete(recordingStore.recordId)) {
-          const deleteRecordId = recordingStore.recordId;
-          // Delay deletion by 30s to allow server to fully persist
-          setTimeout(async () => {
-            try {
-              if (isElectron()) {
-                await window.electronAPI.recording.deleteRecording(deleteRecordId);
-              }
-              await historyStore.updateRecording(deleteRecordId, { filePath: null });
-              recordingStore.unlockFile(deleteRecordId);
-            } catch (e) {
-              console.warn('Delayed file deletion failed:', e);
-            }
-          }, 30000);
-        } else {
-          console.warn('File not deleted: upload not verified or file is locked');
-        }
-      }
-
       // P0 Data Loss Fix: Unlock file after successful upload
       recordingStore.unlockFile(recordingStore.recordId);
+
+      // "Delete after upload" (both platforms, one implementation in the
+      // history store — it verifies the cloud copy and the lock itself).
+      // Delayed 30s to give the server time to fully persist.
+      if (currentStoragePreference.value === 'delete_after_upload') {
+        if (result.canDelete) {
+          const deleteRecordId = recordingStore.recordId;
+          setTimeout(() => {
+            historyStore.applyStoragePreference(deleteRecordId)
+              .catch(e => console.warn('Delayed file deletion failed:', e));
+          }, 30000);
+        } else {
+          console.warn('File not deleted: upload not verified');
+        }
+      }
 
       // Reset session after successful upload
       transcriptionStore.resetSession();
@@ -2067,7 +2075,7 @@ const startAutoUpload = async () => {
 
       $q.notify({
         type: 'positive',
-        message: 'Recording uploaded successfully'
+        message: t('uploadSuccessful')
       });
     } else {
       // P0 Data Loss Fix: Keep file locked on failure - will be unlocked on retry or explicit delete

@@ -91,8 +91,10 @@ export async function openSSO({ url, callbackScheme = 'suissenotes' }) {
       }
     } catch (err) {
       const msg = err?.message || String(err);
-      // Treat user-cancel quietly; everything else surfaces as an error.
-      if (msg === 'USER_CANCELED') {
+      // Treat user-cancel quietly (Android USER_CANCELED, iOS
+      // ASWebAuthenticationSession error 1 = canceledLogin); everything else
+      // surfaces as a warning.
+      if (msg === 'USER_CANCELED' || /WebAuthenticationSession error 1\b|canceledLogin/i.test(msg)) {
         addBreadcrumb({ category: 'sso', message: 'SSOAuth.startAuth cancelled by user', level: 'info' });
         window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: 'canceled' } }));
       } else {

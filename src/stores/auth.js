@@ -1,8 +1,17 @@
 import { defineStore } from 'pinia';
 import { isElectron, isCapacitor, getPlatform } from '../utils/platform';
 import { storeToken, getToken, clearToken, storeUserCredentials, getUserCredentials, clearAllCredentials } from '../services/secureStorage';
-import { apiRequest, authenticatedRequest, API_ENDPOINTS } from '../services/api';
-import { addBreadcrumb, captureException, setUser } from '../boot/sentry';
+import { apiRequest, authenticatedRequest, API_ENDPOINTS, parseJsonSafe } from '../services/api';
+import { addBreadcrumb, captureException, captureMessage, setUser } from '../boot/sentry';
+import { i18n } from '../boot/i18n';
+
+const tr = (key) => { try { return i18n.global.t(key); } catch { return key; } };
+
+/** fetch() rejects with TypeError offline, TimeoutError on our deadline. */
+function isNetworkFailure(error) {
+  return !!error && (error.name === 'TypeError' || error.name === 'TimeoutError' || error.code === 'ETIMEDOUT' ||
+    /failed to fetch|load failed|network|timed out/i.test(error.message || ''));
+}
 
 /**
  * P1 Fix: Resume pending mobile uploads after successful authentication.
@@ -38,14 +47,23 @@ async function platformLogin(username, password) {
     return window.electronAPI.auth.login(username, password);
   }
   // Mobile / web: direct fetch
-  const response = await apiRequest(API_ENDPOINTS.login, {
-    method: 'POST',
-    body: JSON.stringify({ email: username, password })
-  });
-  const data = await response.json();
+  let response;
+  try {
+    response = await apiRequest(API_ENDPOINTS.login, {
+      method: 'POST',
+      body: JSON.stringify({ email: username, password })
+    });
+  } catch (error) {
+    if (isNetworkFailure(error)) {
+      addBreadcrumb({ category: 'auth', message: `Login: network failure (${error.message})`, level: 'warning' });
+      return { success: false, error: tr('networkUnavailable'), networkError: true };
+    }
+    throw error;
+  }
+  const data = await parseJsonSafe(response);
   if (!response.ok) {
     addBreadcrumb({ category: 'auth', message: `Login failed: ${data.error || response.status}`, level: 'warning' });
-    return { success: false, error: data.error || 'Login failed' };
+    return { success: false, error: data.nonJson ? tr('serverUnexpectedResponse') : (data.error || 'Login failed') };
   }
   addBreadcrumb({ category: 'auth', message: 'Login successful', level: 'info' });
   return { success: true, token: data.token, user: data.user, minutes: data.minutes };
@@ -55,13 +73,19 @@ async function platformRegister(email, password, name) {
   if (isElectron()) {
     return window.electronAPI.auth.register(email, password, name);
   }
-  const response = await apiRequest(API_ENDPOINTS.register, {
-    method: 'POST',
-    body: JSON.stringify({ email, password, name })
-  });
-  const data = await response.json();
+  let response;
+  try {
+    response = await apiRequest(API_ENDPOINTS.register, {
+      method: 'POST',
+      body: JSON.stringify({ email, password, name })
+    });
+  } catch (error) {
+    if (isNetworkFailure(error)) return { success: false, error: tr('networkUnavailable'), networkError: true };
+    throw error;
+  }
+  const data = await parseJsonSafe(response);
   if (!response.ok) {
-    return { success: false, error: data.error || 'Registration failed' };
+    return { success: false, error: data.nonJson ? tr('serverUnexpectedResponse') : (data.error || 'Registration failed') };
   }
   return { success: true, token: data.token, user: data.user };
 }
@@ -203,8 +227,13 @@ export const useAuthStore = defineStore('auth', {
           return { success: false, error: this.error };
         }
       } catch (error) {
-        captureException(error, { tags: { action: 'login' } });
-        this.error = error.message || 'An unexpected error occurred';
+        if (isNetworkFailure(error)) {
+          captureMessage(`auth: login network failure — ${error.message}`, 'warning');
+          this.error = tr('networkUnavailable');
+        } else {
+          captureException(error, { tags: { action: 'login' } });
+          this.error = error.message || 'An unexpected error occurred';
+        }
         return { success: false, error: this.error };
       } finally {
         this.loading = false;
@@ -538,7 +567,8 @@ export const useAuthStore = defineStore('auth', {
           if (!response.ok) {
             return { success: false, authRejected: response.status === 401 || response.status === 403 };
           }
-          result = await response.json();
+          result = await parseJsonSafe(response);
+          if (!result.token) return { success: false }; // non-JSON / unexpected body — transient
           // Normalize: direct API returns { token, user } at top level
           result = { success: true, token: result.token, user: result.user };
         }

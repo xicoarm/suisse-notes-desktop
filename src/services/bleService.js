@@ -92,6 +92,12 @@ export class BleDeviceManager {
     this._onDisconnectCallback = null;
     this._recordingStateCallback = null;
     this._downloadAborted = false;
+    // True only while downloadFile() is consuming audio frames. Outside a
+    // download, TYPE_AUDIO frames (real-time recording stream 0x14, or a
+    // stale 0x1C stream the device kept sending after a dropped link) are
+    // discarded in _onNotify instead of poisoning the next command's reply —
+    // the "handshake step1 byte[3]=0x33 raw=[0x02 0x1c …]" failures.
+    this._downloadInProgress = false;
 
     // Command lock: prevents concurrent BLE commands from interleaving responses.
     // Without this, auto-sync keepalive (getBattery) can fire during getFileList,
@@ -150,10 +156,17 @@ export class BleDeviceManager {
       addBreadcrumb({ category: 'ble', message: `BLE scan pre-check: bluetooth=${bleEnabled}`, level: 'info' });
       if (!bleEnabled) {
         addBreadcrumb({ category: 'ble', message: 'BLE scan: Bluetooth disabled — requesting enable', level: 'warning' });
-        await this.ble.requestEnable();
-        const rechecked = await this.ble.isEnabled();
+        // requestEnable exists on Android only; iOS users switch Bluetooth on
+        // in Control Center / Settings.
+        let rechecked = false;
+        if (isAndroid()) {
+          await this.ble.requestEnable();
+          rechecked = await this.ble.isEnabled();
+        }
         if (!rechecked) {
-          throw new Error('Bluetooth is required for device scanning. Please enable Bluetooth.');
+          const err = new Error('Bluetooth is required for device scanning. Please enable Bluetooth.');
+          err.code = 'BLE_DISABLED';
+          throw err;
         }
       }
     } catch (e) {
@@ -379,7 +392,7 @@ export class BleDeviceManager {
         const release = await this._acquireLock();
         try {
           await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
-          await this._readNotification(2000);
+          await this._readResponse(CMD_SYNC_STATE, 2000);
           addBreadcrumb({ category: 'ble', message: 'Cleared potential stale sync-state after connect', level: 'info' });
         } finally {
           release();
@@ -491,7 +504,7 @@ export class BleDeviceManager {
     try {
       await this._write(buildCmd(CMD_FORMAT));
       // Format can take a while on large storage — use generous timeout
-      const resp = await this._readNotification(30000);
+      const resp = await this._readResponse(CMD_FORMAT, 30000);
       const status = resp[3];
       addBreadcrumb({ category: 'ble', message: `Format device: status=0x${status.toString(16)}`, level: 'info' });
       return status === 0x00;
@@ -510,8 +523,8 @@ export class BleDeviceManager {
       this.abortDownload();
       const release = await this._acquireLock();
       try {
-        await this._write(buildCmd(CMD_UNPAIR));
-        await this._readNotification(3000);
+        await this._write(buildCmd(CMD_UNPAIR, [0x00])); // 0x00 = keep the recordings on the device
+        await this._readResponse(CMD_UNPAIR, 3000);
       } catch { /* ignore */ }
       finally { release(); }
       await this.disconnect();
@@ -541,13 +554,9 @@ export class BleDeviceManager {
     const release = await this._acquireLock();
     try {
       await this._write(buildCmd(CMD_BATTERY));
-      const resp = await this._readNotification(5000);
-      // Response: 0x01 0x09 0x00 <level>
-      // Validate this is actually a battery response before reading the value
-      if (resp.length < 4 || resp[0] !== TYPE_CMD || resp[1] !== CMD_BATTERY[0] || resp[2] !== CMD_BATTERY[1]) {
-        addBreadcrumb({ category: 'ble', message: `getBattery: unexpected response [${Array.from(resp.slice(0, 6)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(', ')}]`, level: 'warning' });
-        return -1; // Signal invalid reading — caller should ignore
-      }
+      // Response: 0x01 0x09 0x00 <level> — unsolicited frames are skipped
+      const resp = await this._readResponse(CMD_BATTERY, 5000);
+      if (resp.length < 4) return -1; // Signal invalid reading — caller should ignore
       const level = resp[3];
       return (level >= 0 && level <= 100) ? level : -1;
     } finally {
@@ -563,7 +572,7 @@ export class BleDeviceManager {
     const release = await this._acquireLock();
     try {
       await this._write(buildCmd(CMD_STORAGE));
-      const resp = await this._readNotification(5000);
+      const resp = await this._readResponse(CMD_STORAGE, 5000);
       return parseJsonFromBuffer(resp, 3);
     } finally {
       release();
@@ -585,7 +594,7 @@ export class BleDeviceManager {
         now.getSeconds().toString().padStart(2, '0');
       const timeBytes = new TextEncoder().encode(timeStr);
       await this._write(buildCmd(CMD_TIME_SYNC, [...timeBytes]));
-      await this._readNotification(3000);
+      await this._readResponse(CMD_TIME_SYNC, 3000);
     } finally {
       release();
     }
@@ -598,7 +607,7 @@ export class BleDeviceManager {
     const release = await this._acquireLock();
     try {
       await this._write(buildCmd(CMD_DEVICE_INFO));
-      const resp = await this._readNotification(5000);
+      const resp = await this._readResponse(CMD_DEVICE_INFO, 5000);
       return parseJsonFromBuffer(resp, 3);
     } finally {
       release();
@@ -622,22 +631,26 @@ export class BleDeviceManager {
 
       // Enter sync state
       await this._write(buildCmd(CMD_SYNC_STATE, [0x01]));
-      await this._readNotification(5000);
+      await this._readResponse(CMD_SYNC_STATE, 5000);
       inSyncState = true;
 
       // Request file list
       await this._write(buildCmd(CMD_FILE_LIST));
 
       // First response: file count
-      const countResp = await this._readNotification(10000);
+      const countResp = await this._readResponse(CMD_FILE_LIST, 10000);
       addBreadcrumb({ category: 'ble', message: `getFileList countResp raw: [${Array.from(countResp.slice(0, 20)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(', ')}...] len=${countResp.length}`, level: 'info' });
 
       const countJson = parseJsonFromBuffer(countResp, 3);
       addBreadcrumb({ category: 'ble', message: `getFileList countJson: ${JSON.stringify(countJson)}`, level: 'info' });
 
-      // Check for error (device busy)
+      // Device-side error instead of a count: {"FileList":"MemoryBusy"} while
+      // the recorder is still scanning its card. Surfaced with a code the UI
+      // translates; the next auto-sync poll retries.
       if (countJson.FileList) {
-        throw new Error(countJson.FileList);
+        const err = new Error(String(countJson.FileList));
+        err.code = 'DEVICE_' + String(countJson.FileList).toUpperCase();
+        throw err;
       }
 
       fileCount = countJson.FileNum || 0;
@@ -650,15 +663,9 @@ export class BleDeviceManager {
       // keeps streaming and stale data floods subsequent commands.
       for (let i = 0; i < fileCount; i++) {
         try {
-          const fileResp = await this._readNotification(10000);
-
-          // Validate: must be a CMD response for FILE_LIST
-          if (fileResp.length < 4 || fileResp[0] !== TYPE_CMD ||
-              fileResp[1] !== CMD_FILE_LIST[0] || fileResp[2] !== CMD_FILE_LIST[1]) {
-            skipped++;
-            addBreadcrumb({ category: 'ble', message: `getFileList file[${i}]: skipped non-file-list response (byte[1]=0x${fileResp[1]?.toString(16)})`, level: 'warning' });
-            continue;
-          }
+          // Only FILE_LIST replies count as entries; unsolicited frames
+          // (toggle switch, socket state) no longer consume a file slot.
+          const fileResp = await this._readResponse(CMD_FILE_LIST, 10000);
 
           const fileJson = parseJsonFromBuffer(fileResp, 3);
           if (fileJson.file) {
@@ -681,7 +688,7 @@ export class BleDeviceManager {
       if (inSyncState) {
         try {
           await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
-          await this._readNotification(3000);
+          await this._readResponse(CMD_SYNC_STATE, 3000);
         } catch { /* best effort */ }
       }
       // If the read loop bailed early (stream timeout / corrupt entry), the
@@ -724,6 +731,11 @@ export class BleDeviceManager {
    * and re-throws 'cancelled' to the caller.
    */
   abortDownload() {
+    // Outside a download there is nothing to abort. Setting the flag anyway
+    // used to make EVERY later read (keepalive battery poll, file list) fail
+    // with "BLE download cancelled" until the next connect — the auto-sync
+    // then stopped silently (Sentry CAPACITOR-H9/YX).
+    if (!this._downloadInProgress) return;
     this._downloadAborted = true;
     if (this._notifyWaiter && this._notifyWaiter.reject) {
       const waiter = this._notifyWaiter;
@@ -753,12 +765,14 @@ export class BleDeviceManager {
   async downloadFile(filename, onProgress = null, totalSize = 0) {
     const release = await this._acquireLock();
     this._downloadAborted = false;
+    this._downloadInProgress = true;
 
     // Track whether the device is in sync state so we only exit it when needed.
     // Declared here so the catch block can reference it.
     let inSyncState = false;
     const chunks = [];
     let receivedBytes = 0;
+    let expectedIndex = 0;
 
     try {
       // Drain any stale notifications from previous operations
@@ -766,7 +780,7 @@ export class BleDeviceManager {
 
       // Enter sync state
       await this._write(buildCmd(CMD_SYNC_STATE, [0x01]));
-      await this._readNotification(5000);
+      await this._readResponse(CMD_SYNC_STATE, 5000);
       inSyncState = true;
 
       // Send download command with filename
@@ -779,7 +793,17 @@ export class BleDeviceManager {
         const data = await this._readNotification(30000);
 
         if (data[0] === TYPE_AUDIO) {
-          // Audio data frame: type(1) + cmd(2) + index(2) + audio(N)
+          // Audio data frame: type(1) + cmd(2) + index(2) + audio(N). Only the
+          // local-sync stream (cmd 0x1C) belongs to this download; the
+          // real-time stream (0x14) is dropped in _onNotify.
+          if (!(data[1] === CMD_FILE_DOWNLOAD[0] && data[2] === CMD_FILE_DOWNLOAD[1])) continue;
+          const frameIndex = data[3] | (data[4] << 8);
+          if (frameIndex !== (expectedIndex & 0xFFFF)) {
+            // A hole in the frame sequence can only end in a CRC mismatch
+            // after the whole file — fail fast instead.
+            throw new Error(`CRC mismatch: frame ${frameIndex} received, expected ${expectedIndex & 0xFFFF} (frame gap)`);
+          }
+          expectedIndex++;
           const audioData = data.slice(5);
           chunks.push(audioData);
           receivedBytes += audioData.length;
@@ -794,6 +818,14 @@ export class BleDeviceManager {
         } else if (data[0] === TYPE_CMD && data[1] === CMD_FILE_DONE[0] && data[2] === CMD_FILE_DONE[1]) {
           // Transfer complete: 0x01 0x1D 0x00 crcL crcH
           const expectedCrc = data[3] | (data[4] << 8);
+
+          if (receivedBytes === 0) {
+            // A zero-length recording on the card (device-side write failure).
+            // Retrying it every poll can never succeed — the caller skips it.
+            const empty = new Error('Device file is empty');
+            empty.code = 'EMPTY_FILE';
+            throw empty;
+          }
 
           // Concatenate all chunks
           const fileData = new Uint8Array(receivedBytes);
@@ -813,7 +845,7 @@ export class BleDeviceManager {
 
           // Success path: exit sync state cleanly
           await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
-          await this._readNotification(3000);
+          await this._readResponse(CMD_SYNC_STATE, 3000);
           inSyncState = false;
 
           return fileData;
@@ -827,9 +859,11 @@ export class BleDeviceManager {
       // (Bug 3). Scales drain wait by estimated stale frames so large-file
       // aborts don't truncate prematurely.
       if (inSyncState) {
+        // The cancel flag would make this exit-sync-state read fail too.
+        this._downloadAborted = false;
         try {
           await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));
-          await this._readNotification(3000);
+          await this._readResponse(CMD_SYNC_STATE, 3000);
         } catch { /* best effort */ }
       }
       try {
@@ -840,6 +874,9 @@ export class BleDeviceManager {
       } catch { /* best effort */ }
       throw err;
     } finally {
+      // The cancel sentinel belongs to THIS download only.
+      this._downloadAborted = false;
+      this._downloadInProgress = false;
       release();
     }
   }
@@ -854,7 +891,7 @@ export class BleDeviceManager {
     try {
       const filenameBytes = new TextEncoder().encode(filename);
       await this._write(buildCmd(CMD_DELETE_FILE, [...filenameBytes]));
-      const resp = await this._readNotification(5000);
+      const resp = await this._readResponse(CMD_DELETE_FILE, 5000);
       // 0x01 = success, 0x02 = failure
       return resp[3] === 0x01;
     } finally {
@@ -993,6 +1030,26 @@ export class BleDeviceManager {
         return;
       }
 
+      // Any other audio frame is only meaningful inside downloadFile(). A
+      // device that kept streaming a file after a dropped link, or a stale
+      // stream on reconnect, must not become "the reply" of a command.
+      if (data[0] === TYPE_AUDIO && !this._downloadInProgress) {
+        if (!this._strayAudioWarned) {
+          this._strayAudioWarned = true;
+          addBreadcrumb({ category: 'ble', message: 'Dropping stray audio frames outside a download', level: 'warning' });
+        }
+        return;
+      }
+      if (data[0] === TYPE_AUDIO) this._strayAudioWarned = false;
+
+      // Unsolicited state reports the device pushes at any time: toggle
+      // switch position (0x6E, protocol §15) and WiFi socket state (0x0C,
+      // §24). Never a command reply — keep them out of the queue.
+      if (data[0] === TYPE_CMD && data[2] === 0x00 && (data[1] === 0x6E || data[1] === 0x0C)) {
+        addBreadcrumb({ category: 'ble', message: `Unsolicited device report cmd=0x${data[1].toString(16)} dropped`, level: 'info' });
+        return;
+      }
+
       // Recording started via device button (TYPE_CMD, cmd 0x14 0x00)
       if (data[0] === TYPE_CMD && data[1] === 0x14 && data[2] === 0x00) {
         this.isRecording = true;
@@ -1075,6 +1132,32 @@ export class BleDeviceManager {
 
     if (totalDrained > 0) {
       addBreadcrumb({ category: 'ble', message: `Drained ${totalDrained} stale BLE notification(s) in ${Date.now() - startTime}ms (expectedCount=${expectedCount})`, level: 'warning' });
+    }
+  }
+
+  /**
+   * Read the next notification that is the reply to `cmd` (TYPE_CMD followed
+   * by the two command bytes). Frames that are not that reply — a late reply
+   * to an abandoned command, a device report — are skipped, so a caller
+   * never parses the wrong frame as its answer. Bounded by `timeout` overall.
+   * @param {number[]} cmd
+   * @param {number} timeout
+   * @returns {Promise<Uint8Array>}
+   */
+  async _readResponse(cmd, timeout = 10000) {
+    const deadline = Date.now() + timeout;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error('BLE response timeout');
+      const resp = await this._readNotification(remaining);
+      if (resp.length >= 3 && resp[0] === TYPE_CMD && resp[1] === cmd[0] && resp[2] === cmd[1]) {
+        return resp;
+      }
+      addBreadcrumb({
+        category: 'ble',
+        message: `skipped frame while waiting for cmd 0x${cmd[0].toString(16)}: [${Array.from(resp.slice(0, 5)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ')}]`,
+        level: 'warning'
+      });
     }
   }
 

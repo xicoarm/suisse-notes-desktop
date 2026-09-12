@@ -599,6 +599,7 @@ import { useTranscriptionSettingsStore } from '../stores/transcription-settings'
 import { useMeetingPrepStore } from '../stores/meeting-prep';
 import { useDeviceStore } from '../stores/device';
 import { useRecordingStore } from '../stores/recording';
+import { humanizeBleError } from '../utils/bleErrors';
 import { useLanguage } from '../composables/useLanguage';
 import { isCapacitor, isElectron } from '../utils/platform';
 import CustomVocabularyInput from '../components/CustomVocabularyInput.vue';
@@ -705,7 +706,7 @@ const handleDeleteAll = async () => {
     if (!userId) {
       $q.notify({
         type: 'negative',
-        message: 'You must be logged in to delete recordings'
+        message: t('deleteAllLoginRequired')
       });
       return;
     }
@@ -714,9 +715,8 @@ const handleDeleteAll = async () => {
     if (isElectron()) {
       result = await window.electronAPI.history.deleteAll(userId);
     } else {
-      // Mobile: clear via history store
-      await historyStore.deleteAll();
-      result = { success: true, deletedCount: recordingsCount.value };
+      // Mobile: the history store deletes local audio + local-only entries
+      result = await historyStore.deleteAll();
     }
 
     if (result.success) {
@@ -728,20 +728,20 @@ const handleDeleteAll = async () => {
 
       $q.notify({
         type: 'positive',
-        message: `Successfully deleted ${result.deletedCount} recording(s)`,
+        message: t('deleteAllDone', { count: result.deletedCount }),
         icon: 'check_circle'
       });
     } else {
       $q.notify({
         type: 'negative',
-        message: result.error || 'Failed to delete recordings'
+        message: result.error || t('deleteAllFailed')
       });
     }
   } catch (error) {
     console.error('Error deleting all recordings:', error);
     $q.notify({
       type: 'negative',
-      message: 'An error occurred while deleting recordings'
+      message: t('deleteAllFailed')
     });
   } finally {
     isDeleting.value = false;
@@ -788,7 +788,7 @@ const startDeviceScan = async () => {
   try {
     await deviceStore.startScan();
   } catch (e) {
-    $q.notify({ type: 'warning', message: e.message });
+    $q.notify({ type: 'warning', message: humanizeBleError(e, t), timeout: 6000 });
   }
 };
 
@@ -797,7 +797,7 @@ const pairDevice = async (device) => {
     await deviceStore.connectAndPair(device.deviceId);
     $q.notify({ type: 'positive', message: t('deviceConnected') });
   } catch (e) {
-    $q.notify({ type: 'negative', message: t('pairingFailed'), caption: e.message, timeout: 5000 });
+    $q.notify({ type: 'negative', message: t('pairingFailed'), caption: humanizeBleError(e, t), timeout: 8000 });
   }
 };
 
@@ -805,7 +805,7 @@ const reconnectDevice = async () => {
   try {
     await deviceStore.autoConnect();
   } catch (e) {
-    $q.notify({ type: 'negative', message: t('connectionFailed'), caption: e.message, timeout: 5000 });
+    $q.notify({ type: 'negative', message: t('connectionFailed'), caption: humanizeBleError(e, t), timeout: 6000 });
   }
 };
 
