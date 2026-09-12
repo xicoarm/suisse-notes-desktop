@@ -1,10 +1,17 @@
 // @vitest-environment node
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
 import vm from 'node:vm';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const require = createRequire(import.meta.url);
-const { compareGroups, clockReadout, installWitness } = require('../e2e-harness/capture-clock-diagnostic');
+const { compareGroups, clockReadout, installWitness, createClockDriver, analyzeCapturedEvidence } = require('../e2e-harness/capture-clock-diagnostic');
+const { AppDriver } = require('../e2e-harness/lib/app-driver');
+const directories = [];
+afterEach(() => { vi.useRealTimers(); for (const directory of directories.splice(0)) fs.rmSync(directory, { recursive: true, force: true }); });
+function outputDirectory() { const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'suisse-clock-evidence-')); directories.push(directory); return directory; }
 
 const groups = (first, last, offset = 0) => ({ groups: Array.from({ length: last - first + 1 }, (_, index) => {
   const id = first + index;
@@ -89,6 +96,32 @@ function witnessFixture(processingDisabled = false, { fixedFormat = false, setti
 }
 
 describe('native witness isolation', () => {
+  it('ends the actual start loop at the first rejected format instead of retrying acquisition for 90 seconds', async () => {
+    vi.useFakeTimers();
+    const fixture = witnessFixture(false, { fixedFormat: true });
+    class BaseDriver {
+      constructor() {
+        this.page = { waitForSelector: vi.fn(async () => {}), $: vi.fn(async () => null),
+          evaluate: vi.fn(async () => ({ hasStart: true, hasStorage: false, hasCredit: false })) };
+        this.seedUnlimitedMinutes = vi.fn(async () => {});
+        this.clickByTest = vi.fn(async () => fixture.devices.getUserMedia({ audio: true }));
+        this.screenshot = vi.fn(async () => {});
+      }
+      async evalTimed() { return fixture.window.__directMixedWitness.snapshot().errors; }
+      async getPhase() { return 'idle'; }
+      startRecording(...args) { return AppDriver.prototype.startRecording.apply(this, args); }
+    }
+    const Driver = createClockDriver(BaseDriver), driver = new Driver();
+    const starting = driver.startRecording();
+    const rejected = expect(starting).rejects.toThrow('Fixed diagnostic format was not negotiated: expected 48000 Hz mono');
+    await vi.advanceTimersByTimeAsync(1000);
+    await rejected;
+    expect(driver.clickByTest).toHaveBeenCalledTimes(1);
+    expect(fixture.nativeGet).toHaveBeenCalledTimes(1);
+    expect(driver.screenshot).not.toHaveBeenCalled();
+    expect(fixture.window.__directMixedWitness.snapshot().errors).toHaveLength(1);
+    await fixture.window.__directMixedWitness.dispose();
+  });
   it('tees a clone, returns the identical acquired stream, and cleanup leaves the original track alone', async () => {
     const fixture = witnessFixture();
     const constraints = { audio: { deviceId: { exact: 'chosen' } } };
@@ -149,4 +182,53 @@ describe('native witness isolation', () => {
       expect(snapshot.errors).toContain('Fixed diagnostic format was not negotiated: expected 48000 Hz mono');
       await fixture.window.__directMixedWitness.dispose();
     });
+});
+
+describe('captured evidence survives optional trace failure', () => {
+  function savedResult(directory) {
+    const trace = path.join(directory, 'audio-buffer-trace.json');
+    fs.writeFileSync(trace, JSON.stringify({ traceEvents: [{ name: 'WebAudioMediaStreamAudioSink::OnData',
+      cat: 'disabled-by-default-mediastream', ph: 'X', pid: 1, tid: 2, ts: 100, dur: 1 }] }));
+    return { options: { traceBuffers: true }, problems: [], directPath: 'native-input-original.webm',
+      mixedPath: 'live-mix-original.webm', finalPath: 'published-audio.webm',
+      directSha256: 'native-sha', mixedSha256: 'mixed-sha', finalSha256: 'final-sha',
+      upload: { localSha256: 'final-sha', remoteSha256: 'final-sha', canDelete: false },
+      bufferTrace: { file: trace, exportCompleted: true, problems: [] } };
+  }
+
+  it('retains all decoded source/final and upload evidence while unavailable upstream trace coverage still fails controls', async () => {
+    const directory = outputDirectory(), result = savedResult(directory);
+    const analyze = vi.fn(async () => ({ ...groups(0, 40), durationS: 20.5, decoderWarnings: null }));
+    await analyzeCapturedEvidence(result, directory, analyze);
+    expect(analyze.mock.calls.map(call => call[0])).toEqual([result.directPath, result.mixedPath, result.finalPath]);
+    for (const role of ['direct', 'mixed', 'final']) expect(JSON.parse(fs.readFileSync(path.join(directory, role + '-analysis.json'), 'utf8')).durationS).toBe(20.5);
+    expect(result.measurementCompleted).toBe(true);
+    expect(result.controlsValid).toBe(false);
+    expect(result.traceCoverage).toMatchObject({ complete: false });
+    expect(result.problems).toContain('Missing upstream callback trace: InputController::OnData');
+    expect(result.commonSourceComparison.alignedFrames).toHaveLength(39);
+    expect(result.finalSourceComparison.alignedFrames).toHaveLength(39);
+    expect(result.upload).toEqual({ localSha256: 'final-sha', remoteSha256: 'final-sha', canDelete: false });
+    expect(result.directSha256).toBe('native-sha');
+  });
+
+  it('continues final-file analysis after trace export and one source decoder fail, without declaring complete evidence', async () => {
+    const directory = outputDirectory(), result = savedResult(directory);
+    result.bufferTrace.exportCompleted = false;
+    result.traceProblems = ['Audio trace export: connection lost'];
+    const analyze = vi.fn(async file => {
+      if (file === result.mixedPath) throw new Error('invalid mixed source');
+      return { ...groups(0, 40), durationS: 20.5, decoderWarnings: null };
+    });
+    await analyzeCapturedEvidence(result, directory, analyze);
+    expect(analyze).toHaveBeenCalledTimes(3);
+    expect(result.problems).toContain('Audio trace export: connection lost');
+    expect(result.problems).toContain('Audio trace export did not complete');
+    expect(result.problems).toContain('mixed audio analysis: invalid mixed source');
+    expect(result.decoded.finalDurationS).toBe(20.5);
+    expect(result.finalSourceComparison.alignedFrames).toHaveLength(39);
+    expect(result.commonSourceComparison).toBeUndefined();
+    expect(result.measurementCompleted).toBe(false);
+    expect(result.controlsValid).toBe(false);
+  });
 });

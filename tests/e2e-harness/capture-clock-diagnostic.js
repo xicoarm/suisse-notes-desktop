@@ -225,27 +225,75 @@ function clockReadout(samples, finalSnapshot) {
   });
 }
 
-async function capture(directory, options, expectedProvenance) {
-  const { AppDriver, sleep } = require(path.join(ROOT, 'tests/e2e-harness/lib/app-driver'));
-  const { startMockBackend } = require(path.join(ROOT, 'tests/e2e-harness/lib/mock-backend'));
-  const { buildCodedScenario, analyzeCodedAudio } = require(path.join(ROOT, 'tests/e2e-harness/lib/coded-audio'));
-  class ClockDriver extends AppDriver {
+function createClockDriver(AppDriver) {
+  return class ClockDriver extends AppDriver {
     async observeRenderer(page) {
       await super.observeRenderer(page);
       const observer = this.rendererListeners.get(page);
       if (observer?.timer) { clearInterval(observer.timer); observer.timer = null; }
     }
+    async getPhase() {
+      // AppDriver polls phase before retrying the Start button. Surface the
+      // first rejected diagnostic control instead of making 90 seconds of
+      // futile reacquisitions and replacing its cause with a generic timeout.
+      const errors = await this.evalTimed(() => window.__directMixedWitness?.snapshot().errors || [], undefined, 3000);
+      if (errors.length) throw new Error('Capture diagnostic control failed: ' + errors.join('; '));
+      return super.getPhase();
+    }
+  };
+}
+
+// Call only after the app and mock have closed. Optional trace coverage must
+// never prevent analysis of already preserved native-input/mix/final audio.
+// A completed media measurement with failed coverage still fails controls.
+async function analyzeCapturedEvidence(result, directory, analyzeCodedAudio) {
+  const traceProblems = [...(result.traceProblems || []), ...(result.bufferTrace?.problems || [])];
+  if (result.options.traceBuffers) {
+    if (!result.bufferTrace?.exportCompleted) traceProblems.push('Audio trace export did not complete');
+    else {
+      try {
+        const summary = summarizeTrace(JSON.parse(fs.readFileSync(result.bufferTrace.file, 'utf8')));
+        result.bufferTrace.summary = summary;
+        if (!Object.keys(summary.counts).length) traceProblems.push('No native media-stream events in audio trace');
+        traceProblems.push(...summary.callbackTiming.problems);
+      } catch (error) { traceProblems.push('Audio trace analysis: ' + error.message); }
+    }
   }
+  result.traceCoverage = { requested: result.options.traceBuffers, complete: !traceProblems.length,
+    problems: [...new Set(traceProblems)] };
+  result.problems.push(...result.traceCoverage.problems);
+  const analyses = {};
+  result.decoded = {};
+  for (const role of ['direct', 'mixed', 'final']) {
+    try {
+      const analysis = await analyzeCodedAudio(result[role + 'Path']);
+      writeJson(path.join(directory, role + '-analysis.json'), analysis);
+      analyses[role] = analysis;
+      result.decoded[role + 'DurationS'] = analysis.durationS;
+      result.decoded[role + 'DecoderWarnings'] = analysis.decoderWarnings;
+    } catch (error) { result.problems.push(role + ' audio analysis: ' + error.message); }
+  }
+  if (analyses.direct && analyses.mixed) result.commonSourceComparison = compareGroups(analyses.direct, analyses.mixed);
+  if (analyses.direct && analyses.final) result.finalSourceComparison = compareGroups(analyses.direct, analyses.final);
+  result.measurementCompleted = Object.keys(analyses).length === 3;
+  result.controlsValid = result.measurementCompleted && result.problems.length === 0;
+}
+
+async function capture(directory, options, expectedProvenance) {
+  const { AppDriver, sleep } = require(path.join(ROOT, 'tests/e2e-harness/lib/app-driver'));
+  const { startMockBackend } = require(path.join(ROOT, 'tests/e2e-harness/lib/mock-backend'));
+  const { buildCodedScenario, analyzeCodedAudio } = require(path.join(ROOT, 'tests/e2e-harness/lib/coded-audio'));
+  const ClockDriver = createClockDriver(AppDriver);
   const result = { diagnostic: 'same-native-source-direct-vs-actual-app-mixed', measurementCompleted: false, controlsValid: false,
     fiveHourQualificationPassed: false, productionBackendQualified: false, physicalHardwareQualified: false, options,
-    provenance: expectedProvenance, samples: [], problems: [], notes: [
+    provenance: expectedProvenance, samples: [], problems: [], traceProblems: [], notes: [
       'The actual app recorder remains unchanged; the direct native recorder tees a clone of its single acquired microphone.',
       'Synthetic microphone, local mock backend, no system audio or playback. All original app source chunks stay in the isolated profile.',
       'Witness buffers at most five minutes and 16 MiB; export and offline decoding occur only after both capture branches stop.',
       'The additional witness is an experimental workload. Passing this diagnostic is not production or five-hour qualification.',
     ] };
   const checkpoint = () => writeJson(path.join(directory, 'result.json'), result);
-  let mock = null, app = null, trace = null;
+  let mock = null, app = null, trace = null, traceAttempted = false;
   try {
     verifyUnchanged(expectedProvenance);
     const name = path.basename(path.dirname(directory)) + '-' + path.basename(directory);
@@ -277,11 +325,16 @@ async function capture(directory, options, expectedProvenance) {
     const traceStartS = Math.max(5, options.seconds / 2 - 15);
     while (performance.now() - began < options.seconds * 1000) {
       const before = performance.now();
-      if (options.traceBuffers && !trace && (before - began) / 1000 >= traceStartS) {
-        trace = await startBufferTrace(app.page);
-        result.bufferTrace = trace.state; result.bufferTrace.requestedStartElapsedS = (before - began) / 1000;
+      if (options.traceBuffers && !traceAttempted && (before - began) / 1000 >= traceStartS) {
+        traceAttempted = true;
+        try {
+          trace = await startBufferTrace(app.page);
+          result.bufferTrace = trace.state; result.bufferTrace.requestedStartElapsedS = (before - began) / 1000;
+        } catch (error) { result.traceProblems.push('Audio trace start: ' + error.message); }
       }
-      if (trace && trace.state.stopRequestedAt === null && performance.now() - trace.state.startedAt >= 30000) await trace.stop();
+      if (trace && trace.state.stopRequestedAt === null && performance.now() - trace.state.startedAt >= 30000) {
+        try { await trace.stop(); } catch (error) { result.traceProblems.push('Audio trace stop: ' + error.message); }
+      }
       const renderer = await app.evalTimed(() => window.__directMixedWitness.snapshot(), undefined, 10000);
       result.samples.push({ before, after: performance.now(), elapsedS: (before - began) / 1000, renderer });
       checkpoint();
@@ -295,9 +348,9 @@ async function capture(directory, options, expectedProvenance) {
     await app.stopRecording(60000);
     await app.evalTimed(() => window.__directMixedWitness.stopDirect(), undefined, 15000);
     if (trace) {
-      await trace.exportTo(path.join(directory, 'audio-buffer-trace.json'));
-      await trace.dispose();
-      if (trace.state.problems.length) throw new Error(trace.state.problems.join('; '));
+      try { await trace.exportTo(path.join(directory, 'audio-buffer-trace.json')); }
+      catch (error) { result.traceProblems.push('Audio trace export: ' + error.message); }
+      finally { await trace.dispose().catch(error => result.traceProblems.push('Audio trace cleanup: ' + error.message)); }
     }
     const witnessStoppedSnapshot = await app.evalTimed(() => window.__directMixedWitness.snapshot());
     const directDir = path.join(directory, 'direct-chunks'); fs.mkdirSync(directDir);
@@ -350,24 +403,9 @@ async function capture(directory, options, expectedProvenance) {
     await app.close({ keepProfile: true }); app = null;
     await mock.close(); mock = null;
     // No live capture, playback, or app process overlaps decoding.
-    if (result.bufferTrace?.exportCompleted) {
-      result.bufferTrace.summary = summarizeTrace(JSON.parse(fs.readFileSync(result.bufferTrace.file, 'utf8')));
-      if (!Object.keys(result.bufferTrace.summary.counts).length) throw new Error('No native media-stream events in audio trace');
-      if (result.bufferTrace.summary.callbackTiming.problems.length) throw new Error(result.bufferTrace.summary.callbackTiming.problems.join('; '));
-    }
     checkpoint();
-    const directAnalysis = await analyzeCodedAudio(result.directPath);
-    writeJson(path.join(directory, 'direct-analysis.json'), directAnalysis);
-    const mixedAnalysis = await analyzeCodedAudio(result.mixedPath);
-    writeJson(path.join(directory, 'mixed-analysis.json'), mixedAnalysis);
-    result.decoded = { directDurationS: directAnalysis.durationS, mixedDurationS: mixedAnalysis.durationS,
-      directDecoderWarnings: directAnalysis.decoderWarnings, mixedDecoderWarnings: mixedAnalysis.decoderWarnings };
-    result.commonSourceComparison = compareGroups(directAnalysis, mixedAnalysis);
-    const finalAnalysis = await analyzeCodedAudio(result.finalPath);
-    writeJson(path.join(directory, 'final-analysis.json'), finalAnalysis);
-    result.finalSourceComparison = compareGroups(directAnalysis, finalAnalysis);
-    result.decoded.finalDurationS = finalAnalysis.durationS;
-    verifyUnchanged(expectedProvenance); result.controlsValid = true; result.measurementCompleted = true;
+    await analyzeCapturedEvidence(result, directory, analyzeCodedAudio);
+    verifyUnchanged(expectedProvenance);
   } catch (error) { result.problems.push(error.stack || error.message); }
   finally {
     if (app) {
@@ -453,4 +491,4 @@ async function runCaptureClockDiagnostic(opts = {}) {
   checkpoint(); return result;
 }
 
-module.exports = { runCaptureClockDiagnostic, compareGroups, clockReadout, installWitness };
+module.exports = { runCaptureClockDiagnostic, compareGroups, clockReadout, installWitness, createClockDriver, analyzeCapturedEvidence };
