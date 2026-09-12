@@ -104,6 +104,24 @@ async function sendLocalNotification(id, title, body) {
 }
 
 /**
+ * Remove an already-shown local notification (the "syncing…" one, id 9001, was
+ * never cancelled — it lingered in the shade after a sync ended or the device
+ * was forgotten). iOS only removes DELIVERED notifications via a separate call.
+ */
+async function clearLocalNotification(id) {
+  if (!isCapacitor()) return;
+  try {
+    const { LocalNotifications } = await import('@capacitor/local-notifications');
+    await LocalNotifications.cancel({ notifications: [{ id }] }).catch(() => {});
+    if (LocalNotifications.removeDeliveredNotifications) {
+      await LocalNotifications.removeDeliveredNotifications({ notifications: [{ id, title: '', body: '' }] }).catch(() => {});
+    }
+  } catch {
+    // best-effort
+  }
+}
+
+/**
  * Get or create a persistent app UUID for BLE pairing.
  * NOT user-scoped — the device firmware locks to this UUID per phone installation.
  * Changing it per-user would cause "already paired to another app" rejection.
@@ -211,6 +229,11 @@ export const useDeviceStore = defineStore('device', {
 
     // Cancel flag for in-progress sync
     _cancelRequested: false,
+    // Bumped by _teardownSync (forget/disconnect/logout). A sync run, a
+    // download or an auto-sync poll captures it at entry and stops touching the
+    // sync UI once it changes — so forgetting a device can never leave the
+    // "transferring" banner or a phantom "sync complete" behind.
+    _syncGen: 0,
     // Consecutive corrupted transfers per device file (session-scoped); after
     // MAX_CRC_FAILURES the file is skipped instead of retried forever.
     _crcFailures: {},
@@ -296,6 +319,7 @@ export const useDeviceStore = defineStore('device', {
 
       // Set disconnect handler — auto-reconnect unless user explicitly disconnected
       manager.onDisconnect(() => {
+        this._teardownSync();
         this.stopAutoSync();
         // Only move to 'disconnected' if we weren't already in 'lost' state
         // (user still needs to see 'lost' if they backgrounded the app)
@@ -364,6 +388,7 @@ export const useDeviceStore = defineStore('device', {
       // Disconnect any active connection from previous user
       if (this.connectionState !== 'disconnected') {
         this._intentionalDisconnect = true;
+        this._teardownSync();
         this.stopAutoSync();
         this._stopReconnect();
         const manager = getBleManager();
@@ -416,6 +441,7 @@ export const useDeviceStore = defineStore('device', {
      */
     async onLogout() {
       this._intentionalDisconnect = true;
+      this._teardownSync();
       this.stopAutoSync();
       this._stopReconnect();
       this._stopPersistentReconnect();
@@ -656,6 +682,7 @@ export const useDeviceStore = defineStore('device', {
      */
     async disconnect() {
       this._intentionalDisconnect = true;
+      this._teardownSync();
       this._stopReconnect();
       this._stopPersistentReconnect();
       this.stopAutoSync();
@@ -700,6 +727,7 @@ export const useDeviceStore = defineStore('device', {
 
     async forgetDevice() {
       this._intentionalDisconnect = true;
+      this._teardownSync();
       this._stopReconnect();
       this._stopPersistentReconnect();
       this.stopAutoSync();
@@ -729,13 +757,20 @@ export const useDeviceStore = defineStore('device', {
     async fetchFileList() {
       if (!this.isConnected) return;
 
+      const gen = this._syncGen;
       try {
         const manager = getBleManager();
         const files = await manager.getFileList();
+        // Device forgotten/disconnected while the list was being fetched:
+        // don't refill deviceFiles (it would revive the paired UI).
+        if (gen !== this._syncGen || !this.isConnected) return;
         this.deviceFiles = files.sort((a, b) => b.creat_time - a.creat_time);
         this.fileListLoaded = true;
       } catch (e) {
         console.warn('Failed to fetch file list:', e.message);
+        // Device forgotten/disconnected while the list was in flight — don't
+        // revive deviceFiles from a partial or stale result.
+        if (gen !== this._syncGen || !this.isConnected) throw e;
         if (e.code === 'LIST_INCOMPLETE') {
           // The recorder's list arrived truncated (stale frames of an earlier
           // request in the stream). MERGE what came through into the known
@@ -828,6 +863,10 @@ export const useDeviceStore = defineStore('device', {
       if (newFiles.length === 0) return;
       const t = i18n.global.t;
 
+      // This run is abandoned the moment the device is forgotten/disconnected.
+      const gen = this._syncGen;
+      const live = () => gen === this._syncGen;
+
       this._cancelRequested = false;
       this.syncState = 'syncing';
       noteSessionActivity({ bleSync: true });
@@ -855,13 +894,16 @@ export const useDeviceStore = defineStore('device', {
 
       try {
         for (const file of newFiles) {
-          if (this._cancelRequested) break;
+          if (this._cancelRequested || !live()) break;
           this.syncCurrent++;
           this.currentSyncFile = file.file;
           this.syncProgress = 0;
           try {
-            await this._downloadAndUpload(file);
+            await this._downloadAndUpload(file, gen);
           } catch (perFileErr) {
+            // The device was forgotten/disconnected mid-run: stop the batch
+            // without recording a failure or advancing the indicator.
+            if (!live()) break;
             // Per-file cancel (single-file UI cancel without a full-batch
             // cancel): drop this file and continue to the next.
             if (perFileErr.message === 'cancelled' && !this._cancelRequested) {
@@ -878,7 +920,10 @@ export const useDeviceStore = defineStore('device', {
             addBreadcrumb({ category: 'ble', message: `Sync failed for ${file.file}: ${perFileErr.message} — continuing batch`, level: 'warning' });
           }
         }
-        if (this._cancelRequested) {
+        if (!live()) {
+          // Torn down (forget/disconnect): the teardown already reset the UI.
+          return;
+        } else if (this._cancelRequested) {
           this.syncState = 'idle';
         } else if (failures.length > 0) {
           this.syncState = 'error';
@@ -908,18 +953,20 @@ export const useDeviceStore = defineStore('device', {
         }
         throw e;
       } finally {
-        this.currentSyncFile = null;
-        this.syncPhase = 'idle';
         noteSessionActivity({ bleSync: false });
-        // End of the sync run — "apply to all" answers no longer carry over.
-        prepStoreForRun?.endDeviceSyncRun();
+        if (live()) {
+          this.currentSyncFile = null;
+          this.syncPhase = 'idle';
+          // End of the run — "apply to all" answers no longer carry over.
+          prepStoreForRun?.endDeviceSyncRun();
+        }
       }
     },
 
     /**
      * Download file from device and upload to backend
      */
-    async _downloadAndUpload(file) {
+    async _downloadAndUpload(file, gen = this._syncGen) {
       const manager = getBleManager();
       const historyStore = useRecordingsHistoryStore();
       const authStore = useAuthStore();
@@ -1174,6 +1221,13 @@ export const useDeviceStore = defineStore('device', {
         }
 
       } catch (err) {
+        // Forgotten/disconnected mid-file: not a user cancel and not a real
+        // failure — keep the entry retryable (file may already be on the
+        // phone) and let syncAllNew end the run quietly. No skip, no delete.
+        if (gen !== this._syncGen) {
+          try { await historyStore.updateRecording(recordId, { uploadStatus: 'pending' }); } catch { /* best-effort */ }
+          throw err;
+        }
         const isCancelled = this._cancelRequested ||
           err.message === 'BLE download cancelled' ||
           err.message === 'cancelled';
@@ -1448,6 +1502,9 @@ export const useDeviceStore = defineStore('device', {
       if (this._pollInProgress) return;
       this._pollInProgress = true;
 
+      const gen = this._syncGen;
+      const live = () => gen === this._syncGen && this.isConnected;
+
       try {
         // Always send a battery request as BLE keepalive — prevents the
         // device from disconnecting due to inactivity (even during recording)
@@ -1470,9 +1527,11 @@ export const useDeviceStore = defineStore('device', {
         if (!due) return;
         this._listRefreshRequested = false;
 
+        if (!live()) return;
         try {
           await this.fetchFileList();
         } catch (e) {
+          if (!live()) return;
           // Busy card (a recording just stopped / the card is still being
           // scanned) or a dropped link: nothing to do this tick. Ask for the
           // list again on the next tick instead of waiting a full cycle.
@@ -1481,8 +1540,9 @@ export const useDeviceStore = defineStore('device', {
           return;
         }
 
-        // Re-check: recording may have started during file list fetch
-        if (this.isRecordingOnDevice) return;
+        // Re-check: recording may have started during file list fetch, or the
+        // device was forgotten while the list was being fetched.
+        if (!live() || this.isRecordingOnDevice) return;
 
         const newFiles = this._filesForAutoSync();
         if (newFiles.length > 0) {
@@ -1511,6 +1571,31 @@ export const useDeviceStore = defineStore('device', {
       } finally {
         this._pollInProgress = false;
       }
+    },
+
+    /**
+     * End any sync in progress and clear everything that draws the transfer
+     * indicator. Synchronous so it takes effect before the awaited unpair /
+     * disconnect; the generation bump makes any in-flight run/poll go stale.
+     */
+    _teardownSync() {
+      this._syncGen++;
+      this._cancelRequested = false;
+      this.syncState = 'idle';
+      this.syncPhase = 'idle';
+      this.currentSyncFile = null;
+      this.syncCurrent = 0;
+      this.syncTotal = 0;
+      this.syncProgress = 0;
+      this.syncBytesReceived = 0;
+      this.syncBytesTotal = 0;
+      this.syncError = null;
+      this.syncErrorPhase = null;
+      this._listRefreshRequested = false;
+      clearLocalNotification(NOTIF_SYNC_PROGRESS);
+      import('./meeting-prep')
+        .then(m => m.useMeetingPrepStore().endDeviceSyncRun())
+        .catch(() => { /* prep prompt unavailable */ });
     },
 
     /**
