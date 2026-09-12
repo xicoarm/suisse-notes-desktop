@@ -344,7 +344,7 @@
     <!-- BLE Transfer Sync Pill (floating, mobile, visible on all pages) -->
     <BleTransferBanner v-if="isMobile() && authStore.isAuthenticated" />
 
-    <!-- Suisse Notes Pro sync: context/template prompt (global, waits until answered) -->
+    <!-- Suisse Meets Pro sync: context/template prompt (global, waits until answered) -->
     <DeviceSyncPrepDialog v-if="isMobile() && authStore.isAuthenticated" />
 
     <!-- Offline Banner -->

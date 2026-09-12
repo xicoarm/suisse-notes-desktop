@@ -821,7 +821,7 @@
             size="xs"
             color="grey-6"
           />
-          <span>{{ $t('tipsContact') }} <a href="mailto:info@suisse-notes.ch">info@suisse-notes.ch</a></span>
+          <span>{{ $t('tipsContact') }} <a href="mailto:info@suisse-meets.ch">info@suisse-meets.ch</a></span>
         </div>
       </div>
     </div>

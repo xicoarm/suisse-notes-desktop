@@ -499,7 +499,7 @@ export default {
       }
     };
 
-    // Suisse Notes Pro: record is waiting for the context/template answer
+    // Suisse Meets Pro: record is waiting for the context/template answer
     // ('pending_prep'). Re-open the prompt; on answer the record becomes
     // 'pending' and the auto-retry/upload paths take over with the prep set.
     const handleAnswerPrep = async (recording) => {

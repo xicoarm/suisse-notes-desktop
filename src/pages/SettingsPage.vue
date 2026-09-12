@@ -321,7 +321,7 @@
         </div>
       </div>
 
-      <!-- Suisse Notes Pro: context prompt on device sync (mobile only) -->
+      <!-- Suisse Meets Pro: context prompt on device sync (mobile only) -->
       <div
         v-if="isMobileApp"
         class="settings-section"

@@ -137,7 +137,7 @@
           </q-btn>
         </template>
 
-        <!-- Waiting for the context/template answer (Suisse Notes Pro sync) -->
+        <!-- Waiting for the context/template answer (Suisse Meets Pro sync) -->
         <q-btn
           v-else-if="recording.uploadStatus === 'pending_prep'"
           flat

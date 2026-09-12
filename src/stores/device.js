@@ -1040,7 +1040,7 @@ export const useDeviceStore = defineStore('device', {
           await historyStore.updateRecording(recordId, { filePath, uploadStatus: 'pending' });
         }
 
-        // Phase 2b: Ask for pre-meeting context/template (Suisse Notes Pro flow).
+        // Phase 2b: Ask for pre-meeting context/template (Suisse Meets Pro flow).
         // The file is safely on the phone — we WAIT for the answer (product
         // decision); "skip" is always available and with prompting disabled the
         // saved defaults apply automatically. While waiting the record carries
