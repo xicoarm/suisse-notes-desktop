@@ -217,7 +217,11 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
     const spaceEstimate = fastPath => estimateScratchBytes({ sourceBytes, timelineSeconds: estimatedTimelineSeconds,
       sourceSeconds: estimatedSourceSeconds, lanes: estimatedLanes, fastPath });
     const stereo = 'pan=stereo|c0=FL+FC+0.707*BL+0.707*SL+0.5*LFE|c1=FR+FC+0.707*BR+0.707*SR+0.5*LFE';
-    const resample = 'aresample=48000:ocl=stereo:clev=1:async=1:first_pts=0:min_hard_comp=0.002:max_soft_comp=0';
+    // pan already establishes stereo at unity. The redundant ocl alias was
+    // removed from newer FFmpeg; keeping layout negotiation implicit here
+    // supports both bundled generations without changing timestamp repair.
+    // https://github.com/FFmpeg/FFmpeg/blob/e64a1d2953/libswresample/options.c
+    const resample = 'aresample=48000:clev=1:async=1:first_pts=0:min_hard_comp=0.002:max_soft_comp=0';
     const rendered = path.join(scratchDirectory, 'rendered.webm');
     async function finish(candidate, plan, totalSamples, fastPathUsed) {
       Object.assign(plan, { version: 1, sampleRate: RATE, channels: CHANNELS, totalSamples, recovery: !!options.recovery,

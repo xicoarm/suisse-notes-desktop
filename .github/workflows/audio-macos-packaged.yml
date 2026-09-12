@@ -70,6 +70,16 @@ jobs:
         timeout-minutes: 16
         run: node tests/e2e-harness/ci/build-macos-packaged.js --arch ${{ matrix.arch }}
 
+      - name: Verify actual packaged media binaries against native finalization contracts
+        timeout-minutes: 8
+        shell: bash
+        env:
+          SUISSE_TEST_FFMPEG_PATH: ${{ steps.build.outputs.app }}/Contents/Resources/ffmpeg/ffmpeg
+          SUISSE_TEST_FFPROBE_PATH: ${{ steps.build.outputs.app }}/Contents/Resources/ffmpeg/ffprobe
+        run: |
+          set -o pipefail
+          node node_modules/vitest/vitest.mjs run tests/unit/nativeSourceFinalization.test.js --maxWorkers=1 --minWorkers=1 --reporter=default --reporter=json --outputFile=tests/e2e-harness/work/macos-packaged/media-compatibility-result.json 2>&1 | tee tests/e2e-harness/work/macos-packaged/media-compatibility.log
+
       # The scripts own 15/10-minute deadlines. Outer steps leave time for their
       # finally blocks to preserve partial results and tar files after failure.
       - name: Qualify packaged resources, capture, finalization, and local upload

@@ -3,15 +3,25 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const require = createRequire(import.meta.url);
 const ffmpeg = require('fluent-ffmpeg');
-ffmpeg.setFfmpegPath(require('@ffmpeg-installer/ffmpeg').path);
-ffmpeg.setFfprobePath(require('@ffprobe-installer/ffprobe').path);
+// The packaged Mac workflow can run this same real-media suite against its
+// attested Contents/Resources binaries. Never fall back if one override is missing.
+const overrideFfmpeg = process.env.SUISSE_TEST_FFMPEG_PATH;
+const overrideFfprobe = process.env.SUISSE_TEST_FFPROBE_PATH;
+if (!!overrideFfmpeg !== !!overrideFfprobe) throw new Error('Media compatibility requires both explicit binary paths');
+for (const file of [overrideFfmpeg, overrideFfprobe].filter(Boolean)) {
+  if (!path.isAbsolute(file) || !fs.lstatSync(file).isFile() || fs.lstatSync(file).isSymbolicLink()) throw new Error('Media compatibility requires absolute regular binary paths');
+}
+const FFMPEG = overrideFfmpeg || require('@ffmpeg-installer/ffmpeg').path;
+const FFPROBE = overrideFfprobe || require('@ffprobe-installer/ffprobe').path;
+ffmpeg.setFfmpegPath(FFMPEG);
+ffmpeg.setFfprobePath(FFPROBE);
 const { createNativeSourceFinalization, createTimestampEvidence, planLane, estimateScratchBytes, estimateEncodedBytes } = require('../../src-electron/native-source-finalization');
 const { validateNativeMedia } = require('../../src-electron/native-media-validation');
 const { beginSource, markSourceStarted, saveSourceChunk, endSource, inspectNativeSources } = require('../../src-electron/native-source-persistence');
@@ -29,7 +39,7 @@ function metadata(file) {
   return new Promise((resolve, reject) => ffmpeg.ffprobe(file, (error, result) => error ? reject(error) : resolve(result)));
 }
 function finalizer(overrides = {}) {
-  return createNativeSourceFinalization({ ffmpeg, run, ffprobePath: require('@ffprobe-installer/ffprobe').path,
+  return createNativeSourceFinalization({ ffmpeg, run, ffprobePath: FFPROBE,
     validate: validateNativeMedia,
     probe: async file => Number((await metadata(file)).format.duration), ...overrides });
 }
@@ -89,6 +99,23 @@ afterEach(async () => {
 });
 
 describe('native source finalization real-media custody', () => {
+  it.each(['fast', 'general'])('preserves mono microphone unity gain in both stereo channels through the %s path', async mode => {
+    await source(await encoded(1, 440), { end: 1000 });
+    if (mode === 'general') await source(await encoded(1, 880), { start: 1000, end: 2000 });
+    const result = await finalizer().build(root, path.join(root, 'audio_building.webm'));
+    const audio = await decoded(result.outputPath);
+    expect(result.fastPathUsed).toBe(mode === 'fast');
+    expect(audio.samples).toBe(mode === 'fast' ? 48000 : 96000);
+    for (const channel of [0, 1]) {
+      expect(amplitude(audio, 440, 0.2, 0.8, channel)).toBeGreaterThan(0.095);
+      expect(amplitude(audio, 440, 0.2, 0.8, channel)).toBeLessThan(0.105);
+      if (mode === 'general') {
+        expect(amplitude(audio, 880, 1.2, 1.8, channel)).toBeGreaterThan(0.095);
+        expect(amplitude(audio, 880, 1.2, 1.8, channel)).toBeLessThan(0.105);
+      }
+    }
+  }, 60000);
+
   it.each(['fast', 'general'])('bounds %s output with 192-kbit CBR packets while preserving stereo and fractional sample count', async mode => {
     const targetSeconds = 12.345;
     await source(await encoded(mode === 'fast' ? 12 : 6, 440, { stereo: true, antiPhase: true }),
@@ -96,7 +123,7 @@ describe('native source finalization real-media custody', () => {
     if (mode === 'general') await source(await encoded(6, 880, { stereo: true, antiPhase: true }),
       { start: 6000, end: targetSeconds * 1000, channels: 2 });
     const result = await finalizer().build(root, path.join(root, 'audio_building.webm'), { expectedDurationSec: targetSeconds });
-    const { stdout } = await promisify(execFile)(require('@ffprobe-installer/ffprobe').path,
+    const { stdout } = await promisify(execFile)(FFPROBE,
       ['-v', 'error', '-select_streams', 'a', '-show_packets', '-show_streams', '-show_entries',
         'packet=size,duration_time:stream=codec_name,sample_rate,channels', '-of', 'json', result.outputPath],
       { windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024 });
@@ -170,16 +197,19 @@ describe('native source finalization real-media custody', () => {
     expect(amplitude(audio, 660, 2.2, 2.6)).toBeGreaterThan(0.08);
   }, 60000);
 
-  it('materializes a native packet-clock gap instead of shifting later audio earlier', async () => {
+  it.each(['fast', 'general'])('materializes a native packet-clock gap in the %s path instead of shifting later audio earlier', async mode => {
     const bytes = await encoded(2, 770, { filters: 'aselect=not(between(t\\,0.8\\,1.2))' });
     await source(bytes, { end: 2000 });
+    if (mode === 'general') await source(await encoded(1, 880), { start: 2000, end: 3000 });
     const result = await finalizer().build(root, path.join(root, 'audio_building.webm'));
     const audio = await decoded(result.outputPath);
     expect(result.warnings.some(warning => warning.kind === 'native-source-timestamp-gaps')).toBe(true);
     expect(amplitude(audio, 770, 0.2, 0.6)).toBeGreaterThan(0.08);
     expect(amplitude(audio, 770, 0.95, 1.1)).toBeLessThan(0.002);
     expect(amplitude(audio, 770, 1.5, 1.8)).toBeGreaterThan(0.08);
-    expect(audio.samples / 48000).toBeCloseTo(2, 2);
+    expect(audio.samples / 48000).toBeCloseTo(mode === 'fast' ? 2 : 3, 2);
+    expect(result.fastPathUsed).toBe(mode === 'fast');
+    if (mode === 'general') expect(amplitude(audio, 880, 2.2, 2.8)).toBeGreaterThan(0.08);
   }, 60000);
 
   it('includes active-time AudioTee PCM once and rejects simultaneous native system copies', async () => {
@@ -277,6 +307,37 @@ describe('native source finalization real-media custody', () => {
     expect(fs.readFileSync(output, 'utf8')).toBe('previous playable output');
     expect(Buffer.concat(inspectNativeSources(root).find(item => item.sourceId === id).chunkPaths.map(file => fs.readFileSync(file))).equals(original)).toBe(true);
   }, 60000);
+});
+
+describe('bundled resampler compatibility controls', () => {
+  it.each([{ rate: 48000, stereo: false }, { rate: 44100, stereo: true, antiPhase: true }])(
+    'retains identical old-binary PCM without the removed layout alias ($rate Hz, stereo=$stereo)', async options => {
+      const wav = path.join(root, 'compatibility.wav');
+      fs.writeFileSync(wav, wave(0.25, 440, options));
+      const stereo = 'pan=stereo|c0=FL+FC+0.707*BL+0.707*SL+0.5*LFE|c1=FR+FC+0.707*BR+0.707*SR+0.5*LFE';
+      const clock = 'clev=1:async=1:first_pts=0:min_hard_comp=0.002:max_soft_comp=0';
+      const execute = legacy => promisify(execFile)(FFMPEG, ['-nostdin', '-hide_banner', '-v', 'error', '-i', wav,
+        '-af', `${stereo},aresample=48000:${legacy ? 'ocl=stereo:' : ''}${clock}`,
+        '-threads', '1', '-ac', '2', '-c:a', 'pcm_f32le', '-f', 'f32le', 'pipe:1'],
+      { windowsHide: true, timeout: 5000, maxBuffer: 1024 * 1024, encoding: 'buffer' });
+      const corrected = await execute(false);
+      expect(corrected.stdout.length).toBe(12000 * 8);
+      let previous, legacyError;
+      try { previous = await execute(true); } catch (error) { legacyError = error; }
+      if (previous) expect(corrected.stdout.equals(previous.stdout)).toBe(true);
+      else {
+        // New FFmpeg must reproduce the exact removed-option rejection, not a
+        // generic spawn/timeout/codec failure that could conceal a bad fixture.
+        expect(String(legacyError.stderr)).toMatch(/ocl/);
+        expect(String(legacyError.stderr)).toMatch(/Option not found|option.*not found/i);
+      }
+      const { stdout: version } = await promisify(execFile)(FFMPEG, ['-version'], { windowsHide: true, timeout: 5000 });
+      console.info('resampler-compatibility', JSON.stringify({ binary: FFMPEG,
+        sha256: createHash('sha256').update(fs.readFileSync(FFMPEG)).digest('hex'),
+        version: version.split(/\r?\n/)[0], input: options, decodedSamples: corrected.stdout.length / 8,
+        legacyAliasAccepted: !!previous, legacyStderr: legacyError ? String(legacyError.stderr).slice(0, 2048) : null,
+        identicalLegacyPcm: previous ? corrected.stdout.equals(previous.stdout) : null }));
+    }, 20000);
 });
 
 describe('native timeline policy', () => {

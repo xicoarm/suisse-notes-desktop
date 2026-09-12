@@ -90,6 +90,29 @@ describe('macOS packaged qualification boundaries', () => {
     expect(job.env.SUISSE_E2E_PACKAGED_EXE).toBeUndefined();
   });
 
+  it('checks the actual built media binaries with one worker before allowing packaged capture', () => {
+    const buildIndex = steps.findIndex(step => step.id === 'build');
+    const captureIndex = steps.findIndex(step => /run-macos-packaged-qualification\.js/.test(step.run || ''));
+    const compatibilityIndex = steps.findIndex(step => /vitest\.mjs/.test(step.run || ''));
+    const compatibility = steps[compatibilityIndex];
+    expect(compatibilityIndex).toBeGreaterThan(buildIndex);
+    expect(compatibilityIndex).toBeLessThan(captureIndex);
+    expect(compatibility.env).toEqual({
+      SUISSE_TEST_FFMPEG_PATH: '${{ steps.build.outputs.app }}/Contents/Resources/ffmpeg/ffmpeg',
+      SUISSE_TEST_FFPROBE_PATH: '${{ steps.build.outputs.app }}/Contents/Resources/ffmpeg/ffprobe'
+    });
+    expect(compatibility['timeout-minutes']).toBeLessThanOrEqual(8);
+    expect(compatibility.shell).toBe('bash');
+    expect(compatibility['continue-on-error']).toBeUndefined();
+    expect(compatibility.run).toContain('set -o pipefail');
+    expect(compatibility.run).toContain('node node_modules/vitest/vitest.mjs run tests/unit/nativeSourceFinalization.test.js');
+    expect(compatibility.run).toContain('--maxWorkers=1 --minWorkers=1');
+    expect(compatibility.run).toContain('--outputFile=tests/e2e-harness/work/macos-packaged/media-compatibility-result.json');
+    expect(compatibility.run).toContain('2>&1 | tee tests/e2e-harness/work/macos-packaged/media-compatibility.log');
+    expect(compatibility.run).not.toMatch(/prepare-ffmpeg|ffmpeg-installer|\|\|\s*true/);
+    expect(steps[captureIndex].if).toBeUndefined();
+  });
+
   it('has read-only repository access and receives no signing or service credentials', () => {
     expect(packaged.permissions).toEqual({ contents: 'read' });
     expect(job.permissions).toBeUndefined();
