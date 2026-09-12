@@ -19,6 +19,7 @@
  */
 
 import { getFileUri, statFile, readFile } from "./storage";
+import { fetchWithTimeout } from "./api";
 import { isCapacitor } from "../utils/platform";
 import { addBreadcrumb, captureMessage } from "../boot/sentry";
 
@@ -333,7 +334,9 @@ export async function uploadViaPresignedSas(opts) {
   crumb(`POST /api/uploads/init starting — host=${apiBaseUrl} size=${fileSize}`);
   let initResp, initData;
   try {
-    initResp = await fetch(`${apiBaseUrl}/api/uploads/init`, {
+    // Deadline: this call runs before EVERY upload (it is what falls back to
+    // the legacy POST); a hung init used to block the whole upload flow.
+    initResp = await fetchWithTimeout(`${apiBaseUrl}/api/uploads/init`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -347,6 +350,7 @@ export async function uploadViaPresignedSas(opts) {
         durationSeconds,
       }),
       signal: abortSignal,
+      timeoutMs: 30000,
     });
     initData = await initResp.json().catch(() => ({}));
     crumb(`POST /api/uploads/init returned status=${initResp.status} mode=${initData?.mode || '-'}`);
@@ -535,7 +539,7 @@ export async function uploadViaPresignedSas(opts) {
 
   let completeResp, completeData;
   try {
-    completeResp = await fetch(`${apiBaseUrl}/api/uploads/complete`, {
+    completeResp = await fetchWithTimeout(`${apiBaseUrl}/api/uploads/complete`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -552,6 +556,7 @@ export async function uploadViaPresignedSas(opts) {
         metadata,
       }),
       signal: abortSignal,
+      timeoutMs: 60000,
     });
     completeData = await completeResp.json().catch(() => ({}));
   } catch (err) {

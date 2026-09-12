@@ -17,6 +17,7 @@ import { addBreadcrumb, captureMessage } from '../boot/sentry';
 
 const crumb = (message, level = 'info') => addBreadcrumb({ category: 'upload', message, level });
 import { uploadViaPresignedSas, isTransientUploadError, readBlobFromCapacitorPath } from './upload-direct';
+import { fetchWithTimeout } from './api';
 
 // --- Persistent Mobile Upload Queue (localStorage + Preferences backup) ---
 const MOBILE_UPLOAD_QUEUE_KEY = 'mobile_upload_queue';
@@ -647,7 +648,9 @@ const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts 
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const response = await fetch(`${apiUrl}/api/desktop/upload/${audioFileId}/status`, { headers: buildHeaders() });
+      // 20s deadline per poll: a black-holed status request used to hang the
+      // whole upload flow (and its in-flight guard) until the OS gave up.
+      const response = await fetchWithTimeout(`${apiUrl}/api/desktop/upload/${audioFileId}/status`, { headers: buildHeaders(), timeoutMs: 20000 });
 
       if (!response.ok) {
         // Server doesn't support status endpoint yet, fall back to trust-based

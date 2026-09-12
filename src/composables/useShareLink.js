@@ -2,7 +2,7 @@ import { useQuasar } from 'quasar';
 import { useI18n } from 'vue-i18n';
 import { isElectron, isCapacitor } from '../utils/platform';
 import { useAuthStore } from '../stores/auth';
-import { getApiUrlSync } from '../services/api';
+import { getApiUrlSync, fetchWithTimeout } from '../services/api';
 
 /**
  * Composable for generating shareable meeting links and opening them in the system browser.
@@ -35,7 +35,7 @@ export function useShareLink() {
     } else if (isCapacitor()) {
       try {
         if (authStore.token) {
-          const response = await fetch(`${getApiUrlSync()}/api/auth/desktop/create-web-session`, {
+          const response = await fetchWithTimeout(`${getApiUrlSync()}/api/auth/desktop/create-web-session`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
