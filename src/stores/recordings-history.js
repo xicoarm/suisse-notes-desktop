@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { useAuthStore } from './auth';
 import { useRecordingStore } from './recording';
 import { isElectron, isCapacitor, getPlatform } from '../utils/platform';
-import { getApiUrlSync } from '../services/api';
+import { getApiUrlSync, fetchWithTimeout } from '../services/api';
 
 // Map a client `recording` object to the contract's RegisterRecordingRequest
 // shape (see src/lib/api/desktop-contract.ts → POST /api/desktop/recording).
@@ -149,7 +149,7 @@ async function _serverFetch(endpoint, options = {}) {
   const baseUrl = getApiUrlSync();
   const url = `${baseUrl}${endpoint}`;
 
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -368,7 +368,9 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
               'retryCount', 'lastRetryAt', 'uploadError', '_serverSynced',
               // Pre-meeting preparation (context/template/pre-fill) — client-only,
               // re-sent on retry uploads; the server never returns it.
-              'prep', 'prepAnswered'
+              'prep', 'prepAnswered',
+              // Capture forensics shown on the card (segments lost at stop time).
+              'captureWarning'
             ];
             const merged = serverRecordings.map(serverRec => {
               const localRec = cached.find(r => r.id === serverRec.id);

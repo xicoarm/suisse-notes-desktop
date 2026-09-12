@@ -1659,7 +1659,7 @@ const doStartRecordingInternal = async () => {
   if (recordingStore.recoveryInProgress) {
     $q.notify({
       type: 'warning',
-      message: 'Please wait — recovering a previous recording...',
+      message: t('recoveringPreviousRecording'),
       timeout: 3000
     });
     return;
@@ -1682,7 +1682,7 @@ const doStartRecordingInternal = async () => {
   } else {
     $q.notify({
       type: 'negative',
-      message: result.error || 'Failed to start recording'
+      message: result.error || t('failedToStartRecording')
     });
   }
 };
@@ -1727,7 +1727,7 @@ const handleStopInternal = async () => {
       if (result.recovered) {
         $q.notify({
           type: 'warning',
-          message: result.warning || 'Recording recovered after interruption. Some audio at the end may be missing.',
+          message: t('recordingRecoveredAfterInterruption'),
           timeout: 8000
         });
       }
@@ -1753,12 +1753,31 @@ const handleStopInternal = async () => {
       }
 
       // Update existing history entry (created at recording start) with final details
-      await historyStore.updateRecording(recordingStore.recordId, {
+      const stopUpdates = {
         duration: finalDuration.value,
         fileSize: currentFileSize.value,
         filePath: currentFilePath.value,
         uploadStatus: 'pending'
-      });
+      };
+      if (isCapacitor() && result.gapCount > 0) {
+        // Segments went missing between capture and combine. The file is saved
+        // and uploaded as-is, but the user must know it has holes — a persistent
+        // warning now and a marker on the history card.
+        stopUpdates.captureWarning = {
+          type: 'gaps',
+          missing: result.gapCount,
+          total: result.expectedCount || (result.chunkCount + result.gapCount),
+          at: new Date().toISOString()
+        };
+        $q.notify({
+          type: 'warning',
+          icon: 'warning',
+          message: t('recordingGapsWarning', { missing: result.gapCount, total: stopUpdates.captureWarning.total }),
+          timeout: 0,
+          actions: [{ label: t('ok'), color: 'white' }]
+        });
+      }
+      await historyStore.updateRecording(recordingStore.recordId, stopUpdates);
 
       // Processing done, start auto-upload
       // phase transition handled by subsequent action (setUploading/setError/reset)
@@ -1818,13 +1837,13 @@ const handleStopInternal = async () => {
         // Show more detailed error for partial recovery
         $q.notify({
           type: 'warning',
-          message: 'Recording was interrupted. Your audio chunks are saved locally but could not be combined. Please try again from History.',
+          message: t('recordingInterruptedChunksKept'),
           timeout: 10000
         });
       } else {
         $q.notify({
           type: 'negative',
-          message: result.error || 'Failed to save recording'
+          message: result.error || t('failedToSaveRecording')
         });
       }
     }
@@ -1832,7 +1851,7 @@ const handleStopInternal = async () => {
     // phase transition handled by subsequent action (setUploading/setError/reset)
     $q.notify({
       type: 'negative',
-      message: error.message || 'Error processing recording'
+      message: error.message || t('errorProcessingRecording')
     });
   }
 };

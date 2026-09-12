@@ -21,7 +21,8 @@
  */
 
 import { isElectron, isCapacitor } from '../utils/platform';
-import { captureMessage } from '../boot/sentry';
+import { addBreadcrumb, captureMessage } from '../boot/sentry';
+import { statFile, copyToCache, getFileUri } from './storage';
 
 // Characters illegal in filenames on Windows / most filesystems.
 const ILLEGAL_FILENAME_CHARS = '/\\?%*:|"<>';
@@ -99,68 +100,56 @@ export async function exportAudio(recording) {
  * Copy the local recording into the Cache dir under a friendly name, then open
  * the native share sheet. The copy is a native filesystem operation, so no file
  * bytes pass through JS memory.
- * @param {string} filePath - Capacitor-relative path under Directory.Documents
+ * @param {string} filePath - Capacitor-relative path (resolved by the storage service)
  * @param {string} filename - friendly destination filename
  */
 async function shareViaSheet(filePath, filename) {
-  const { Filesystem, Directory } = await import('@capacitor/filesystem');
   const { Share } = await import('@capacitor/share');
 
-  captureMessage(`export: start filePath=${filePath} filename=${filename}`, 'info');
+  addBreadcrumb({ category: 'export', message: `start filePath=${filePath} filename=${filename}`, level: 'info' });
 
   // 1. Verify the source actually exists. A History item can carry a filePath
   //    whose underlying file was already cleaned up after upload — that would
-  //    otherwise surface as an opaque copy failure.
-  try {
-    const st = await Filesystem.stat({ path: filePath, directory: Directory.Documents });
-    captureMessage(`export: source ok size=${st?.size}`, 'info');
-  } catch (e) {
-    captureMessage(`export: source MISSING — ${e?.message}`, 'error');
+  //    otherwise surface as an opaque copy failure. The storage service resolves
+  //    the platform directory (and the legacy Android location).
+  const st = await statFile(filePath);
+  if (!st.success) {
+    captureMessage(`export: source MISSING — ${st.error}`, 'warning');
     return { success: false, error: 'source_missing' };
   }
+  addBreadcrumb({ category: 'export', message: `source ok size=${st.size}`, level: 'info' });
 
   // 2. Resolve a shareable URI. Prefer a friendly-named copy staged in Cache
   //    (native copy — no JS-heap buffering, so multi-hour files don't OOM).
   //    If the copy fails for ANY reason, fall back to sharing the original file
-  //    in place. file_paths.xml covers both Cache and the recording directory,
+  //    in place. file_paths.xml covers Cache and every recording directory,
   //    so either is shareable on Android; on iOS both file:// URIs share fine.
   let shareUri;
-  try {
-    try {
-      await Filesystem.deleteFile({ path: filename, directory: Directory.Cache });
-    } catch (_) {
-      // no stale copy — fine
+  const staged = await copyToCache(filePath, filename);
+  if (staged.success) {
+    shareUri = staged.uri;
+    addBreadcrumb({ category: 'export', message: `staged copy uri=${shareUri}`, level: 'info' });
+  } else {
+    captureMessage(`export: cache-copy failed (${staged.error}) — sharing original in place`, 'warning');
+    const original = await getFileUri(filePath);
+    if (!original.success) {
+      captureMessage(`export: getUri original FAILED — ${original.error}`, 'error');
+      return { success: false, error: `uri: ${original.error || 'failed'}` };
     }
-    const res = await Filesystem.copy({
-      from: filePath,
-      directory: Directory.Documents,
-      to: filename,
-      toDirectory: Directory.Cache,
-    });
-    // copy() returns the destination uri on success; fall back to getUri.
-    shareUri = res?.uri || (await Filesystem.getUri({ path: filename, directory: Directory.Cache })).uri;
-    captureMessage(`export: staged copy uri=${shareUri}`, 'info');
-  } catch (copyErr) {
-    captureMessage(`export: cache-copy failed (${copyErr?.message}) — sharing original in place`, 'warning');
-    try {
-      shareUri = (await Filesystem.getUri({ path: filePath, directory: Directory.Documents })).uri;
-      captureMessage(`export: original uri=${shareUri}`, 'info');
-    } catch (uriErr) {
-      captureMessage(`export: getUri original FAILED — ${uriErr?.message}`, 'error');
-      return { success: false, error: `uri: ${uriErr?.message || 'failed'}` };
-    }
+    shareUri = original.uri;
+    addBreadcrumb({ category: 'export', message: `original uri=${shareUri}`, level: 'info' });
   }
 
   // 3. Open the native share sheet.
   try {
     await Share.share({ title: filename, files: [shareUri] });
-    captureMessage('export: share completed', 'info');
+    addBreadcrumb({ category: 'export', message: 'share completed', level: 'info' });
     return { success: true, shared: true };
   } catch (e) {
     const msg = (e && e.message) || '';
     // Capacitor Share throws "Share canceled" when the user dismisses the sheet.
     if (/cancel/i.test(msg)) {
-      captureMessage('export: share cancelled by user', 'info');
+      addBreadcrumb({ category: 'export', message: 'share cancelled by user', level: 'info' });
       return { success: false, cancelled: true };
     }
     captureMessage(`export: share FAILED — ${e?.name}: ${msg}`, 'error');

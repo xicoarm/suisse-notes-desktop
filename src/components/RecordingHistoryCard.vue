@@ -53,6 +53,20 @@
           </div>
         </div>
 
+        <!-- Capture warning: the saved file has holes (segments were lost
+             between capture and combine). Stays on the card so the user can
+             judge the transcript accordingly. -->
+        <div
+          v-if="captureWarningText"
+          class="capture-warning"
+        >
+          <q-icon
+            name="warning"
+            size="12px"
+          />
+          <span>{{ captureWarningText }}</span>
+        </div>
+
         <!-- Visible "View transcript" link for uploaded recordings -->
         <div
           v-if="isUploaded"
@@ -419,6 +433,15 @@ export default {
       props.uploading ? 'uploading' : props.recording.uploadStatus
     );
 
+    const captureWarningText = computed(() => {
+      const w = props.recording.captureWarning;
+      if (!w || typeof w !== 'object') return '';
+      if (w.type === 'gaps') {
+        return t('historyCaptureGapsWarning', { missing: w.missing || 0, total: w.total || 0 });
+      }
+      return '';
+    });
+
     const isUploaded = isRecoverable;
 
     const statusLabel = computed(() => {
@@ -542,6 +565,7 @@ export default {
       formattedDuration,
       formattedSize,
       currentStatus,
+      captureWarningText,
       isUploaded,
       isRecoverable,
       statusLabel,
@@ -647,6 +671,16 @@ export default {
     font-size: 12px;
     color: #1e293b;
   }
+}
+
+.capture-warning {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #b45309;
 }
 
 .view-transcript-link {

@@ -13,7 +13,9 @@ import { isElectron, isCapacitor, isMobile, PlatformConstants } from '../utils/p
 import { calculateUploadChecksum, verifyUploadChecksum } from './integrity';
 import { readFile, deleteFile } from './storage';
 import { sentryUploadStart, sentryUploadSuccess, sentryUploadFail } from './sentryHelpers';
-import { captureMessage } from '../boot/sentry';
+import { addBreadcrumb, captureMessage } from '../boot/sentry';
+
+const crumb = (message, level = 'info') => addBreadcrumb({ category: 'upload', message, level });
 import { uploadViaPresignedSas, isTransientUploadError, readBlobFromCapacitorPath } from './upload-direct';
 
 // --- Persistent Mobile Upload Queue (localStorage + Preferences backup) ---
@@ -807,7 +809,7 @@ export const uploadWithVerification = async (options) => {
   }
 
   if (!_beginMobileUpload(recordId)) {
-    captureMessage(`upload: skipped duplicate in-flight mobile upload recordId=${recordId}`, 'info');
+    crumb(`skipped duplicate in-flight mobile upload recordId=${recordId}`);
     return {
       success: false,
       canDelete: false,
@@ -878,7 +880,7 @@ export const uploadWithVerification = async (options) => {
         // Try direct-to-Azure-Blob via SAS URL (works on iOS, Android, browser
         // file picker). Falls through to simple POST when the server reports
         // mode: 'fallback' (i.e. running in local-storage mode).
-        captureMessage(`upload: uploadWithVerification entering SAS path — recordId=${recordId} hasFile=${!!file} hasFilePath=${!!filePath}`, 'info');
+        crumb(`uploadWithVerification entering SAS path — recordId=${recordId} hasFile=${!!file} hasFilePath=${!!filePath}`);
         let uploadResult;
         try {
           uploadResult = await uploadViaPresignedSas({
@@ -892,11 +894,13 @@ export const uploadWithVerification = async (options) => {
               onProgress(progress, bytesUploaded, bytesTotal);
             },
           });
-          captureMessage(`upload: uploadViaPresignedSas returned mode=${uploadResult?.mode} success=${uploadResult?.success}`, 'info');
+          crumb(`uploadViaPresignedSas returned mode=${uploadResult?.mode} success=${uploadResult?.success}`);
         } catch (transientErr) {
           // Bubbled-up transient error from upload-direct — only network
           // failures should land here. Surface to outer retry.
-          captureMessage(`upload: uploadViaPresignedSas THREW — transient=${isTransientUploadError(transientErr)} name=${transientErr.name} msg=${transientErr.message}`, 'error');
+          // Transient network failures (offline, DNS, timeouts) are expected on
+          // mobile and are retried by the queue — warning, not error.
+          captureMessage(`upload: uploadViaPresignedSas THREW — transient=${isTransientUploadError(transientErr)} name=${transientErr.name} msg=${transientErr.message}`, isTransientUploadError(transientErr) ? 'warning' : 'error');
           if (!isTransientUploadError(transientErr)) {
             throw transientErr;
           }
@@ -905,7 +909,7 @@ export const uploadWithVerification = async (options) => {
 
         if (uploadResult.mode === 'fallback') {
           // Server is in local-storage mode — use the legacy POST.
-          captureMessage(`upload: falling back to legacy POST /api/desktop/upload reason=${uploadResult.reason || '-'}`, 'info');
+          crumb(`falling back to legacy POST /api/desktop/upload reason=${uploadResult.reason || '-'}`);
           uploadResult = await uploadFileMobileSimple(
             filePath,
             apiUrl,
@@ -915,7 +919,11 @@ export const uploadWithVerification = async (options) => {
             file,
             recordId
           );
-          captureMessage(`upload: legacy POST returned success=${uploadResult?.success} status=${uploadResult?.status || '-'} error=${uploadResult?.error || '-'}`, uploadResult?.success ? 'info' : 'warning');
+          if (uploadResult?.success) {
+            crumb(`legacy POST returned success=true`);
+          } else {
+            captureMessage(`upload: legacy POST returned success=false status=${uploadResult?.status || '-'} error=${uploadResult?.error || '-'}`, 'warning');
+          }
         }
 
         if (!uploadResult.success) {
@@ -1320,7 +1328,7 @@ const uploadFileMobileSimple = async (filePath, apiUrl, authToken, metadata, onP
       // Telemetry: confirms the legacy POST is sending a disk-backed Blob.
       // If the renderer is OOM-killed mid-upload there is no JS exception, so a
       // missing "legacy POST returned" after this breadcrumb pinpoints send().
-      captureMessage(`upload: legacy POST sending blob size=${fileBlob.size} type=${fileBlob.type || '-'}`, 'info');
+      crumb(`legacy POST sending blob size=${fileBlob.size} type=${fileBlob.type || '-'}`);
       xhr.send(formData);
     });
   } catch (error) {

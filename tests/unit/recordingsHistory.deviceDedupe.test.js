@@ -18,7 +18,8 @@ vi.mock('../../src/stores/recording', () => ({
 }));
 
 vi.mock('../../src/services/api', () => ({
-  getApiUrlSync: () => 'https://api.test'
+  getApiUrlSync: () => 'https://api.test',
+  fetchWithTimeout: async () => { throw new Error('offline (test)'); }
 }));
 
 import { useRecordingsHistoryStore } from '../../src/stores/recordings-history';

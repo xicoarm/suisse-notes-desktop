@@ -18,9 +18,11 @@
  * Bytes never transit the app server.
  */
 
-import { getFileUri } from "./storage";
+import { getFileUri, statFile, readFile } from "./storage";
 import { isCapacitor } from "../utils/platform";
-import { captureMessage } from "../boot/sentry";
+import { addBreadcrumb, captureMessage } from "../boot/sentry";
+
+const crumb = (message, level = "info") => addBreadcrumb({ category: "upload", message, level });
 
 // HTTP status codes that should never be retried — the request will fail
 // identically next time. Mirrors the desktop side.
@@ -75,10 +77,10 @@ function sleep(ms) {
  * Uses fetch() on the file:// URI which streams the bytes natively.
  */
 export async function readBlobFromCapacitorPath(filePath) {
-  captureMessage(`upload: readBlob start path=${filePath}`, "info");
+  crumb(`readBlob start path=${filePath}`);
   const uriResult = await getFileUri(filePath);
   if (!uriResult.success) {
-    captureMessage(`upload: readBlob getFileUri FAILED — ${uriResult.error}`, "error");
+    captureMessage(`upload: readBlob getFileUri FAILED — ${uriResult.error}`, "warning");
     throw new Error(uriResult.error || "Could not resolve file URI");
   }
   let rawUri = uriResult.uri;
@@ -99,33 +101,33 @@ export async function readBlobFromCapacitorPath(filePath) {
         fetchableUri = Capacitor.convertFileSrc(rawUri);
       }
     } catch (e) {
-      captureMessage(`upload: readBlob Capacitor.convertFileSrc unavailable — ${e.message}`, "warning");
+      crumb(`readBlob Capacitor.convertFileSrc unavailable — ${e.message}`, "warning");
     }
   }
 
-  captureMessage(`upload: readBlob fetch URI=${fetchableUri.slice(0, 90)}`, "info");
+  crumb(`readBlob fetch URI=${fetchableUri.slice(0, 90)}`);
   let resp;
   try {
     resp = await fetch(fetchableUri);
   } catch (fetchErr) {
-    captureMessage(`upload: readBlob fetch THREW — name=${fetchErr.name} msg=${fetchErr.message}`, "error");
+    crumb(`readBlob fetch THREW — name=${fetchErr.name} msg=${fetchErr.message}`, "warning");
     // If convertFileSrc gave us a capacitor:// URI that still failed, fall
     // back to native Filesystem.readFile (slower, base64-roundtrip, but
     // works on every iOS version since Capacitor has supported it).
     if (isCapacitor() && fetchableUri !== rawUri) {
-      captureMessage(`upload: readBlob falling back to Filesystem.readFile (base64)`, "warning");
+      crumb(`readBlob falling back to Filesystem.readFile (base64)`, "warning");
       const blob = await _readBlobViaFilesystemReadFile(filePath);
-      captureMessage(`upload: readBlob OK via Filesystem.readFile — size=${blob.size} bytes`, "info");
+      crumb(`readBlob OK via Filesystem.readFile — size=${blob.size} bytes`);
       return blob;
     }
     throw fetchErr;
   }
   if (!resp.ok) {
-    captureMessage(`upload: readBlob fetch returned non-OK status=${resp.status}`, "error");
+    captureMessage(`upload: readBlob fetch returned non-OK status=${resp.status} (local file missing?)`, "warning");
     throw new Error(`Could not read file (status ${resp.status})`);
   }
   const blob = await resp.blob();
-  captureMessage(`upload: readBlob OK — size=${blob.size} bytes, type=${blob.type}`, "info");
+  crumb(`readBlob OK — size=${blob.size} bytes, type=${blob.type}`);
   return blob;
 }
 
@@ -145,12 +147,13 @@ const BASE64_FALLBACK_MAX_BYTES = 80 * 1024 * 1024; // 80 MB
 // fail. Costs ~3-4x memory (base64 string + decoded bytes simultaneously)
 // but works regardless of WKWebView restrictions.
 async function _readBlobViaFilesystemReadFile(filePath) {
-  const { Filesystem, Directory } = await import('@capacitor/filesystem');
   // Guard against OOM: never base64-decode a large file. stat() is cheap and
   // does not load the file. If stat fails for an unrelated reason, fall through
   // to the original best-effort behavior rather than blocking a small upload.
   try {
-    const { size } = await Filesystem.stat({ path: filePath, directory: Directory.Documents });
+    const st = await statFile(filePath);
+    if (!st.success) throw new Error(st.error || 'stat failed');
+    const { size } = st;
     if (typeof size === 'number' && size > BASE64_FALLBACK_MAX_BYTES) {
       captureMessage(
         `upload: readBlob base64 fallback REFUSED — size=${size} exceeds ${BASE64_FALLBACK_MAX_BYTES} (would OOM the WebView)`,
@@ -162,17 +165,11 @@ async function _readBlobViaFilesystemReadFile(filePath) {
     }
   } catch (statErr) {
     if (statErr?.tooLargeForBase64) throw statErr;
-    captureMessage(`upload: readBlob base64 fallback stat failed (${statErr?.message}) — proceeding best-effort`, 'warning');
+    crumb(`readBlob base64 fallback stat failed (${statErr?.message}) — proceeding best-effort`, 'warning');
   }
-  const { data } = await Filesystem.readFile({
-    path: filePath,
-    directory: Directory.Documents,
-  });
-  // data is a base64 string on iOS/Android when no encoding is specified.
-  const binary = atob(typeof data === 'string' ? data : '');
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return new Blob([bytes], { type: detectContentType(filePath) });
+  const read = await readFile(filePath);
+  if (!read.success) throw new Error(read.error || 'Could not read file');
+  return new Blob([read.data], { type: detectContentType(filePath) });
 }
 
 /**
@@ -333,7 +330,7 @@ export async function uploadViaPresignedSas(opts) {
   const durationSeconds = Number(metadata?.duration) || 0;
 
   // 2. Init.
-  captureMessage(`upload: POST /api/uploads/init starting — host=${apiBaseUrl} size=${fileSize}`, "info");
+  crumb(`POST /api/uploads/init starting — host=${apiBaseUrl} size=${fileSize}`);
   let initResp, initData;
   try {
     initResp = await fetch(`${apiBaseUrl}/api/uploads/init`, {
@@ -352,13 +349,13 @@ export async function uploadViaPresignedSas(opts) {
       signal: abortSignal,
     });
     initData = await initResp.json().catch(() => ({}));
-    captureMessage(`upload: POST /api/uploads/init returned status=${initResp.status} mode=${initData?.mode || '-'}`, "info");
+    crumb(`POST /api/uploads/init returned status=${initResp.status} mode=${initData?.mode || '-'}`);
   } catch (err) {
     if (err?.name === "AbortError") {
-      captureMessage("upload: POST /api/uploads/init ABORTED by caller", "warning");
+      crumb("POST /api/uploads/init ABORTED by caller", "warning");
       return { mode: "azure", success: false, cancelled: true, canRetry: false };
     }
-    captureMessage(`upload: POST /api/uploads/init THREW — name=${err.name} msg=${err.message}`, "error");
+    crumb(`POST /api/uploads/init THREW — name=${err.name} msg=${err.message}`, "warning");
     // Network-level failure → caller can retry
     throw err;
   }
