@@ -136,6 +136,26 @@ describe('AppDriver fails closed before renderer actions', () => {
       expect(fixture.observed).not.toHaveBeenCalled(); expect(fixture.browser.disconnect).toHaveBeenCalledTimes(1);
     })();
   });
+  it('retries identity verification after a mid-check renderer navigation but not after a closed target', async () => {
+    const fixture = driverFixture();
+    fixture.page.evaluate.mockImplementationOnce(async () => { throw new Error('Execution context was destroyed, most likely because of a navigation.'); });
+    const launching = fixture.app.launch();
+    fixture.proc.stderr.emit('data', Buffer.from(`DevTools listening on ${endpoint}\n`));
+    await vi.advanceTimersByTimeAsync(6000); await launching;
+    const identityChecks = fixture.page.evaluate.mock.calls.filter(([fn]) => fn.toString().includes('getUserDataPath'));
+    expect(identityChecks).toHaveLength(2);
+    expect(fixture.observed).toHaveBeenCalledTimes(1); expect(fixture.actions).toHaveBeenCalled();
+    await fixture.app.close();
+
+    const closed = driverFixture();
+    closed.page.evaluate.mockImplementationOnce(async () => { throw new Error('Target closed'); });
+    const failing = closed.app.launch();
+    const failure = expect(failing).rejects.toThrow('Could not verify connected app identity');
+    closed.proc.stderr.emit('data', Buffer.from(`DevTools listening on ${endpoint}\n`));
+    await failure;
+    expect(closed.page.evaluate).toHaveBeenCalledTimes(1); expect(closed.actions).not.toHaveBeenCalled();
+    expect(closed.observed).not.toHaveBeenCalled(); expect(closed.browser.disconnect).toHaveBeenCalledTimes(1);
+  });
   it('connects only to its announced endpoint and checks identity before allowing actions', async () => {
     const fixture = driverFixture();
     fixture.app.env = { SUISSE_TEST_USERDATA: 'C:\\not-owned', SUISSE_TEST_CDP_PORT: '9339',

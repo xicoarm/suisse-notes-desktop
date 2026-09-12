@@ -100,9 +100,13 @@ function finalPausesFromHoles(measurement, startOffsetS = 0) {
 }
 
 /**
- * The recorder's start-event to stop-event interval must agree with the
- * native timestamp span. If the recorder had invented holes while audio
- * flowed, wall time would equal the decoded duration instead.
+ * The native timestamp span must not exceed the recorder's start-event to
+ * stop-event interval: if the recorder had invented holes while audio kept
+ * flowing, the span would exceed wall time by the invented total. A span
+ * shorter than wall time is reported, not failed: the fake source delivers its
+ * first buffer only after loading its WAV (seconds for a five-hour file) and a
+ * real device can start late, both of which the content and source-clock
+ * checks judge separately.
  */
 function assessNativeClock(measurement, recorderWallS, toleranceS = CLOCK_TOLERANCE_SECONDS) {
   const problems = [];
@@ -111,12 +115,13 @@ function assessNativeClock(measurement, recorderWallS, toleranceS = CLOCK_TOLERA
     problems.push(`NATIVE CLOCK: ${measurement.overlaps.length} overlapping native timestamp(s) totaling ${measurement.totalOverlapS.toFixed(3)}s`);
   }
   const residualS = Number.isFinite(recorderWallS) ? round(measurement.ptsSpanS - recorderWallS) : null;
-  if (residualS !== null && Math.abs(residualS) > toleranceS) {
-    problems.push(`NATIVE CLOCK: native timestamp span ${measurement.ptsSpanS.toFixed(3)}s differs from the recorder wall clock ${recorderWallS.toFixed(3)}s by ${residualS.toFixed(3)}s (tolerance ${toleranceS}s); ${measurement.holes.length} hole(s) total ${measurement.totalHoleS.toFixed(3)}s`);
+  if (residualS !== null && residualS > toleranceS) {
+    problems.push(`NATIVE CLOCK: native timestamp span ${measurement.ptsSpanS.toFixed(3)}s exceeds the recorder wall clock ${recorderWallS.toFixed(3)}s by ${residualS.toFixed(3)}s (tolerance ${toleranceS}s); ${measurement.holes.length} hole(s) total ${measurement.totalHoleS.toFixed(3)}s`);
   }
   return { recorderWallS: Number.isFinite(recorderWallS) ? recorderWallS : null, ptsSpanS: measurement.ptsSpanS,
     codedDurationS: measurement.codedDurationS, holeCount: measurement.holes.length, totalHoleS: measurement.totalHoleS,
-    overlapCount: measurement.overlaps.length, residualS, toleranceS, problems };
+    overlapCount: measurement.overlaps.length, residualS, toleranceS,
+    lateDeliveryS: residualS !== null && residualS < 0 ? round(-residualS) : 0, problems };
 }
 
 /** The finalization plan that produced the published output, if exactly one validated plan exists. */

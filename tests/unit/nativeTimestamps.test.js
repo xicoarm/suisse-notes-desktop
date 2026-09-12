@@ -121,7 +121,12 @@ describe('native timestamp holes', () => {
     expect(assessNativeClock(holes, 13.03).problems).toEqual([]);
     const invented = assessNativeClock(holes, holes.codedDurationS);
     expect(invented.problems).toHaveLength(1);
-    expect(invented.problems[0]).toMatch(/^NATIVE CLOCK: native timestamp span/);
+    expect(invented.problems[0]).toMatch(/^NATIVE CLOCK: native timestamp span .* exceeds the recorder wall clock/);
+    // A source that starts delivering late (the fake WAV load) shortens the
+    // span below wall time; that is reported, and judged elsewhere.
+    const late = assessNativeClock(holes, holes.ptsSpanS + 4.8);
+    expect(late.problems).toEqual([]);
+    expect(late.lateDeliveryS).toBeCloseTo(4.8, 3);
     expect(assessNativeClock(holes, null).problems).toEqual([]);
     const overlapping = assessNativeClock({ ...holes, overlaps: [{ startS: 1, lengthS: 0.02, packetIndex: 50 }], totalOverlapS: 0.02 }, 13);
     expect(overlapping.problems).toEqual(['NATIVE CLOCK: 1 overlapping native timestamp(s) totaling 0.020s']);

@@ -69,10 +69,14 @@ jobs:
         timeout-minutes: 8
         run: npx quasar build -m electron --skip-pkg
 
-      # The inner 330-minute deadline leaves 25 minutes after the requested
-      # capture for startup, streamed reference generation, upload and decode.
+      # The inner 345-minute deadline leaves 40 minutes after the requested
+      # capture for startup, streamed reference generation, finalization,
+      # upload and decode. The Intel replay of run 33988551101 showed the
+      # five-hour finalization alone needs about 18 minutes; the old 25-minute
+      # remainder expired at 93.8 % of the encode. Within the six-hour job
+      # ceiling this leaves about seven minutes for setup and artifact upload.
       - name: Qualify a real five-hour-five-minute recording
-        timeout-minutes: 335
+        timeout-minutes: 350
         run: node tests/e2e-harness/ci/run-qualification.js s13-coded-endurance
 
       - name: Preserve captured audio and original source chunks

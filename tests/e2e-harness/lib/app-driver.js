@@ -109,6 +109,15 @@ function isolationError(message) {
   return Object.assign(new Error(message), { code: 'HARNESS_ISOLATION_FAILED' });
 }
 
+// Puppeteer/CDP errors raised when the renderer navigates or replaces its
+// frame while an evaluation is in flight (welcome → login, hot reload). They
+// are transient lifecycle events, never evidence about which application is
+// connected. A closed target or session is deliberately not included.
+function isNavigationInterruption(error) {
+  return /Execution context was destroyed|Cannot find context with specified id|Execution context is not available|Inspected target navigated|frame was detached|Frame .* detached/i
+    .test(String(error?.message || ''));
+}
+
 function validateDevToolsEndpoint(value, expectedPort = 0) {
   let url;
   try { url = new URL(value); } catch (_) { throw isolationError('Owned child emitted an invalid DevTools endpoint'); }
@@ -460,7 +469,14 @@ class AppDriver {
         const [userDataDir, apiUrl] = await Promise.all([api.app.getUserDataPath(), api.config.getApiUrl()]);
         return { userDataDir, apiUrl };
       }), 5000));
-    } catch (error) { throw isolationError(`Could not verify connected app identity: ${error.message}`); }
+    } catch (error) {
+      // The renderer navigating (welcome → login, hot reload) while the
+      // identity IPC is in flight destroys the evaluation context. That is not
+      // an identity mismatch: the stable-page loop re-resolves the page and
+      // verifies again. Timeouts and other failures stay isolation failures.
+      if (isNavigationInterruption(error)) throw new Error(`Renderer navigated during identity verification; retrying: ${error.message}`);
+      throw isolationError(`Could not verify connected app identity: ${error.message}`);
+    }
     if (!identity) throw isolationError('Connected renderer has no app identity IPC');
     validateAppIdentity(identity, { userDataDir: path.resolve(this.userDataDir), apiUrl: this.apiUrl });
     this.ownedDevTools.assertAlive();
@@ -795,4 +811,4 @@ class AppDriver {
   }
 }
 
-module.exports = { AppDriver, sleep, installSyntheticCaptureProbe, watchOwnedDevTools, validateDevToolsEndpoint, validateAppIdentity };
+module.exports = { AppDriver, sleep, installSyntheticCaptureProbe, watchOwnedDevTools, validateDevToolsEndpoint, validateAppIdentity, isNavigationInterruption };

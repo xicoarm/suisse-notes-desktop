@@ -18,7 +18,11 @@ const diagnostics = path.join(work, 'ci', scenario);
 const endurance = scenario === 's13-coded-endurance';
 const mainCrash = scenario === 's15-main-crash-qualification';
 const captureClock = scenario === 's16-capture-clock-diagnostic';
-const timeoutMs = (endurance ? 330 : mainCrash ? 10 : 20) * 60 * 1000;
+// Endurance: 305 minutes of capture plus 40 minutes for startup, reference
+// generation, finalization (about 18 minutes on Intel runners), local upload
+// and full decoded verification. This is a supervisor budget, not a capture
+// or oracle tolerance; the 18,300-second capture is unchanged.
+const timeoutMs = (endurance ? 345 : mainCrash ? 10 : 20) * 60 * 1000;
 fs.mkdirSync(diagnostics, { recursive: true });
 
 function log(message) {
