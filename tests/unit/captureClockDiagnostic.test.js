@@ -7,10 +7,20 @@ import os from 'node:os';
 import path from 'node:path';
 
 const require = createRequire(import.meta.url);
-const { compareGroups, clockReadout, installWitness, createClockDriver, analyzeCapturedEvidence } = require('../e2e-harness/capture-clock-diagnostic');
+const { compareGroups, clockReadout, installWitness, createClockDriver, analyzeCapturedEvidence,
+  disposeCaptureTrace, finalizeCaptureControls } = require('../e2e-harness/capture-clock-diagnostic');
 const { AppDriver } = require('../e2e-harness/lib/app-driver');
 const directories = [];
-afterEach(() => { vi.useRealTimers(); for (const directory of directories.splice(0)) fs.rmSync(directory, { recursive: true, force: true }); });
+afterEach(() => {
+  vi.useRealTimers();
+  for (const directory of directories.splice(0)) {
+    const target = path.resolve(directory);
+    if (path.dirname(target) !== path.resolve(os.tmpdir()) || !path.basename(target).startsWith('suisse-clock-evidence-')) {
+      throw new Error('Refusing to remove unexpected evidence fixture: ' + target);
+    }
+    fs.rmSync(target, { recursive: true, force: true });
+  }
+});
 function outputDirectory() { const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'suisse-clock-evidence-')); directories.push(directory); return directory; }
 
 const groups = (first, last, offset = 0) => ({ groups: Array.from({ length: last - first + 1 }, (_, index) => {
@@ -195,6 +205,51 @@ describe('captured evidence survives optional trace failure', () => {
       upload: { localSha256: 'final-sha', remoteSha256: 'final-sha', canDelete: false },
       bufferTrace: { file: trace, exportCompleted: true, problems: [] } };
   }
+
+  it('grants controls only after decoded evidence and final provenance verification both succeed', async () => {
+    const directory = outputDirectory(), result = savedResult(directory);
+    result.options.traceBuffers = false;
+    await analyzeCapturedEvidence(result, directory, async () => ({ ...groups(0, 40), durationS: 20.5, decoderWarnings: null }));
+    expect(result.measurementCompleted).toBe(true);
+    expect(result.controlsValid).toBe(false);
+    const verify = vi.fn();
+    finalizeCaptureControls(result, verify);
+    expect(verify).toHaveBeenCalledOnce();
+    expect(result.controlsValid).toBe(true);
+  });
+
+  it('keeps decoded evidence but invalidates controls when post-analysis provenance verification fails', async () => {
+    const directory = outputDirectory(), result = savedResult(directory);
+    result.options.traceBuffers = false;
+    await analyzeCapturedEvidence(result, directory, async () => ({ ...groups(0, 40), durationS: 20.5, decoderWarnings: null }));
+    const verify = vi.fn(() => { throw new Error('Bundle, runtime, or harness changed during diagnostic'); });
+    finalizeCaptureControls(result, verify);
+    expect(verify).toHaveBeenCalledOnce();
+    expect(result.measurementCompleted).toBe(true);
+    expect(result.controlsValid).toBe(false);
+    expect(result.problems).toEqual(['Bundle, runtime, or harness changed during diagnostic']);
+    for (const role of ['direct', 'mixed', 'final']) expect(JSON.parse(fs.readFileSync(path.join(directory, role + '-analysis.json'), 'utf8')).durationS).toBe(20.5);
+    expect(result.finalSourceComparison.alignedFrames).toHaveLength(39);
+    expect(result.upload).toEqual({ localSha256: 'final-sha', remoteSha256: 'final-sha', canDelete: false });
+    // A later successful recheck cannot erase an earlier intermittent failure.
+    finalizeCaptureControls(result, () => {});
+    expect(result.controlsValid).toBe(false);
+  });
+
+  it('continues after rejected trace disposal and retains failed controls despite successful final provenance', async () => {
+    const directory = outputDirectory(), result = savedResult(directory);
+    result.options.traceBuffers = false;
+    await analyzeCapturedEvidence(result, directory, async () => ({ ...groups(0, 40), durationS: 20.5, decoderWarnings: null }));
+    const trace = { dispose: vi.fn().mockRejectedValue(new Error('CDP detached during cleanup')) };
+    await expect(disposeCaptureTrace(trace, result.problems)).resolves.toBeUndefined();
+    const verify = vi.fn();
+    finalizeCaptureControls(result, verify);
+    expect(verify).toHaveBeenCalledOnce();
+    expect(result.problems).toEqual(['Audio trace cleanup: CDP detached during cleanup']);
+    expect(result.measurementCompleted).toBe(true);
+    expect(result.controlsValid).toBe(false);
+    expect(result.decoded.finalDurationS).toBe(20.5);
+  });
 
   it('retains all decoded source/final and upload evidence while unavailable upstream trace coverage still fails controls', async () => {
     const directory = outputDirectory(), result = savedResult(directory);

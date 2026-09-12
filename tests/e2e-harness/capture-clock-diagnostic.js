@@ -247,6 +247,9 @@ function createClockDriver(AppDriver) {
 // never prevent analysis of already preserved native-input/mix/final audio.
 // A completed media measurement with failed coverage still fails controls.
 async function analyzeCapturedEvidence(result, directory, analyzeCodedAudio) {
+  // Only the final gate, after cleanup and provenance verification, can grant
+  // valid controls. Decoding alone is a completed measurement, not that gate.
+  result.controlsValid = false;
   const traceProblems = [...(result.traceProblems || []), ...(result.bufferTrace?.problems || [])];
   if (result.options.traceBuffers) {
     if (!result.bufferTrace?.exportCompleted) traceProblems.push('Audio trace export did not complete');
@@ -276,7 +279,20 @@ async function analyzeCapturedEvidence(result, directory, analyzeCodedAudio) {
   if (analyses.direct && analyses.mixed) result.commonSourceComparison = compareGroups(analyses.direct, analyses.mixed);
   if (analyses.direct && analyses.final) result.finalSourceComparison = compareGroups(analyses.direct, analyses.final);
   result.measurementCompleted = Object.keys(analyses).length === 3;
-  result.controlsValid = result.measurementCompleted && result.problems.length === 0;
+}
+
+async function disposeCaptureTrace(trace, problems) {
+  // Trace disposal bounds its CDP operations internally. A rejected cleanup
+  // must not skip remaining witness/app cleanup or the final checkpoint.
+  try { await trace.dispose(); }
+  catch (error) { problems.push('Audio trace cleanup: ' + error.message); }
+}
+
+function finalizeCaptureControls(result, verify) {
+  result.controlsValid = false;
+  try { verify(); }
+  catch (error) { result.problems.push(error.message); }
+  result.controlsValid = result.measurementCompleted === true && result.problems.length === 0;
 }
 
 async function capture(directory, options, expectedProvenance) {
@@ -350,7 +366,7 @@ async function capture(directory, options, expectedProvenance) {
     if (trace) {
       try { await trace.exportTo(path.join(directory, 'audio-buffer-trace.json')); }
       catch (error) { result.traceProblems.push('Audio trace export: ' + error.message); }
-      finally { await trace.dispose().catch(error => result.traceProblems.push('Audio trace cleanup: ' + error.message)); }
+      finally { await disposeCaptureTrace(trace, result.traceProblems); }
     }
     const witnessStoppedSnapshot = await app.evalTimed(() => window.__directMixedWitness.snapshot());
     const directDir = path.join(directory, 'direct-chunks'); fs.mkdirSync(directDir);
@@ -405,8 +421,7 @@ async function capture(directory, options, expectedProvenance) {
     // No live capture, playback, or app process overlaps decoding.
     checkpoint();
     await analyzeCapturedEvidence(result, directory, analyzeCodedAudio);
-    verifyUnchanged(expectedProvenance);
-  } catch (error) { result.problems.push(error.stack || error.message); }
+  } catch (error) { result.controlsValid = false; result.problems.push(error.stack || error.message); }
   finally {
     if (app) {
       try { result.failureSnapshot = await app.evalTimed(() => window.__directMixedWitness?.snapshot(), undefined, 3000); } catch (_) { /* retain available evidence */ }
@@ -419,7 +434,7 @@ async function capture(directory, options, expectedProvenance) {
             else result.problems.push('Trace export skipped because capture did not stop');
           } catch (error) { result.problems.push('Trace preservation: ' + error.message); }
         }
-        await trace.dispose();
+        await disposeCaptureTrace(trace, result.problems);
       }
       // Preserve whatever the diagnostic witness captured on a failed case too.
       // The normal success path already exported it; never overwrite that output.
@@ -440,10 +455,13 @@ async function capture(directory, options, expectedProvenance) {
           }
         } catch (error) { result.problems.push('Failed witness preservation: ' + error.message); }
       }
-      await app.close({ keepProfile: true }).catch(error => result.problems.push('App cleanup: ' + error.message));
+      try { await app.close({ keepProfile: true }); } catch (error) { result.problems.push('App cleanup: ' + error.message); }
     }
-    if (mock) { mock.server.closeAllConnections?.(); await mock.close().catch(error => result.problems.push('Mock cleanup: ' + error.message)); }
-    try { verifyUnchanged(expectedProvenance); } catch (error) { result.problems.push(error.message); result.controlsValid = false; }
+    if (mock) {
+      try { mock.server.closeAllConnections?.(); } catch (error) { result.problems.push('Mock connection cleanup: ' + error.message); }
+      try { await mock.close(); } catch (error) { result.problems.push('Mock cleanup: ' + error.message); }
+    }
+    finalizeCaptureControls(result, () => verifyUnchanged(expectedProvenance));
     result.finishedAt = new Date().toISOString(); checkpoint();
   }
   return result;
@@ -491,4 +509,5 @@ async function runCaptureClockDiagnostic(opts = {}) {
   checkpoint(); return result;
 }
 
-module.exports = { runCaptureClockDiagnostic, compareGroups, clockReadout, installWitness, createClockDriver, analyzeCapturedEvidence };
+module.exports = { runCaptureClockDiagnostic, compareGroups, clockReadout, installWitness, createClockDriver,
+  analyzeCapturedEvidence, disposeCaptureTrace, finalizeCaptureControls };
