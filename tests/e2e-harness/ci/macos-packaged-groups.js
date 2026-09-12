@@ -8,7 +8,9 @@ function parseProcesses(text) {
     const parts = line.trim().split(/\s+/), [pid, ppid, pgid] = parts.splice(0, 3).map(Number);
     const state = parts.shift(), birth = parts.splice(0, 5).join(' ');
     if (pid === 0) return null; // macOS kernel_task is not a signal target.
-    if (![pid, pgid].every(value => Number.isSafeInteger(value) && value > 0) ||
+    // Linux kernel threads and namespace init may legitimately have PGID 0.
+    // Keep those rows in the snapshot; only positive PID=PGID leaders are owned.
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isSafeInteger(pgid) || pgid < 0 ||
         !Number.isSafeInteger(ppid) || ppid < 0 || !state || !Number.isFinite(Date.parse(birth))) throw new Error('Invalid process ownership snapshot');
     return { pid, ppid, pgid, state, birth };
   }).filter(Boolean);
@@ -20,6 +22,7 @@ async function readProcesses() {
 }
 
 function claimGroup(rows, pid, parentPid, orphanedParentBirth = null) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('Invalid owned process group identity');
   const leader = rows.find(row => row.pid === pid);
   const orphan = leader?.ppid === 1 && orphanedParentBirth && Date.parse(leader.birth) >= Date.parse(orphanedParentBirth);
   if (!leader || (!orphan && leader.ppid !== parentPid) || leader.pgid !== pid) throw new Error('Spawned process group ownership was not established');

@@ -83,10 +83,26 @@ describe('native process identity snapshots', () => {
   });
 
   it.each([
-    `bad 1 42 S ${birth}`, `42 -1 42 S ${birth}`, `42 1 0 S ${birth}`,
-    `42 1 42 S not-a-date`, `42 1 42`, `1.5 1 42 S ${birth}`
+    `bad 1 42 S ${birth}`, `42 -1 42 S ${birth}`, `42 1 -1 S ${birth}`,
+    `42 1 42 S not-a-date`, `42 1 42`, `1.5 1 42 S ${birth}`, `42 1 1.5 S ${birth}`
   ])('rejects malformed process ownership rows: %s', line => {
     expect(() => parseProcesses(line)).toThrow('ownership snapshot');
+  });
+
+  it('retains valid Linux kernel and namespace rows with PGID0 without granting group ownership', () => {
+    // procps-ng 4.0.4 prints PGID numerically and lstart as %a %b %e %H:%M:%S %Y.
+    // https://gitlab.com/procps-ng/procps/-/blob/v4.0.4/src/ps/output.c#L535
+    // Linux initializes PGID 0 and fork inherits it; these are valid system rows.
+    // https://github.com/torvalds/linux/blob/v6.8/init/init_task.c#L41
+    // https://github.com/torvalds/linux/blob/v6.8/kernel/fork.c#L2515
+    const rows = parseProcesses(`1 0 0 S ${birth}\n2 0 0 S ${birth}\n4 2 0 I< ${birth}\n42 10 42 Ss ${later}\n`);
+    expect(rows).toEqual([row(1, 0, 0), row(2, 0, 0), row(4, 2, 0, birth, 'I<'), row(42, 10, 42, later, 'Ss')]);
+    expect(claimGroup(rows, 42, 10)).toEqual({ pid: 42, birth: later });
+    for (const process of rows.filter(value => value.pgid === 0)) {
+      expect(() => claimGroup(rows, process.pid, process.ppid)).toThrow('ownership');
+    }
+    expect(() => claimGroup([row(0, 0, 0)], 0, 0)).toThrow('Invalid owned');
+    expect(() => validateGroup(rows, { pid: 0, birth })).toThrow('Invalid owned');
   });
 
   it('claims only the child group leader belonging to the expected parent', () => {
@@ -129,6 +145,20 @@ describe('native process identity snapshots', () => {
 });
 
 describe('bounded cleanup of registered process groups', () => {
+  it('leaves retained Linux PGID0 rows untouched while cleaning only the positive owned group', async () => {
+    const systemRows = parseProcesses(`1 0 0 S ${birth}\n2 0 0 S ${birth}\n4 2 0 I< ${birth}\n`);
+    const before = [...systemRows, row(42, 10, 42, later)];
+    const readTable = vi.fn().mockResolvedValueOnce(before).mockResolvedValue(systemRows);
+    const kill = vi.fn();
+    expect(await stopGroups([claimGroup(before, 42, 10)], { readTable, kill }))
+      .toEqual({ signalled: [42], remaining: [], liveProcesses: 0 });
+    expect(kill.mock.calls).toEqual([[-42, 'SIGKILL']]);
+    kill.mockClear();
+    await expect(stopGroups([{ pid: 0, birth }], { readTable, kill })).rejects.toThrow('Invalid owned');
+    expect(kill).not.toHaveBeenCalled();
+    expect(systemRows).toHaveLength(3);
+  });
+
   it('signals each group once, detached children first, and verifies no live members remain', async () => {
     const claims = [{ pid: 42, birth }, { pid: 50, birth: later }];
     const readTable = vi.fn().mockResolvedValueOnce([row(42, 10), row(50, 42, 50, later), row(51, 50, 50, later)]).mockResolvedValue([]);
