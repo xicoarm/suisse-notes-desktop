@@ -9,7 +9,9 @@ const { startMockBackend } = require('./lib/mock-backend');
 const { buildCodedScenario, WORK_DIR } = require('./lib/audio');
 const { verifyCodedAudio } = require('./lib/coded-audio');
 const { installRecordingRoleObserver } = require('./lib/native-recorder-evidence');
+const { measureTimestampHoles, finalPausesFromHoles, assessNativeClock, readAssemblyPlanGaps, comparePlanGaps } = require('./lib/native-timestamps');
 const { inspectNativeSources } = require('../../src-electron/native-source-persistence');
+const { concatenateFiles } = require('../../src-electron/durable-files');
 
 const LIMITATIONS = [
   'Synthetic microphone tracks and enumeration qualify application recovery; physical USB/Bluetooth drivers, codec changes and macOS permissions are not exercised.',
@@ -485,7 +487,36 @@ async function deviceCase(kind) {
     const output = app.findOutputFile();
     if (!output || path.dirname(output) !== recordDir) throw new Error('Missing finalized audio for this recording; original profile retained');
     result.output = output;
-    result.audio = await verifyCodedAudio(output, reference, { expectedDurationS: result.expectedDurationS, durationToleranceS: 1.5 });
+    let expectedPauses;
+    if (result.nativeArchiveExpected) {
+      // Every preserved epoch must be complete as-is, and the hosted fake
+      // microphone's buffer skips inside each epoch (forward timestamp holes
+      // that finalization materializes as silence at the epoch's placement)
+      // are measured and removed from the final's content timeline. Skips
+      // during a device outage reach no recorder and stay in the outage.
+      const sources = inspectNativeSources(recordDir);
+      result.nativeEpochs = [];
+      expectedPauses = [];
+      for (const epoch of result.nativeTimeline.epochs) {
+        const source = sources.find(candidate => candidate.sourceId === epoch.sourceId);
+        if (!source) throw new Error('Preserved native epoch disappeared before verification: ' + epoch.sourceId);
+        const original = path.join(WORK_DIR, 'qualification', `${name}-${epoch.sourceId}-native-original.webm`);
+        await concatenateFiles(source.chunkPaths, original);
+        const timestamps = await measureTimestampHoles(original);
+        const clock = assessNativeClock(timestamps, (epoch.stoppedAt - epoch.startCalledAt) / 1000);
+        const audio = await verifyCodedAudio(original, reference);
+        result.nativeEpochs.push({ sourceId: epoch.sourceId, startOffsetMs: epoch.startOffsetMs, path: original, sha256: await sha256(original),
+          timestamps: { packets: timestamps.packets, ptsSpanS: timestamps.ptsSpanS, codedDurationS: timestamps.codedDurationS,
+            holes: timestamps.holes, overlaps: timestamps.overlaps, totalHoleS: timestamps.totalHoleS },
+          clock, audio: { pass: audio.pass, problems: audio.problems, identifiedFrames: audio.identifiedFrames, firstFrame: audio.firstFrame, lastFrame: audio.lastFrame } });
+        result.problems.push(...audio.problems.map(problem => `Native epoch ${epoch.sourceId}: ${problem}`), ...clock.problems);
+        expectedPauses.push(...finalPausesFromHoles(timestamps, epoch.startOffsetMs / 1000));
+      }
+      result.nativeAssemblyGaps = result.nativeTimeline.epochs.map(epoch => comparePlanGaps(readAssemblyPlanGaps(recordDir), epoch.sourceId,
+        result.nativeEpochs.find(entry => entry.sourceId === epoch.sourceId).timestamps));
+      result.problems.push(...result.nativeAssemblyGaps.flatMap(entry => entry.problems));
+    }
+    result.audio = await verifyCodedAudio(output, reference, { expectedDurationS: result.expectedDurationS, durationToleranceS: 1.5, expectedPauses });
     result.problems.push(...result.audio.problems);
     result.sourceClockErrorS = Math.abs(result.audio.sourceOffsetS - result.expectedSourceOffsetS);
     // Check the acquisition clock against actual decoded identities. If it is

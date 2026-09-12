@@ -59,7 +59,8 @@ decodes the native original as-is with the unchanged strict oracle (real
 upstream loss shortens identities, as in the five-hour Windows run), measures
 the original's holes from its packet timestamps (`lib/native-timestamps.js`),
 requires them to match the plan's gap accounting and the recorder wall clock,
-and checks the final as native content plus exactly those silent pauses. No
+and checks the final as native content plus exactly those silent pauses; the
+device scenario does this per preserved epoch at that epoch's placement. No
 tolerance was widened; see `work/native-preservation/TIMESTAMP-HOLES-ROOT-CAUSE-20260912.md`.
 macOS AudioTee now reserves a durable required-capture attempt before spawning,
 records startup/data/failure observations, and publishes its terminal evidence
