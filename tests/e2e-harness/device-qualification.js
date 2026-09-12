@@ -375,7 +375,9 @@ async function deviceCase(kind) {
     result.selectedSyntheticInput = selectedInput;
     // Use the real microphone selector. Do not spoof getSettings() or let a
     // default alias make the zero-input fixture bypass physical-identity checks.
-    await app.clickByTest('.mic-select .q-field__native');
+    // A DOM .click() can leave Quasar's popup closed. Use the actual pointer
+    // interaction on its focus target before checking the exact option label.
+    await app.page.click('.mic-select .q-select__focus-target');
     await app.page.waitForFunction(label => [...document.querySelectorAll('.mic-dropdown [role="option"]')]
       .some(option => option.textContent.trim() === label), { timeout: 10000 }, selectedInput.label);
     await app.evalTimed(label => {
