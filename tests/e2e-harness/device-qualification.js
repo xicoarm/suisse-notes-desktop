@@ -366,17 +366,24 @@ async function deviceCase(kind) {
     await app.launch();
     await app.login();
     const inputs = await app.evalTimed(async () => (await navigator.mediaDevices.enumerateDevices())
-      .filter(device => device.kind === 'audioinput' && device.deviceId && !['default', 'communications'].includes(device.deviceId))
+      .filter(device => device.kind === 'audioinput' && device.deviceId)
       .map(device => ({ deviceId: device.deviceId, label: device.label })));
-    const selectedInput = inputs[0];
+    result.availableSyntheticInputs = inputs;
+    const selectedInput = inputs.find(device => !['default', 'communications'].includes(device.deviceId));
     if (!selectedInput?.label || inputs.filter(device => device.label === selectedInput.label).length !== 1) {
       throw new Error('No uniquely labeled concrete synthetic input is available for the microphone selector');
     }
     result.selectedSyntheticInput = selectedInput;
     // Use the real microphone selector. Do not spoof getSettings() or let a
     // default alias make the zero-input fixture bypass physical-identity checks.
-    // A DOM .click() can leave Quasar's popup closed. Use the actual pointer
-    // interaction on its focus target before checking the exact option label.
+    // Browser enumeration can finish before RecordPage's permission probe and
+    // device list. Quasar ignores opening an empty list and does not reopen it
+    // when those options arrive. Wait for the app's displayed selection first.
+    await app.page.waitForFunction(labels => {
+      const select = document.querySelector('.mic-select');
+      return select && !select.querySelector('.q-spinner') &&
+        labels.includes(select.querySelector('.mic-selected-text')?.textContent.trim());
+    }, { timeout: 15000 }, inputs.map(device => device.label).filter(Boolean));
     await app.page.click('.mic-select .q-select__focus-target');
     await app.page.waitForFunction(label => [...document.querySelectorAll('.mic-dropdown [role="option"]')]
       .some(option => option.textContent.trim() === label), { timeout: 10000 }, selectedInput.label);
@@ -387,6 +394,7 @@ async function deviceCase(kind) {
     }, selectedInput.label);
     await app.page.waitForFunction(label => document.querySelector('.mic-selected-text')?.textContent.trim() === label,
       { timeout: 10000 }, selectedInput.label);
+    result.syntheticInputSelected = true;
     result.nativeArchiveExpected = await app.evalTimed(() => typeof window.electronAPI.recording.beginSource === 'function');
     if (result.nativeArchiveExpected) await app.evalTimed(installRecordingRoleObserver);
     await app.evalTimed(installDeviceFixture, { apiUrl: mock.url, actions, observeNative: result.nativeArchiveExpected,
@@ -584,6 +592,16 @@ async function deviceCase(kind) {
     result.pass = result.problems.length === 0;
   } catch (error) {
     result.problems.push(error.stack || error.message);
+    if (app && !result.syntheticInputSelected) {
+      try {
+        result.selectorFailure = await app.evalTimed(() => ({
+          selected: document.querySelector('.mic-selected-text')?.textContent.trim(),
+          loading: !!document.querySelector('.mic-select .q-spinner'),
+          expanded: document.querySelector('.mic-select [role="combobox"]')?.getAttribute('aria-expanded'),
+          options: [...document.querySelectorAll('.mic-dropdown [role="option"]')].map(option => option.textContent.trim()),
+        }), undefined, 3000);
+      } catch (diagnosticError) { result.selectorDiagnosticError = diagnosticError.message; }
+    }
   } finally {
     result.diagnostics = app?.diagnosticsDir || null;
     result.profile = app?.userDataDir || null;
