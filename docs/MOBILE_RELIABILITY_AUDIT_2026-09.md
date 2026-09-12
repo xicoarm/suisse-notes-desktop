@@ -243,10 +243,20 @@ recorder (unpair flag byte, translated messages).
   corrupted", "file no longer on this phone").
 - iOS sign-in sheet dismissed = breadcrumb, not an event.
 
+### 8.6 Mobile stack traces were never symbolicated
+- The CI build uploaded source maps under `ch.suissenotes.mobile@<package.json version>`
+  — the **desktop** version (4.4.1 … 4.6.0; visible in Sentry as releases with zero
+  events) — while every mobile event is tagged with the native app version (3.9.x). No
+  mobile JavaScript stack trace has ever resolved to source lines. The upload release name
+  now comes from the Android `versionName` (kept in lock-step with the iOS marketing
+  version), so 3.9.37 is the first mobile release with readable stack traces.
+- Consequence for §9: Sentry's "resolve in next release" bound the issues to the phantom
+  4.6.0; they were re-bound explicitly to `ch.suissenotes.mobile@3.9.37`.
+
 ## 9. Sentry, one issue at a time
 Source: Sentry project `capacitor`, every issue with status *unresolved* seen in the last 90 days, fetched on 2026-09-12 (461 issues, 63,333 events). Each issue was matched to exactly one row below; the issue IDs of every row are listed underneath so the mapping can be checked one by one.
 
-Result: **430 issues** are fixed, handled or expected behaviour (marked *resolved in next release* in Sentry, so a recurrence on 3.9.37+ reopens them automatically); **31 issues** stay open on purpose (monitoring signals we want to keep seeing, plus one backend item).
+Result: **430 issues** are fixed, handled or expected behaviour (marked *resolved in release ch.suissenotes.mobile@3.9.37* in Sentry: events from older app versions still in the field do not reopen them, any event from 3.9.37 or newer does); **31 issues** stay open on purpose (monitoring signals we want to keep seeing, plus one backend item).
 
 | # | What Sentry showed (most frequent title of the row) | Issues | Events | What it was | Disposition | Sentry |
 |---|---|---:|---:|---|---|---|

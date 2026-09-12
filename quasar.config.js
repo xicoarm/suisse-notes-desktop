@@ -6,6 +6,19 @@
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
+// Native mobile version (Android versionName; the iOS MARKETING_VERSION is kept
+// in lock-step by the release runbook). Falls back to package.json only if the
+// gradle file cannot be read. ESM file: no __dirname, resolve via import.meta.url.
+function mobileAppVersion() {
+  try {
+    const fs = require('fs');
+    const gradle = fs.readFileSync(new URL('./src-capacitor/android/app/build.gradle', import.meta.url), 'utf8');
+    const m = /versionName\s+"([^"]+)"/.exec(gradle);
+    if (m) return m[1];
+  } catch (e) { /* fall through */ }
+  return require('./package.json').version;
+}
+
 export default function (ctx) {
   return {
     eslint: {
@@ -57,8 +70,15 @@ export default function (ctx) {
               org: process.env.SENTRY_ORG || 'suisse-it-gmbh',
               project: process.env.SENTRY_PROJECT || 'capacitor',
               authToken: process.env.SENTRY_AUTH_TOKEN,
+              // MUST match the runtime release name in src/boot/sentry.js, which
+              // is the NATIVE app version (App.getInfo().version = Android
+              // versionName / iOS MARKETING_VERSION, e.g. 3.9.37). package.json
+              // carries the DESKTOP version (4.6.0): source maps were being
+              // uploaded to phantom releases (ch.suissenotes.mobile@4.4.1 ...
+              // @4.6.0, zero events) while every mobile event came from
+              // @3.9.x - so no mobile stack trace was ever symbolicated.
               release: {
-                name: `ch.suissenotes.mobile@${require('./package.json').version}`,
+                name: `ch.suissenotes.mobile@${mobileAppVersion()}`,
               },
               sourcemaps: {
                 assets: './dist/capacitor/www/**',
