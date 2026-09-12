@@ -27,10 +27,12 @@ export default function (ctx) {
     },
 
     boot: [
+      // Mobile: Sentry boots FIRST so errors in the other boot files are
+      // captured (desktop keeps its established order).
+      ctx.mode.capacitor ? 'sentry' : '',
       'axios',
       'i18n',
-      // Load Sentry for both desktop (Electron renderer) and mobile (Capacitor)
-      (ctx.mode.capacitor || ctx.mode.electron) ? 'sentry' : '',
+      ctx.mode.electron ? 'sentry' : '',
       // Load lifecycle boot file only on Capacitor (mobile)
       ctx.mode.capacitor ? 'lifecycle' : ''
     ].filter(Boolean),
@@ -55,9 +57,12 @@ export default function (ctx) {
       // DEV ONLY: forward the API override into the renderer so the e2e
       // harness can point the whole app (renderer + main) at its local mock
       // backend. Never applied to production builds.
-      ...(ctx.dev && process.env.VITE_API_URL
-        ? { env: { VITE_API_URL: process.env.VITE_API_URL } }
-        : {}),
+      env: {
+        // Mobile release name for Sentry, known at build time (the same value
+        // the source maps are uploaded under).
+        MOBILE_APP_VERSION: ctx.mode.capacitor ? mobileAppVersion() : '',
+        ...(ctx.dev && process.env.VITE_API_URL ? { VITE_API_URL: process.env.VITE_API_URL } : {})
+      },
       // Enable source maps in CI for Sentry (when SENTRY_AUTH_TOKEN is set)
       ...(process.env.SENTRY_AUTH_TOKEN && ctx.mode.capacitor ? { sourcemap: true } : {}),
       extendViteConf(viteConf) {

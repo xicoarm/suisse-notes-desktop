@@ -28,6 +28,7 @@ export function userAppUuid(userId) {
 }
 import { isCapacitor } from '../utils/platform';
 import { getBleManager } from '../services/bleService';
+import { noteSessionActivity } from '../services/sessionHealth';
 import { addBreadcrumb, captureException, captureMessage } from '../boot/sentry';
 import { uploadWithVerification } from '../services/upload';
 import * as storage from '../services/storage';
@@ -829,6 +830,7 @@ export const useDeviceStore = defineStore('device', {
 
       this._cancelRequested = false;
       this.syncState = 'syncing';
+      noteSessionActivity({ bleSync: true });
       this.syncTotal = newFiles.length;
       this.syncCurrent = 0;
       this.syncBytesReceived = 0;
@@ -908,6 +910,7 @@ export const useDeviceStore = defineStore('device', {
       } finally {
         this.currentSyncFile = null;
         this.syncPhase = 'idle';
+        noteSessionActivity({ bleSync: false });
         // End of the sync run — "apply to all" answers no longer carry over.
         prepStoreForRun?.endDeviceSyncRun();
       }

@@ -7,6 +7,7 @@
 import { isCapacitor, isMobile, isAndroid, PlatformConstants } from '../utils/platform';
 import { sentryAppBackground, sentryAppForeground, sentryNetworkChange, sentryLowBattery } from '../services/sentryHelpers';
 import { addBreadcrumb, captureMessage } from './sentry';
+import { markSessionState } from '../services/sessionHealth';
 import { redactUrl } from '../utils/redact';
 
 // Module-level state for lifecycle management
@@ -125,6 +126,9 @@ export const initializeLifecycle = async () => {
   const appStateOk = await step('appStateChange', async () => {
     const { App } = await import('@capacitor/app');
     appStateListener = await App.addListener('appStateChange', async ({ isActive }) => {
+      // First, before any await: a session that later dies on screen is
+      // reported as an unclean exit on the next launch.
+      markSessionState(isActive);
       if (isActive) {
         console.log('Lifecycle: App came to foreground');
         sentryAppForeground();

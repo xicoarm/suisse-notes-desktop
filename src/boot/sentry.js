@@ -12,9 +12,26 @@
 
 import { isCapacitor, isElectron, getPlatform } from '../utils/platform';
 import { redactSecrets } from '../utils/redact';
+import {
+  HTTP_CAPTURE_STATUS_CODES,
+  createEarlyErrorBuffer,
+  createOccurrenceSampler,
+  errorDetails,
+  sanitizeConsoleArguments,
+  treatHttpClientAsHandled
+} from '../utils/sentryCapture';
+import { startSessionHealth, noteSessionActivity } from '../services/sessionHealth';
 
 let sentryInitialized = false;
 let SentryModule = null;
+
+// Mobile: errors thrown while the app is still starting (module evaluation,
+// the boot files, the async SDK import) happen before Sentry's own global
+// handlers exist. Buffer them from the first moment this module is evaluated
+// and replay them right after init.
+const earlyErrors = (typeof window !== 'undefined' && window.Capacitor?.isNativePlatform?.())
+  ? createEarlyErrorBuffer(window)
+  : null;
 
 /**
  * Add a breadcrumb (safe — no-op when Sentry is not initialized)
@@ -201,25 +218,63 @@ async function initElectronRenderer(app, router) {
 }
 
 /**
+ * beforeSend for mobile events: scrub secrets, keep failed HTTP answers out of
+ * the crash-free-session statistics, attach whitelisted error details and
+ * apply the per-session occurrence sampling.
+ */
+export function mobileBeforeSend(event, hint, sampler) {
+  const scrubbed = scrubSensitiveData(event, hint);
+  if (!scrubbed) return null;
+  treatHttpClientAsHandled(scrubbed);
+  sanitizeConsoleArguments(scrubbed);
+  const details = errorDetails(hint?.originalException);
+  if (details) {
+    scrubbed.contexts = { ...(scrubbed.contexts || {}), error_details: details };
+    if (details.code !== undefined) scrubbed.tags = { ...(scrubbed.tags || {}), error_code: String(details.code) };
+  }
+  return sampler ? sampler(scrubbed) : scrubbed;
+}
+
+/**
  * Initialize Sentry for Capacitor (mobile)
+ *
+ * Capture policy (docs/MOBILE_RELEASE_GUIDE.md, "Sentry capture"):
+ * - uncaught errors, unhandled rejections, Vue and router errors;
+ * - every console.error AND console.warn call (the app logs its handled
+ *   failures there) — sampled per session so a loop cannot flood the project;
+ * - failed HTTP answers (400-599 except 401/402/409);
+ * - errors raised before init (buffered) and sessions that died on screen
+ *   (native crash / WebView kill / out-of-memory, see services/sessionHealth);
+ * - events raised offline are stored in IndexedDB and sent when the phone is
+ *   back online (until 3.9.37 they were dropped: ~5 per day in Sentry's
+ *   client-report statistics);
+ * - no default ignore patterns (they silently dropped Android bridge errors
+ *   such as "Java exception was raised during method invocation").
  */
 async function initCapacitor(app, router) {
   const dsn = 'https://f5f1d2b53d297a64e9b76ca26d2d8397@o4510659364716544.ingest.de.sentry.io/4510958727462992';
-
-  let appVersion = 'unknown';
-  try {
-    const { App: CapApp } = await import('@capacitor/app');
-    const appInfo = await CapApp.getInfo();
-    appVersion = appInfo.version || 'unknown';
-  } catch (e) {
-    console.warn('Sentry: Could not get app version', e);
-  }
-
   const platform = getPlatform();
+
+  // The release comes from the build (Android versionName, which the iOS
+  // MARKETING_VERSION follows in lock-step — the same value the source maps
+  // are uploaded under), so init never waits on a native call. Builds without
+  // the constant (dev, unit tests) fall back to the native version.
+  const buildVersion = (typeof process !== 'undefined' && process.env?.MOBILE_APP_VERSION) || '';
+  let appVersion = buildVersion || 'unknown';
+  if (!buildVersion) {
+    try {
+      const { App: CapApp } = await import('@capacitor/app');
+      const appInfo = await CapApp.getInfo();
+      appVersion = appInfo.version || 'unknown';
+    } catch (e) {
+      console.warn('Sentry: Could not get app version', e);
+    }
+  }
 
   try {
     const SentryVue = await import('@sentry/vue');
     SentryModule = SentryVue;
+    const sampler = createOccurrenceSampler();
 
     // Use @sentry/vue directly. The @sentry/capacitor 2.4.1 wrapper appeared
     // to silently drop captureMessage / captureException events when the app
@@ -236,12 +291,20 @@ async function initCapacitor(app, router) {
       environment: import.meta.env.DEV ? 'development' : 'production',
       release: `ch.suissenotes.mobile@${appVersion}`,
       dist: platform,
+      sampleRate: 1.0,
+      attachStacktrace: true,
+      maxBreadcrumbs: 100,
+      transport: SentryVue.makeBrowserOfflineTransport(SentryVue.makeFetchTransport),
+      transportOptions: { dbName: 'suisse-sentry-offline', maxQueueSize: 100, flushAtStartup: true },
       integrations: [
         SentryVue.vueIntegration({ app, attachProps: true, logErrors: true, trackComponents: true }),
         SentryVue.browserTracingIntegration({ router }),
+        SentryVue.captureConsoleIntegration({ levels: ['error', 'warn'] }),
+        SentryVue.httpClientIntegration({ failedRequestStatusCodes: HTTP_CAPTURE_STATUS_CODES }),
+        SentryVue.eventFiltersIntegration({ disableErrorDefaults: true }),
       ],
       tracesSampleRate: 0.1,
-      beforeSend: scrubSensitiveData,
+      beforeSend: (event, hint) => mobileBeforeSend(event, hint, sampler),
       beforeBreadcrumb: filterBreadcrumbs,
     });
 
@@ -250,6 +313,62 @@ async function initCapacitor(app, router) {
     SentryVue.setTag('platform', platform);
     SentryVue.setTag('app.version', appVersion);
     SentryVue.setTag('dist', platform);
+
+    // Errors raised before init, in the order they happened.
+    earlyErrors?.drain(({ kind, error }) => {
+      SentryVue.captureException(error ?? new Error(`${kind} before Sentry init (no reason)`), {
+        tags: { phase: 'boot', early_error: kind }
+      });
+    });
+
+    // Lazy-loaded route chunks that fail to load never reach Vue's error handler.
+    router?.onError?.((err) => {
+      SentryVue.captureException(err, { tags: { source: 'router' } });
+    });
+    router?.afterEach?.((to) => {
+      noteSessionActivity({ route: to?.name || to?.matched?.[to.matched.length - 1]?.path || null });
+    });
+
+    // Cross-check the build constant against the installed native version.
+    if (buildVersion) {
+      import('@capacitor/app')
+        .then(({ App: CapApp }) => CapApp.getInfo())
+        .then((info) => {
+          const nativeVersion = info?.version || 'unknown';
+          SentryVue.setTag('native.version', nativeVersion);
+          SentryVue.setTag('native.build', String(info?.build || 'unknown'));
+          if (nativeVersion !== 'unknown' && nativeVersion !== buildVersion) {
+            SentryVue.captureMessage(`sentry: bundle version ${buildVersion} differs from native version ${nativeVersion}`, 'warning');
+          }
+        })
+        .catch((e) => console.warn('Sentry: Could not read native app version', e?.message || e));
+    }
+
+    // A previous session that died on screen (native crash, WebView kill,
+    // out-of-memory, watchdog) is reported once, with what it was doing.
+    let isActive = true;
+    try {
+      const { App: CapApp } = await import('@capacitor/app');
+      isActive = (await CapApp.getState())?.isActive !== false;
+    } catch { /* assume foreground */ }
+    startSessionHealth({
+      appVersion,
+      platform,
+      isActive,
+      report: (previous) => {
+        SentryVue.captureMessage('app: previous session ended unexpectedly while on screen (native crash, WebView termination, out-of-memory or watchdog kill)', {
+          level: 'error',
+          fingerprint: ['unclean-exit', platform],
+          tags: {
+            unclean_exit: 'true',
+            'previous.app_version': previous.appVersion,
+            'previous.recording': String(previous.recording),
+            'previous.ble_sync': String(previous.bleSync)
+          },
+          contexts: { previous_session: previous }
+        });
+      }
+    }).catch((e) => console.warn('Sentry: session health tracking unavailable', e?.message || e));
 
     console.log(`Sentry: Initialized for ${platform} (v${appVersion}) via @sentry/vue`);
   } catch (error) {
