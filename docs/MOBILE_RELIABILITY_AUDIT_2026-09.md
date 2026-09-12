@@ -244,12 +244,21 @@ recorder (unpair flag byte, translated messages).
 - iOS sign-in sheet dismissed = breadcrumb, not an event.
 
 ### 8.6 Mobile stack traces were never symbolicated
-- The CI build uploaded source maps under `ch.suissenotes.mobile@<package.json version>`
-  — the **desktop** version (4.4.1 … 4.6.0; visible in Sentry as releases with zero
-  events) — while every mobile event is tagged with the native app version (3.9.x). No
-  mobile JavaScript stack trace has ever resolved to source lines. The upload release name
-  now comes from the Android `versionName` (kept in lock-step with the iOS marketing
-  version), so 3.9.37 is the first mobile release with readable stack traces.
+- **Evidence:** the latest CAPACITOR-N0 event (3.9.36, 2026-09-11) carries the processing
+  error `js_no_source: Source code was not found`; its frames point at
+  `index-Og8XjKTs.js line 4 col 183611`. Every CI build logged
+  `[sentry-vite-plugin] Warning: Didn't find any matching sources for debug ID upload`.
+- **Cause:** the source-map glob in `quasar.config.js` was `./dist/capacitor/www/**`, but
+  Quasar writes the Capacitor web build to `src-capacitor/www`. Debug IDs were injected
+  into the shipped bundles (58 of 61 files in the 3.9.37 AAB), but nothing was ever
+  uploaded. Second defect: the plugin named its release after `package.json` — the
+  **desktop** version (4.4.1 … 4.6.0, visible in Sentry as mobile releases with zero
+  events) — while every mobile event is tagged with the native app version (3.9.x).
+- **Fix:** glob → `src-capacitor/www/**`, `.map` files deleted after the upload so they
+  can never ship, release name from the Android `versionName` (in lock-step with the iOS
+  marketing version). Verified with a local build against the real project: the plugin
+  uploads the bundle. 3.9.37 is the first mobile release with readable stack traces —
+  confirm on the first real error event (frames must show `src/…` paths).
 - Consequence for §9: Sentry's "resolve in next release" bound the issues to the phantom
   4.6.0; they were re-bound explicitly to `ch.suissenotes.mobile@3.9.37`.
 

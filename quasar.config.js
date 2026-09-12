@@ -73,15 +73,21 @@ export default function (ctx) {
               // MUST match the runtime release name in src/boot/sentry.js, which
               // is the NATIVE app version (App.getInfo().version = Android
               // versionName / iOS MARKETING_VERSION, e.g. 3.9.37). package.json
-              // carries the DESKTOP version (4.6.0): source maps were being
-              // uploaded to phantom releases (ch.suissenotes.mobile@4.4.1 ...
-              // @4.6.0, zero events) while every mobile event came from
-              // @3.9.x - so no mobile stack trace was ever symbolicated.
+              // carries the DESKTOP version (4.6.0): the plugin created phantom
+              // releases ch.suissenotes.mobile@4.4.1 ... @4.6.0 (zero events)
+              // while every mobile event comes from @3.9.x.
               release: {
                 name: `ch.suissenotes.mobile@${mobileAppVersion()}`,
               },
               sourcemaps: {
-                assets: './dist/capacitor/www/**',
+                // Quasar writes the capacitor web build to src-capacitor/www
+                // (capacitor.config webDir "www"); the previous glob
+                // './dist/capacitor/www/**' matched nothing, so every CI build
+                // logged "Didn't find any matching sources for debug ID upload"
+                // and no mobile stack trace was ever symbolicated.
+                assets: ['./src-capacitor/www/**'],
+                // Never ship .map files inside the APK/IPA.
+                filesToDeleteAfterUpload: ['./src-capacitor/www/**/*.map'],
               },
             })
           );
