@@ -202,8 +202,8 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
     const sourceEvidence = [];
     const rawPaths = new Map();
     const sourceBytes = usable.reduce((sum, source) => sum + source.chunks.reduce((n, chunk) => n + chunk.size, 0), 0);
-    // Old swresample queues an entire inserted timestamp gap in memory.
-    // Large initial offsets belong in streamed silence segments, not its FIFO.
+    // Keep the one-command path limited to short initial offsets. Long offsets
+    // continue through the general planner's streamed silence segments.
     const fastEligible = ['microphone', 'system'].every(kind => usable.filter(source => source.kind === kind).length <= 1) &&
       usable.every(source => source.startOffsetMs <= 5000);
     const knownEndSamples = Math.max(expectedSamples, hasPcm ? pcm.samples : 0, ...usable.map(source =>
@@ -290,7 +290,11 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
           command = command.input(lane.inputPath);
           if (lane.pcm) command = command.inputOptions(['-f', 's16le', '-ar', String(RATE), '-ac', '1']);
           const padding = targetSamples ? `,apad=whole_len=${targetSamples}` : '';
-          filters.push(`[${index}:a]asettb=1/48000,ashowinfo@native_${index},asetpts=PTS-STARTPTS+${lane.startSample},${stereo},${resample}${padding}[lane${index}]`);
+          // Resample the source's own clock gaps first. Initial offsets below
+          // its compensation threshold need exact leading samples, not PTS
+          // shifts that may be ignored and later disguised by end padding.
+          const delay = lane.startSample ? `,adelay=${lane.startSample}S|${lane.startSample}S` : '';
+          filters.push(`[${index}:a]asettb=1/48000,ashowinfo@native_${index},asetpts=PTS-STARTPTS,${stereo},${resample}${delay}${padding}[lane${index}]`);
         }
         filters.push(lanes.length === 2
           ? '[lane0][lane1]amix=inputs=2:duration=longest:dropout_transition=0,volume=2[out]'

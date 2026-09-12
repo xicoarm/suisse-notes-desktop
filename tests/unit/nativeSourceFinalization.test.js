@@ -99,6 +99,54 @@ afterEach(async () => {
 });
 
 describe('native source finalization real-media custody', () => {
+  it.each(['fast', 'general'].flatMap(mode => [5, 95, 96, 97].flatMap(offsetSamples =>
+    [false, true].map(interrupted => ({ mode, offsetSamples, interrupted })))))('preserves the $offsetSamples-sample onset through $mode finalization (interrupted=$interrupted)', async ({ mode, offsetSamples, interrupted }) => {
+    // Two non-harmonic tones make the sample offset identifiable independently
+    // of total duration. Appending silence at the end cannot satisfy this test.
+    const wav = path.join(root, 'onset.wav'), native = path.join(root, 'onset.webm');
+    const data = wave(0.25, 997, { stereo: true, antiPhase: true });
+    for (let index = 0; index < 12000; index++) {
+      const extra = Math.round(Math.sin(2 * Math.PI * 1709 * index / 48000) * 0.05 * 32767);
+      const value = data.readInt16LE(44 + index * 4) + extra;
+      data.writeInt16LE(value, 44 + index * 4);
+      data.writeInt16LE(-value, 44 + index * 4 + 2);
+    }
+    fs.writeFileSync(wav, data);
+    await run(ffmpeg(wav).audioCodec('libopus').output(native));
+    const bytes = fs.readFileSync(native), reference = await decoded(native);
+    expect(reference.samples).toBe(12000);
+    // Match the exact observed crash offset; the other cases straddle the
+    // resampler's 2 ms / 96-sample hard-compensation threshold.
+    const start = offsetSamples === 5 ? 0.10000000009313226 : offsetSamples / 48;
+    await source(bytes, { start, end: interrupted && mode === 'fast' ? undefined : start + 250,
+      reason: mode === 'general' ? 'paused' : 'stopped', channels: 2 });
+    if (mode === 'general') await source(bytes, { start: start + 250,
+      end: interrupted ? undefined : start + 500, channels: 2 });
+    const result = await finalizer().build(root, path.join(root, 'audio_building.webm'), { recovery: interrupted });
+    const audio = await decoded(result.outputPath);
+    const expectedSamples = (mode === 'fast' ? 12000 : 24000) + offsetSamples;
+    expect(result.fastPathUsed).toBe(mode === 'fast');
+    expect(result.plan.totalSamples).toBe(expectedSamples);
+    expect(audio.samples).toBe(expectedSamples);
+    expect(result.plan.validation.observedDecodedSamples).toBe(expectedSamples);
+    for (const channel of [0, 1]) {
+      let bestDelay = null, bestError = Infinity;
+      for (let delay = 0; delay <= 102; delay++) {
+        let error = 0;
+        for (let index = 2000; index < 8000; index++) {
+          const delta = audio.data.readFloatLE((index + delay) * 8 + channel * 4) - reference.data.readFloatLE(index * 8 + channel * 4);
+          error += delta * delta;
+        }
+        if (error < bestError) { bestError = error; bestDelay = delay; }
+      }
+      expect(bestDelay).toBe(offsetSamples);
+      expect(bestError / 6000).toBeLessThan(0.00001);
+    }
+    for (const archived of inspectNativeSources(root)) {
+      expect(Buffer.concat(archived.chunkPaths.map(file => fs.readFileSync(file))).equals(bytes)).toBe(true);
+    }
+  }, 60000);
+
   it.each(['fast', 'general'])('preserves mono microphone unity gain in both stereo channels through the %s path', async mode => {
     await source(await encoded(1, 440), { end: 1000 });
     if (mode === 'general') await source(await encoded(1, 880), { start: 1000, end: 2000 });
@@ -197,17 +245,18 @@ describe('native source finalization real-media custody', () => {
     expect(amplitude(audio, 660, 2.2, 2.6)).toBeGreaterThan(0.08);
   }, 60000);
 
-  it.each(['fast', 'general'])('materializes a native packet-clock gap in the %s path instead of shifting later audio earlier', async mode => {
+  it.each(['fast', 'general'].flatMap(mode => [0, 5].map(offsetSamples => ({ mode, offsetSamples }))))('materializes a native packet-clock gap in the $mode path with a $offsetSamples-sample onset', async ({ mode, offsetSamples }) => {
+    const start = offsetSamples / 48;
     const bytes = await encoded(2, 770, { filters: 'aselect=not(between(t\\,0.8\\,1.2))' });
-    await source(bytes, { end: 2000 });
-    if (mode === 'general') await source(await encoded(1, 880), { start: 2000, end: 3000 });
+    await source(bytes, { start, end: start + 2000 });
+    if (mode === 'general') await source(await encoded(1, 880), { start: start + 2000, end: start + 3000 });
     const result = await finalizer().build(root, path.join(root, 'audio_building.webm'));
     const audio = await decoded(result.outputPath);
     expect(result.warnings.some(warning => warning.kind === 'native-source-timestamp-gaps')).toBe(true);
     expect(amplitude(audio, 770, 0.2, 0.6)).toBeGreaterThan(0.08);
     expect(amplitude(audio, 770, 0.95, 1.1)).toBeLessThan(0.002);
     expect(amplitude(audio, 770, 1.5, 1.8)).toBeGreaterThan(0.08);
-    expect(audio.samples / 48000).toBeCloseTo(mode === 'fast' ? 2 : 3, 2);
+    expect(audio.samples).toBe((mode === 'fast' ? 96000 : 144000) + offsetSamples);
     expect(result.fastPathUsed).toBe(mode === 'fast');
     if (mode === 'general') expect(amplitude(audio, 880, 2.2, 2.8)).toBeGreaterThan(0.08);
   }, 60000);
