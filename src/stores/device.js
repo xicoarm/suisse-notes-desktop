@@ -7,8 +7,9 @@ import { defineStore } from 'pinia';
 import { v4 as uuidv4 } from 'uuid';
 import { isCapacitor } from '../utils/platform';
 import { getBleManager } from '../services/bleService';
-import { addBreadcrumb, captureException } from '../boot/sentry';
+import { addBreadcrumb, captureException, captureMessage } from '../boot/sentry';
 import { uploadWithVerification } from '../services/upload';
+import * as storage from '../services/storage';
 import { getApiUrlSync } from '../services/api';
 import { useAuthStore } from './auth';
 import { useRecordingsHistoryStore } from './recordings-history';
@@ -33,10 +34,22 @@ function _userPrefKey(baseKey) {
 }
 
 // Background timers
-const RECONNECT_INTERVAL_MS = 15_000;  // Try reconnect every 15s
+const RECONNECT_INTERVAL_MS = 15_000;  // First persistent-reconnect delay
+const RECONNECT_INTERVAL_MAX_MS = 5 * 60_000; // Cap after repeated failures (device off / left at home)
 const DISCOVERY_INTERVAL_MS = 15_000;  // Scan for new devices every 15s
 const DISCOVERY_SCAN_DURATION = 5000;  // Quick 5s scan for discovery
 const MAX_RECONNECT_ATTEMPTS = 10;     // After this, connectionState='lost' — manual retry required
+
+/**
+ * Errors that mean "the Bluetooth link is not there right now" — a device that
+ * is switched off, out of range, busy or mid-reboot. They are the normal
+ * outcome of automatic reconnect/poll loops and must not be reported as app
+ * errors (they were the top error-level issues in Sentry for months).
+ */
+export function isBleTransportError(err) {
+  const msg = (err && err.message) || String(err || '');
+  return /connection timeout|connection failed|disconnected during transfer|not connected|deviceId required|response timeout|device not found|BLE download cancelled|rejected pairing|connect(ing)? (failed|error)/i.test(msg);
+}
 
 // Notification IDs
 const NOTIF_SYNC_PROGRESS = 9001;
@@ -168,6 +181,7 @@ export const useDeviceStore = defineStore('device', {
 
     // Persistent reconnect & discovery
     _persistentReconnectTimer: null,
+    _persistentFailures: 0, // consecutive failed persistent attempts → backoff
     _discoveryTimer: null,
     _blePermissionsGranted: false,
 
@@ -202,16 +216,24 @@ export const useDeviceStore = defineStore('device', {
       this._initialized = true;
 
       const manager = getBleManager();
-      await manager.initialize();
 
-      // Request notification permissions early so sync notifications work in background
-      try {
-        const { LocalNotifications } = await import('@capacitor/local-notifications');
-        const { display } = await LocalNotifications.checkPermissions();
-        if (display !== 'granted') {
-          await LocalNotifications.requestPermissions();
+      // Load user-scoped data FIRST. Bluetooth is only initialized (= the OS
+      // permission prompt appears) when this user actually owns a paired
+      // recording device. Until 3.9.36 every fresh install was asked for
+      // Bluetooth AND notification permission on the login screen, before the
+      // user had done anything — 134 iOS users tapped "Don't allow" (Sentry
+      // CAPACITOR-HS) and had to dig through Settings later to pair. Scans,
+      // pairing and connects initialize BLE lazily and in context.
+      // Notification permission is requested by sendLocalNotification the
+      // first time a sync actually needs it.
+      await this._loadUserData();
+      if (this.hasPairedDevice) {
+        try {
+          await manager.initialize();
+        } catch (e) {
+          console.warn('BLE init deferred (permission not granted yet):', e?.message);
         }
-      } catch { /* best-effort */ }
+      }
 
       // Set disconnect handler — auto-reconnect unless user explicitly disconnected
       manager.onDisconnect(() => {
@@ -242,17 +264,15 @@ export const useDeviceStore = defineStore('device', {
         const { App } = await import('@capacitor/app');
         this._appStateListener = await App.addListener('appStateChange', async ({ isActive }) => {
           if (isActive && this.pairedDevice && this.connectionState === 'disconnected' && !this._intentionalDisconnect) {
-            // Fresh session on foreground — reset counter so user gets full 10 attempts
+            // Fresh session on foreground — reset counters so user gets full 10 attempts
             this._reconnectAttempts = 0;
+            this._persistentFailures = 0;
             addBreadcrumb({ category: 'ble', message: 'App foregrounded — attempting reconnect', level: 'info' });
             this._scheduleReconnect(1500);
           }
           // Intentionally skip auto-retry when connectionState==='lost' — user must tap "Retry"
         });
       }
-
-      // Load user-scoped data (may be empty if no user is authenticated yet)
-      await this._loadUserData();
 
       // Start persistent background timers — reconnect to an ALREADY-paired
       // device only. Background NEW-device discovery + its bottom auto-prompt
@@ -514,8 +534,9 @@ export const useDeviceStore = defineStore('device', {
         // Use rediscovery-aware reconnect: on iOS, runs a service-UUID-filtered
         // scan first to repopulate the system discovery cache, which fixes the
         // multi-day-suspension hang where centralManager.connect() never
-        // resolves until the app process is killed.
-        const deviceInfo = await manager.connectWithRediscovery(this.pairedDevice.deviceId, appUuid);
+        // resolves until the app process is killed. Automatic attempts are
+        // `silent`: an unreachable device is their expected outcome.
+        const deviceInfo = await manager.connectWithRediscovery(this.pairedDevice.deviceId, appUuid, { silent: true });
 
         this.deviceName = deviceInfo.name || deviceInfo.model || this.pairedDevice.name;
         this.deviceSN = deviceInfo.SN || this.pairedDevice.sn;
@@ -523,6 +544,7 @@ export const useDeviceStore = defineStore('device', {
         this.isRecordingOnDevice = deviceInfo.isAudioRecorded === '1';
         this.connectionState = 'connected';
         this._intentionalDisconnect = false;
+        this._persistentFailures = 0;
         this._stopReconnect();
         this._startPersistentReconnect(); // Ensure persistent timer is running for next disconnect
 
@@ -630,8 +652,13 @@ export const useDeviceStore = defineStore('device', {
         this.fileListLoaded = true;
       } catch (e) {
         console.warn('Failed to fetch file list:', e.message);
-        // Send to Sentry so the diagnostic breadcrumbs from getFileList are captured
-        captureException(e, { tags: { action: 'ble_file_list' } });
+        if (isBleTransportError(e)) {
+          // Link dropped / device busy — the reconnect loop owns this.
+          addBreadcrumb({ category: 'ble', message: `getFileList failed (transport): ${e.message}`, level: 'warning' });
+        } else {
+          // Send to Sentry so the diagnostic breadcrumbs from getFileList are captured
+          captureException(e, { tags: { action: 'ble_file_list' } });
+        }
         this.deviceFiles = [];
         this.fileListLoaded = true;
       }
@@ -891,26 +918,20 @@ export const useDeviceStore = defineStore('device', {
           addBreadcrumb({ category: 'ble', message: `Converted raw Opus to Ogg: ${fileData.byteLength} → ${saveData.byteLength} bytes`, level: 'info' });
         }
 
-        const { Filesystem, Directory } = await import('@capacitor/filesystem');
-        let binary = '';
-        const len = saveData.byteLength;
-        for (let i = 0; i < len; i++) {
-          binary += String.fromCharCode(saveData[i]);
-        }
-        const base64Data = btoa(binary);
-
+        // storage.writeFile owns the directory choice (app-private on Android,
+        // sandbox Documents on iOS) and verifies the bytes reached disk.
         const dirPath = 'suissenotes_recordings';
-        try {
-          await Filesystem.mkdir({ path: dirPath, directory: Directory.Documents, recursive: true });
-        } catch { /* exists */ }
-
-        await Filesystem.writeFile({
-          path: `${dirPath}/${file.file}`,
-          data: base64Data,
-          directory: Directory.Documents
-        });
-
+        await storage.createDirectory(dirPath);
         const filePath = `${dirPath}/${file.file}`;
+        const bytes = saveData instanceof Uint8Array ? saveData : new Uint8Array(saveData);
+        const writeResult = await storage.writeFile(
+          filePath,
+          bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+        );
+        if (!writeResult?.success) {
+          throw new Error(writeResult?.error || 'Could not save device file');
+        }
+
         await historyStore.updateRecording(recordId, { filePath, uploadStatus: 'pending' });
 
         // Phase 2b: Ask for pre-meeting context/template (Suisse Notes Pro flow).
@@ -1023,8 +1044,7 @@ export const useDeviceStore = defineStore('device', {
           // 1) Delete any partial file that was saved to phone filesystem
           if (rec?.filePath) {
             try {
-              const { Filesystem, Directory } = await import('@capacitor/filesystem');
-              await Filesystem.deleteFile({ path: rec.filePath, directory: Directory.Documents });
+              await storage.deleteFile(rec.filePath);
               addBreadcrumb({ category: 'ble', message: `Deleted partial file: ${rec.filePath}`, level: 'info' });
             } catch (delErr) {
               // Best-effort — file may not exist or may fail to delete.
@@ -1058,10 +1078,15 @@ export const useDeviceStore = defineStore('device', {
         // rather than skipping it because the syncedFiles set thinks we're
         // done with it.
         await historyStore.updateRecording(recordId, { uploadStatus: 'pending' });
-        captureException(err, {
-          tags: { action: 'ble_upload' },
-          extra: { filename: file.file, recordId }
-        });
+        if (isBleTransportError(err) || /CRC mismatch/i.test(err?.message || '')) {
+          // Dropped link or a corrupted transfer: retried on the next sync.
+          captureMessage(`BLE sync of ${file.file} interrupted: ${err.message}`, 'warning');
+        } else {
+          captureException(err, {
+            tags: { action: 'ble_upload' },
+            extra: { filename: file.file, recordId }
+          });
+        }
         throw err;
       }
 
@@ -1268,12 +1293,18 @@ export const useDeviceStore = defineStore('device', {
         }
       } catch (e) {
         // Connection may have dropped — stop polling to avoid noise.
-        // Capture so we can see WHY auto-sync stopped instead of going dark.
+        // Record WHY auto-sync stopped instead of going dark: a dropped link
+        // or per-file sync failures (each already reported where it happened)
+        // are warnings; anything else is a real error.
         console.log('Auto-sync poll error:', e.message);
-        captureException(e, {
-          tags: { action: 'auto_sync_poll' },
-          extra: { failureCount: e.failureCount, totalCount: e.totalCount }
-        });
+        if (isBleTransportError(e) || e.failureCount) {
+          captureMessage(`auto-sync stopped: ${e.message}`, 'warning');
+        } else {
+          captureException(e, {
+            tags: { action: 'auto_sync_poll' },
+            extra: { failureCount: e.failureCount, totalCount: e.totalCount }
+          });
+        }
         this.stopAutoSync();
       }
     },
@@ -1375,6 +1406,7 @@ export const useDeviceStore = defineStore('device', {
     async retryConnect() {
       if (!this.pairedDevice) return;
       this._reconnectAttempts = 0;
+      this._persistentFailures = 0;
       this.error = null;
       // Transition out of 'lost' so _scheduleReconnect's guard lets attempts through
       if (this.connectionState === 'lost') {
@@ -1418,37 +1450,56 @@ export const useDeviceStore = defineStore('device', {
     // ========== Persistent Reconnect ==========
 
     /**
-     * Persistent reconnect timer — runs every 30s as a safety net.
-     * Unlike _scheduleReconnect (fast backoff after disconnect), this
-     * ensures we always keep trying even if the fast reconnect gave up.
+     * Persistent reconnect — the long-term safety net after the fast backoff
+     * loop gave up. Exponential backoff: 15s, 30s, 60s, 2min, 4min, capped at
+     * 5min while the device stays unreachable (switched off, left at home);
+     * reset to 15s on success, on foreground, or on a manual retry.
+     *
+     * The previous fixed 15-second interval ran a 12s rediscovery scan plus a
+     * 15s connect timeout back-to-back for as long as the app was open — a
+     * continuous radio/battery drain producing an error event every ~30s
+     * (Sentry CAPACITOR-7: 2308 events from 38 users).
      */
+    _persistentDelayMs() {
+      const factor = Math.pow(2, Math.min(this._persistentFailures, 5));
+      return Math.min(RECONNECT_INTERVAL_MS * factor, RECONNECT_INTERVAL_MAX_MS);
+    },
+
     _startPersistentReconnect() {
       this._stopPersistentReconnect();
-      this._persistentReconnectTimer = setInterval(async () => {
-        if (!this.pairedDevice || this._intentionalDisconnect) return;
-        if (this.connectionState !== 'disconnected') return;
-        if (document.hidden) return; // Only when app is in foreground
-        // Cross-timer mutex — if scheduled-reconnect is mid-attempt OR a
-        // retryConnect is in flight, skip this safety-net tick. The next
-        // interval (15s later) will retry.
-        if (this._reconnectInProgress) return;
-        this._reconnectInProgress = true;
-
+      const tick = async () => {
+        this._persistentReconnectTimer = null;
         try {
-          addBreadcrumb({ category: 'ble', message: 'Persistent reconnect attempt', level: 'info' });
-          await this.autoConnect();
-          addBreadcrumb({ category: 'ble', message: 'Persistent reconnect succeeded', level: 'info' });
-        } catch {
-          // Will try again on next interval
+          if (!this.pairedDevice || this._intentionalDisconnect) return;
+          if (this.connectionState !== 'disconnected') return;
+          if (document.hidden) return; // Only when app is in foreground
+          // Cross-timer mutex — if scheduled-reconnect is mid-attempt OR a
+          // retryConnect is in flight, skip this safety-net tick.
+          if (this._reconnectInProgress) return;
+          this._reconnectInProgress = true;
+          try {
+            addBreadcrumb({ category: 'ble', message: `Persistent reconnect attempt (failures=${this._persistentFailures})`, level: 'info' });
+            await this.autoConnect();
+            this._persistentFailures = 0;
+            addBreadcrumb({ category: 'ble', message: 'Persistent reconnect succeeded', level: 'info' });
+          } catch {
+            this._persistentFailures++;
+          } finally {
+            this._reconnectInProgress = false;
+          }
         } finally {
-          this._reconnectInProgress = false;
+          // Re-arm only if nobody stopped/replaced the timer meanwhile.
+          if (this._persistentReconnectTimer === null && this.pairedDevice && !this._intentionalDisconnect) {
+            this._persistentReconnectTimer = setTimeout(tick, this._persistentDelayMs());
+          }
         }
-      }, RECONNECT_INTERVAL_MS);
+      };
+      this._persistentReconnectTimer = setTimeout(tick, this._persistentDelayMs());
     },
 
     _stopPersistentReconnect() {
       if (this._persistentReconnectTimer) {
-        clearInterval(this._persistentReconnectTimer);
+        clearTimeout(this._persistentReconnectTimer);
         this._persistentReconnectTimer = null;
       }
     },

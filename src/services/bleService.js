@@ -120,14 +120,17 @@ export class BleDeviceManager {
     const { BleClient } = await import('@capacitor-community/bluetooth-le');
     this.ble = BleClient;
     const neverForLocation = true;
-    captureMessage(`BLE initialize: androidNeverForLocation=${neverForLocation}, platform=${isAndroid() ? 'android' : 'ios'}`, 'info');
+    addBreadcrumb({ category: 'ble', message: `BLE initialize: androidNeverForLocation=${neverForLocation}, platform=${isAndroid() ? 'android' : 'ios'}`, level: 'info' });
     try {
       await this.ble.initialize({ androidNeverForLocation: neverForLocation });
       this._initialized = true;
-      captureMessage('BLE initialize: SUCCESS — permissions granted', 'info');
+      addBreadcrumb({ category: 'ble', message: 'BLE initialize: SUCCESS — permissions granted', level: 'info' });
     } catch (e) {
       this._initialized = false;
-      captureMessage(`BLE initialize: FAILED — ${e.message}`, 'error');
+      // A denied Bluetooth permission is a user decision, not a defect —
+      // record it as a warning so it stays visible in aggregate without
+      // paging anyone (it was the #3 error-level issue in Sentry).
+      captureMessage(`BLE initialize: FAILED — ${e.message}`, 'warning');
       throw new Error('Bluetooth permissions are required. Please enable Bluetooth and Location permissions in your device settings.');
     }
   }
@@ -144,9 +147,9 @@ export class BleDeviceManager {
     // Check Bluetooth is enabled — prompt user to turn it on if not
     try {
       const bleEnabled = await this.ble.isEnabled();
-      captureMessage(`BLE scan pre-check: bluetooth=${bleEnabled}`, 'info');
+      addBreadcrumb({ category: 'ble', message: `BLE scan pre-check: bluetooth=${bleEnabled}`, level: 'info' });
       if (!bleEnabled) {
-        captureMessage('BLE scan: Bluetooth disabled — requesting enable', 'warning');
+        addBreadcrumb({ category: 'ble', message: 'BLE scan: Bluetooth disabled — requesting enable', level: 'warning' });
         await this.ble.requestEnable();
         const rechecked = await this.ble.isEnabled();
         if (!rechecked) {
@@ -231,8 +234,9 @@ export class BleDeviceManager {
       await new Promise(r => setTimeout(r, duration));
       await this.stopScan();
 
-      // Log all nearby names to Sentry so we can identify new device variants
-      captureMessage(`BLE name-scan: found=[${[...seen].length}] all_nearby=[${allSeen.join(', ')}]`, 'info');
+      // Only counts leave the device: the names of nearby Bluetooth devices
+      // are the user's environment (people's headphones, cars, TVs).
+      addBreadcrumb({ category: 'ble', message: `BLE name-scan: found=${[...seen].length} nearby_named=${allSeen.length}`, level: 'info' });
     }
 
     addBreadcrumb({
@@ -242,7 +246,7 @@ export class BleDeviceManager {
     });
 
     if (devicesFound === 0) {
-      captureMessage(`BLE scan: 0 devices found. All nearby: [${allSeen.join(', ')}]`, 'warning');
+      captureMessage(`BLE scan: 0 recording devices found (${allSeen.length} other named devices nearby)`, 'warning');
     }
   }
 
@@ -261,10 +265,20 @@ export class BleDeviceManager {
    * Connect to a device and perform handshake
    * @param {string} bleDeviceId - Platform BLE device ID
    * @param {string} appUuid - App's UUID for pairing
+   * @param {Object} [opts]
+   * @param {boolean} [opts.silent] - automatic reconnect: an unreachable device
+   *   is the expected outcome, so failures are breadcrumbs, not Sentry errors
    * @returns {Promise<Object>} Device info from handshake
    */
-  async connect(bleDeviceId, appUuid) {
+  async connect(bleDeviceId, appUuid, { silent = false } = {}) {
     if (!this.ble) await this.initialize();
+    const report = (e, action, extra) => {
+      if (silent) {
+        addBreadcrumb({ category: 'ble', message: `${action} failed (auto): ${e?.message}`, level: 'warning' });
+      } else {
+        captureException(e, { tags: { action }, extra });
+      }
+    };
 
     addBreadcrumb({
       category: 'ble',
@@ -283,32 +297,52 @@ export class BleDeviceManager {
 
     // Ensure the BLE plugin knows about this device (needed for reconnection
     // to previously paired devices without a fresh scan)
+    let knownToPlugin = true;
     try {
       await this.ble.getDevices([bleDeviceId]);
       addBreadcrumb({ category: 'ble', message: 'BLE getDevices OK', level: 'info' });
     } catch (e) {
+      knownToPlugin = false;
       addBreadcrumb({ category: 'ble', message: `BLE getDevices failed: ${e.message}, will try connect anyway`, level: 'warning' });
     }
 
-    // Connect
+    const onDisconnect = (deviceId) => {
+      this.connected = false;
+      this.deviceId = null;
+      addBreadcrumb({ category: 'ble', message: `BLE disconnected: ${deviceId}`, level: 'warning' });
+      // BT-2: immediately fail any in-flight notification read so an active
+      // download/getFileList doesn't block for the full 30s-per-chunk timeout
+      // — a lost device could otherwise hang a multi-chunk transfer for ~50
+      // minutes. Uses a disconnect error (NOT the cancel sentinel) so the
+      // caller retries the file on reconnect instead of skipping it.
+      this._failInflightOnDisconnect();
+      if (this._onDisconnectCallback) {
+        this._onDisconnectCallback(deviceId);
+      }
+    };
+
+    // Connect (BT-4: bound the attempt so an unreachable device can't hang indefinitely)
     try {
-      await this.ble.connect(bleDeviceId, (deviceId) => {
-        this.connected = false;
-        this.deviceId = null;
-        addBreadcrumb({ category: 'ble', message: `BLE disconnected: ${deviceId}`, level: 'warning' });
-        // BT-2: immediately fail any in-flight notification read so an active
-        // download/getFileList doesn't block for the full 30s-per-chunk timeout
-        // — a lost device could otherwise hang a multi-chunk transfer for ~50
-        // minutes. Uses a disconnect error (NOT the cancel sentinel) so the
-        // caller retries the file on reconnect instead of skipping it.
-        this._failInflightOnDisconnect();
-        if (this._onDisconnectCallback) {
-          this._onDisconnectCallback(deviceId);
+      try {
+        await this.ble.connect(bleDeviceId, onDisconnect, { timeout: 15000 });
+      } catch (e) {
+        // Android: after a process restart the plugin may have forgotten a
+        // paired peripheral it never scanned in this process ("Device not
+        // found. Call requestDevice, requestLEScan or getDevices first").
+        // A short service-filtered scan re-registers it; retry once.
+        if (isAndroid() && (!knownToPlugin || /not found/i.test(e?.message || ''))) {
+          addBreadcrumb({ category: 'ble', message: 'Android connect: device unknown to plugin — rediscovery scan + retry', level: 'info' });
+          const seen = await this._rediscover(bleDeviceId, 6000);
+          if (!seen) throw e;
+          await this.ble.connect(bleDeviceId, onDisconnect, { timeout: 15000 });
+        } else {
+          throw e;
         }
-      }, { timeout: 15000 }); // BT-4: bound the connect attempt so an unreachable device can't hang indefinitely
+      }
       addBreadcrumb({ category: 'ble', message: 'BLE connected, starting notifications', level: 'info' });
     } catch (e) {
-      captureException(e, { tags: { action: 'ble_connect' }, extra: { bleDeviceId } });
+      this.deviceId = null;
+      report(e, 'ble_connect', { bleDeviceId });
       throw new Error(`Connection failed: ${e.message}`);
     }
 
@@ -322,7 +356,7 @@ export class BleDeviceManager {
       );
       addBreadcrumb({ category: 'ble', message: 'BLE notifications started, waiting for device handshake', level: 'info' });
     } catch (e) {
-      captureException(e, { tags: { action: 'ble_notifications' }, extra: { bleDeviceId } });
+      report(e, 'ble_notifications', { bleDeviceId });
       throw new Error(`Notification setup failed: ${e.message}`);
     }
 
@@ -356,10 +390,49 @@ export class BleDeviceManager {
 
       return deviceInfo;
     } catch (e) {
-      captureException(e, { tags: { action: 'ble_handshake' }, extra: { bleDeviceId } });
+      // "already paired to another app" and response timeouts are device
+      // states, not app defects: keep them visible as warnings.
+      if (silent || /rejected pairing|response timeout/i.test(e?.message || '')) {
+        captureMessage(`BLE handshake failed: ${e?.message}`, 'warning');
+      } else {
+        captureException(e, { tags: { action: 'ble_handshake' }, extra: { bleDeviceId } });
+      }
       await this.disconnect();
       throw new Error(`Handshake failed: ${e.message}`);
     }
+  }
+
+  /**
+   * Run a short service-UUID-filtered scan and report whether `bleDeviceId`
+   * advertised. Repopulates the platform's peripheral cache as a side effect
+   * (what makes a subsequent connect() resolve on iOS after a long suspension
+   * and on Android after a process restart).
+   * @returns {Promise<boolean>} true if the device was seen
+   */
+  async _rediscover(bleDeviceId, timeoutMs) {
+    let found = false;
+    const scanStart = Date.now();
+    try {
+      await this.ble.requestLEScan(
+        { services: [BLE_SERVICE_UUID], allowDuplicates: false },
+        (result) => {
+          if (result?.device?.deviceId === bleDeviceId) found = true;
+        }
+      );
+      while (!found && Date.now() - scanStart < timeoutMs) {
+        await new Promise(r => setTimeout(r, 200));
+      }
+    } catch (e) {
+      addBreadcrumb({ category: 'ble', message: `rediscovery scan error: ${e.message}`, level: 'warning' });
+    } finally {
+      try { await this.ble.stopLEScan(); } catch { /* ignore */ }
+    }
+    addBreadcrumb({
+      category: 'ble',
+      message: `rediscovery: target ${found ? 'located' : 'NOT located'} in ${Date.now() - scanStart}ms`,
+      level: found ? 'info' : 'warning'
+    });
+    return found;
   }
 
   /**
@@ -375,46 +448,18 @@ export class BleDeviceManager {
    * Android's connect() handles known peripherals natively, so we skip the
    * scan there to avoid extra latency.
    */
-  async connectWithRediscovery(bleDeviceId, appUuid, { rediscoveryTimeoutMs = 12000 } = {}) {
+  async connectWithRediscovery(bleDeviceId, appUuid, { rediscoveryTimeoutMs = 12000, silent = false } = {}) {
     if (!this.ble) await this.initialize();
 
     if (!isIOS()) {
-      return this.connect(bleDeviceId, appUuid);
+      return this.connect(bleDeviceId, appUuid, { silent });
     }
 
-    captureMessage(`BLE rediscovery scan starting (target=${bleDeviceId}, timeout=${rediscoveryTimeoutMs}ms)`, 'info');
-
-    let found = false;
-    let scanError = null;
-    const scanStart = Date.now();
-    try {
-      await this.ble.requestLEScan(
-        { services: [BLE_SERVICE_UUID], allowDuplicates: false },
-        (result) => {
-          if (result?.device?.deviceId === bleDeviceId) {
-            found = true;
-          }
-        }
-      );
-
-      while (!found && Date.now() - scanStart < rediscoveryTimeoutMs) {
-        await new Promise(r => setTimeout(r, 200));
-      }
-    } catch (e) {
-      scanError = e;
-      captureMessage(`BLE rediscovery scan error: ${e.message}`, 'warning');
-    } finally {
-      try { await this.ble.stopLEScan(); } catch { /* ignore */ }
-    }
-
-    const elapsedMs = Date.now() - scanStart;
-    if (found) {
-      captureMessage(`BLE rediscovery: target located in ${elapsedMs}ms, proceeding to connect`, 'info');
-    } else {
-      captureMessage(`BLE rediscovery: NOT located in ${elapsedMs}ms${scanError ? ' (scan errored)' : ''} — falling through to connect anyway`, 'warning');
-    }
-
-    return this.connect(bleDeviceId, appUuid);
+    // Deliberately falls through to connect() even when the scan did not see
+    // the device: iOS can connect to a peripheral that is connectable but not
+    // advertising. The caller (device store) backs off between attempts.
+    await this._rediscover(bleDeviceId, rediscoveryTimeoutMs);
+    return this.connect(bleDeviceId, appUuid, { silent });
   }
 
   /**
@@ -853,7 +898,7 @@ export class BleDeviceManager {
       step1 = await this._readNotification(Math.min(remaining, 5000));
       step1Attempts++;
 
-      captureMessage(`BLE handshake step1 raw (attempt ${step1Attempts}): ${hexDump(step1, 30)}`, 'info');
+      addBreadcrumb({ category: 'ble', message: `handshake step1 raw (attempt ${step1Attempts}): ${hexDump(step1, 30)}`, level: 'info' });
 
       // Valid step 1: byte[3]=0x00, followed by JSON with device UUID
       if (step1.length >= 5 && step1[3] === 0x00) {
@@ -876,7 +921,7 @@ export class BleDeviceManager {
     const deviceJson = parseJsonFromBuffer(step1, 4);
     this.deviceUuid = deviceJson.uuid;
 
-    captureMessage(`BLE handshake step1 OK: uuid=${deviceJson.uuid}`, 'info');
+    addBreadcrumb({ category: 'ble', message: `handshake step1 OK: uuid=${deviceJson.uuid}`, level: 'info' });
 
     // Step 2: Send app UUID + timestamp
     const timestamp = Math.floor(Date.now() / 1000);
@@ -887,7 +932,7 @@ export class BleDeviceManager {
     // Step 3: Wait for device verification
     const step3 = await this._readNotification(5000);
 
-    captureMessage(`BLE handshake step3 raw: ${hexDump(step3, 30)}`, 'info');
+    addBreadcrumb({ category: 'ble', message: `handshake step3 raw: ${hexDump(step3, 30)}`, level: 'info' });
 
     // Response: 0x01 0x01 0x00 0x02 <status> [json if status=0x00]
     if (step3[3] !== 0x02) {
@@ -904,13 +949,13 @@ export class BleDeviceManager {
         0x04: 'Handshake timeout'
       };
       const errMsg = errors[status] || `Handshake failed with code 0x${status.toString(16)}`;
-      captureMessage(`BLE handshake step3 rejected: status=0x${status.toString(16)} (${errMsg})`, 'warning');
+      addBreadcrumb({ category: 'ble', message: `handshake step3 rejected: status=0x${status.toString(16)} (${errMsg})`, level: 'warning' });
       throw new Error(errMsg);
     }
 
     // Parse device info from successful handshake
     const info = parseJsonFromBuffer(step3, 5);
-    captureMessage(`BLE handshake OK: name=${info.name}, SN=${info.SN}, model=${info.model}`, 'info');
+    addBreadcrumb({ category: 'ble', message: `handshake OK: name=${info.name}, SN=${info.SN}, model=${info.model}`, level: 'info' });
     return info;
   }
 
@@ -918,6 +963,12 @@ export class BleDeviceManager {
    * Write data to the BLE write characteristic
    */
   async _write(data) {
+    if (!this.deviceId) {
+      // The link dropped (the disconnect callback nulls deviceId) while a
+      // command was queued. Fail with the transport error the callers already
+      // classify as retryable instead of the plugin's "deviceId required."
+      throw new Error('BLE disconnected during transfer');
+    }
     const dataView = new DataView(data.buffer, data.byteOffset, data.byteLength);
     await this.ble.writeWithoutResponse(
       this.deviceId,

@@ -144,13 +144,12 @@ const prefs = vi.hoisted(() => {
 });
 vi.mock('@capacitor/preferences', () => ({ Preferences: prefs.Preferences }));
 
-vi.mock('@capacitor/filesystem', () => ({
-  Filesystem: {
-    mkdir: async () => {},
-    writeFile: async () => {},
-    deleteFile: async () => {}
-  },
-  Directory: { Documents: 'DOCUMENTS' }
+// The device store persists BLE files through the storage service (which
+// owns the platform directory choice); stub it out here.
+vi.mock('../../src/services/storage', () => ({
+  createDirectory: async () => ({ success: true }),
+  writeFile: async () => ({ success: true }),
+  deleteFile: async () => ({ success: true })
 }));
 
 vi.mock('@capacitor/local-notifications', () => ({
