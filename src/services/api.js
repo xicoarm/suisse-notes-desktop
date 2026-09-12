@@ -218,10 +218,53 @@ export const isDevelopment = () => {
   return env === Environments.DEVELOPMENT;
 };
 
+// Default deadline for JSON API calls (login, refresh, minutes, history,
+// spellings). Uploads use XHR/their own budgets and are not affected.
+export const API_REQUEST_TIMEOUT_MS = 30000;
+
+/**
+ * fetch() with a deadline. Resolves/rejects exactly like fetch, except that a
+ * request still pending after `timeoutMs` is aborted and rejects with an
+ * Error whose name is 'TimeoutError' (message mentions the timeout so the
+ * generic transient-network classifiers treat it as retryable). An
+ * `options.signal` from the caller is honoured alongside the deadline.
+ * @param {string} url
+ * @param {Object} options - fetch options + optional timeoutMs
+ * @returns {Promise<Response>}
+ */
+export const fetchWithTimeout = async (url, options = {}) => {
+  const { timeoutMs = API_REQUEST_TIMEOUT_MS, signal: callerSignal, ...fetchOptions } = options;
+  if (!timeoutMs || timeoutMs <= 0 || typeof AbortController === 'undefined') {
+    return fetch(url, { ...fetchOptions, signal: callerSignal });
+  }
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  const onCallerAbort = () => controller.abort();
+  if (callerSignal) {
+    if (callerSignal.aborted) controller.abort();
+    else callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+  }
+  try {
+    return await fetch(url, { ...fetchOptions, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) {
+      const e = new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s (network error)`);
+      e.name = 'TimeoutError';
+      e.code = 'ETIMEDOUT';
+      throw e;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    if (callerSignal) callerSignal.removeEventListener('abort', onCallerAbort);
+  }
+};
+
 /**
  * HTTP request helper with automatic API URL resolution
  * @param {string} endpoint - API endpoint
- * @param {Object} options - Fetch options
+ * @param {Object} options - Fetch options (+ optional timeoutMs, default 30s)
  * @returns {Promise<Response>}
  */
 export const apiRequest = async (endpoint, options = {}) => {
@@ -231,7 +274,7 @@ export const apiRequest = async (endpoint, options = {}) => {
     'Content-Type': 'application/json'
   };
 
-  return fetch(url, {
+  return fetchWithTimeout(url, {
     ...options,
     headers: {
       ...defaultHeaders,
