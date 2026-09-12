@@ -7,6 +7,9 @@ name: Mobile Reliability
 
 on:
   pull_request:
+    # `labeled`: adding the label "endurance" to a PR starts the 5h15 run for
+    # that PR (schedule and workflow_dispatch only work on the default branch).
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - 'src/**'
       - 'quasar.config.js'
@@ -40,7 +43,7 @@ on:
 
 jobs:
   scenarios:
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && github.event.action != 'labeled'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -76,7 +79,10 @@ jobs:
           retention-days: 14
 
   endurance:
-    if: github.event_name == 'schedule' || github.event.inputs.scenario == 'm2-endurance'
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event.inputs.scenario == 'm2-endurance' ||
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'endurance')
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:

@@ -81,8 +81,10 @@ standard location.
 ## CI
 
 `.github/workflows/mobile-reliability.yml` runs `all` for both personas on
-pull requests that touch `src/**`, and the endurance run nightly. Evidence is
-uploaded as a workflow artifact.
+pull requests that touch `src/**`, and the 5h15 endurance run nightly on `main`.
+Adding the label **endurance** to a pull request starts the endurance run for
+that branch. Evidence (results, screenshots, console logs, captured uploads,
+device file systems) is uploaded as a workflow artifact.
 
 ## What it does not cover
 
