@@ -18,11 +18,15 @@ const diagnostics = path.join(work, 'ci', scenario);
 const endurance = scenario === 's13-coded-endurance';
 const mainCrash = scenario === 's15-main-crash-qualification';
 const captureClock = scenario === 's16-capture-clock-diagnostic';
-// Endurance: 305 minutes of capture plus 40 minutes for startup, reference
-// generation, finalization (about 18 minutes on Intel runners), local upload
-// and full decoded verification. This is a supervisor budget, not a capture
-// or oracle tolerance; the 18,300-second capture is unchanged.
-const timeoutMs = (endurance ? 345 : mainCrash ? 10 : 20) * 60 * 1000;
+// Hosted endurance captures 18,300 s (5h05) or 18,900 s (5h15). The supervisor
+// budget adds 40 minutes for startup, reference generation, finalization (about
+// 18 minutes on Intel runners), local upload and full decoded verification, and
+// is capped at 350 minutes so the six-hour job keeps time for setup and the
+// artifact upload. This is a supervisor budget, not a capture or oracle
+// tolerance; the requested capture length is enforced exactly.
+const HOSTED_ENDURANCE_SECONDS = [18300, 18900];
+const enduranceSeconds = endurance ? Number(process.env.SUISSE_ENDURANCE_SECONDS) : null;
+const timeoutMs = (endurance ? Math.min(enduranceSeconds / 60 + 40, 350) : mainCrash ? 10 : 20) * 60 * 1000;
 fs.mkdirSync(diagnostics, { recursive: true });
 
 function log(message) {
@@ -56,7 +60,7 @@ function childEnvironment(bundleSha) {
     SUISSE_TEST_NETWORK_ISOLATION: '1',
     SUISSE_E2E_APP_DIR: bundle,
     SUISSE_E2E_BUNDLE_SHA: bundleSha,
-    ...(endurance ? { SUISSE_ENDURANCE_SECONDS: '18300', SUISSE_ENDURANCE_PROCESSING_DISABLED: '0' } : {}),
+    ...(endurance ? { SUISSE_ENDURANCE_SECONDS: String(enduranceSeconds), SUISSE_ENDURANCE_PROCESSING_DISABLED: '0' } : {}),
     CSC_IDENTITY_AUTO_DISCOVERY: 'false',
     SENTRY_AUTH_TOKEN: '',
     GH_TOKEN: '',
@@ -98,8 +102,8 @@ async function main() {
   assertLocalUrl(process.env.API_BASE_URL);
   assertLocalUrl(process.env.VITE_API_URL);
   if (process.env.SUISSE_E2E_PACKAGED_EXE) throw new Error('A packaged release executable cannot be used by this job');
-  if (endurance && (process.env.SUISSE_ENDURANCE_SECONDS !== '18300' || process.env.SUISSE_ENDURANCE_PROCESSING_DISABLED !== '0' || process.env.VITE_SUISSE_MAX_DURATION_SECONDS)) {
-    throw new Error('Hosted endurance requires exactly 18300 seconds, default processing, and no accelerated rotation override');
+  if (endurance && (!HOSTED_ENDURANCE_SECONDS.includes(enduranceSeconds) || process.env.SUISSE_ENDURANCE_PROCESSING_DISABLED !== '0' || process.env.VITE_SUISSE_MAX_DURATION_SECONDS)) {
+    throw new Error('Hosted endurance requires exactly 18300 or 18900 seconds, default processing, and no accelerated rotation override');
   }
   if (path.resolve(repository, process.env.SUISSE_E2E_APP_DIR || '') !== bundle) throw new Error('Unexpected Electron bundle directory');
   const bundlePackage = JSON.parse(fs.readFileSync(path.join(bundle, 'package.json'), 'utf8'));
@@ -116,9 +120,9 @@ async function main() {
     ...(captureClock ? { diagnosticOnly: true, secondsPerCase: 180, processingModes: ['default', 'disabled'],
       bufferTraceEnabled: process.env.SUISSE_CAPTURE_CLOCK_TRACE === '1',
       successMeaning: 'Measurements completed under valid controls; does not clear existing endurance or capture failures.' } : {}),
-    ...(endurance ? { captureSeconds: 18300, naturalRotationSeconds: 17700, processingDisabled: false,
+    ...(endurance ? { captureSeconds: enduranceSeconds, naturalRotationSeconds: 17700, processingDisabled: false,
       productionBackendQualified: false, referenceGeneration: { generator: 'tests/e2e-harness/lib/coded-audio.js',
-        firstFrameId: 0, randomSeed: null, plan: [{ type: 'speech', seconds: 18325 }] } } : {}),
+        firstFrameId: 0, randomSeed: null, plan: [{ type: 'speech', seconds: enduranceSeconds + 25 }] } } : {}),
   };
   fs.writeFileSync(path.join(diagnostics, 'manifest.json'), JSON.stringify(manifest, null, 2));
   log(`Starting ${scenario} on ${manifest.platform}/${manifest.architecture}; ${timeoutMs / 60000}-minute deadline`);
@@ -147,9 +151,9 @@ async function main() {
     // A zero exit code from a shortened local smoke must never qualify this job.
     try {
       const evidence = JSON.parse(fs.readFileSync(path.join(work, 'result_s13-coded-endurance.json'), 'utf8'));
-      passed = evidence.fiveHourQualificationPassed === true && evidence.requestedSeconds === 18300;
+      passed = evidence.fiveHourQualificationPassed === true && evidence.requestedSeconds === enduranceSeconds;
     } catch (error) { passed = false; log('Missing or unreadable endurance result: ' + error.message); }
-    if (!passed) log('Endurance result did not prove the required real 5h05 capture');
+    if (!passed) log(`Endurance result did not prove the required real ${enduranceSeconds}-second capture`);
   }
   if (captureClock && passed) {
     try {
@@ -167,7 +171,7 @@ async function main() {
       `The artifact contains generated audio, original chunks, test profiles and diagnostics. ` +
       `This is not a test of physical microphones, Bluetooth/USB, AudioTee, or macOS privacy permissions.\n` +
       (captureClock ? '\nThis compares one native input against the actual app mixer for three minutes per processing mode. It does not qualify five hours or clear historical failures. Negotiated format changes and both clocks are retained.\n' : '') +
-      (endurance ? '\nThe requested capture is 5h05 at normal speed with the default 4h55 source rotation. Local mock acceptance beyond five hours does not prove acceptance by the production backend, whose limit is five hours. Regenerable input WAVs are excluded; their metadata and generator revision are retained.\n' : ''));
+      (endurance ? `\nThe requested capture is ${enduranceSeconds} seconds at normal speed with the default 4h55 source rotation. Local mock acceptance beyond five hours does not prove acceptance by the production backend, whose limit is five hours. Regenerable input WAVs are excluded; their metadata and generator revision are retained.\n` : ''));
   }
   process.exitCode = passed ? 0 : 1;
 }

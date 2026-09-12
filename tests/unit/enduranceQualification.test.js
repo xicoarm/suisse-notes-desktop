@@ -130,4 +130,29 @@ describe('endurance source boundaries and acquisition clock', () => {
       expect(assessSourceCoverage(audio, recorder, acquisitions).problems.some(problem => problem.startsWith('SOURCE CLOCK:'))).toBe(true);
     }
   });
+
+  // The hosted fake microphone loads its WAV lazily: its first buffer can arrive
+  // seconds after the recorder started, and the recording then begins at
+  // identity 0. That delay is measured from the native timestamps and bounded.
+  it('expects identity 0 at the origin when delivery began after the recorder started, and the request interval otherwise', async () => {
+    const audio = await verifyCodedAudio(output('late-delivery', slice(0, 12)), reference, { expectedDurationS: 12 });
+    const late = assessSourceCoverage(audio, { startedAt: 1000, startCalledAt: 950 }, acquisition, { lateDeliveryS: 4.7 });
+    expect(late.problems).toEqual([]);
+    expect(late.sourceOffsetRangeS).toEqual([0, 0]);
+    expect(late.firstDeliveryDelayS).toBe(4.7);
+    const early = assessSourceCoverage(audio, { startedAt: 1000, startCalledAt: 950 }, acquisition, { lateDeliveryS: 0 });
+    expect(early.problems).toEqual([]);
+    expect(early.sourceOffsetRangeS).toEqual([0, 0.1]);
+    const shifted = await verifyCodedAudio(output('late-shifted', slice(3, 15)), reference, { expectedDurationS: 12 });
+    expect(assessSourceCoverage(shifted, { startedAt: 1000, startCalledAt: 950 }, acquisition, { lateDeliveryS: 4.7 }).problems)
+      .toContainEqual(expect.stringMatching('SOURCE CLOCK: decoded numbering'));
+  });
+
+  it('bounds the first-delivery delay and the recorder start latency at ten seconds', () => {
+    const audio = { firstFrame: 0, lastFrame: 23, durationS: 12, sourceOffsetS: 0, firstIdentifiedStartS: 0.02, lastIdentifiedEndS: 11.98 };
+    expect(assessSourceCoverage(audio, { startedAt: 1000, startCalledAt: 950 }, acquisition, { lateDeliveryS: 12 }).problems)
+      .toContainEqual(expect.stringMatching('SOURCE CLOCK: native source delivered its first audio 12.000s'));
+    expect(assessSourceCoverage(audio, { startedAt: 12000, startCalledAt: 11500 }, acquisition, { lateDeliveryS: 0 }).problems)
+      .toContainEqual(expect.stringMatching('SOURCE CLOCK: native recorder start was requested 10.500s'));
+  });
 });

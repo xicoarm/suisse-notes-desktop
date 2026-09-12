@@ -27,6 +27,10 @@ const STOP_TAIL_SECONDS = SAMPLE_SECONDS + 60;
 const SOURCE_BOUNDARY_TOLERANCE_S = 1.5;
 const SOURCE_CLOCK_TOLERANCE_S = 1.5;
 const MAX_SOURCE_ACQUISITION_S = 10;
+// Recorder start/stop events sit tens of milliseconds from the first/last
+// packet edge; above this the native timestamp span is genuinely shorter than
+// wall time, i.e. the source delivered its first buffer after the recorder started.
+const FIRST_DELIVERY_SLACK_S = 0.25;
 
 function diskBudget(seconds, nativeSources = false, { fastPlan = false } = {}) {
   if (fastPlan && !nativeSources) throw new Error('Fast endurance budget requires native sources');
@@ -415,7 +419,7 @@ async function installConstraintEvidence(app, processingDisabled) {
 }
 
 /** The interior oracle alone cannot detect a long silent prefix or suffix. */
-function assessSourceCoverage(audio, recorder, acquisitions) {
+function assessSourceCoverage(audio, recorder, acquisitions, nativeClock = null) {
   const problems = [];
   const result = { problems, boundaryToleranceS: SOURCE_BOUNDARY_TOLERANCE_S,
     clockToleranceS: SOURCE_CLOCK_TOLERANCE_S, maximumAcquisitionS: MAX_SOURCE_ACQUISITION_S };
@@ -444,10 +448,27 @@ function assessSourceCoverage(audio, recorder, acquisitions) {
   }
   result.acquisitionSeconds = (receivedAt - requestedAt) / 1000;
   if (result.acquisitionSeconds > MAX_SOURCE_ACQUISITION_S) problems.push('SOURCE CLOCK: native acquisition exceeded the bounded ten-second clock interval');
-  // Native capture can begin while getUserMedia is settling. Preserve that
-  // measured interval instead of assuming the exact first sample coincides
-  // with promise resolution; the extra tolerance is explicit and bounded.
-  result.sourceOffsetRangeS = [(recorder.startedAt - receivedAt) / 1000, (recorder.startedAt - requestedAt) / 1000];
+  // The application must request its native recorder promptly after acquisition.
+  if (Number.isFinite(recorder.startCalledAt)) {
+    result.startLatencyS = (recorder.startCalledAt - receivedAt) / 1000;
+    if (result.startLatencyS > MAX_SOURCE_ACQUISITION_S) problems.push(`SOURCE CLOCK: native recorder start was requested ${result.startLatencyS.toFixed(3)}s after acquisition (limit ${MAX_SOURCE_ACQUISITION_S}s)`);
+  }
+  // Where the numbered source's cursor stood when the recording timeline began.
+  // The hosted fake microphone loads its WAV lazily and advances the cursor
+  // only for buffers it actually delivers. When its first buffer arrived after
+  // the recorder had started (wall time exceeding the native timestamp span),
+  // the recording begins at identity 0; when delivery preceded the recorder
+  // start, the cursor can have advanced by at most the time since the request.
+  // Both delays are measured and bounded rather than assumed away. Without
+  // native timestamp evidence the historical acquisition-based range is kept.
+  const lateDeliveryS = Number.isFinite(nativeClock?.lateDeliveryS) ? nativeClock.lateDeliveryS : null;
+  result.firstDeliveryDelayS = lateDeliveryS;
+  if (lateDeliveryS !== null && lateDeliveryS > MAX_SOURCE_ACQUISITION_S) {
+    problems.push(`SOURCE CLOCK: native source delivered its first audio ${lateDeliveryS.toFixed(3)}s after the recorder started (limit ${MAX_SOURCE_ACQUISITION_S}s)`);
+  }
+  result.sourceOffsetRangeS = lateDeliveryS === null
+    ? [(recorder.startedAt - receivedAt) / 1000, (recorder.startedAt - requestedAt) / 1000]
+    : [0, lateDeliveryS > FIRST_DELIVERY_SLACK_S ? 0 : (recorder.startedAt - requestedAt) / 1000];
   result.sourceClockErrorS = Math.max(0, result.sourceOffsetRangeS[0] - audio.sourceOffsetS, audio.sourceOffsetS - result.sourceOffsetRangeS[1]);
   if (result.sourceClockErrorS > SOURCE_CLOCK_TOLERANCE_S) problems.push(`SOURCE CLOCK: decoded numbering is ${result.sourceClockErrorS.toFixed(3)}s outside native acquisition timing`);
   return result;
@@ -506,7 +527,7 @@ async function runCodedEndurance(opts = {}) {
       'Shortened smoke runs do not qualify five hours; natural rotation is asserted only after crossing 4h55.',
       'Synthetic native microphone capture; physical Bluetooth/USB and macOS system audio are outside this scenario.',
       'Progress metrics are thirty-second snapshots; sampled event/persistence ages do not rule out shorter intervening stalls.',
-      'Both decoded boundaries and the native acquisition clock must agree within explicit 1.5-second tolerances; acquisitions longer than ten seconds cannot qualify the source clock.',
+      'Both decoded boundaries must agree within explicit 1.5-second tolerances. The numbered source cursor is expected at identity 0 when its first buffer arrived after the recorder started (the hosted fake microphone loads its WAV lazily), otherwise within the interval since the acquisition request; acquisition, recorder start latency and first-delivery delay are each bounded at ten seconds.',
     ], metrics: { samples: 0, maxPersistGapS: 0, maxNativeEventGapS: 0, maxRendererHeapMB: null, maxHarnessRssMB: 0,
       minFreeBytes: null, firstRotationElapsedS: null, maxBatchesDuringCapture: 0, phaseCounts: {} }, recentSamples: [], evidenceDir, summaryPath, progressPath };
   let mock = null, app = null, started = null, lastChunkCount = -1, lastPersistObservedAt = null, nativeLedger = null, nativeMode = false;
@@ -687,7 +708,7 @@ async function runCodedEndurance(opts = {}) {
         unchecked: audio.pauses.filter(pause => pause.silent === null).length } : null };
     for (const issue of audio.problems) problem(issue);
     result.constraintEvidence = await app.evalTimed(() => window.__enduranceConstraints);
-    result.sourceCoverage = assessSourceCoverage(audio, recorder, result.constraintEvidence?.acquisitions);
+    result.sourceCoverage = assessSourceCoverage(audio, recorder, result.constraintEvidence?.acquisitions, result.nativeClock);
     for (const issue of result.sourceCoverage.problems) problem(issue);
     result.localSha256 = await sha256(output);
     const receipt = JSON.parse(fs.readFileSync(path.join(recordingDir, 'upload-receipt.json'), 'utf8'));
@@ -719,7 +740,7 @@ async function runCodedEndurance(opts = {}) {
       const sourceAudio = await verifyCodedAudio(nativeOriginal, reference, { expectedDurationS: result.expectedDurationS - timestamps.totalHoleS, durationToleranceS: 1.5 });
       result.nativeSourceAudio = { ...sourceAudio, problems: sourceAudio.problems.slice(0, 30), problemCount: sourceAudio.problems.length };
       for (const issue of sourceAudio.problems) problem('Native original: ' + issue);
-      result.nativeSourceCoverage = assessSourceCoverage(sourceAudio, roles.native, result.constraintEvidence.acquisitions);
+      result.nativeSourceCoverage = assessSourceCoverage(sourceAudio, roles.native, result.constraintEvidence.acquisitions, result.nativeClock);
       for (const issue of result.nativeSourceCoverage.problems) problem('Native original: ' + issue);
       result.nativePreservation = assessNativeEndurancePreservation(sourceAudio, audio, sourceEvidence.startOffsetMs / 1000);
       for (const issue of result.nativePreservation.problems) problem(issue);

@@ -15,19 +15,32 @@ concurrency:
 
 jobs:
   coded-endurance:
-    name: Real 5h05 capture / ${{ matrix.name }}
+    name: Real ${{ matrix.label }} capture / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
     strategy:
       fail-fast: false
+      # 5h15 (18,900 s) where the runner finishes finalization and verification
+      # within the six-hour job ceiling; the Intel runner needs about 18 minutes
+      # for the five-hour encode alone and keeps 5h05 (18,300 s). Both exceed
+      # the backend's five-hour limit and the 4h55 source rotation.
       matrix:
         include:
           - name: windows-x64
             os: windows-2022
+            seconds: '18900'
+            label: 5h15
+            stepTimeout: 353
           - name: macos-intel
             os: macos-15-intel
+            seconds: '18300'
+            label: 5h05
+            stepTimeout: 350
           - name: macos-arm64
             os: macos-26
+            seconds: '18900'
+            label: 5h15
+            stepTimeout: 353
     env:
       CI: 'true'
       HUSKY: '0'
@@ -36,7 +49,7 @@ jobs:
       SUISSE_E2E_HOOKS: '1'
       SUISSE_TEST_NETWORK_ISOLATION: '1'
       SUISSE_E2E_APP_DIR: dist/electron/UnPackaged
-      SUISSE_ENDURANCE_SECONDS: '18300'
+      SUISSE_ENDURANCE_SECONDS: ${{ matrix.seconds }}
       SUISSE_ENDURANCE_PROCESSING_DISABLED: '0'
       VITE_SUISSE_MAX_DURATION_SECONDS: ''
       # No signing, production API, or upload credentials are provided.
@@ -69,14 +82,15 @@ jobs:
         timeout-minutes: 8
         run: npx quasar build -m electron --skip-pkg
 
-      # The inner 345-minute deadline leaves 40 minutes after the requested
-      # capture for startup, streamed reference generation, finalization,
-      # upload and decode. The Intel replay of run 33988551101 showed the
-      # five-hour finalization alone needs about 18 minutes; the old 25-minute
-      # remainder expired at 93.8 % of the encode. Within the six-hour job
-      # ceiling this leaves about seven minutes for setup and artifact upload.
-      - name: Qualify a real five-hour-five-minute recording
-        timeout-minutes: 350
+      # The inner supervisor deadline is the requested capture plus 40 minutes,
+      # capped at 350 minutes (345 for 5h05, 350 for 5h15), for startup, streamed
+      # reference generation, finalization, upload and decode. The Intel replay
+      # of run 33988551101 showed the five-hour finalization alone needs about
+      # 18 minutes; the old 25-minute remainder expired at 93.8 % of the encode.
+      # Within the six-hour job ceiling this leaves about seven minutes for
+      # setup and artifact upload.
+      - name: Qualify a real five-hour recording
+        timeout-minutes: ${{ matrix.stepTimeout }}
         run: node tests/e2e-harness/ci/run-qualification.js s13-coded-endurance
 
       - name: Preserve captured audio and original source chunks

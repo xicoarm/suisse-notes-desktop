@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       run_endurance:
-        description: Run the real 5h05 native endurance matrix instead of the short suites
+        description: Run the real five-hour native endurance matrix (5h15 on Windows and Apple Silicon, 5h05 on Intel) instead of the short suites
         type: boolean
         required: false
         default: false
