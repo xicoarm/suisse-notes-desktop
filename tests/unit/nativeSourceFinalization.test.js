@@ -39,7 +39,12 @@ function metadata(file) {
   return new Promise((resolve, reject) => ffmpeg.ffprobe(file, (error, result) => error ? reject(error) : resolve(result)));
 }
 function finalizer(overrides = {}) {
-  return createNativeSourceFinalization({ ffmpeg, run, ffprobePath: FFPROBE,
+  // The production watchdog subscribes to progress. This activates fluent's
+  // input-metadata hook and catches no-input silence graphs that otherwise pass.
+  return createNativeSourceFinalization({ ffmpeg, run: (command, ...args) => {
+    expect(command._inputs.length).toBeGreaterThan(0);
+    return run(command.on('progress', () => {}), ...args);
+  }, ffprobePath: FFPROBE,
     validate: validateNativeMedia,
     probe: async file => Number((await metadata(file)).format.duration), ...overrides });
 }
@@ -129,6 +134,14 @@ describe('native source finalization real-media custody', () => {
     expect(result.plan.totalSamples).toBe(expectedSamples);
     expect(audio.samples).toBe(expectedSamples);
     expect(result.plan.validation.observedDecodedSamples).toBe(expectedSamples);
+    if (mode === 'general') {
+      const seed = fs.readFileSync(path.join(result.scratchDirectory, 'silence-frame.wav'));
+      expect(seed.length).toBe(48);
+      expect(seed.readUInt16LE(22)).toBe(2);
+      expect(seed.readUInt32LE(24)).toBe(48000);
+      expect(seed.readUInt32LE(40)).toBe(4);
+      expect(seed.subarray(44)).toEqual(Buffer.alloc(4));
+    }
     for (const channel of [0, 1]) {
       let bestDelay = null, bestError = Infinity;
       for (let delay = 0; delay <= 102; delay++) {
@@ -179,7 +192,14 @@ describe('native source finalization real-media custody', () => {
     expect(packetEvidence.streams).toEqual([expect.objectContaining({ codec_name: 'opus', sample_rate: '48000', channels: 2 })]);
     expect(packetEvidence.packets.length).toBeGreaterThan(600);
     expect(new Set(packetEvidence.packets.map(packet => Number(packet.size)))).toEqual(new Set([480]));
-    expect(new Set(packetEvidence.packets.map(packet => Number(packet.duration_time)))).toEqual(new Set([0.02]));
+    // Container duration may trim the last packet on newer Matroska muxers.
+    // Production now proves actual coded duration from hash-bound Opus bytes;
+    // exact independently decoded sample count below remains the contract.
+    expect(packetEvidence.packets.every(packet => Number(packet.duration_time) > 0 && Number(packet.duration_time) <= 0.02)).toBe(true);
+    expect(result.plan.validation.encodedPacketEvidence).toMatchObject({
+      minPacketSamples: 960, maxPacketSamples: 960, packets: packetEvidence.packets.length,
+      codedSampleEvidence: { method: 'sha256-bound-webm-opus-framing', packets: packetEvidence.packets.length }
+    });
     const audio = await decoded(result.outputPath);
     expect(audio.samples).toBe(Math.round(targetSeconds * 48000));
     for (const channel of [0, 1]) {

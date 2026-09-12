@@ -11,6 +11,19 @@ const CHANNELS = 2;
 const BIT_RATE = 192000;
 const FRAME_DURATION_MS = 20;
 const CODEC_POLICY = 'opus-cbr-192k-20ms-reencoded-from-native-sources';
+
+// One zero-valued stereo PCM frame gives fluent-ffmpeg's production progress
+// probe a real input. A no-input graph crashes that dependency's metadata hook;
+// its lavfi input capability parser also rejects newer FFmpeg device columns.
+function silentFrameWav() {
+  const bytes = Buffer.alloc(48);
+  bytes.write('RIFF'); bytes.writeUInt32LE(40, 4); bytes.write('WAVEfmt ', 8);
+  bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(2, 22);
+  bytes.writeUInt32LE(48000, 24); bytes.writeUInt32LE(192000, 28);
+  bytes.writeUInt16LE(4, 32); bytes.writeUInt16LE(16, 34);
+  bytes.write('data', 36); bytes.writeUInt32LE(4, 40);
+  return bytes;
+}
 const TIMING_TOLERANCE_SAMPLES = 96; // 2 ms: native WebM timestamps have millisecond precision.
 const MAX_DURATION_SECONDS = 31 * 24 * 60 * 60;
 
@@ -384,14 +397,19 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
       if (!totalSamples) throw failure('Native recording timeline is empty');
       const laneFiles = [];
       let sequence = 0;
+      let silenceInput = null;
       for (const plan of plans) {
         if (plan.samples < totalSamples) plan.segments.push({ kind: 'silence', samples: totalSamples - plan.samples });
         const files = [];
         for (const segment of plan.segments) {
           if (segment.kind === 'audio' && segment.samples === segment.originalSamples) { files.push(segment.input); continue; }
           const segmentPath = path.join(scratchDirectory, `segment-${sequence++}.flac`);
+          if (segment.kind === 'silence' && !silenceInput) {
+            silenceInput = path.join(scratchDirectory, 'silence-frame.wav');
+            await writeFileAtomic(silenceInput, silentFrameWav());
+          }
           const command = segment.kind === 'silence'
-            ? ffmpeg().input('anullsrc=r=48000:cl=stereo').inputFormat('lavfi').audioFilters(`atrim=end_sample=${segment.samples}`)
+            ? input(silenceInput).audioFilters(`apad=whole_len=${segment.samples},atrim=end_sample=${segment.samples},asetpts=PTS-STARTPTS`)
             : input(segment.input).audioFilters(`atrim=end_sample=${segment.samples},asetpts=PTS-STARTPTS`);
           await run(lossless(command).output(segmentPath), timeout(segment.samples / RATE), 'Build native timeline segment');
           if (Math.abs(samples(await validDuration(segmentPath, 'flac')) - segment.samples) > 1) throw failure('Native timeline segment has an incorrect length');
