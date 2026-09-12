@@ -8,6 +8,7 @@ const { createNativeSourceFinalization } = require('./native-source-finalization
 const { NATIVE_CAPTURE_MODE, usesNativeSources, readNativeCaptureMarker, markNativeCaptureSession } = require('./native-recording-session');
 const { assessRecordingUpload, FINALIZATION_PENDING_MARKER } = require('./recording-upload-eligibility');
 const { withCaptureWarnings, hydrateHistoryCaptureWarnings } = require('./recording-history-warnings');
+const { createRecordingExporter, repairRecoveredHistoryRecord, assertExportRecoveryReady } = require('./recording-export');
 const { createPcmCapture } = require('./pcm-capture');
 const pcmCaptureEvidence = require('./pcm-capture-evidence');
 const { validateNativeMedia } = require('./native-media-validation');
@@ -731,15 +732,12 @@ async function recoverOrphanedRecordings() {
             const TERMINAL_STATUSES = ['completed', 'uploaded', 'skipped', 'cancelled', 'pending_verification'];
             const terminal = TERMINAL_STATUSES.includes(existing.uploadStatus);
             recordings[existingIndex] = withCaptureWarnings({
-              ...existing,
-              filePath: existing.filePath || result.outputPath,
-              fileSize: existing.fileSize > 0 ? existing.fileSize : recoveredFileSize,
-              duration: existing.duration > 0 ? existing.duration : metadataDuration,
+              ...repairRecoveredHistoryRecord(existing, { ...result, fileSize: recoveredFileSize, duration: metadataDuration }),
               uploadStatus: terminal ? existing.uploadStatus : 'pending',
               recovered: true
             }, getRecordingsPath());
             historyStore.set('recordings', recordings);
-            log.info(`Updated stuck history entry for recovered recording: ${dir} (status ${existing.uploadStatus} -> ${recordings[existingIndex].uploadStatus}, filePath ${existing.filePath ? 'kept' : 'set'})`);
+            log.info(`Updated recovered recording history: ${dir} (status ${existing.uploadStatus} -> ${recordings[existingIndex].uploadStatus}, canonical filePath repaired)`);
             if (!terminal) {
               const finalRec = recordings[existingIndex];
               recoveredForUpload.push({ recordId: dir, filePath: finalRec.filePath, metadata: { duration: String(finalRec.duration || 0), ...(finalRec.prep || {}) } });
@@ -3352,11 +3350,15 @@ ipcMain.handle('recording:combineChunks', async (event, recordId, ext, expectedD
 async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options = {}) {
   const recordPath = getRecordingPath(recordId);
   try {
+    if (options.exportRecovery === true) assertExportRecoveryReady(recordPath, isExportRecoveryBusy(recordId));
     // A failed rebuild must not let automatic upload retries send an older
     // audio.webm. Clear this durable gate only after finalization succeeds.
     const pendingPath = path.join(recordPath, FINALIZATION_PENDING_MARKER);
     await writeFileAtomic(pendingPath, JSON.stringify({ version: 1, startedAt: new Date().toISOString() }));
     const spaceCheck = await canFinalizeRecording(recordPath);
+    // Capture can start while the disk check awaits. Export recovery must
+    // never stop a live AudioTee, even if recording state changed mid-request.
+    if (options.exportRecovery === true) assertExportRecoveryReady(recordPath, isExportRecoveryBusy(recordId));
     if (!spaceCheck.canFinalize) {
       return { success: false, diskFull: true, ...spaceCheck, error: 'Insufficient disk space to finalize recording; source audio is preserved' };
     }
@@ -3421,7 +3423,7 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
   } catch (error) {
     log.error('Recording finalization failed; all source batches retained:', error);
     const diskFull = error.code === 'ENOSPC' || /no space left|not enough space|disk full/i.test(error.message || '');
-    return { success: false, diskFull, requiresRecovery: error.code === 'PCM_CAPTURE_RECOVERY_REQUIRED', error: error.message };
+    return { success: false, diskFull, requiresRecovery: error.code === 'PCM_CAPTURE_RECOVERY_REQUIRED', error: error.message, code: error.code || null };
   }
 }
 
@@ -4817,17 +4819,29 @@ ipcMain.handle('dialog:openFile', async (event, options) => {
   }
 });
 
-// Export/save a recording's audio file to a user-chosen location (Save As).
-// srcPath MUST be a recording inside userData/recordings — validateFilePath
-// enforces that, so this handler can never copy an arbitrary file off disk.
-ipcMain.handle('dialog:saveFile', async (event, srcPath, suggestedName) => {
-  try {
-    const validated = validateFilePath(srcPath); // throws if outside recordings dir
-    await fs.promises.access(validated); // ensure the source still exists on disk
+function isExportRecoveryBusy(recordId) {
+  return isRecordingInProgress || isProcessingRecording || !!unsavedRecordingId || !!activeAudioTee ||
+    isRecoveryRunning || inFlightUploads.has(recordId) || activeRecordingStore.get('lockedRecordings', []).includes(recordId);
+}
 
+const exportRecording = createRecordingExporter({
+  recordingsPath: getRecordingsPath, validateRecordId,
+  getOwner: id => historyStore.get('recordings', []).find(recording => recording.id === id)?.userId,
+  getCurrentUserId: async () => tokenUserId(await getAuthToken()), // Local identity works offline; no token refresh/network.
+  isBusy: isExportRecoveryBusy, isLocked: id => recordingLocks.has(id), withRecordingLock,
+  finalize: id => finalizeRecording(id, '.webm', 0, { recovery: true, exportRecovery: true }),
+  repairHistory: (id, owner, result) => {
+    const recordings = historyStore.get('recordings', []);
+    const index = recordings.findIndex(recording => recording.id === id && recording.userId === owner);
+    if (index < 0) return null;
+    recordings[index] = withCaptureWarnings(repairRecoveredHistoryRecord(recordings[index], result), getRecordingsPath());
+    historyStore.set('recordings', recordings);
+    return recordings[index];
+  },
+  saveAs: async (source, suggestedName) => {
     const result = await dialog.showSaveDialog(mainWindow, {
       title: 'Save Audio',
-      defaultPath: suggestedName || path.basename(validated),
+      defaultPath: suggestedName || path.basename(source),
       filters: [
         { name: 'Audio', extensions: ['webm', 'm4a', 'mp3', 'opus', 'ogg', 'wav', 'aac'] },
         { name: 'All Files', extensions: ['*'] }
@@ -4838,13 +4852,11 @@ ipcMain.handle('dialog:saveFile', async (event, srcPath, suggestedName) => {
       return { success: false, cancelled: true };
     }
 
-    await fs.promises.copyFile(validated, result.filePath);
+    await fs.promises.copyFile(source, result.filePath);
     return { success: true, savedPath: result.filePath };
-  } catch (error) {
-    log.warn('Error saving audio file:', error?.message);
-    return { success: false, error: error.message };
   }
 });
+ipcMain.handle('dialog:saveFile', (event, srcPath, suggestedName) => exportRecording(srcPath, suggestedName));
 
 // Handle dropped file - get file info from path
 ipcMain.handle('dialog:getDroppedFilePath', async (event, filePath) => {

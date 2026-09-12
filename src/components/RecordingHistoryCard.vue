@@ -373,7 +373,7 @@ import { useQuasar } from 'quasar';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useShareLink } from '../composables/useShareLink';
 import { isElectron } from '../utils/platform';
-import { exportAudio } from '../services/export';
+import { exportAudio, buildExportNotice } from '../services/export';
 import { captureMessage } from '../boot/sentry';
 import AudioPlayback from './AudioPlayback.vue';
 
@@ -408,9 +408,10 @@ export default {
     const deleteFile = ref(false);
     const linkLoading = ref(false);
     const exporting = ref(false);
+    const recoveredCaptureWarnings = ref([]);
     const isDesktop = isElectron();
-    const hasCaptureWarnings = computed(() => isDesktop && Array.isArray(props.recording.captureWarnings) &&
-      props.recording.captureWarnings.some(kind => typeof kind === 'string' && kind.trim()));
+    const hasCaptureWarnings = computed(() => isDesktop &&
+      [...(Array.isArray(props.recording.captureWarnings) ? props.recording.captureWarnings : []), ...recoveredCaptureWarnings.value].some(kind => typeof kind === 'string' && kind.trim()));
 
     // A known server ID enables the online actions. It is not proof that the
     // remote audio remains recoverable, so desktop deletion never selects the
@@ -504,18 +505,21 @@ export default {
       exporting.value = true;
       try {
         const res = await exportAudio(props.recording);
+        if (res.recovered && Array.isArray(res.captureWarnings)) recoveredCaptureWarnings.value = res.captureWarnings;
         if (res.success) {
           // Desktop: confirm the save. Mobile: the share sheet is its own
           // feedback, so we stay silent on success.
           if (isDesktop) {
-            $q.notify({ type: 'positive', message: t('exportSaved'), timeout: 2500 });
+            $q.notify(buildExportNotice({ ...res, captureWarnings: [
+              ...(Array.isArray(props.recording.captureWarnings) ? props.recording.captureWarnings : []), ...recoveredCaptureWarnings.value
+            ] }, t));
           }
         } else if (!res.cancelled) {
           // User-cancelled save/share is silent; anything else is an error.
           // Log to Sentry AND surface the underlying reason in the toast so the
           // exact failure is diagnosable both remotely and on-device.
           captureMessage(`export: onExport failure reason=${res.error || 'unknown'}`, 'error');
-          $q.notify({ type: 'negative', message: t('exportFailed'), caption: res.error, timeout: 6000 });
+          $q.notify({ type: 'negative', message: t('exportFailed'), caption: res.message || res.error, timeout: 6000 });
         }
       } catch (e) {
         captureMessage(`export: onExport threw — ${e?.name}: ${e?.message}`, 'error');

@@ -70,6 +70,12 @@ export function buildExportFilename(recording) {
   return `${base}.${ext}`;
 }
 
+export function buildExportNotice(result, translate) {
+  const warning = Array.isArray(result.captureWarnings) && result.captureWarnings.some(kind => typeof kind === 'string' && kind.trim());
+  return { type: warning ? 'warning' : 'positive', message: translate('exportSaved'),
+    ...(warning ? { caption: translate('historyCaptureWarningDescription') } : {}), timeout: warning ? 7000 : 2500 };
+}
+
 /**
  * Export the recording's local audio file.
  * @param {Object} recording - history item; must have a local filePath
