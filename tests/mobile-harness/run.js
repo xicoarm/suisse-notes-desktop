@@ -16,6 +16,8 @@
  *                      recording) → bytes identical on the server → cancel keeps a skipped entry → unpair
  *   m6-crash-recovery  app killed mid-recording → relaunch → recovery combines and queues the upload
  *   m7-repair          reinstall (storage wiped) → the recorder still bound to the user's UUID → pairs again
+ *   m8-sentry-capture  every error type reaches Sentry: uncaught, rejection, Vue, console.error/warn,
+ *                      failed HTTP answers, errors before init, offline queue, unclean exit after a kill
  *   all                everything except m2
  */
 'use strict';
@@ -27,9 +29,10 @@ const { buildScenario } = require('../e2e-harness/lib/audio');
 const { verdict } = require('../e2e-harness/lib/verify');
 const { startMockBackend } = require('../e2e-harness/lib/mock-backend');
 const { startDeviceServer } = require('./lib/device-server');
-const { MobileApp, sleep } = require('./lib/app');
+const { MobileApp, sleep, sentryEventText } = require('./lib/app');
 
 const WORK_DIR = path.join(__dirname, 'work');
+const GRADLE_VERSION_NAME = (/versionName\s+"([^"]+)"/.exec(fs.readFileSync(path.resolve(__dirname, '..', '..', 'src-capacitor', 'android', 'app', 'build.gradle'), 'utf8')) || [])[1];
 const WWW_DIR = path.resolve(__dirname, '..', '..', 'src-capacitor', 'www');
 const argv = process.argv.slice(2);
 const flag = (name, def) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : def; };
@@ -54,7 +57,7 @@ function report(name, result) {
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 
 /** Bring up mock + device server + app for one scenario. */
-async function withApp(name, { scenario = null, recorder = null, bridge = {}, freshProfile = true, mockMode = 'ok' } = {}, fn) {
+async function withApp(name, { scenario = null, recorder = null, bridge = {}, freshProfile = true, mockMode = 'ok', initScripts = [] } = {}, fn) {
   if (!fs.existsSync(path.join(WWW_DIR, 'index.html'))) {
     throw new Error(`No capacitor bundle at ${WWW_DIR} — run: npx quasar build -m capacitor -T android --skip-pkg`);
   }
@@ -64,12 +67,15 @@ async function withApp(name, { scenario = null, recorder = null, bridge = {}, fr
   mock.setMode(mockMode);
   const device = await startDeviceServer({ name, platform: PLATFORM, wwwDir: WWW_DIR });
   if (freshProfile) device.wipe();
-  const app = new MobileApp({ name, device, mock, platform: PLATFORM, fakeAudioWav: scenario?.wavPath, recorder, bridge, headful: HEADFUL });
+  const app = new MobileApp({ name, device, mock, platform: PLATFORM, fakeAudioWav: scenario?.wavPath, recorder, bridge: { version: GRADLE_VERSION_NAME, ...bridge }, headful: HEADFUL, initScripts: [...initScripts] });
   try {
     await app.launch({ freshProfile });
     await app.login();
     const result = await fn(app, mock, device);
     fs.writeFileSync(path.join(WORK_DIR, `requests_${name}_${PLATFORM}.json`), JSON.stringify(mock.state.requests, null, 1));
+    fs.writeFileSync(path.join(WORK_DIR, `sentry_${name}_${PLATFORM}.json`), JSON.stringify(app.sentryEvents().map(e => ({
+      timestamp: e.timestamp, level: e.level, text: sentryEventText(e).slice(0, 200), release: e.release, tags: e.tags, mechanism: e.exception?.values?.[0]?.mechanism, previous_session: e.contexts?.previous_session, extra: e.extra
+    })), null, 1));
     return report(name, result);
   } catch (e) {
     await app.screenshot('crash').catch(() => {});
@@ -127,6 +133,19 @@ async function m0Selftest() {
     if (!(disk > 0)) problems.push('Device.getInfo has no realDiskFree');
     const errors = app.console.filter(l => /^\[error\]|pageerror/.test(l) && !/sentry|favicon/i.test(l));
     notes.push(`console errors: ${errors.length}${errors.length ? ' — ' + errors.slice(0, 3).join(' | ').slice(0, 300) : ''}`);
+    // Rebrand guard: no old product name in visible text, no old domain in links.
+    const brand = [];
+    for (const route of ['/record', '/history', '/device', '/settings', '/about']) {
+      await app.navigate(route);
+      await sleep(1500);
+      const hit = await app.evalTimed(() => ({
+        name: ((document.body.innerText || '').match(/suisse\s*notes/i) || [])[0] || null,
+        link: [...document.querySelectorAll('a[href]')].map(a => a.getAttribute('href')).find(h => /suisse-notes\.ch/i.test(h || '')) || null
+      }));
+      if (hit.name || hit.link) brand.push(`${route}: ${[hit.name, hit.link].filter(Boolean).join(' ')}`);
+    }
+    notes.push(`rebrand guard on /record /history /device /settings /about: ${brand.length ? brand.join('; ') : 'clean'}`);
+    if (brand.length) problems.push(`old brand still visible: ${brand.join('; ')}`);
     return { pass: problems.length === 0, problems, notes };
   });
 }
@@ -460,6 +479,141 @@ async function m7ForeignApp() {
   });
 }
 
+/**
+ * Every kind of error must reach Sentry — in the real bundle, through the real
+ * SDK transport — with the right release, redacted, sampled under a flood,
+ * queued while offline and reported after the app was killed on screen.
+ */
+async function m8SentryCapture() {
+  // Triggers live in a regular page script: Chrome treats code compiled by a
+  // DevTools evaluation as cross-origin ("muted") and never dispatches window
+  // error / unhandledrejection events for it — a real app error is not muted.
+  const hooks = () => {
+    window.__mh = {
+      throwLater(msg) { setTimeout(() => { throw new Error(msg); }, 0); },
+      rejectLater(msg) { setTimeout(() => { Promise.reject(new Error(msg)); }, 0); }
+    };
+  };
+  return withApp('m8-sentry-capture', { initScripts: [hooks] }, async (app) => {
+    const problems = [], notes = [];
+    const expectedRelease = `ch.suissenotes.mobile@${GRADLE_VERSION_NAME}`;
+    const waitEvent = (label, re, timeoutMs = 30_000) =>
+      app.waitFor(async () => (app.findSentryEvents(re).length ? app.findSentryEvents(re) : null), { timeoutMs, every: 500, label }).catch(() => null);
+
+    // Let the boot settle, then trigger each capture path from inside the page.
+    await sleep(3000);
+    notes.push(`rejection handler: ${await app.evalTimed(() => `${typeof window.onunhandledrejection} instrumented=${!!window.onunhandledrejection?.__SENTRY_INSTRUMENTED__} src=${String(window.onunhandledrejection).slice(0, 120)}`)}`);
+    await app.evalTimed(() => { window.__mh.throwLater('mh-uncaught-window-error'); return true; });
+    await app.evalTimed(() => { window.__mh.rejectLater('mh-unhandled-rejection'); return true; });
+    await app.evalTimed(() => {
+      console.error('mh: upload step failed', new Error('mh-console-error-object'));
+      console.error('mh-console-error-text for record 4711');
+      console.warn('mh-console-warn: keepalive failed');
+    });
+    await app.evalTimed(() => {
+      const vueApp = document.querySelector('#q-app')?.__vue_app__;
+      if (!vueApp?.config?.errorHandler) return 'no vue error handler installed';
+      try {
+        vueApp.config.errorHandler(new Error('mh-vue-component-error'), null, 'harness hook');
+      } catch (e) {
+        // Sentry's handler captures, then rethrows for Vue to log when the app has no own handler.
+        if (e?.message !== 'mh-vue-component-error') return `handler threw: ${e?.message}`;
+      }
+      return 'ok';
+    }).then((r) => { if (r !== 'ok') problems.push(`Vue error handler: ${r}`); });
+    await app.evalTimed(async () => {
+      for (const s of [500, 404, 413, 401, 402, 409]) await fetch(`https://app.suisse-meets.ch/api/__mh/status/${s}`).catch(() => null);
+      return true;
+    });
+
+    const expectations = [
+      ['uncaught window error', /mh-uncaught-window-error/],
+      ['unhandled promise rejection', /mh-unhandled-rejection/],
+      ['console.error with an Error', /mh-console-error-object/],
+      ['console.error with text', /mh-console-error-text/],
+      ['console.warn', /mh-console-warn/],
+      ['Vue component error', /mh-vue-component-error/],
+      ['HTTP 500 answer', /status code: 500/],
+      ['HTTP 404 answer', /status code: 404/],
+      ['HTTP 413 answer', /status code: 413/]
+    ];
+    for (const [label, re] of expectations) {
+      const hit = await waitEvent(label, re, 20_000);
+      if (!hit) problems.push(`NOT captured: ${label}`);
+    }
+    await sleep(2000);
+    for (const s of [401, 402, 409]) {
+      if (app.findSentryEvents(new RegExp(`status code: ${s}\\b`)).length) problems.push(`HTTP ${s} is part of normal operation but was captured`);
+    }
+    const warn = app.findSentryEvents(/mh-console-warn/)[0];
+    if (warn && warn.level !== 'warning') problems.push(`console.warn captured with level ${warn.level}`);
+    const http500 = app.findSentryEvents(/status code: 500/)[0];
+    if (http500 && http500.exception?.values?.[0]?.mechanism?.handled !== true) problems.push('HTTP 500 counted as an unhandled crash');
+
+    // Flood: 60 identical failures → the first 5, then 8th, 16th, 32nd.
+    await app.evalTimed(() => { for (let i = 0; i < 60; i++) console.error(`mh-flood tick ${i}`); });
+    await sleep(4000);
+    const flood = app.findSentryEvents(/mh-flood tick/).length;
+    notes.push(`flood of 60 identical errors → ${flood} events`);
+    if (flood < 5 || flood > 9) problems.push(`flood sampling wrong: ${flood} events for 60 occurrences (expected 8)`);
+
+    // Offline: ingest unreachable → queued → delivered after reconnect.
+    app.sentryOffline = true;
+    await app.evalTimed(() => { console.error('mh-offline-error while the phone has no network'); });
+    await sleep(4000);
+    const leaked = app.findSentryEvents(/mh-offline-error/).length;
+    app.sentryOffline = false;
+    await app.evalTimed(() => { window.dispatchEvent(new Event('online')); });
+    const offline = await waitEvent('offline event after reconnect', /mh-offline-error/, 60_000);
+    notes.push(`offline event: ${leaked ? 'delivered while offline (test invalid)' : (offline ? 'queued, delivered after reconnect' : 'LOST')}`);
+    if (!offline) problems.push('an error raised offline never reached Sentry (offline queue missing)');
+
+    // Release, environment, dist and redaction on everything captured so far.
+    const events = app.sentryEvents();
+    const wrongRelease = events.filter(e => e.release !== expectedRelease);
+    if (wrongRelease.length) problems.push(`${wrongRelease.length} event(s) with release ${[...new Set(wrongRelease.map(e => e.release))].join(',')} (expected ${expectedRelease})`);
+    if (events.some(e => e.environment !== 'production')) problems.push('event environment is not production');
+    if (events.some(e => e.dist !== PLATFORM)) problems.push(`event dist is not ${PLATFORM}`);
+    const raw = app.sentryEnvelopes.map(e => e.raw).join('\n');
+    if (/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/.test(raw) || /Bearer\s+[A-Za-z0-9._-]{8,}/.test(raw)) problems.push('a token left the phone inside a Sentry envelope');
+
+    // Unclean exit: killed while on screen → reported once on the next launch;
+    // an error raised during that boot is captured too.
+    const bootError = () => {
+      document.addEventListener('DOMContentLoaded', () => { Promise.reject(new Error('mh-error-during-boot')); });
+    };
+    app.initScripts.push(bootError);
+    await sleep(1500);
+    await app.kill();
+    await app.relaunch();
+    await app.login();
+    const unclean = await waitEvent('unclean-exit report', /previous session ended unexpectedly/, 60_000);
+    if (!unclean) problems.push('an app killed on screen was not reported on the next launch');
+    else notes.push(`unclean exit reported: ${JSON.stringify(unclean[0].contexts?.previous_session || {})}`);
+    const bootErr = await waitEvent('error during boot', /mh-error-during-boot/, 30_000);
+    if (!bootErr) problems.push('an error raised during boot was not captured');
+    else notes.push(`boot error captured via ${bootErr[0].tags?.phase === 'boot' ? 'early buffer' : 'global handler'}`);
+
+    // Control: leaving the screen normally, then killed in the background → nothing reported.
+    app.initScripts.splice(app.initScripts.indexOf(bootError), 1);
+    await app.harness('h.setAppActive(false); return true');
+    // Chromium commits localStorage to disk in batches (~5 s); a phone's
+    // Preferences write is immediate. Let the commit happen before the kill.
+    await sleep(7000);
+    const uncleanBefore = app.findSentryEvents(/previous session ended unexpectedly/).length;
+    await app.kill();
+    await app.relaunch();
+    await app.login();
+    await sleep(8000);
+    const uncleanAfter = app.findSentryEvents(/previous session ended unexpectedly/).length;
+    if (uncleanAfter !== uncleanBefore) problems.push('a normal background kill was reported as an unclean exit');
+
+    const titles = [...new Set(app.sentryEvents().map(e => `${e.level}: ${sentryEventText(e).slice(0, 90)}`))];
+    notes.push(`distinct events captured (${titles.length}): ${titles.filter(t => !/mh-|status code/.test(t)).slice(0, 12).join(' || ') || 'only the triggered ones'}`);
+    return { pass: problems.length === 0, problems, notes };
+  });
+}
+
 const SCENARIOS = {
   'm0-selftest': m0Selftest,
   'm1-baseline': m1Baseline,
@@ -468,7 +622,8 @@ const SCENARIOS = {
   'm4-delete-after-upload': m4DeleteAfterUpload,
   'm5-recorder-sync': m5RecorderSync,
   'm6-crash-recovery': m6CrashRecovery,
-  'm7-repair': m7Repair
+  'm7-repair': m7Repair,
+  'm8-sentry-capture': m8SentryCapture
 };
 
 (async () => {

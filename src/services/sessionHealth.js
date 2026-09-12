@@ -22,37 +22,40 @@ let current = null;
 let heartbeat = null;
 let saveTimer = null;
 
-async function preferences() {
-  try {
-    const { Preferences } = await import('@capacitor/preferences');
-    return Preferences;
-  } catch {
-    return null;
-  }
+// NOTE: never return the Capacitor plugin object from an async function or
+// resolve a promise with it — promise resolution reads `.then`, which the
+// plugin proxy turns into a native call ("Preferences.then() is not
+// implemented") and the promise rejects. Call the method inside instead.
+async function preferencesCall(method, options) {
+  const mod = await import('@capacitor/preferences');
+  return mod.Preferences[method](options);
 }
 
+const parse = (raw) => {
+  try { return raw ? JSON.parse(raw) : null; } catch { return null; }
+};
+
 async function load() {
-  const prefs = await preferences();
+  let fromPrefs = null;
+  let fromLocal = null;
   try {
-    if (prefs) {
-      const { value } = await prefs.get({ key: KEY });
-      if (value) return JSON.parse(value);
-    }
-  } catch { /* fall back to localStorage */ }
-  try {
-    const raw = localStorage.getItem(KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
+    const { value } = await preferencesCall('get', { key: KEY });
+    fromPrefs = parse(value);
+  } catch { /* bridge unavailable */ }
+  try { fromLocal = parse(localStorage.getItem(KEY)); } catch { /* storage unavailable */ }
+  if (fromPrefs && fromLocal) return (fromLocal.writtenAt || 0) > (fromPrefs.writtenAt || 0) ? fromLocal : fromPrefs;
+  return fromPrefs || fromLocal;
 }
+
+let writeSeq = 0;
 
 async function save() {
   if (!current) return;
+  // Monotonic stamp even when two saves share a millisecond.
+  current.writtenAt = Math.max(Date.now(), (current.writtenAt || 0) + 1, ++writeSeq);
   const value = JSON.stringify(current);
   try { localStorage.setItem(KEY, value); } catch { /* storage unavailable */ }
-  const prefs = await preferences();
-  try { if (prefs) await prefs.set({ key: KEY, value }); } catch { /* bridge unavailable */ }
+  try { await preferencesCall('set', { key: KEY, value }); } catch { /* bridge unavailable */ }
 }
 
 /**

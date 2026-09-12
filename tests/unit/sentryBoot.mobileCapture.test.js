@@ -55,7 +55,7 @@ describe('mobile Sentry init — capture wiring', () => {
     const o = h.calls.init;
     expect(o).toBeTruthy();
     expect(o.sampleRate).toBe(1.0);
-    expect(o.attachStacktrace).toBe(true);
+    expect(o.attachStacktrace).toBeUndefined();
     expect(o.release).toBe('ch.suissenotes.mobile@3.9.38');
     expect(o.dist).toBe('android');
     expect(h.calls.offlineWrappedWith).toBe(h.sentry.makeFetchTransport);

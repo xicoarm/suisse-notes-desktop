@@ -259,7 +259,10 @@ async function initCapacitor(app, router) {
   // MARKETING_VERSION follows in lock-step — the same value the source maps
   // are uploaded under), so init never waits on a native call. Builds without
   // the constant (dev, unit tests) fall back to the native version.
-  const buildVersion = (typeof process !== 'undefined' && process.env?.MOBILE_APP_VERSION) || '';
+  // Literal `process.env.MOBILE_APP_VERSION`: the build replaces this exact
+  // expression (there is no `process` object at runtime — optional chaining or
+  // a typeof guard would silently fall back to the native version).
+  const buildVersion = process.env.MOBILE_APP_VERSION || '';
   let appVersion = buildVersion || 'unknown';
   if (!buildVersion) {
     try {
@@ -292,7 +295,9 @@ async function initCapacitor(app, router) {
       release: `ch.suissenotes.mobile@${appVersion}`,
       dist: platform,
       sampleRate: 1.0,
-      attachStacktrace: true,
+      // attachStacktrace stays off on purpose: with it, message events are
+      // grouped by call site instead of by text, which merges distinct
+      // problems logged from one helper into a single issue.
       maxBreadcrumbs: 100,
       transport: SentryVue.makeBrowserOfflineTransport(SentryVue.makeFetchTransport),
       transportOptions: { dbName: 'suisse-sentry-offline', maxQueueSize: 100, flushAtStartup: true },

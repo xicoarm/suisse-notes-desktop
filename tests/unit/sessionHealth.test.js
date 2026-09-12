@@ -3,12 +3,21 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 // Native Preferences survive a crash of the app process; emulate them with a
 // Map that outlives the module under test (a "relaunch" re-imports it).
 const h = vi.hoisted(() => ({ prefs: new Map(), failPrefs: false }));
-vi.mock('@capacitor/preferences', () => ({
-  Preferences: {
+vi.mock('@capacitor/preferences', () => {
+  const impl = {
     async get({ key }) { if (h.failPrefs) throw new Error('bridge down'); return { value: h.prefs.has(key) ? h.prefs.get(key) : null }; },
     async set({ key, value }) { if (h.failPrefs) throw new Error('bridge down'); h.prefs.set(key, value); }
-  }
-}));
+  };
+  // Like Capacitor's registerPlugin proxy: EVERY property is a native method,
+  // including `then` — returning the plugin from an async function rejects.
+  const Preferences = new Proxy(impl, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      return () => { throw new Error(`"Preferences.${String(prop)}()" is not implemented on android`); };
+    }
+  });
+  return { Preferences };
+});
 
 async function launch() {
   vi.resetModules();
@@ -20,6 +29,15 @@ describe('sessionHealth — unclean exit detection', () => {
     h.prefs.clear();
     h.failPrefs = false;
     localStorage.clear();
+  });
+
+  it('really persists through the plugin (not only the localStorage fallback)', async () => {
+    const m = await launch();
+    await m.startSessionHealth({ appVersion: '3.9.38', platform: 'android' });
+    expect(h.prefs.get('suisse_session_health_v1')).toContain('"state":"foreground"');
+    await m.markSessionState(false);
+    expect(h.prefs.get('suisse_session_health_v1')).toContain('"state":"background"');
+    m._resetSessionHealthForTests();
   });
 
   it('first launch reports nothing', async () => {
@@ -80,6 +98,18 @@ describe('sessionHealth — unclean exit detection', () => {
     m = await launch();
     const verdict = await m.startSessionHealth({ appVersion: '3.9.38', platform: 'android' });
     expect(verdict).toMatchObject({ platform: 'android' });
+    m._resetSessionHealthForTests();
+  });
+
+  it('the newer of the two stores wins (a save that reached only localStorage)', async () => {
+    let m = await launch();
+    await m.startSessionHealth({ appVersion: '3.9.38', platform: 'android' });
+    m._resetSessionHealthForTests();
+    // Process died after localStorage got "background" but before the plugin write.
+    const stale = JSON.parse(h.prefs.get('suisse_session_health_v1'));
+    localStorage.setItem('suisse_session_health_v1', JSON.stringify({ ...stale, state: 'background', writtenAt: stale.writtenAt + 5 }));
+    m = await launch();
+    expect(await m.startSessionHealth({ appVersion: '3.9.38', platform: 'android' })).toBeNull();
     m._resetSessionHealthForTests();
   });
 

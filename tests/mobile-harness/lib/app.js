@@ -16,6 +16,26 @@ const { installVirtualRecorder } = require('./virtual-recorder');
 const WORK_DIR = path.join(__dirname, '..', 'work');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+/** Sentry envelope: header line, then (item header, payload) line pairs. */
+function parseEnvelope(body) {
+  const lines = String(body || '').split('\n');
+  const items = [];
+  for (let i = 1; i + 1 < lines.length; i += 2) {
+    let header;
+    try { header = JSON.parse(lines[i]); } catch { break; }
+    let payload = lines[i + 1];
+    try { payload = JSON.parse(payload); } catch { /* binary or plain item */ }
+    items.push({ type: header.type, payload });
+  }
+  return items;
+}
+
+/** Searchable text of a Sentry event: message, log entry and exception values. */
+function sentryEventText(ev) {
+  return [ev?.message, ev?.logentry?.message, ...(ev?.exception?.values || []).map(v => `${v.type}: ${v.value}`)]
+    .filter(Boolean).join(' | ');
+}
+
 function findChrome() {
   const env = process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH;
   if (env && fs.existsSync(env)) return env;
@@ -60,6 +80,12 @@ class MobileApp {
     this.page = null;
     this.console = [];
     this.apiHost = opts.apiHost || 'app.suisse-meets.ch';
+    // Every envelope the app sends to Sentry (the ingest itself is stubbed).
+    this.sentryEnvelopes = [];
+    // true = Sentry ingest unreachable (requests fail like a phone without network).
+    this.sentryOffline = false;
+    // Extra scripts injected before the app's own code on every launch.
+    this.initScripts = opts.initScripts || [];
   }
 
   async launch({ freshProfile = true } = {}) {
@@ -92,22 +118,36 @@ class MobileApp {
     await this._installInterception();
     await this.page.evaluateOnNewDocument(installVirtualRecorder, this.recorderCfg);
     await this.page.evaluateOnNewDocument(installBridge, { platform: this.platform, deviceUrl: this.device.url, ...this.bridgeCfg });
+    for (const script of this.initScripts) await this.page.evaluateOnNewDocument(script);
     await this.page.goto(`${this.device.url}/`, { waitUntil: 'domcontentloaded' });
     await this.waitForStablePage();
     return this;
   }
 
-  /** Production API host → mock backend; Sentry ingest → swallowed. */
+  /** Production API host → mock backend; Sentry ingest → recorded (or unreachable on demand). */
   async _installInterception() {
     await this.page.setRequestInterception(true);
     this.page.on('request', (req) => {
       const url = req.url();
       try {
         const u = new URL(url);
-        if (u.hostname === this.apiHost || u.hostname === 'app.suisse-notes.ch') {
+        const isApiHost = u.hostname === this.apiHost || u.hostname === 'app.suisse-notes.ch';
+        // Scenario hook: /api/__mh/status/<code> answers with that HTTP status.
+        if (isApiHost && u.pathname.startsWith('/api/__mh/status/')) {
+          const status = parseInt(u.pathname.split('/').pop(), 10) || 500;
+          return req.respond({ status, contentType: 'text/plain', headers: { 'Access-Control-Allow-Origin': '*' }, body: `harness status ${status}` });
+        }
+        if (isApiHost) {
           return req.continue({ url: `${this.mock.url}${u.pathname}${u.search}` });
         }
         if (/sentry\.io$/.test(u.hostname) || u.hostname.endsWith('.ingest.de.sentry.io')) {
+          if (req.method() === 'OPTIONS') {
+            return req.respond({ status: 200, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS' }, body: '' });
+          }
+          if (this.sentryOffline) return req.abort('internetdisconnected');
+          let body = '';
+          try { body = req.postData() || ''; } catch { body = ''; }
+          this.sentryEnvelopes.push({ at: Date.now(), size: body.length, items: parseEnvelope(body), raw: body });
           return req.respond({ status: 200, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*' }, body: '{}' });
         }
         if (u.protocol === 'capacitor:') {
@@ -119,6 +159,15 @@ class MobileApp {
       } catch { /* non-URL */ }
       return req.continue();
     });
+  }
+
+  /** Error/message events the app delivered to Sentry. */
+  sentryEvents() {
+    return this.sentryEnvelopes.flatMap(e => e.items.filter(i => i.type === 'event' && i.payload && typeof i.payload === 'object').map(i => i.payload));
+  }
+
+  findSentryEvents(re) {
+    return this.sentryEvents().filter(ev => re.test(sentryEventText(ev)));
   }
 
   async waitForStablePage(timeoutMs = 90_000) {
@@ -270,18 +319,33 @@ class MobileApp {
     throw new Error(`Timed out waiting for ${label}`);
   }
 
-  /** "App killed by the OS": SIGKILL the browser (no unload handlers run). */
+  /** "App killed by the OS": kill the browser hard (no unload handlers run). */
   async kill() {
     const proc = this.browser?.process();
+    const pid = proc?.pid;
+    // Windows: TerminateProcess on the main process leaves the renderer/GPU
+    // children holding the profile lock — kill the whole tree first.
+    if (process.platform === 'win32' && pid) {
+      try { require('child_process').execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' }); } catch { /* already gone */ }
+    }
     try { proc?.kill('SIGKILL'); } catch { /* already gone */ }
-    await new Promise(r => setTimeout(r, 1500));
+    const deadline = Date.now() + 15_000;
+    while (proc && proc.exitCode === null && proc.signalCode === null && Date.now() < deadline) await sleep(200);
+    await sleep(1500);
     this.browser = null;
     this.page = null;
   }
 
   /** Relaunch on the same phone: profile (preferences, session) + VFS persist. */
   async relaunch() {
-    if (!this.browser) return this.launch({ freshProfile: false });
+    if (!this.browser) {
+      for (let attempt = 1; ; attempt++) {
+        try { return await this.launch({ freshProfile: false }); } catch (e) {
+          if (attempt >= 4 || !/already running/i.test(e.message)) throw e;
+          await sleep(3000); // profile lock of the killed browser not released yet
+        }
+      }
+    }
     await this.page.goto(`${this.device.url}/`, { waitUntil: 'domcontentloaded' });
     await this.waitForStablePage();
     return this;
@@ -306,4 +370,4 @@ class MobileApp {
   }
 }
 
-module.exports = { MobileApp, sleep, findChrome };
+module.exports = { MobileApp, sleep, findChrome, sentryEventText, parseEnvelope };
