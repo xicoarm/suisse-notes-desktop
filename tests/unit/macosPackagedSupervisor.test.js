@@ -78,7 +78,8 @@ describe('packaged pre-record attestation hook', () => {
       if (name === './lib/app-driver') return { AppDriver: Driver };
       if (name === './lib/mock-backend') return { startMockBackend: async () => ({ url: 'http://localhost:3000', close: async () => calls.push('mock-close') }) };
       if (name === './lib/audio') return { WORK_DIR: root, buildCodedScenario: () => ({ wavPath: 'fake.wav', metaPath: 'fake.json' }) };
-      if (name === './lib/coded-audio' || name === './lib/native-recorder-evidence' || name === '../../src-electron/native-source-persistence') return {};
+      if (['./lib/coded-audio', './lib/native-recorder-evidence', './lib/native-timestamps',
+        '../../src-electron/native-source-persistence', '../../src-electron/durable-files'].includes(name)) return {};
       return nativeRequire(name);
     };
     vm.runInNewContext(fs.readFileSync(path.resolve('tests/e2e-harness/qualification.js'), 'utf8'), { require: fakeRequire, module, console, process: { env: {} } });

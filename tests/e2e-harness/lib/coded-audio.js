@@ -158,19 +158,81 @@ function decodeWindow(samples, offset) {
   return Math.imul((code - 17) & 65535, inverse) & 65535;
 }
 
-function createAnalyzer() {
-  let bytes = Buffer.alloc(0), tail = new Float32Array(0), sampleBase = 0, totalSamples = 0;
+// One hop of guard on each side of a declared pause absorbs the 20 ms Opus
+// frame boundary and codec ringing at the silence edges.
+const PAUSE_GUARD_SECONDS = HOP_SECONDS;
+// Materialized holes are digital silence. Decoded Opus silence stays far
+// below this after codec noise, while the coded signal's RMS is about 0.15.
+const PAUSE_SILENCE_RMS = 0.003;
+
+function normalizePauses(pauses) {
+  if (pauses === undefined || pauses === null) return [];
+  if (!Array.isArray(pauses)) throw new Error('Expected pauses must be an array of { startS, lengthS }');
+  const list = pauses.map(pause => {
+    const startS = Number(pause?.startS), lengthS = Number(pause?.lengthS);
+    if (!Number.isFinite(startS) || !Number.isFinite(lengthS) || startS < 0 || lengthS <= 0) {
+      throw new Error('Expected pauses need a finite non-negative startS and a positive lengthS');
+    }
+    return { startS, lengthS, endS: startS + lengthS };
+  }).sort((a, b) => a.startS - b.startS);
+  for (let i = 1; i < list.length; i++) {
+    if (list[i].startS < list[i - 1].endS - TIMING_EPSILON_SECONDS) throw new Error('Expected pauses overlap');
+  }
+  return list;
+}
+
+/**
+ * options.pauses: sorted, non-overlapping intervals (seconds on the decoded
+ * timeline) that the source itself never delivered — Chromium's hosted fake
+ * microphone skips late buffers while its clock advances — and that native
+ * finalization materialized as silence. Their samples are spliced out before
+ * windowing, which restores the consecutive delivered content even where
+ * several holes fall within one numbered frame, and their interior energy is
+ * measured so a declared pause that carries audio is rejected. The unchanged
+ * identity, order, spacing and span checks then judge the delivered content.
+ * Without pauses the analysis is byte-for-byte the old one.
+ */
+function createAnalyzer(options = {}) {
+  const pauses = normalizePauses(options.pauses).map(pause => ({ ...pause,
+    startSample: Math.round(pause.startS * ANALYSIS_RATE), endSample: Math.round(pause.endS * ANALYSIS_RATE),
+    interiorSamples: 0, energy: 0, peak: 0 }));
+  const guard = Math.round(PAUSE_GUARD_SECONDS * ANALYSIS_RATE);
+  let pauseIndex = 0;
+  let bytes = Buffer.alloc(0), tail = new Float32Array(0), sampleBase = 0, totalSamples = 0, contentSamples = 0;
   let active = null;
   const groups = [];
   const finishGroup = () => { if (active) groups.push(active); active = null; };
+  // Drop decoded samples inside declared pauses; keep their interior energy.
+  const splice = (incoming, firstSample) => {
+    if (pauseIndex >= pauses.length) return incoming;
+    const kept = new Float32Array(incoming.length);
+    let written = 0;
+    for (let i = 0; i < incoming.length; i++) {
+      const position = firstSample + i;
+      while (pauseIndex < pauses.length && position >= pauses[pauseIndex].endSample) pauseIndex++;
+      const pause = pauseIndex < pauses.length ? pauses[pauseIndex] : null;
+      if (pause && position >= pause.startSample) {
+        if (position >= pause.startSample + guard && position < pause.endSample - guard) {
+          const value = incoming[i];
+          pause.interiorSamples++; pause.energy += value * value; pause.peak = Math.max(pause.peak, Math.abs(value));
+        }
+        continue;
+      }
+      kept[written++] = incoming[i];
+    }
+    return written === incoming.length ? incoming : kept.subarray(0, written);
+  };
   return {
     feed(chunk) {
       bytes = Buffer.concat([bytes, chunk]);
       const count = Math.floor(bytes.length / 4);
-      const samples = new Float32Array(tail.length + count);
-      samples.set(tail);
-      for (let i = 0; i < count; i++) samples[tail.length + i] = bytes.readFloatLE(i * 4);
-      totalSamples += count; bytes = Buffer.from(bytes.subarray(count * 4));
+      const incoming = new Float32Array(count);
+      for (let i = 0; i < count; i++) incoming[i] = bytes.readFloatLE(i * 4);
+      bytes = Buffer.from(bytes.subarray(count * 4));
+      const content = splice(incoming, totalSamples);
+      totalSamples += count; contentSamples += content.length;
+      const samples = new Float32Array(tail.length + content.length);
+      samples.set(tail); samples.set(content, tail.length);
       let offset = 0;
       while (offset + WINDOW <= samples.length) {
         const id = decodeWindow(samples, offset);
@@ -186,14 +248,19 @@ function createAnalyzer() {
     },
     finish() {
       finishGroup();
-      return { durationS: totalSamples / ANALYSIS_RATE, groups: groups.filter(group => group.windows >= 2),
-        rejectedGroups: groups.filter(group => group.windows < 2).length };
+      return { durationS: totalSamples / ANALYSIS_RATE, contentDurationS: contentSamples / ANALYSIS_RATE,
+        groups: groups.filter(group => group.windows >= 2), rejectedGroups: groups.filter(group => group.windows < 2).length,
+        ...(pauses.length ? { pauses: pauses.map(pause => {
+          const rms = pause.interiorSamples ? Math.sqrt(pause.energy / pause.interiorSamples) : null;
+          return { startS: pause.startS, lengthS: pause.lengthS, interiorSamples: pause.interiorSamples, rms, peak: pause.peak,
+            silent: pause.interiorSamples >= WINDOW ? rms <= PAUSE_SILENCE_RMS : null };
+        }) } : {}) };
     },
   };
 }
 
-async function analyzeCodedAudio(filePath) {
-  const analyzer = createAnalyzer();
+async function analyzeCodedAudio(filePath, options = {}) {
+  const analyzer = createAnalyzer({ pauses: options.pauses });
   const child = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-i', filePath,
     '-vn', '-ac', '1', '-ar', String(ANALYSIS_RATE), '-f', 'f32le', 'pipe:1'], { windowsHide: true });
   let stderr = '';
@@ -218,7 +285,11 @@ async function analyzeCodedAudio(filePath) {
  */
 async function verifyCodedAudio(filePath, scenario, expectations = {}) {
   if (scenario.coded?.version !== 1) throw new Error('Unsupported coded reference');
-  const analysis = await analyzeCodedAudio(filePath);
+  // expectations.expectedPauses: measured native timestamp holes that the
+  // finalizer materialized as silence (see createAnalyzer). They never widen a
+  // tolerance; the delivered content is still required to be continuous.
+  const pauses = normalizePauses(expectations.expectedPauses);
+  const analysis = await analyzeCodedAudio(filePath, pauses.length ? { pauses } : {});
   const problems = [];
   const notes = [];
   const groups = analysis.groups;
@@ -263,13 +334,20 @@ async function verifyCodedAudio(filePath, scenario, expectations = {}) {
   const first = groups[0], last = groups[groups.length - 1];
   const offsets = groups.slice(1, -1).map(group => (group.id + 0.5) * frameSeconds - (group.start + group.end) / 2).sort((a, b) => a - b);
   const sourceOffsetS = offsets.length ? offsets[Math.floor(offsets.length / 2)] : null;
+  if (pauses.length) {
+    for (const pause of analysis.pauses || []) {
+      if (pause.silent === false) problems.push(`PAUSE NOT SILENT: ${pause.startS.toFixed(3)}s+${pause.lengthS.toFixed(3)}s has interior RMS ${pause.rms.toFixed(4)}`);
+    }
+    notes.push(`${pauses.length} declared source pause(s) totaling ${pauses.reduce((total, pause) => total + pause.lengthS, 0).toFixed(3)}s were removed from the content timeline before identity/timing checks; pauses of at least ${(WINDOW_SECONDS + 2 * PAUSE_GUARD_SECONDS).toFixed(2)}s must decode as silence.`);
+  }
   notes.push('Identity/order checked independently of duration and energy; first/last partial frames tolerated.');
   notes.push('Resolution: 0.5-second identities, 80ms spectral windows; this does not certify every individual audio sample.');
-  return { pass: problems.length === 0, problems, notes, durationS: analysis.durationS, sourceOffsetS,
+  return { pass: problems.length === 0, problems, notes, durationS: analysis.durationS,
+    contentDurationS: analysis.contentDurationS ?? analysis.durationS, sourceOffsetS,
     identifiedFrames: groups.length, firstFrame: first?.id ?? null, lastFrame: last?.id ?? null,
     firstIdentifiedStartS: first?.start ?? null, lastIdentifiedEndS: last?.end ?? null,
-    decoderWarnings: analysis.decoderWarnings, rejectedGroups: analysis.rejectedGroups };
+    decoderWarnings: analysis.decoderWarnings, rejectedGroups: analysis.rejectedGroups, pauses: analysis.pauses ?? null };
 }
 
 module.exports = { buildCodedScenario, verifyCodedAudio, analyzeCodedAudio, symbolsForFrame,
-  SAMPLE_RATE, FRAME_SECONDS, ANALYSIS_RATE };
+  SAMPLE_RATE, FRAME_SECONDS, ANALYSIS_RATE, PAUSE_SILENCE_RMS, PAUSE_GUARD_SECONDS };

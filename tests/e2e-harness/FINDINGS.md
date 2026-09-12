@@ -603,3 +603,15 @@ Test-harness fixes shipped alongside: `confirmDead()` (retry before declaring
 death), renderer memory/DOM instrumentation, CDP-free `verify-longrun.js`,
 chunk-count completion (sleep-proof), and E2E auto-update gate
 (`SUISSE_E2E_HOOKS`) so a test build never self-updates to a new release mid-run.
+
+
+---
+
+## H-004 — Harness: hosted fake microphone pauses its waveform behind timestamp holes (FIXED in the oracle, 2026-09-12)
+
+- **Type:** harness/environment finding, not an app defect · **Status:** fixed (oracle models the pauses)
+- **Scenarios:** s11 renderer-stall (Windows runs 34682725721, 34689957816; Intel 34684148755), native mixer suspension (Apple Silicon 34689957816, Intel 34686326960), s15 crash (Intel 34689957816, Apple Silicon 34686326960).
+- **Evidence:** `work/native-preservation/TIMESTAMP-HOLES-ROOT-CAUSE-20260912.md` and `ci-34689957816/REPORT.md`.
+- Every failing case had a native original that passed the as-is content oracle (all half-second identities, full spans) while its packet timestamps contained forward holes in 10 ms multiples (0.94 s / 1.47 s Windows, 0.11 s Apple Silicon, 0.05 s Intel). Recorder wall time equalled decoded PCM plus holes. Chromium 120's `FakeAudioWorker::DoRead` skips late intervals and hands the stream the scheduled read time; `FileSource::OnMoreData` advances the WAV cursor only for callbacks that ran. The finalizer materializes the holes as silence (correct for real devices), and the old oracle labelled that silence as duplicated/reordered/incomplete markers, alignment drift or excess duration.
+- **Fix:** `lib/native-timestamps.js` measures holes from the original's packet timestamps; `lib/coded-audio.js` accepts `expectedPauses`, removes them from the content timeline and requires them to decode as silence. s11 now also runs the strict as-is oracle on the native original (previously only bytes/chunk counts), cross-checks the plan's gap accounting and the recorder wall clock. No tolerance changed. The old `APP-DEFECT` candidates written for these cases (`DUPLICATED FRAME 32`) were this detector label.
+- **Still open, separately:** five-hour Windows marker 1153 (native original itself shortened: real loss upstream of the cursor) and live-mix dropout; Apple Silicon five-hour acquisition-clock mismatch from the lazy 1.76 GB WAV load; Intel five-hour finalization budget.

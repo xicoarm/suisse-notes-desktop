@@ -194,4 +194,39 @@ describe('numbered-frame synthetic audio oracle', () => {
     const result = await verifyCodedAudio(encode(mixed.wavPath, 'mixed'), mixed, { expectedDurationS: 10 });
     expect(result.problems).toEqual([]);
   });
+
+  // Hosted fake-microphone pauses: the finalizer materializes the source's own
+  // timestamp holes as silence. Declared pauses are removed from the content
+  // timeline and must be silent; undeclared silence still fails.
+  it('removes declared silent pauses from the content timeline but still rejects undeclared ones', async () => {
+    const paused = writeWave('paused', Buffer.concat([region(0, 5.2), Buffer.alloc(Math.round(0.3 * SAMPLE_RATE) * 2), region(5.2, 12)]));
+    const file = encode(paused, 'paused');
+    const undeclared = await verifyCodedAudio(file, scenario, { expectedDurationS: 12.3 });
+    expect(undeclared.pass).toBe(false);
+    expect(undeclared.problems.some(problem => /DUPLICATED FRAME 10|INTERIOR TIMING: frames 10|INCOMPLETE OR REPEATED FRAME 10/.test(problem))).toBe(true);
+    const declared = await verifyCodedAudio(file, scenario, { expectedDurationS: 12.3, expectedPauses: [{ startS: 5.2, lengthS: 0.3 }] });
+    expect(declared.problems).toEqual([]);
+    expect(declared.identifiedFrames).toBe(24);
+    expect(declared.pauses).toEqual([expect.objectContaining({ startS: 5.2, lengthS: 0.3, silent: true })]);
+    expect(declared.contentDurationS).toBeCloseTo(declared.durationS - 0.3, 6);
+  });
+
+  it('rejects a declared pause where the recording carries audio', async () => {
+    const result = await verifyCodedAudio(encode(scenario.wavPath, 'unpaused'), scenario, { expectedDurationS: 12, expectedPauses: [{ startS: 5.2, lengthS: 0.3 }] });
+    expect(result.pass).toBe(false);
+    expect(result.problems.some(problem => problem.startsWith('PAUSE NOT SILENT'))).toBe(true);
+  });
+
+  it('reports pauses shorter than one guarded analysis window without a silence verdict', async () => {
+    const short = writeWave('short-pause', Buffer.concat([region(0, 5.2), Buffer.alloc(Math.round(0.06 * SAMPLE_RATE) * 2), region(5.2, 12)]));
+    const result = await verifyCodedAudio(encode(short, 'short-pause'), scenario, { expectedDurationS: 12.06, expectedPauses: [{ startS: 5.2, lengthS: 0.06 }] });
+    expect(result.problems).toEqual([]);
+    expect(result.pauses[0].silent).toBeNull();
+  });
+
+  it('rejects malformed or overlapping pause declarations', async () => {
+    await expect(verifyCodedAudio(scenario.wavPath, scenario, { expectedPauses: [{ startS: 1, lengthS: 0 }] })).rejects.toThrow();
+    await expect(verifyCodedAudio(scenario.wavPath, scenario, { expectedPauses: [{ startS: 1, lengthS: 1 }, { startS: 1.5, lengthS: 1 }] })).rejects.toThrow('overlap');
+    await expect(verifyCodedAudio(scenario.wavPath, scenario, { expectedPauses: 'later' })).rejects.toThrow();
+  });
 });

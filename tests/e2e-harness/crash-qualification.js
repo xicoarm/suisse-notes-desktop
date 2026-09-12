@@ -8,6 +8,7 @@ const { spawn, execFileSync } = require('child_process');
 const { AppDriver, sleep } = require('./lib/app-driver');
 const { buildCodedScenario, WORK_DIR, FFMPEG } = require('./lib/audio');
 const { verifyCodedAudio, analyzeCodedAudio } = require('./lib/coded-audio');
+const { measureTimestampHoles, finalPausesFromHoles, assessNativeClock, comparePlanGaps } = require('./lib/native-timestamps');
 const { startMockBackend } = require('./lib/mock-backend');
 const { concatenateFiles } = require('../../src-electron/durable-files');
 const { inspectNativeSources } = require('../../src-electron/native-source-persistence');
@@ -187,7 +188,9 @@ function nativeAssemblyProblems(receipt, plan, sources) {
 }
 
 function nativeEndpointCoverage(audio, toleranceS = 1.5) {
-  const { durationS, firstIdentifiedStartS, lastIdentifiedEndS } = audio || {};
+  // Identified positions lie on the content timeline (declared pauses removed).
+  const { firstIdentifiedStartS, lastIdentifiedEndS } = audio || {};
+  const durationS = audio?.contentDurationS ?? audio?.durationS;
   if (![durationS, firstIdentifiedStartS, lastIdentifiedEndS].every(Number.isFinite) ||
       firstIdentifiedStartS < 0 || lastIdentifiedEndS < firstIdentifiedStartS || lastIdentifiedEndS > durationS) {
     return { problems: ['Missing measured native prefix boundary positions'] };
@@ -598,7 +601,18 @@ async function runMainCrashQualification(opts = {}) {
       result.acknowledgedPcm = acknowledgedPrefix === rawPrefix ? result.originalPcm : await decodedFingerprint(acknowledgedPrefix);
       result.nativePrefixArtifacts = { sourceId: nativeMapping.sourceId, rawPrefix, rawSha256: await sha256(rawPrefix),
         acknowledgedPrefix, acknowledgedSha256: await sha256(acknowledgedPrefix) };
-      const sourceAnalysis = await analyzeCodedAudio(rawPrefix), finalAnalysis = await analyzeCodedAudio(output);
+      // The surviving prefix may carry forward timestamp holes from the hosted
+      // fake microphone (skipped late buffers, unmoved waveform). Recovery
+      // finalization materializes them as silence, so the recovered output is
+      // judged as the prefix's as-is content plus exactly those silent pauses;
+      // the plan's own gap accounting must agree with the packet measurement.
+      result.nativeTimestamps = await measureTimestampHoles(rawPrefix);
+      result.nativeClock = assessNativeClock(result.nativeTimestamps, null);
+      result.problems.push(...result.nativeClock.problems);
+      result.nativeAssemblyGaps = comparePlanGaps({ planPath: plans[0], plan }, nativeMapping.sourceId, result.nativeTimestamps);
+      result.problems.push(...result.nativeAssemblyGaps.problems);
+      const expectedPauses = finalPausesFromHoles(result.nativeTimestamps, nativeMapping.startOffsetMs / 1000);
+      const sourceAnalysis = await analyzeCodedAudio(rawPrefix), finalAnalysis = await analyzeCodedAudio(output, { pauses: expectedPauses });
       result.nativeContent = compareNativeRecoveredContent(sourceAnalysis, finalAnalysis, nativeMapping.startOffsetMs / 1000);
       result.problems.push(...result.nativeContent.problems);
       fs.writeFileSync(path.join(evidenceDir, 'native-source-analysis.json'), JSON.stringify(sourceAnalysis, null, 2));
@@ -606,8 +620,10 @@ async function runMainCrashQualification(opts = {}) {
       result.nativeSourceAudio = await verifyCodedAudio(rawPrefix, reference);
       result.problems.push(...result.nativeSourceAudio.problems.map(problem => 'Native source: ' + problem));
       // This fixture has one epoch and no intended gaps. Use its surviving
-      // source extent, never add simultaneous source durations or UI downtime.
-      result.audio = await verifyCodedAudio(output, reference, { expectedDurationS: result.originalPcm.durationS + nativeMapping.startOffsetMs / 1000, durationToleranceS: 0.03 });
+      // source extent plus that source's own materialized timestamp holes;
+      // never add simultaneous source durations or UI downtime.
+      result.audio = await verifyCodedAudio(output, reference, { expectedDurationS: result.originalPcm.durationS + nativeMapping.startOffsetMs / 1000 + result.nativeTimestamps.totalHoleS,
+        durationToleranceS: 0.03, expectedPauses });
       result.problems.push(...result.audio.problems);
       result.endpointCoverage = nativeEndpointCoverage(result.audio);
       result.problems.push(...result.endpointCoverage.problems);

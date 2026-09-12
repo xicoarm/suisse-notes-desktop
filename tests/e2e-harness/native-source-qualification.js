@@ -9,6 +9,9 @@ const net = require('net');
 const { spawn, execFileSync } = require('child_process');
 const { performance } = require('perf_hooks');
 const { installWitness, compareGroups, clockReadout } = require('./capture-clock-diagnostic');
+const { measureTimestampHoles, finalPausesFromHoles, assessNativeClock, readAssemblyPlanGaps, comparePlanGaps } = require('./lib/native-timestamps');
+const { inspectNativeSources } = require('../../src-electron/native-source-persistence');
+const { concatenateFiles } = require('../../src-electron/durable-files');
 const ROOT = path.resolve(__dirname, '../..');
 const WORK = path.join(__dirname, 'work', 'qualification');
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -189,7 +192,8 @@ function provenance(appDirectory, applicationBuildCommit) {
     electron: require('electron/package.json').version, electronSha256: hash(fs.readFileSync(require('electron'))),
     compiledFiles: inventory(appDirectory),
     harnessFiles: [__filename, path.join(__dirname, 'capture-clock-diagnostic.js'), path.join(__dirname, 'lib/app-driver.js'),
-      path.join(__dirname, 'lib/coded-audio.js'), path.join(__dirname, 'lib/mock-backend.js'), path.join(ROOT, 'package-lock.json'),
+      path.join(__dirname, 'lib/coded-audio.js'), path.join(__dirname, 'lib/native-timestamps.js'), path.join(__dirname, 'lib/mock-backend.js'),
+      path.join(ROOT, 'package-lock.json'),
       require('@ffmpeg-installer/ffmpeg').path].map(filename => ({ filename, sha256: hash(fs.readFileSync(filename)) })) };
 }
 
@@ -314,13 +318,37 @@ async function runNativeSourceQualification(opts = {}) {
     await mock.close(); mock = null;
     // All native capture and app processes are closed before any decoding.
     checkpoint();
+    // The application's own native original must be complete as-is. Its
+    // measured timestamp holes (hosted fake-microphone buffer skips that the
+    // finalizer materializes as silence) are removed from the final's timeline
+    // before comparing it with the direct witness, which is decoded as-is and
+    // shares the same source pauses.
+    const recordingDir = path.dirname(result.finalPath);
+    const applicationSources = inspectNativeSources(recordingDir).filter(source => source.kind === 'microphone' && source.complete);
+    if (applicationSources.length !== 1) throw new Error('Expected one complete preserved application native microphone epoch');
+    const applicationSource = applicationSources[0];
+    const nativeOriginal = path.join(directory, 'application-native-original.webm');
+    await concatenateFiles(applicationSource.chunkPaths, nativeOriginal);
+    result.applicationNativeOriginal = { path: nativeOriginal, sha256: hash(fs.readFileSync(nativeOriginal)), sourceId: applicationSource.sourceId,
+      startOffsetMs: applicationSource.startOffsetMs, chunkCount: applicationSource.chunkCount };
+    result.nativeTimestamps = await measureTimestampHoles(nativeOriginal);
+    const applicationRecorder = result.finalSnapshot.recorders.find(recorder => recorder.role === 'actual-application' &&
+      recorder.trackIds.some(id => result.finalSnapshot.acquisitions[0]?.sourceTrackIds?.includes(id)));
+    const applicationWallS = applicationRecorder && Number.isFinite(applicationRecorder.startedAt) && Number.isFinite(applicationRecorder.stoppedAt)
+      ? (applicationRecorder.stoppedAt - applicationRecorder.startedAt) / 1000 : null;
+    result.nativeClock = assessNativeClock(result.nativeTimestamps, applicationWallS);
+    result.nativeAssemblyGaps = comparePlanGaps(readAssemblyPlanGaps(recordingDir), applicationSource.sourceId, result.nativeTimestamps);
+    const expectedPauses = finalPausesFromHoles(result.nativeTimestamps, applicationSource.startOffsetMs / 1000);
     const direct = await analyzeCodedAudio(result.directEvidence.joinedPath);
-    const final = await analyzeCodedAudio(result.finalPath);
+    const final = await analyzeCodedAudio(result.finalPath, { pauses: expectedPauses });
     writeJson(path.join(directory, 'direct-analysis.json'), direct);
     writeJson(path.join(directory, 'final-analysis.json'), final);
     const directVerification = await verifyCodedAudio(result.directEvidence.joinedPath, reference);
-    const finalVerification = await verifyCodedAudio(result.finalPath, reference);
-    result.verification = { direct: directVerification, final: finalVerification };
+    const finalVerification = await verifyCodedAudio(result.finalPath, reference, { expectedPauses });
+    const applicationNativeVerification = await verifyCodedAudio(nativeOriginal, reference);
+    result.verification = { direct: directVerification, final: finalVerification, applicationNative: applicationNativeVerification };
+    result.problems.push(...applicationNativeVerification.problems.map(problem => 'Application native original: ' + problem),
+      ...result.nativeClock.problems, ...result.nativeAssemblyGaps.problems);
     result.assessment = assessSourcePreservation({ direct, final, directVerification, finalVerification,
       snapshot: result.finalSnapshot, fault: result.faultSnapshot.fault, expectPreserved: options.expectPreserved });
     result.problems.push(...result.assessment.controlsProblems);

@@ -48,6 +48,19 @@ the bounded policy still needs a real long upload against the deployed backend.
 Start-call offsets do not establish exact first-sample alignment. Pause overlap
 above 2 ms currently blocks with originals retained. Large internal timestamp
 gaps may exceed the bounded allocation policy and require further recovery work.
+
+Hosted runners add a source-side artifact: Chromium's fake microphone
+(`FakeAudioWorker`) skips late 10 ms buffers instead of replaying them while
+`FileSource` advances the WAV cursor only for callbacks that ran. The original
+then carries consecutive content behind forward packet-timestamp holes, and the
+finalizer correctly materializes those holes as silence (a real device's clock
+never pauses, so a hole from real hardware is lost audio). The harness therefore
+decodes the native original as-is with the unchanged strict oracle (real
+upstream loss shortens identities, as in the five-hour Windows run), measures
+the original's holes from its packet timestamps (`lib/native-timestamps.js`),
+requires them to match the plan's gap accounting and the recorder wall clock,
+and checks the final as native content plus exactly those silent pauses. No
+tolerance was widened; see `work/native-preservation/TIMESTAMP-HOLES-ROOT-CAUSE-20260912.md`.
 macOS AudioTee now reserves a durable required-capture attempt before spawning,
 records startup/data/failure observations, and publishes its terminal evidence
 only after the child closes and accepted PCM drains to disk. A failed or missing

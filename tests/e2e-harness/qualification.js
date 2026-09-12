@@ -9,7 +9,9 @@ const { startMockBackend } = require('./lib/mock-backend');
 const { buildCodedScenario, WORK_DIR } = require('./lib/audio');
 const { verifyCodedAudio } = require('./lib/coded-audio');
 const { installRecordingRoleObserver, legacyBatchLayout } = require('./lib/native-recorder-evidence');
+const { measureTimestampHoles, finalPausesFromHoles, assessNativeClock, readAssemblyPlanGaps, comparePlanGaps } = require('./lib/native-timestamps');
 const { inspectNativeSources } = require('../../src-electron/native-source-persistence');
+const { concatenateFiles } = require('../../src-electron/durable-files');
 
 async function sha256(filename) {
   const hash = crypto.createHash('sha256');
@@ -126,9 +128,7 @@ async function captureCase(kind, seconds, opts = {}) {
     if (!output) throw new Error('No finalized recording; original profile retained');
     result.output = output;
     result.expectedDurationS = expectedDurationS;
-    result.audio = await verifyCodedAudio(output, reference, { expectedDurationS, durationToleranceS: 1.5 });
-    result.problems.push(...result.audio.problems);
-    result.localSha256 = await sha256(output);
+    let expectedPauses;
     if (result.nativeArchiveExpected) {
       const sources = inspectNativeSources(path.dirname(output));
       if (sources.length !== 1 || sources[0].kind !== 'microphone' || !sources[0].complete) throw new Error('Expected one complete preserved native microphone epoch');
@@ -138,7 +138,29 @@ async function captureCase(kind, seconds, opts = {}) {
       if (result.nativeSource.bytes !== native[0].bytes || source.chunkCount !== native[0].events - native[0].emptyEvents) throw new Error('Native original bytes/events do not match their observed recorder');
       for (const chunk of source.chunks) result.nativeSource.chunks.push({ index: chunk.index, bytes: chunk.size,
         path: path.relative(path.dirname(output), chunk.path), sha256: await sha256(chunk.path) });
+      // The hosted fake microphone skips late buffers without advancing its
+      // waveform, so the original carries forward timestamp holes that the
+      // finalizer materializes as silence. The original must still pass the
+      // unchanged as-is oracle (real upstream loss shortens identities), its
+      // holes are measured independently of the plan, the recorder wall clock
+      // must agree with the timestamp span, and the final is then checked as
+      // native content plus exactly those silent pauses.
+      const nativeOriginal = path.join(WORK_DIR, 'qualification', `${name}-${recordId}-native-original.webm`);
+      await concatenateFiles(source.chunks.map(chunk => chunk.path), nativeOriginal);
+      result.nativeOriginal = { path: nativeOriginal, sha256: await sha256(nativeOriginal), sourceId: source.sourceId };
+      result.nativeSourceAudio = await verifyCodedAudio(nativeOriginal, reference);
+      result.problems.push(...result.nativeSourceAudio.problems.map(problem => 'Native original: ' + problem));
+      result.nativeTimestamps = await measureTimestampHoles(nativeOriginal);
+      result.nativeClock = assessNativeClock(result.nativeTimestamps, expectedDurationS);
+      result.problems.push(...result.nativeClock.problems);
+      result.nativeAssemblyGaps = comparePlanGaps(readAssemblyPlanGaps(path.dirname(output)), source.sourceId, result.nativeTimestamps);
+      result.problems.push(...result.nativeAssemblyGaps.problems);
+      expectedPauses = finalPausesFromHoles(result.nativeTimestamps, source.startOffsetMs / 1000);
+      result.notes.push('Final content is compared after removing the native source\'s own measured timestamp holes; the native original must independently pass the as-is oracle, its holes must match the finalization plan, and its timestamp span must agree with the recorder wall clock.');
     }
+    result.audio = await verifyCodedAudio(output, reference, { expectedDurationS, durationToleranceS: 1.5, expectedPauses });
+    result.problems.push(...result.audio.problems);
+    result.localSha256 = await sha256(output);
     const receipt = JSON.parse(fs.readFileSync(path.join(path.dirname(output), 'upload-receipt.json'), 'utf8'));
     const remote = mock.state.uploads.get(receipt.audioFileId);
     if (remote?.sha256 !== result.localSha256) result.problems.push('Multipart upload differs from finalized audio bytes');

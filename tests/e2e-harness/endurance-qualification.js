@@ -9,6 +9,7 @@ const { AppDriver, sleep } = require('./lib/app-driver');
 const { startMockBackend } = require('./lib/mock-backend');
 const { buildCodedScenario, WORK_DIR } = require('./lib/audio');
 const { verifyCodedAudio } = require('./lib/coded-audio');
+const { measureTimestampHoles, finalPausesFromHoles, assessNativeClock, comparePlanGaps } = require('./lib/native-timestamps');
 const { inspectNativeSources } = require('../../src-electron/native-source-persistence');
 const { concatenateFiles } = require('../../src-electron/durable-files');
 const { estimateEncodedBytes } = require('../../src-electron/native-source-finalization');
@@ -657,14 +658,38 @@ async function runCodedEndurance(opts = {}) {
     if (!output) throw new Error('No final recording; retained profile contains the available source evidence');
     result.output = output;
     checkpoint({ event: 'verifying-audio', output });
-    const audio = await verifyCodedAudio(output, reference, { expectedDurationS: result.expectedDurationS, durationToleranceS: 1.5 });
-    result.audio = { ...audio, problems: audio.problems.slice(0, 30), problemCount: audio.problems.length };
+    const recordingDir = path.dirname(output);
+    let expectedPauses, nativeEvidence = null;
+    if (nativeMode) {
+      // Measure the native original's timestamp holes before judging the
+      // final: the hosted fake microphone skips late buffers without moving
+      // its waveform, finalization materializes those holes as silence, and
+      // the final is checked as native content plus exactly those pauses.
+      // The original itself keeps the unchanged as-is oracle below.
+      const { chunkPaths, ...sourceEvidence } = await nativeLedger.verify(roles.native);
+      result.nativeSource = sourceEvidence;
+      for (const issue of sourceEvidence.problems) problem(issue);
+      const nativeOriginal = path.join(evidenceDir, 'native-original.webm');
+      await concatenateFiles(chunkPaths, nativeOriginal);
+      result.nativeOriginal = { path: nativeOriginal, sha256: await sha256(nativeOriginal), sourceId: sourceEvidence.sourceId };
+      checkpoint({ event: 'measuring-native-timestamps', sourceId: sourceEvidence.sourceId });
+      const timestamps = await measureTimestampHoles(nativeOriginal);
+      result.nativeTimestamps = { ...timestamps, holeCount: timestamps.holes.length, overlapCount: timestamps.overlaps.length,
+        holes: timestamps.holes.slice(0, 200), overlaps: timestamps.overlaps.slice(0, 50) };
+      result.nativeClock = assessNativeClock(timestamps, result.expectedDurationS);
+      for (const issue of result.nativeClock.problems) problem(issue);
+      expectedPauses = finalPausesFromHoles(timestamps, sourceEvidence.startOffsetMs / 1000);
+      nativeEvidence = { nativeOriginal, sourceEvidence, timestamps };
+    }
+    const audio = await verifyCodedAudio(output, reference, { expectedDurationS: result.expectedDurationS, durationToleranceS: 1.5, expectedPauses });
+    result.audio = { ...audio, problems: audio.problems.slice(0, 30), problemCount: audio.problems.length,
+      pauses: audio.pauses ? { count: audio.pauses.length, notSilent: audio.pauses.filter(pause => pause.silent === false).length,
+        unchecked: audio.pauses.filter(pause => pause.silent === null).length } : null };
     for (const issue of audio.problems) problem(issue);
     result.constraintEvidence = await app.evalTimed(() => window.__enduranceConstraints);
     result.sourceCoverage = assessSourceCoverage(audio, recorder, result.constraintEvidence?.acquisitions);
     for (const issue of result.sourceCoverage.problems) problem(issue);
     result.localSha256 = await sha256(output);
-    const recordingDir = path.dirname(output);
     const receipt = JSON.parse(fs.readFileSync(path.join(recordingDir, 'upload-receipt.json'), 'utf8'));
     const remote = mock.state.uploads.get(receipt.audioFileId);
     result.upload = { localBytes: fs.statSync(output).size, remoteBytes: remote?.fileSize, remoteSha256: remote?.sha256,
@@ -675,9 +700,7 @@ async function runCodedEndurance(opts = {}) {
     result.sources = await verifyRetainedSources(recordingDir, mixedRecorder.bytes, mixedRecorder.events - mixedRecorder.emptyEvents, path.join(evidenceDir, 'source-manifest.jsonl'));
     for (const issue of result.sources.problems) problem(issue);
     if (nativeMode) {
-      const { chunkPaths, ...sourceEvidence } = await nativeLedger.verify(roles.native);
-      result.nativeSource = sourceEvidence;
-      for (const issue of sourceEvidence.problems) problem(issue);
+      const { nativeOriginal, sourceEvidence, timestamps } = nativeEvidence;
       const finalReceipt = JSON.parse(fs.readFileSync(path.join(recordingDir, 'finalized.json'), 'utf8'));
       const plans = fs.readdirSync(recordingDir, { withFileTypes: true }).filter(entry => entry.isDirectory() && entry.name.startsWith('native-finalization-'))
         .map(entry => path.join(recordingDir, entry.name, 'plan.json')).filter(filename => fs.existsSync(filename));
@@ -688,11 +711,12 @@ async function runCodedEndurance(opts = {}) {
         onsetIsApproximate: plan.onsetIsApproximate, exactDecodedPcmEqualityRequired: false };
       for (const issue of assessNativeEnduranceAssembly(finalReceipt, plan, sourceEvidence.sourceId)) problem(issue);
       if (fs.existsSync(path.join(recordingDir, 'finalization-pending.json')) || finalReceipt.sha256 !== result.localSha256) problem('Native endurance output transaction is not complete');
-      const nativeOriginal = path.join(evidenceDir, 'native-original.webm');
-      await concatenateFiles(chunkPaths, nativeOriginal);
-      result.nativeOriginal = { path: nativeOriginal, sha256: await sha256(nativeOriginal), sourceId: sourceEvidence.sourceId };
+      result.nativeAssemblyGaps = comparePlanGaps({ planPath: plans[0], plan }, sourceEvidence.sourceId, timestamps);
+      for (const issue of result.nativeAssemblyGaps.problems) problem(issue);
       checkpoint({ event: 'verifying-native-source', sourceId: sourceEvidence.sourceId });
-      const sourceAudio = await verifyCodedAudio(nativeOriginal, reference, { expectedDurationS: result.expectedDurationS, durationToleranceS: 1.5 });
+      // Decoded as-is, the original excludes its own timestamp holes by
+      // construction; the wall clock was already checked against the span.
+      const sourceAudio = await verifyCodedAudio(nativeOriginal, reference, { expectedDurationS: result.expectedDurationS - timestamps.totalHoleS, durationToleranceS: 1.5 });
       result.nativeSourceAudio = { ...sourceAudio, problems: sourceAudio.problems.slice(0, 30), problemCount: sourceAudio.problems.length };
       for (const issue of sourceAudio.problems) problem('Native original: ' + issue);
       result.nativeSourceCoverage = assessSourceCoverage(sourceAudio, roles.native, result.constraintEvidence.acquisitions);
