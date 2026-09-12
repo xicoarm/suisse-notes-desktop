@@ -74,7 +74,7 @@ vi.mock('@capacitor/local-notifications', () => ({ LocalNotifications: {
   checkPermissions: async () => ({ display: 'granted' }), requestPermissions: async () => ({ display: 'granted' }), schedule: async () => {}
 } }));
 
-import { useDeviceStore } from '../../src/stores/device';
+import { useDeviceStore, oldestFirst } from '../../src/stores/device';
 
 const FILE = { file: 'R20260101-120000.opus', size: 4, duration_ms: 60000, creat_time: 1_750_000_000 };
 
@@ -159,5 +159,52 @@ describe('device store: automatic sync', () => {
     expect(store.connectionState).toBe('lost');
     expect(store._persistentReconnectTimer).toBeNull();
     expect(store._reconnectTimer).toBeNull();
+  });
+});
+
+describe('device store: sync order', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    h.recs.length = 0;
+    uploadState.calls.length = 0;
+    uploadState.result = { success: true, transcriptionId: 't1', audioFileId: 'a1' };
+    ble.downloadCalls.length = 0; ble.listResult = null; ble.listError = null; ble.connectError = null;
+    fsState.existing.clear();
+  });
+
+  it('orders by recording start (file name), then creat_time, unknown dates last', () => {
+    const files = [
+      { file: 'R20260910-080000.opus', creat_time: 1 },
+      { file: 'NOTE-no-date.opus', creat_time: 0 },
+      { file: 'R20260901-170000.opus', creat_time: 1_800_000_000 },
+      { file: 'custom-name.opus', creat_time: 1_756_700_000 }, // 2025-09-01
+      { file: 'R20260901-090000.opus' }
+    ];
+    expect(oldestFirst(files).map((f) => f.file)).toEqual([
+      'custom-name.opus', 'R20260901-090000.opus', 'R20260901-170000.opus', 'R20260910-080000.opus', 'NOTE-no-date.opus'
+    ]);
+    expect(files[0].file).toBe('R20260910-080000.opus'); // input untouched
+    expect(oldestFirst(undefined)).toEqual([]);
+  });
+
+  it('"Sync all" and the automatic sync transfer the OLDEST pending recording first', async () => {
+    const store = useDeviceStore();
+    store.connectionState = 'connected';
+    // As fetchFileList leaves it: newest first on screen.
+    store.deviceFiles = [
+      { file: 'R20260912-150000.opus', size: 4, duration_ms: 60000, creat_time: 1_757_689_200 },
+      { file: 'R20260911-100000.opus', size: 4, duration_ms: 60000, creat_time: 1_757_577_600 },
+      { file: 'R20260910-090000.opus', size: 4, duration_ms: 60000, creat_time: 1_757_487_600 }
+    ];
+    await store.syncAllNew();
+    expect(ble.downloadCalls).toEqual(['R20260910-090000.opus', 'R20260911-100000.opus', 'R20260912-150000.opus']);
+    expect(store.deviceFiles[0].file).toBe('R20260912-150000.opus'); // the list on screen keeps newest first
+
+    ble.downloadCalls.length = 0;
+    store.syncedFiles = [];
+    store.deviceFiles = [...store.deviceFiles];
+    h.recs.length = 0;
+    await store.syncAllNew({ auto: true });
+    expect(ble.downloadCalls[0]).toBe('R20260910-090000.opus');
   });
 });

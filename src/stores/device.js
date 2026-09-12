@@ -144,6 +144,29 @@ async function getOrCreateAppUuid() {
   return uuid;
 }
 
+/**
+ * Transfer order of a sync run: OLDEST recording first.
+ *
+ * The device page lists newest first, but the queue works the backlog in the
+ * order the meetings happened (first in, first out — the dictation-workflow
+ * convention): history entries and transcripts arrive chronologically, a
+ * steady stream of new recordings can never starve an older one, and an
+ * interrupted run always leaves the NEWEST recordings as the pending tail.
+ * Key: start time from the file name (R20260904-145146), else the recorder's
+ * creat_time; ties and unknown dates fall back to the file name.
+ */
+export function oldestFirst(files) {
+  const startOf = (f) => {
+    const m = /R(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(f?.file || '');
+    if (m) return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
+    return Number.isFinite(f?.creat_time) && f.creat_time > 0 ? f.creat_time * 1000 : Number.POSITIVE_INFINITY;
+  };
+  return [...(files || [])]
+    .map((f) => ({ f, t: startOf(f) }))
+    .sort((a, b) => (a.t === b.t ? String(a.f.file).localeCompare(String(b.f.file)) : (a.t < b.t ? -1 : 1)))
+    .map(({ f }) => f);
+}
+
 export const useDeviceStore = defineStore('device', {
   state: () => ({
     // Connection
@@ -800,7 +823,7 @@ export const useDeviceStore = defineStore('device', {
      * Sync all new (un-synced) files
      */
     async syncAllNew({ auto = false } = {}) {
-      const newFiles = auto ? this._filesForAutoSync() : this.autoSyncableFiles;
+      const newFiles = oldestFirst(auto ? this._filesForAutoSync() : this.autoSyncableFiles);
       if (newFiles.length === 0) return;
       const t = i18n.global.t;
 
