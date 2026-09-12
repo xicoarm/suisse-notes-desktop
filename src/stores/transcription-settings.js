@@ -106,7 +106,8 @@ export const useTranscriptionSettingsStore = defineStore('transcription-settings
     async saveGlobalSettings() {
       try {
         const settings = {
-          vocabulary: this.globalVocabulary,
+          // Electron IPC cannot serialize Pinia's reactive array proxy.
+          vocabulary: [...this.globalVocabulary],
           defaultSpeakerCount: this.defaultSpeakerCount
         };
 
