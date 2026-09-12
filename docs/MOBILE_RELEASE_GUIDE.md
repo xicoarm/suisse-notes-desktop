@@ -146,7 +146,7 @@ No match means the backend route does not exist yet: do not ship the client chan
 | File | Field | Rule |
 |---|---|---|
 | `src-capacitor/android/app/build.gradle` | `versionCode` | +1 per upload. **Must be higher than every versionCode ever uploaded to Play, including internal-testing uploads.** A used versionCode can never be uploaded again. |
-| same | `versionName` | the marketing version, e.g. `3.9.37` |
+| same | `versionName` | the marketing version, e.g. `3.9.38` |
 | `src-capacitor/ios/App/App.xcodeproj/project.pbxproj` | `MARKETING_VERSION` (2×) | same as `versionName`; the App Store version string must equal it |
 | same | `CURRENT_PROJECT_VERSION` (2×) | +1 for hygiene; CI overrides the real iOS build number with a timestamp (`yyMMddHHmm`) |
 
@@ -581,6 +581,33 @@ skipped entries), delete after upload, delete all, upload retry policy and the w
 recorder protocol layer, and versionCode 40 raised the Android target to API 36. In scope:
 **all P1** plus A3, B3, B6, B8, C1, D2, D6, E2, E5, F1, F5, F7, F8, G8, G9, G10, G11, G12,
 G15, G16, K1, K2.
+
+### Scope of 3.9.38
+
+On top of 3.9.37, this release fixes six field reports and hardens error capture:
+- **Problem 1/3 — rebrand leftovers**: support address `info@suisse-meets.ch`, About
+  legal links on suisse-meets.ch, recorder name "Suisse Meets Pro" in Settings and the
+  sync prompt. Test: I1 (support link), G-series titles, About links.
+- **Problem 2 — app meeting link** (backend, already live): opening a just-made
+  transcript lands on the meeting (loading page while it processes), not on /meetings.
+  Test: E-series after an upload, tap the in-app link on iOS AND Android.
+- **Problem 4 — Android freeze after the transcript browser**: open a transcript, rotate
+  or fold the phone / leave it a while, return — the app must stay responsive. Also test
+  a double-tap on "Show transcript" (no stuck spinner) and the hardware back button.
+  Android only.
+- **Problem 5 — custom vocabulary sync**: edit the vocabulary on the web, then on the
+  phone open Settings / Record / Upload or foreground the app — the list must match the
+  server (added words appear, deleted words disappear); a second account on the phone must
+  not see the first's words. Both platforms.
+- **Problem 6 — forget device**: while a sync is running, tap "Forget device" — the
+  transfer indicator and the "syncing" notification must disappear at once, with no
+  phantom "sync complete". Android especially.
+- **Requirement 1 — Sentry**: no user test; verify in Sentry that events from
+  `ch.suissenotes.mobile@3.9.38` arrive (errors, warnings, failed requests) and that
+  an unclean-exit report appears if you force-quit while a screen is open.
+
+Scope: **all P1** plus the six above and their neighbours — A3, B3, B6, B8, C1, D2, D6,
+E2, E5, F1, F5, F7, F8, G8–G12, G15, G16, I1, K1, K2, and the Problem-4/5/6 checks.
 
 ---
 
