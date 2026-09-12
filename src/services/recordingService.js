@@ -1000,10 +1000,31 @@ async function acquireReplacementMicrophone(constraints) {
   } finally { clearTimeout(timeout); }
 }
 
+function concreteMicrophoneDeviceId(micStream) {
+  try {
+    const tracks = micStream?.getAudioTracks();
+    if (tracks?.length !== 1 || tracks[0].readyState !== 'live') return null;
+    const deviceId = tracks[0].getSettings?.().deviceId;
+    // These aliases select the current OS endpoint, which can change while
+    // the original headset remains live but hardware-muted. Labels and groups
+    // do not establish which physical microphone will be opened.
+    return typeof deviceId === 'string' && deviceId.trim() &&
+      deviceId !== 'default' && deviceId !== 'communications' ? deviceId : null;
+  } catch (_) { return null; }
+}
+
 export async function switchMicrophoneStream(newDeviceId, opts = {}) {
   const verifyContext = opts.verifyContext || 'manual-switch';
   if (!mixingContext || !mixingDest) {
     return { success: false, error: 'No active recording to switch microphone in' };
+  }
+  // Automatic zero-signal recovery needs a concrete identity. Ambiguous OS
+  // aliases deliberately retain the old source and warning; an explicit user
+  // device change still follows the normal selection path below.
+  const sameDeviceReacquire = verifyContext === 'reacquire';
+  const originalDeviceId = sameDeviceReacquire ? concreteMicrophoneDeviceId(stream) : null;
+  if (sameDeviceReacquire && (!originalDeviceId || originalDeviceId !== newDeviceId)) {
+    return { success: false, error: 'Cannot verify the original microphone identity for same-device recovery' };
   }
 
   const switchId = ++micSwitchGeneration;
@@ -1046,6 +1067,10 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
     }
     const liveTrack = newStream.getAudioTracks()[0];
     if (!liveTrack || liveTrack.readyState === 'ended') throw new Error('The selected microphone disconnected while opening');
+    if (sameDeviceReacquire && (concreteMicrophoneDeviceId(stream) !== originalDeviceId ||
+        concreteMicrophoneDeviceId(newStream) !== originalDeviceId)) {
+      throw new Error('Replacement microphone identity does not match the original microphone');
+    }
     // Connect the replacement before touching the working input. Graph setup
     // can throw after getUserMedia succeeds (driver/context failures).
     liveTrack.enabled = !micMuted;
@@ -1090,7 +1115,7 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
     // Step 4: Connect new mic to mixing pipeline
     micSourceNode = replacementNode;
     stream = newStream;
-    lastRequestedDeviceId = newDeviceId || null;
+    if (!sameDeviceReacquire) lastRequestedDeviceId = newDeviceId || null;
 
     // Step 5: Set up track.onended listener for new stream
     for (const track of newStream.getTracks()) {
@@ -1583,9 +1608,14 @@ async function attemptSameDeviceReacquire() {
   if (zeroReacquireInFlight) return;
   zeroReacquireInFlight = true;
   try {
+    const originalDeviceId = concreteMicrophoneDeviceId(stream);
+    if (!originalDeviceId) {
+      captureMessage('mic-health: same-device re-acquire skipped — original microphone identity is unavailable', 'warning');
+      return;
+    }
     const sinceSec = zeroSignalSince ? Math.round((Date.now() - zeroSignalSince) / 1000) : 0;
     captureMessage(`mic-health: zero-signal for ${sinceSec}s on "${micHealthState.trackLabel || 'unknown mic'}" — re-acquiring the same device`, 'warning');
-    const result = await switchMicrophoneStream(lastRequestedDeviceId || null, { verifyContext: 'reacquire' });
+    const result = await switchMicrophoneStream(originalDeviceId, { verifyContext: 'reacquire' });
     if (!result.success) {
       captureMessage(`mic-health: same-device re-acquire could not open a stream (${result.error})`, 'warning');
       return;

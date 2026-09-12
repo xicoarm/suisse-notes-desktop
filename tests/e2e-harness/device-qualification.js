@@ -73,6 +73,15 @@ function assessNativeDeviceTimeline(kind, sources, roleEvidence, fixture) {
       throw new Error('Native source cannot be uniquely matched to an issued microphone track and start call');
     }
     const recorder = matching[0]; matchedRecorders.add(recorder.id);
+    // Permission probes may clone the fixture without choosing an input and
+    // then stop it. Every track actually archived as meeting audio must come
+    // from an exact concrete request; a pinned clone cannot prove that itself.
+    const acquisitions = fixture.calls.filter(call => call.trackId === recorder.trackIds[0]);
+    if (!fixture.concreteDeviceId || ['default', 'communications'].includes(fixture.concreteDeviceId) ||
+        acquisitions.length !== 1 || acquisitions[0].deviceId !== fixture.concreteDeviceId ||
+        acquisitions[0].constraints?.audio?.deviceId?.exact !== fixture.concreteDeviceId) {
+      throw new Error('Recorded native microphone was not acquired with its exact concrete device identity');
+    }
     const bytes = source.chunks.reduce((total, chunk) => total + chunk.size, 0);
     if (bytes !== recorder.bytes || source.chunkCount !== recorder.events - recorder.emptyEvents ||
         source.chunks.some((chunk, index) => chunk.index !== index)) {
@@ -124,7 +133,7 @@ function verifyNativeCustody(prefix, retained) {
 }
 
 /** Runs in the synthetic renderer only; it never replaces MediaRecorder. */
-async function installDeviceFixture({ apiUrl, actions, observeNative = false }) {
+async function installDeviceFixture({ apiUrl, actions, observeNative = false, concreteDeviceId }) {
   if (window.__deviceQualification) throw new Error('Device fixture already installed');
   if (await window.electronAPI.config.getApiUrl() !== apiUrl ||
       !['localhost', '127.0.0.1', '[::1]'].includes(new URL(apiUrl).hostname)) {
@@ -136,6 +145,11 @@ async function installDeviceFixture({ apiUrl, actions, observeNative = false }) 
   const devices = navigator.mediaDevices;
   const originalGet = devices.getUserMedia;
   const originalEnumerate = devices.enumerateDevices;
+  const available = await Reflect.apply(originalEnumerate, devices, []);
+  if (!concreteDeviceId || ['default', 'communications'].includes(concreteDeviceId) ||
+      !available.some(device => device.kind === 'audioinput' && device.deviceId === concreteDeviceId)) {
+    throw new Error('Device fixture requires a concrete enumerated synthetic microphone');
+  }
   const originalRecorderStop = MediaRecorder.prototype.stop;
   const recorderStops = [];
   if (observeNative) MediaRecorder.prototype.stop = function (...args) {
@@ -169,12 +183,24 @@ async function installDeviceFixture({ apiUrl, actions, observeNative = false }) 
       call.error = 'NotFoundError';
       throw new DOMException('Synthetic microphone disconnected', 'NotFoundError');
     }
+    if (constraints.audio?.deviceId?.exact && constraints.audio.deviceId.exact !== concreteDeviceId) {
+      call.error = 'OverconstrainedError';
+      throw new DOMException('Synthetic fixture requires its exact concrete microphone, not another microphone or an alias', 'OverconstrainedError');
+    }
     if (!opening) {
+      if (constraints.audio?.deviceId?.exact !== concreteDeviceId) {
+        throw new Error('The app did not request the selected concrete synthetic microphone');
+      }
       sourceRequestedAt = performance.now();
       opening = Reflect.apply(originalGet, devices, [constraints]).then(stream => {
+        const tracks = stream.getAudioTracks();
+        if (tracks.length !== 1 || tracks[0].readyState !== 'live' || tracks[0].getSettings().deviceId !== concreteDeviceId) {
+          stream.getTracks().forEach(track => track.stop());
+          throw new Error('Actual synthetic microphone identity differs from the selected concrete device');
+        }
         anchor = stream;
         sourceStartedAt = performance.now();
-        logEvent({ kind: 'source-open', trackId: stream.getAudioTracks()[0]?.id });
+        logEvent({ kind: 'source-open', trackId: tracks[0].id, deviceId: tracks[0].getSettings().deviceId });
         return stream;
       });
     }
@@ -184,8 +210,10 @@ async function installDeviceFixture({ apiUrl, actions, observeNative = false }) 
       throw new DOMException('Synthetic microphone disconnected during acquisition', 'NotFoundError');
     }
     const clone = source.clone();
-    if (clone.getAudioTracks().length !== 1 || clone.getAudioTracks()[0].readyState !== 'live') {
-      throw new Error('Synthetic microphone anchor is not live');
+    if (clone.getAudioTracks().length !== 1 || clone.getAudioTracks()[0].readyState !== 'live' ||
+        clone.getAudioTracks()[0].getSettings().deviceId !== concreteDeviceId) {
+      clone.getTracks().forEach(track => track.stop());
+      throw new Error('Synthetic microphone clone is not live or changed device identity');
     }
     issued.push({ stream: clone, at: performance.now() });
     call.returnedAt = performance.now();
@@ -255,7 +283,7 @@ async function installDeviceFixture({ apiUrl, actions, observeNative = false }) 
   };
   const samplingTimer = setInterval(sample, 250);
   window.__deviceQualification = {
-    snapshot: () => ({ sourceStartedAt, sourceRequestedAt, sourceSeconds: sourceSeconds(), calls, events, samples, errors,
+    snapshot: () => ({ concreteDeviceId, sourceStartedAt, sourceRequestedAt, sourceSeconds: sourceSeconds(), calls, events, samples, errors,
       actions: schedule, recorderStops, anchorState: anchor?.getAudioTracks()[0]?.readyState || null }),
     dispose: () => {
       clearInterval(injectionTimer); clearInterval(samplingTimer);
@@ -337,9 +365,30 @@ async function deviceCase(kind) {
     app.assertTestProfile();
     await app.launch();
     await app.login();
+    const inputs = await app.evalTimed(async () => (await navigator.mediaDevices.enumerateDevices())
+      .filter(device => device.kind === 'audioinput' && device.deviceId && !['default', 'communications'].includes(device.deviceId))
+      .map(device => ({ deviceId: device.deviceId, label: device.label })));
+    const selectedInput = inputs[0];
+    if (!selectedInput?.label || inputs.filter(device => device.label === selectedInput.label).length !== 1) {
+      throw new Error('No uniquely labeled concrete synthetic input is available for the microphone selector');
+    }
+    result.selectedSyntheticInput = selectedInput;
+    // Use the real microphone selector. Do not spoof getSettings() or let a
+    // default alias make the zero-input fixture bypass physical-identity checks.
+    await app.clickByTest('.mic-select .q-field__native');
+    await app.page.waitForFunction(label => [...document.querySelectorAll('.mic-dropdown [role="option"]')]
+      .some(option => option.textContent.trim() === label), { timeout: 10000 }, selectedInput.label);
+    await app.evalTimed(label => {
+      const matches = [...document.querySelectorAll('.mic-dropdown [role="option"]')].filter(option => option.textContent.trim() === label);
+      if (matches.length !== 1) throw new Error('Synthetic microphone option is not unique');
+      matches[0].click();
+    }, selectedInput.label);
+    await app.page.waitForFunction(label => document.querySelector('.mic-selected-text')?.textContent.trim() === label,
+      { timeout: 10000 }, selectedInput.label);
     result.nativeArchiveExpected = await app.evalTimed(() => typeof window.electronAPI.recording.beginSource === 'function');
     if (result.nativeArchiveExpected) await app.evalTimed(installRecordingRoleObserver);
-    await app.evalTimed(installDeviceFixture, { apiUrl: mock.url, actions, observeNative: result.nativeArchiveExpected });
+    await app.evalTimed(installDeviceFixture, { apiUrl: mock.url, actions, observeNative: result.nativeArchiveExpected,
+      concreteDeviceId: selectedInput.deviceId });
     await app.startRecording();
     const recordId = await app.getRecordId();
     if (!/^[a-f0-9-]{36}$/i.test(recordId)) throw new Error('Unexpected synthetic recording ID');
@@ -556,4 +605,4 @@ async function runDeviceQualification() {
     notes: [...LIMITATIONS], results };
 }
 
-module.exports = { runDeviceQualification, assessNativeDeviceTimeline, nativeChunkCustody, verifyNativeCustody };
+module.exports = { runDeviceQualification, assessNativeDeviceTimeline, nativeChunkCustody, verifyNativeCustody, installDeviceFixture };

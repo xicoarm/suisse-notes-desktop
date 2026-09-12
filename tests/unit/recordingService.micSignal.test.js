@@ -131,14 +131,14 @@ async function startHealthyRecording(recordingStore, opts = {}) {
       window.electronAPI.recording[method] ||= vi.fn(async () => ({ success: true }));
     }
   }
-  const micTrack = createTrack({ deviceId: 'mic-1', label: 'BT Speakerphone' });
+  const micTrack = createTrack({ deviceId: 'mic-1', label: 'BT Speakerphone', ...opts.trackSettings });
   const micStream = new MockMediaStream([micTrack]);
   global.navigator.mediaDevices.getUserMedia.mockResolvedValue(micStream);
 
   const result = await recordingService.startRecording({
     recordingStore,
     authStore: null,
-    deviceId: 'mic-1',
+    deviceId: Object.hasOwn(opts, 'deviceId') ? opts.deviceId : 'mic-1',
     systemAudioEnabled: opts.systemAudioEnabled || false,
     captureSystemAudio: opts.captureSystemAudio || null,
     isAutoSplitting: { value: false },
@@ -834,6 +834,126 @@ describe('recordingService mic signal forensics (MSIG)', () => {
     expect(health.status).toBe('ok');
     expect(health.verifying).toBe(false);
     expect(events.verified.some(e => e.ok === true && e.context === 'reacquire')).toBe(true);
+  });
+
+  it.each(['default', 'communications', null, 'headset-physical'])('binds zero-signal retry from requested %s to the captured physical microphone', async deviceId => {
+    const store = createMockRecordingStore();
+    const { micTrack } = await startHealthyRecording(store, {
+      deviceId, trackSettings: { deviceId: 'headset-physical' }, produceChunks: true
+    });
+    const headset = createTrack({ deviceId: 'headset-physical', label: 'BT Speakerphone' });
+    const roomMic = createTrack({ deviceId: 'room-physical', label: 'New system default' });
+    // The OS default now resolves to the room microphone. Only a concrete
+    // device constraint can preserve the original headset's identity.
+    navigator.mediaDevices.getUserMedia.mockImplementation(async request => new MockMediaStream([
+      request.audio?.deviceId?.exact === 'headset-physical' ? headset : roomMic
+    ]));
+    ctrl.amplitude = 0; ctrl.byteVal = 0;
+    await vi.advanceTimersByTimeAsync(15500);
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+    expect(navigator.mediaDevices.getUserMedia.mock.calls[1][0].audio.deviceId).toEqual({ exact: 'headset-physical' });
+    expect(micTrack.stop).toHaveBeenCalled();
+    expect(headset.stop).not.toHaveBeenCalled();
+    expect(healthNow().actualDeviceId).toBe('headset-physical');
+    ctrl.amplitude = 0.1; ctrl.byteVal = 50;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(events.verified.some(event => event.ok && event.context === 'reacquire')).toBe(true);
+  });
+
+  it.each(['default', 'communications', undefined, null, ''])('retains a silent source whose actual identity is %s without opening another microphone', async actualDeviceId => {
+    const store = createMockRecordingStore();
+    const { micTrack } = await startHealthyRecording(store, {
+      trackSettings: { deviceId: actualDeviceId }, produceChunks: true
+    });
+    ctrl.amplitude = 0; ctrl.byteVal = 0;
+    await vi.advanceTimersByTimeAsync(22000);
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
+    expect(micTrack.stop).not.toHaveBeenCalled();
+    expect(healthNow().reasonCode).toBe('zero_signal');
+    expect(healthNow().status).not.toBe('ok');
+    expect(events.verified).toHaveLength(0);
+  });
+
+  it.each(['room-physical', 'default', undefined])('rejects replacement identity %s before changing the mixer or native archive', async actualDeviceId => {
+    const previousApi = window.electronAPI;
+    window.electronAPI = { recording: { saveMetadata: vi.fn().mockResolvedValue({ success: true }) } };
+    try {
+      const store = createMockRecordingStore();
+      const { micTrack } = await startHealthyRecording(store, { produceChunks: true });
+      const beginSource = window.electronAPI.recording.beginSource;
+      const endSource = window.electronAPI.recording.endSource;
+      const initialSources = beginSource.mock.calls.length;
+      const createSource = vi.spyOn(MockAudioContext.prototype, 'createMediaStreamSource');
+      const replacement = createTrack({ deviceId: actualDeviceId, label: 'Other microphone' });
+      navigator.mediaDevices.getUserMedia.mockResolvedValue(new MockMediaStream([replacement]));
+      ctrl.amplitude = 0; ctrl.byteVal = 0;
+      await vi.advanceTimersByTimeAsync(15500);
+      expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+      expect(replacement.stop).toHaveBeenCalledTimes(1);
+      expect(micTrack.stop).not.toHaveBeenCalled();
+      expect(createSource).not.toHaveBeenCalled();
+      expect(beginSource).toHaveBeenCalledTimes(initialSources);
+      expect(endSource).not.toHaveBeenCalled();
+      expect(healthNow().reasonCode).toBe('zero_signal');
+      expect(healthNow().actualDeviceId).toBe('mic-1');
+    } finally { await recordingService.cleanup(); window.electronAPI = previousApi; }
+  });
+
+  it('keeps the current source if its settings cannot identify the microphone', async () => {
+    const store = createMockRecordingStore();
+    const { micTrack } = await startHealthyRecording(store, { produceChunks: true });
+    micTrack.getSettings = () => { throw new Error('Driver settings unavailable'); };
+    ctrl.amplitude = 0; ctrl.byteVal = 0;
+    await vi.advanceTimersByTimeAsync(22000);
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
+    expect(micTrack.stop).not.toHaveBeenCalled();
+    expect(healthNow().reasonCode).toBe('zero_signal');
+  });
+
+  it('disposes a pending retry if the original physical identity changes before acquisition completes', async () => {
+    const store = createMockRecordingStore();
+    const { micTrack } = await startHealthyRecording(store, { produceChunks: true });
+    let resolve;
+    navigator.mediaDevices.getUserMedia.mockReturnValue(new Promise(done => { resolve = done; }));
+    const createSource = vi.spyOn(MockAudioContext.prototype, 'createMediaStreamSource');
+    ctrl.amplitude = 0; ctrl.byteVal = 0;
+    await vi.advanceTimersByTimeAsync(15500);
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+    micTrack.getSettings().deviceId = 'changed-physical';
+    const replacement = createTrack({ deviceId: 'mic-1' });
+    resolve(new MockMediaStream([replacement]));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(replacement.stop).toHaveBeenCalledTimes(1);
+    expect(micTrack.stop).not.toHaveBeenCalled();
+    expect(createSource).not.toHaveBeenCalled();
+    expect(healthNow().reasonCode).toBe('zero_signal');
+  });
+
+  it('keeps every recovery constraint on the captured device if all processing fallbacks fail', async () => {
+    const store = createMockRecordingStore();
+    const { micTrack } = await startHealthyRecording(store, { deviceId: 'default', produceChunks: true });
+    navigator.mediaDevices.getUserMedia.mockRejectedValue(new DOMException('Device unavailable', 'NotReadableError'));
+    ctrl.amplitude = 0; ctrl.byteVal = 0;
+    await vi.advanceTimersByTimeAsync(22000);
+    const replacements = navigator.mediaDevices.getUserMedia.mock.calls.slice(1);
+    expect(replacements).toHaveLength(3);
+    expect(replacements.every(([request]) => request.audio.deviceId?.exact === 'mic-1')).toBe(true);
+    expect(micTrack.stop).not.toHaveBeenCalled();
+    expect(healthNow().reasonCode).toBe('zero_signal');
+  });
+
+  it('uses the actual initial fallback microphone for same-device retry', async () => {
+    const store = createMockRecordingStore();
+    navigator.mediaDevices.getUserMedia.mockRejectedValueOnce(new DOMException('Requested device missing', 'OverconstrainedError'));
+    await startHealthyRecording(store, {
+      deviceId: 'missing-headset', trackSettings: { deviceId: 'fallback-physical' }, produceChunks: true
+    });
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+    expect(healthNow().actualDeviceId).toBe('fallback-physical');
+    navigator.mediaDevices.getUserMedia.mockResolvedValue(new MockMediaStream([createTrack({ deviceId: 'fallback-physical' })]));
+    ctrl.amplitude = 0; ctrl.byteVal = 0;
+    await vi.advanceTimersByTimeAsync(15500);
+    expect(navigator.mediaDevices.getUserMedia.mock.calls[2][0].audio.deviceId).toEqual({ exact: 'fallback-physical' });
   });
 
   it('manual switch onto a silent device is flagged within ~5s (not blessed as OK)', async () => {

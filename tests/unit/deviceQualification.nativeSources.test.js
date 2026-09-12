@@ -1,11 +1,11 @@
 // @vitest-environment node
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 const require = createRequire(import.meta.url);
-const { assessNativeDeviceTimeline, nativeChunkCustody, verifyNativeCustody } = require('../e2e-harness/device-qualification');
+const { assessNativeDeviceTimeline, nativeChunkCustody, verifyNativeCustody, installDeviceFixture } = require('../e2e-harness/device-qualification');
 
 const ids = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333'];
 function fixture(kind = 'reconnect') {
@@ -20,7 +20,8 @@ function fixture(kind = 'reconnect') {
     timesliceMs: 1000, state: 'inactive', events: 4, emptyEvents: 1, bytes: 30, convertedBytes: 30 }));
   const mixed = { ...native[0], id: 20, role: 'live-mix', trackIds: ['mixed'], startCalledAt: 1200, stoppedAt: 1080 + ends.at(-1) };
   return { sources, roleEvidence: { records: [mixed, ...native].reverse() },
-    fixture: { sourceStartedAt: 800, calls: native.map(recorder => ({ trackId: recorder.trackIds[0] })),
+    fixture: { sourceStartedAt: 800, concreteDeviceId: 'physical-input', calls: native.map(recorder => ({ trackId: recorder.trackIds[0],
+      deviceId: 'physical-input', constraints: { audio: { deviceId: { exact: 'physical-input' } } } })),
       recorderStops: [{ trackIds: native.at(-1).trackIds, at: 1000 + ends.at(-1) }] } };
 }
 const assess = (value, kind = 'reconnect') => assessNativeDeviceTimeline(kind, value.sources, value.roleEvidence, value.fixture);
@@ -66,6 +67,17 @@ describe('native device qualification timeline', () => {
     const value = fixture(); value.fixture.recorderStops = [];
     expect(() => assess(value)).toThrow('stop call');
   });
+  it.each([true, { noiseSuppression: true }, { deviceId: { exact: 'default' } },
+    { deviceId: { ideal: 'physical-input' } }])('rejects a recorded post-anchor replacement requested with %j despite its pinned returned identity', audio => {
+    const value = fixture('zero-input');
+    value.fixture.calls[1].constraints.audio = audio;
+    expect(() => assess(value, 'zero-input')).toThrow('exact concrete device identity');
+  });
+  it('allows an unconstrained permission probe whose cloned track is never recorded', () => {
+    const value = fixture('zero-input');
+    value.fixture.calls.push({ trackId: 'permission-only', deviceId: 'physical-input', constraints: { audio: true } });
+    expect(assess(value, 'zero-input').epochs).toHaveLength(2);
+  });
 });
 
 const folders = [];
@@ -100,5 +112,86 @@ describe('native device original custody', () => {
   it('rejects duplicate custody identities', () => {
     const chunk = { sourceId: ids[0], index: 0, relativePath: 'one', bytes: 1, sha256: 'abc' };
     expect(() => verifyNativeCustody([chunk], [chunk, chunk])).toThrow('Duplicate');
+  });
+});
+
+describe('synthetic device fixture physical identity', () => {
+  const concreteDeviceId = 'enumerated-fake-input';
+  const apiUrl = 'http://localhost:3000';
+  let originalGet, anchor, clone;
+  function source(deviceId) {
+    const track = { id: 'track-' + deviceId, readyState: 'live', getSettings: () => ({ deviceId }), stop: vi.fn() };
+    return { getAudioTracks: () => [track], getTracks: () => [track], clone: vi.fn() };
+  }
+  beforeEach(() => {
+    vi.useFakeTimers();
+    anchor = source(concreteDeviceId); clone = source(concreteDeviceId);
+    anchor.clone.mockReturnValue(clone);
+    originalGet = vi.fn().mockResolvedValue(anchor);
+    vi.stubGlobal('navigator', { mediaDevices: {
+      getUserMedia: originalGet,
+      enumerateDevices: vi.fn().mockResolvedValue([
+        { kind: 'audioinput', deviceId: 'default' }, { kind: 'audioinput', deviceId: concreteDeviceId }
+      ])
+    } });
+    vi.stubGlobal('window', { electronAPI: {
+      config: { getApiUrl: async () => apiUrl }, systemAudio: { getEnabled: async () => false }
+    } });
+    vi.stubGlobal('document', { querySelector: () => null });
+    vi.stubGlobal('MediaRecorder', class { stop() {} });
+    vi.spyOn(console, 'debug').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    window.__deviceQualification?.dispose();
+    vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals();
+  });
+  const install = deviceId => installDeviceFixture({ apiUrl, actions: [], concreteDeviceId: deviceId });
+  const capture = () => navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: concreteDeviceId } } });
+
+  it('opens the actual selected input and records its unchanged native clone identity', async () => {
+    await install(concreteDeviceId);
+    expect(await capture()).toBe(clone);
+    expect(originalGet).toHaveBeenCalledWith({ audio: { deviceId: { exact: concreteDeviceId } } });
+    expect(window.__deviceQualification.snapshot()).toMatchObject({ concreteDeviceId,
+      calls: [{ deviceId: concreteDeviceId }], events: [{ kind: 'source-open', deviceId: concreteDeviceId }, { kind: 'acquired-clone', deviceId: concreteDeviceId }] });
+  });
+  it.each(['default', 'communications', 'not-enumerated', undefined])('refuses %s as the fixture physical identity', async deviceId => {
+    await expect(install(deviceId)).rejects.toThrow('concrete enumerated');
+    expect(originalGet).not.toHaveBeenCalled();
+  });
+  it('rejects a different actual anchor before cloning it', async () => {
+    anchor.getAudioTracks()[0].getSettings = () => ({ deviceId: 'default' });
+    await install(concreteDeviceId);
+    await expect(capture()).rejects.toThrow('Actual synthetic microphone identity');
+    expect(anchor.getTracks()[0].stop).toHaveBeenCalled();
+    expect(anchor.clone).not.toHaveBeenCalled();
+  });
+  it('disposes a clone whose actual identity differs from its anchor', async () => {
+    clone.getAudioTracks()[0].getSettings = () => ({ deviceId: 'another-input' });
+    await install(concreteDeviceId);
+    await expect(capture()).rejects.toThrow('changed device identity');
+    expect(clone.getTracks()[0].stop).toHaveBeenCalled();
+    expect(window.__deviceQualification.snapshot().calls[0].trackId).toBeUndefined();
+  });
+  it('does not pretend a request for another physical input returned the fixture input', async () => {
+    await install(concreteDeviceId);
+    await expect(navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: 'another-input' } } })).rejects.toThrow('another microphone');
+    expect(originalGet).not.toHaveBeenCalled();
+  });
+  it.each([{ deviceId: { exact: 'default' } }, { deviceId: { exact: 'communications' } }])('rejects post-anchor alias acquisition %j', async audio => {
+    await install(concreteDeviceId);
+    await capture();
+    await expect(navigator.mediaDevices.getUserMedia({ audio })).rejects.toThrow('exact concrete microphone');
+    expect(originalGet).toHaveBeenCalledTimes(1);
+    expect(anchor.clone).toHaveBeenCalledTimes(1);
+    expect(window.__deviceQualification.snapshot().calls.filter(call => call.trackId)).toHaveLength(1);
+  });
+  it('preserves the ordinary unconstrained permission-probe path after the anchor opens', async () => {
+    await install(concreteDeviceId);
+    await capture();
+    await expect(navigator.mediaDevices.getUserMedia({ audio: true })).resolves.toBe(clone);
+    expect(originalGet).toHaveBeenCalledTimes(1);
+    expect(anchor.clone).toHaveBeenCalledTimes(2);
+    expect(window.__deviceQualification.snapshot().calls[1].constraints).toEqual({ audio: true });
   });
 });
