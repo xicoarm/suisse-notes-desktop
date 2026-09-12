@@ -20,6 +20,16 @@ on:
         type: boolean
         required: false
         default: false
+      capture_fixed_format:
+        description: Require 48kHz mono in both capture-clock processing modes
+        type: boolean
+        required: false
+        default: false
+      run_failure_diagnostics:
+        description: Diagnose large-input startup and replay the preserved Intel finalization (leave other modes false)
+        type: boolean
+        required: false
+        default: false
 
 # This workflow never signs, publishes, pushes, or creates a release.
 permissions:
@@ -30,8 +40,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate-mode:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Reject conflicting diagnostic modes
+        env:
+          ENDURANCE: ${{ inputs.run_endurance }}
+          CAPTURE_CLOCK: ${{ inputs.run_capture_clock }}
+          FAILURE_DIAGNOSTICS: ${{ inputs.run_failure_diagnostics }}
+        run: |
+          count=0
+          for mode in "$ENDURANCE" "$CAPTURE_CLOCK" "$FAILURE_DIAGNOSTICS"; do
+            if [ "$mode" = true ]; then count=$((count + 1)); fi
+          done
+          if [ "$count" -gt 1 ]; then
+            echo 'Select only one of endurance, capture-clock, or failure diagnostics.'
+            exit 1
+          fi
+
   synthetic-capture:
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.run_endurance }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (!inputs.run_endurance && !inputs.run_failure_diagnostics) }}
     name: Synthetic capture / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -108,6 +138,7 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.run_capture_clock }}
         env:
           SUISSE_CAPTURE_CLOCK_TRACE: ${{ inputs.capture_buffer_trace && '1' || '0' }}
+          SUISSE_CAPTURE_CLOCK_FIXED_FORMAT: ${{ inputs.capture_fixed_format && '1' || '0' }}
         timeout-minutes: 23
         run: node tests/e2e-harness/ci/run-qualification.js s16-capture-clock-diagnostic
 
@@ -126,5 +157,12 @@ jobs:
           compression-level: 1
 
   manual-endurance:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_endurance }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_endurance && !inputs.run_capture_clock && !inputs.run_failure_diagnostics }}
     uses: ./.github/workflows/audio-endurance.yml
+
+  failure-diagnostics:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_failure_diagnostics && !inputs.run_endurance && !inputs.run_capture_clock }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/audio-failure-diagnostics.yml

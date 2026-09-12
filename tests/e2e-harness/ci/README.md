@@ -1,5 +1,43 @@
 # Hosted desktop audio qualification
 
+## Investigating the failed five-hour run
+
+Manual `run_failure_diagnostics=true` on `audio-reliability.yml`, with the other
+manual modes false, runs two independent investigations. Conflicting modes fail
+validation. Ordinary PR qualification and the five-hour duration/content checks
+are unchanged.
+
+The startup matrix uses Windows, Intel Mac and Apple Silicon. It compares short
+actual application captures from a small generated WAV and a WAV with the same
+declared byte size as the endurance input. Their initial numbered audio is the
+same; the large file's remaining data is zero-filled. This isolates file-size
+startup work, rather than reproducing the full endurance signal or disk-cache
+conditions. Acquisition, recorder events, negotiated settings and captured
+originals remain available. Generated WAVs are excluded from artifact upload;
+their generator metadata and hashes are retained. Each startup step is bounded
+to twelve minutes and the jobs to forty-five minutes.
+
+The Intel replay downloads only the explicitly pinned generated-audio artifact
+`9980360723` from run `33988551101`. The script verifies the joined native input
+against its retained SHA256 before processing an isolated copy. It runs the
+production finalizer with stage/progress measurements, preserving the encoder
+policy, timeout and exact sample-count checks. It does not recapture five hours
+or contact a backend. A missing or expired artifact fails visibly. The original
+failure reached encoding but never entered final validation: its last complete
+encoded packet was near 17,165 seconds of the approximately 18,302-second source.
+The replay determines how much time each observed phase takes on another Intel
+runner; a successful replay cannot prove the cause of that historical slowdown.
+
+Replay results, progress and any retained candidate are uploaded separately from
+the downloaded original archive. Both investigations retain evidence for thirty
+days and perform no signing, installer publication, release or deployment. A
+completed diagnostic does not clear the prior Windows continuity, Apple Silicon
+clock, Intel finalization, or Intel short-capture timing failures.
+
+```sh
+gh workflow run audio-reliability.yml --ref REVIEWED_BRANCH --field run_failure_diagnostics=true
+```
+
 ## Capture-clock investigation
 
 Manual `run_capture_clock=true` on `audio-reliability.yml` (with `run_endurance=false`)
@@ -42,6 +80,18 @@ buffer loss and export failures stay visible. Trace overhead is an additional
 experimental variable; compare against the retained untraced run. Several health
 and recording AudioContexts are present, so a FIFO event alone does not identify
 the recording mixer. The trace is disabled in ordinary qualification and releases.
+
+For the upstream Windows dropout investigation, add
+`--field capture_fixed_format=true` together with `run_capture_clock=true` and
+`capture_buffer_trace=true`. This optional mode requires actual 48 kHz mono in
+both processing cases; unsupported or mismatched negotiation fails the control.
+The trace also retains Chromium audio callback/processing events and timing
+arguments attached to END events. Callback cadence and delivery-delay summaries
+remain measurements, not proof of which component lost audio. A three-minute
+case without a dropout cannot clear the historical failure near 9m36s. Additional
+recorders, tracing overhead and any negotiated buffer differences remain
+experimental variables. Existing default constraints and trace bounds stay in
+place when fixed-format mode is not selected.
 
 Untraced run `33972112297` reproduced a short Intel Mac failure: with processing
 disabled, two numbered markers split only in the actual mixed output, with 650 ms

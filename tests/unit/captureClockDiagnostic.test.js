@@ -58,9 +58,9 @@ describe('same-source capture comparison', () => {
   });
 });
 
-function witnessFixture(processingDisabled = false) {
+function witnessFixture(processingDisabled = false, { fixedFormat = false, settings = { sampleRate: 44100, channelCount: 2 } } = {}) {
   const cloneTrack = { id: 'clone', stop: vi.fn() };
-  const originalTrack = { id: 'original', clone: () => cloneTrack, stop: vi.fn(), getSettings: () => ({ sampleRate: 44100, channelCount: 2 }) };
+  const originalTrack = { id: 'original', clone: () => cloneTrack, stop: vi.fn(), getSettings: () => settings };
   class Stream {
     constructor(tracks) { this.tracks = tracks; }
     getAudioTracks() { return this.tracks; }
@@ -84,7 +84,7 @@ function witnessFixture(processingDisabled = false) {
   const window = { MediaRecorder: Recorder, AudioContext: Context };
   const sandbox = { window, navigator: { mediaDevices: devices }, MediaRecorder: Recorder, MediaStream: Stream,
     document: { visibilityState: 'visible' }, performance: { now: () => 100 }, setTimeout: vi.fn(() => 1), clearTimeout: vi.fn() };
-  vm.runInNewContext('(' + installWitness.toString() + ')(' + JSON.stringify({ processingDisabled }) + ')', sandbox);
+  vm.runInNewContext('(' + installWitness.toString() + ')(' + JSON.stringify({ processingDisabled, fixedFormat }) + ')', sandbox);
   return { window, devices, source, nativeGet, originalTrack, cloneTrack, Recorder };
 }
 
@@ -121,4 +121,32 @@ describe('native witness isolation', () => {
     expect(fixture.window.__directMixedWitness.snapshot().acquisitions[0].settings[0]).toEqual({ sampleRate: 44100, channelCount: 2 });
     await fixture.window.__directMixedWitness.dispose();
   });
+
+  it.each([false, true])('requires and records an actually negotiated fixed format with processingDisabled=%s', async processingDisabled => {
+    const settings = { sampleRate: 48000, channelCount: 1, echoCancellation: !processingDisabled,
+      noiseSuppression: !processingDisabled, autoGainControl: !processingDisabled };
+    const fixture = witnessFixture(processingDisabled, { fixedFormat: true, settings });
+    const constraints = { audio: { deviceId: { exact: 'chosen' }, sampleRate: 44100, channelCount: 2, echoCancellation: true } };
+    expect(await fixture.devices.getUserMedia(constraints)).toBe(fixture.source);
+    expect(fixture.nativeGet.mock.calls[0][0]).toMatchObject({ audio: { deviceId: { exact: 'chosen' },
+      sampleRate: { exact: 48000 }, channelCount: { exact: 1 }, echoCancellation: !processingDisabled } });
+    expect(constraints.audio).toMatchObject({ sampleRate: 44100, channelCount: 2, echoCancellation: true });
+    expect(fixture.window.__directMixedWitness.snapshot().acquisitions[0]).toMatchObject({ fixedFormatRequired: true,
+      fixedFormatConfirmed: true, settings: [settings] });
+    await fixture.window.__directMixedWitness.dispose();
+    expect(fixture.originalTrack.stop).not.toHaveBeenCalled();
+  });
+
+  it.each([{ sampleRate: 44100, channelCount: 1 }, { sampleRate: 48000, channelCount: 2 }, {}])(
+    'rejects mismatched or unavailable actual format and retains the evidence without leaking an acquired track: %s', async settings => {
+      const fixture = witnessFixture(false, { fixedFormat: true, settings });
+      await expect(fixture.devices.getUserMedia({ audio: true })).rejects.toThrow('expected 48000 Hz mono');
+      expect(fixture.originalTrack.stop).toHaveBeenCalledTimes(1);
+      expect(fixture.cloneTrack.stop).not.toHaveBeenCalled();
+      const snapshot = fixture.window.__directMixedWitness.snapshot();
+      expect(snapshot.acquisitions[0]).toMatchObject({ fixedFormatConfirmed: false, settings: [settings] });
+      expect(snapshot.recorders).toEqual([]);
+      expect(snapshot.errors).toContain('Fixed diagnostic format was not negotiated: expected 48000 Hz mono');
+      await fixture.window.__directMixedWitness.dispose();
+    });
 });

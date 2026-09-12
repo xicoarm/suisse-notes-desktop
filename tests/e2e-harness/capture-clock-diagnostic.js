@@ -50,7 +50,7 @@ async function unusedPort() {
 }
 
 // This function executes only in the synthetic app renderer.
-function installWitness({ processingDisabled }) {
+function installWitness({ processingDisabled, fixedFormat = false }) {
   if (window.__directMixedWitness) throw new Error('Witness already installed');
   const devices = navigator.mediaDevices;
   const originalGet = devices.getUserMedia;
@@ -115,14 +115,29 @@ function installWitness({ processingDisabled }) {
       noteError('Non-microphone capture attempt rejected'); throw new Error('Synthetic microphone only');
     }
     if (acquisitions.length) { noteError('A second native microphone acquisition was attempted'); throw new Error('Single-source diagnostic cannot reacquire'); }
-    const requested = processingDisabled ? { ...constraints, audio: { ...(typeof constraints.audio === 'object' ? constraints.audio : {}),
-      echoCancellation: false, noiseSuppression: false, autoGainControl: false } } : constraints;
-    const acquisition = { requestedAt: performance.now(), receivedAt: null, requestedAudio: requested.audio, settings: [], sourceTrackIds: [], clonedTrackIds: [] };
+    const requested = processingDisabled || fixedFormat ? { ...constraints, audio: {
+      ...(typeof constraints.audio === 'object' ? constraints.audio : {}),
+      ...(processingDisabled ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false } : {}),
+      ...(fixedFormat ? { sampleRate: { exact: 48000 }, channelCount: { exact: 1 } } : {}),
+    } } : constraints;
+    const acquisition = { requestedAt: performance.now(), receivedAt: null, requestedAudio: requested.audio,
+      fixedFormatRequired: fixedFormat, fixedFormatConfirmed: null, settings: [], sourceTrackIds: [], clonedTrackIds: [] };
     acquisitions.push(acquisition);
     const source = await Reflect.apply(originalGet, this, [requested]);
     acquisition.receivedAt = performance.now();
     acquisition.settings = source.getAudioTracks().map(track => track.getSettings());
     acquisition.sourceTrackIds = source.getAudioTracks().map(track => track.id);
+    if (fixedFormat) {
+      acquisition.fixedFormatConfirmed = acquisition.settings.length === 1 && acquisition.settings.every(settings =>
+        settings.sampleRate === 48000 && settings.channelCount === 1);
+      if (!acquisition.fixedFormatConfirmed) {
+        // This acquired stream has not been returned to the application. Do
+        // not leave a live unowned source after a failed diagnostic control.
+        source.getTracks().forEach(track => track.stop());
+        const error = new Error('Fixed diagnostic format was not negotiated: expected 48000 Hz mono');
+        noteError(error); throw error;
+      }
+    }
     try {
       if (source.getAudioTracks().length !== 1) throw new Error('Expected exactly one native microphone track');
       clone = new MediaStream([source.getAudioTracks()[0].clone()]);
@@ -255,7 +270,7 @@ async function capture(directory, options, expectedProvenance) {
     if (await app.evalTimed(() => document.querySelector('[data-test="system-audio-toggle"]')?.getAttribute('aria-checked')) !== 'false') throw new Error('System audio must be off');
     result.systemAudioEnabled = false;
     result.expectedNativeRecorders = await app.evalTimed(() => typeof window.electronAPI.recording.beginSource === 'function' ? 1 : 0);
-    await app.evalTimed(installWitness, { processingDisabled: options.processingDisabled });
+    await app.evalTimed(installWitness, { processingDisabled: options.processingDisabled, fixedFormat: options.fixedFormat });
     await app.startRecording(); result.recordId = await app.getRecordId();
     console.log('Both diagnostic branches are recording: ' + directory);
     const began = performance.now();
@@ -328,6 +343,7 @@ async function capture(directory, options, expectedProvenance) {
     const acquisition = result.finalSnapshot.acquisitions;
     if (acquisition.length !== 1 || !acquisition[0].receivedAt || !acquisition[0].settings.length) throw new Error('Missing single native acquisition evidence');
     if (options.processingDisabled && acquisition[0].settings.some(settings => ['echoCancellation', 'noiseSuppression', 'autoGainControl'].some(flag => settings[flag] !== false))) throw new Error('Disabled audio processing not confirmed by native settings');
+    if (options.fixedFormat && acquisition[0].fixedFormatConfirmed !== true) throw new Error('Fixed diagnostic format was not confirmed');
     if (!result.clockReadout.some(context => context.isActualApplicationRecordingContext)) throw new Error('Actual app mixing context was not identified');
     if (result.finalSnapshot.recorders.some(recorder => recorder.timesliceMs !== 1000 || recorder.startedAt === null || recorder.stoppedAt === null)) throw new Error('Unexpected recorder lifecycle or interval');
     await app.evalTimed(() => window.__directMixedWitness.dispose());
@@ -337,6 +353,7 @@ async function capture(directory, options, expectedProvenance) {
     if (result.bufferTrace?.exportCompleted) {
       result.bufferTrace.summary = summarizeTrace(JSON.parse(fs.readFileSync(result.bufferTrace.file, 'utf8')));
       if (!Object.keys(result.bufferTrace.summary.counts).length) throw new Error('No native media-stream events in audio trace');
+      if (result.bufferTrace.summary.callbackTiming.problems.length) throw new Error(result.bufferTrace.summary.callbackTiming.problems.join('; '));
     }
     checkpoint();
     const directAnalysis = await analyzeCodedAudio(result.directPath);
@@ -398,6 +415,7 @@ async function capture(directory, options, expectedProvenance) {
 async function runCaptureClockDiagnostic(opts = {}) {
   const seconds = opts.seconds ?? 180;
   const traceBuffers = opts.traceBuffers ?? process.env.SUISSE_CAPTURE_CLOCK_TRACE === '1';
+  const fixedFormat = opts.fixedFormat ?? process.env.SUISSE_CAPTURE_CLOCK_FIXED_FORMAT === '1';
   if (!Number.isInteger(seconds) || seconds < 45 || seconds > 240) throw new Error('Diagnostic capture must be 45–240 seconds');
   if (!['win32', 'darwin'].includes(process.platform)) throw new Error('Native Windows or macOS required');
   if (process.env.SUISSE_E2E_HOOKS !== '1' || process.env.SUISSE_TEST_NETWORK_ISOLATION !== '1') throw new Error('Explicit synthetic/network-isolation flags required');
@@ -410,16 +428,17 @@ async function runCaptureClockDiagnostic(opts = {}) {
   const directory = fs.mkdtempSync(path.join(parent, 's16-capture-clock-'));
   const result = { name: 's16-capture-clock-diagnostic', pass: false, measurementCompleted: false, problems: [],
     fiveHourQualificationPassed: false, productionBackendQualified: false, physicalHardwareQualified: false,
-    secondsPerCase: seconds, traceBuffers, evidenceDir: directory, cases: [],
+    secondsPerCase: seconds, traceBuffers, fixedFormat, evidenceDir: directory, cases: [],
     notes: ['Success means the diagnostic completed with valid controls; it does not clear existing capture or endurance failures.',
       'Default and disabled processing may negotiate different sample rates/channel counts. Read the observed settings before attributing a difference to processing.',
+      'Fixed-format mode requires actual 48000 Hz mono in both cases; callback cadence and trace overhead remain independent comparison controls.',
       'Direct and mixed endpoints differ; source identities are compared only over their common interior interval.'] };
   const checkpoint = () => writeJson(path.join(directory, 'summary.json'), result);
   checkpoint();
   for (const processingDisabled of [false, true]) {
     const caseDir = path.join(directory, processingDisabled ? 'processing-disabled' : 'default-processing');
     fs.mkdirSync(caseDir);
-    const caseResult = await capture(caseDir, { seconds, processingDisabled, traceBuffers }, recorded);
+    const caseResult = await capture(caseDir, { seconds, processingDisabled, traceBuffers, fixedFormat }, recorded);
     result.cases.push(caseResult);
     if (!caseResult.measurementCompleted || !caseResult.controlsValid || caseResult.problems.length) {
       result.problems.push(...caseResult.problems.map(problem => path.basename(caseDir) + ': ' + problem));

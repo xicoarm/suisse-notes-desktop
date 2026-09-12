@@ -5,8 +5,102 @@ const { performance } = require('perf_hooks');
 
 const MAX_TRACE_BYTES = 64 * 1024 * 1024;
 const TRACE_CONFIG = Object.freeze({ recordMode: 'recordUntilFull', traceBufferSizeInKb: 16384,
-  includedCategories: ['disabled-by-default-mediastream'], excludedCategories: ['*'],
+  includedCategories: ['audio', 'disabled-by-default-mediastream'], excludedCategories: ['*'],
   enableSampling: false, enableSystrace: false });
+const MAX_CALLBACK_MEASUREMENTS = 20000;
+// These are Chromium 120 event names. Their absence is missing diagnostic
+// coverage, not evidence that a callback or processor was healthy.
+const CALLBACK_STAGES = Object.freeze({
+  'InputController::OnData': 'input-callback',
+  'AudioInputDevice::AudioThreadCallback::Process': 'renderer-delivery',
+  'AudioProcessor::ProcessCapturedAudio': 'processing-input',
+  'AudioProcessor::ProcessData': 'processing-work',
+});
+
+function summarizeCallbacks(events) {
+  const measurements = [], stacks = new Map(), problems = [];
+  let omittedMeasurements = 0, incompleteCallbacks = 0;
+  const add = (begin, end = null) => {
+    if (!begin.cat?.split(',').includes('audio') || !CALLBACK_STAGES[begin.name]) return;
+    if (measurements.length >= MAX_CALLBACK_MEASUREMENTS) { omittedMeasurements++; return; }
+    const args = { ...begin.args, ...end?.args };
+    const captureTimeMs = args['capture time (ms)'] ?? args['capture_time (ms)'];
+    const deliveryTimeMs = args['now_time (ms)'];
+    const captureDelayMs = args['delay (ms)'] ?? args['capture_delay (ms)'] ??
+      (Number.isFinite(captureTimeMs) && Number.isFinite(deliveryTimeMs) ? deliveryTimeMs - captureTimeMs : null);
+    measurements.push({ name: begin.name, stage: CALLBACK_STAGES[begin.name], pid: begin.pid, tid: begin.tid,
+      ts: begin.ts, durationUs: end ? end.ts - begin.ts : begin.dur ?? null, args,
+      captureTimeMs: Number.isFinite(captureTimeMs) ? captureTimeMs : null,
+      deliveryTimeMs: Number.isFinite(deliveryTimeMs) ? deliveryTimeMs : null,
+      captureDelayMs: Number.isFinite(captureDelayMs) ? captureDelayMs : null });
+  };
+  // Pair synchronous events per thread before filtering by event name. Nested
+  // processing and WebAudio events must not steal an outer delivery END event.
+  // Chromium puts capture_time/now_time on the delivery END, not its BEGIN.
+  for (const event of events) {
+    const key = event.pid + ':' + event.tid;
+    if (event.ph === 'B') {
+      if (!stacks.has(key)) stacks.set(key, []);
+      stacks.get(key).push(event);
+    } else if (event.ph === 'E') {
+      const begin = stacks.get(key)?.pop();
+      if (!begin) continue; // Trace may start in the middle of a callback.
+      if (event.name && event.name !== begin.name) {
+        if (CALLBACK_STAGES[begin.name] || CALLBACK_STAGES[event.name]) incompleteCallbacks++;
+        continue;
+      }
+      add(begin, event);
+    } else if (event.ph === 'X') add(event);
+  }
+  for (const stack of stacks.values()) {
+    incompleteCallbacks += stack.filter(event => CALLBACK_STAGES[event.name]).length;
+  }
+  const byThread = new Map();
+  for (const item of measurements) {
+    const key = [item.pid, item.tid, item.name].join(':');
+    if (!byThread.has(key)) byThread.set(key, []);
+    byThread.get(key).push(item);
+  }
+  const cadence = [];
+  for (const items of byThread.values()) {
+    items.sort((a, b) => a.ts - b.ts);
+    const first = items[0];
+    const summary = { name: first.name, stage: first.stage, pid: first.pid, tid: first.tid, callbacks: items.length,
+      firstTs: first.ts, lastTs: items.at(-1).ts, minimumCaptureStepMs: null, maximumCaptureStepMs: null,
+      maximumCallbackStepMs: null, maximumDurationMs: null, maximumCaptureDelayMs: null, backwardsCaptureSteps: 0 };
+    let previous = null;
+    for (const item of items) {
+      if (Number.isFinite(item.durationUs)) summary.maximumDurationMs = Math.max(summary.maximumDurationMs ?? -Infinity, item.durationUs / 1000);
+      if (Number.isFinite(item.captureDelayMs)) summary.maximumCaptureDelayMs = Math.max(summary.maximumCaptureDelayMs ?? -Infinity, item.captureDelayMs);
+      if (previous) {
+        summary.maximumCallbackStepMs = Math.max(summary.maximumCallbackStepMs ?? -Infinity, (item.ts - previous.ts) / 1000);
+        if (Number.isFinite(item.captureTimeMs) && Number.isFinite(previous.captureTimeMs)) {
+          const step = item.captureTimeMs - previous.captureTimeMs;
+          summary.minimumCaptureStepMs = Math.min(summary.minimumCaptureStepMs ?? Infinity, step);
+          summary.maximumCaptureStepMs = Math.max(summary.maximumCaptureStepMs ?? -Infinity, step);
+          if (step < 0) summary.backwardsCaptureSteps++;
+        }
+      }
+      previous = item;
+    }
+    cadence.push(summary);
+  }
+  const requiredNames = ['InputController::OnData', 'AudioInputDevice::AudioThreadCallback::Process'];
+  for (const name of requiredNames) {
+    const matching = measurements.filter(item => item.name === name);
+    if (!matching.length) problems.push('Missing upstream callback trace: ' + name);
+    else if (matching.some(item => item.captureTimeMs === null ||
+      (name === 'AudioInputDevice::AudioThreadCallback::Process' && item.deliveryTimeMs === null))) {
+      problems.push('Missing capture/arrival timestamp arguments: ' + name);
+    }
+  }
+  if (omittedMeasurements) problems.push('Audio callback summary exceeded its measurement cap');
+  return { measurements, cadence, problems, maximumMeasurements: MAX_CALLBACK_MEASUREMENTS, omittedMeasurements,
+    incompleteCallbacks, notes: ['Stages locate observed events; they do not assign a cause to an audio dropout.',
+      'Audio processing may run before renderer delivery. Thread identity alone is not a unique source identity.',
+      'A trace boundary can leave an incomplete callback. Full raw trace and trace data-loss status are retained.',
+      'Compare capture cadence, callback arrival, processing duration and independently decoded content; absence of a short-window fault does not clear historical failures.'] };
+}
 
 function deadline(promise, milliseconds = 15000) {
   let timer;
@@ -30,6 +124,7 @@ function summarizeTrace(trace) {
     if (faults.length < 1000) faults.push({ name: event.name, ts: event.ts, pid: event.pid, tid: event.tid, args: event.args });
   }
   return { totalTraceEvents: trace.traceEvents.length, counts, threads: Object.values(threads), faults,
+    callbackTiming: summarizeCallbacks(trace.traceEvents),
     firstTs, lastTs, observedSpanS: firstTs === null ? null : (lastTs - firstTs) / 1000000,
     notes: ['Multiple app AudioContexts are present. A FIFO event alone does not identify the recording mixer.',
       'Trace timing and buffer overhead are experimental variables. Absence of a fault in this short window does not clear prior failures.'] };
@@ -100,4 +195,4 @@ async function startBufferTrace(page) {
   };
 }
 
-module.exports = { startBufferTrace, summarizeTrace, TRACE_CONFIG, MAX_TRACE_BYTES };
+module.exports = { startBufferTrace, summarizeTrace, TRACE_CONFIG, MAX_TRACE_BYTES, MAX_CALLBACK_MEASUREMENTS };
