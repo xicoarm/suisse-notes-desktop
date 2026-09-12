@@ -9,7 +9,6 @@
 const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const http = require('http');
 const puppeteer = require('puppeteer-core');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
@@ -106,19 +105,99 @@ function installSyntheticCaptureProbe() {
   };
 }
 
-async function fetchJson(url) {
-  return new Promise((resolve, reject) => {
-    http.get(url, (res) => {
-      let d = '';
-      res.on('data', c => d += c);
-      res.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
-    }).on('error', reject).setTimeout(5000, function () { this.destroy(new Error('CDP request timed out')); });
-  });
+function isolationError(message) {
+  return Object.assign(new Error(message), { code: 'HARNESS_ISOLATION_FAILED' });
+}
+
+function validateDevToolsEndpoint(value, expectedPort = 0) {
+  let url;
+  try { url = new URL(value); } catch (_) { throw isolationError('Owned child emitted an invalid DevTools endpoint'); }
+  // Numeric loopback only: no DNS, credentials, redirects or remote WebSocket.
+  if (url.protocol !== 'ws:' || !['127.0.0.1', '[::1]'].includes(url.hostname) ||
+      !url.port || url.username || url.password || url.search || url.hash ||
+      !/^\/devtools\/browser\/[a-zA-Z0-9-]+$/.test(url.pathname) ||
+      (expectedPort !== 0 && Number(url.port) !== expectedPort)) {
+    throw isolationError('Owned child emitted a non-loopback or unexpected DevTools endpoint');
+  }
+  return url.href;
+}
+
+/** Trust only a fresh endpoint printed by this spawned child's stderr. */
+function watchOwnedDevTools(child, { expectedPort = 0, timeoutMs = 180000, maxLineBytes = 16384 } = {}) {
+  let buffer = '', endpoint = null, failure = null, closed = false, timer;
+  let resolveEndpoint, rejectEndpoint, rejectFailure;
+  const ready = new Promise((resolve, reject) => { resolveEndpoint = resolve; rejectEndpoint = reject; });
+  const failed = new Promise((_, reject) => { rejectFailure = reject; });
+  ready.catch(() => {}); failed.catch(() => {});
+  const fail = error => {
+    if (closed || failure) return;
+    failure = error?.code === 'HARNESS_ISOLATION_FAILED' ? error : isolationError(error?.message || String(error));
+    clearTimeout(timer); rejectEndpoint(failure); rejectFailure(failure);
+  };
+  const line = value => {
+    if (/bind\(\).*failed|address already in use|cannot start http server for devtools/i.test(value)) {
+      fail(isolationError('Owned child could not bind its DevTools endpoint')); return;
+    }
+    const match = /^\s*DevTools listening on (\S+)\s*$/.exec(value);
+    if (!match) return;
+    try {
+      const found = validateDevToolsEndpoint(match[1], expectedPort);
+      endpoint = found; clearTimeout(timer); resolveEndpoint(found);
+    } catch (error) { fail(error); }
+  };
+  const onData = chunk => {
+    if (closed || failure || endpoint) return;
+    // Process each piece without retaining unbounded startup output, including
+    // a child that writes forever without a newline.
+    for (const piece of chunk.toString().split(/(?<=\n)/)) {
+      if (Buffer.byteLength(buffer) + Buffer.byteLength(piece) > maxLineBytes) {
+        fail(isolationError('Owned child DevTools startup line exceeded its bound')); return;
+      }
+      buffer += piece;
+      if (buffer.endsWith('\n')) {
+        line(buffer.trimEnd()); buffer = '';
+        if (endpoint) { child.stderr.off('data', onData); return; }
+      }
+    }
+  };
+  const onExit = (code, signal) => fail(isolationError(`Owned app exited (${code ?? signal ?? 'unknown'})`));
+  const onError = error => fail(isolationError(`Owned app failed: ${error.message}`));
+  child.stderr.on('data', onData); child.on('exit', onExit); child.on('error', onError);
+  timer = setTimeout(() => fail(isolationError('Owned app did not announce DevTools before the startup deadline')), timeoutMs);
+  if (child.exitCode != null || child.signalCode != null) onExit(child.exitCode, child.signalCode);
+  return {
+    ready,
+    race: promise => Promise.race([promise, failed]),
+    assertAlive: () => { if (failure) throw failure; if (closed) throw isolationError('Owned app connection is closed'); },
+    close: () => {
+      fail(isolationError('Owned app connection is closed'));
+      closed = true; clearTimeout(timer); buffer = '';
+      child.stderr.off('data', onData); child.off('exit', onExit); child.off('error', onError);
+    },
+  };
+}
+
+function normalizedProfile(value, platform = process.platform) {
+  const paths = platform === 'win32' ? path.win32 : path.posix;
+  if (typeof value !== 'string' || !paths.isAbsolute(value)) throw isolationError('App profile identity is not an absolute path');
+  const normalized = paths.resolve(value);
+  return platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function validateAppIdentity(identity, expected, platform = process.platform) {
+  let actualApi, expectedApi;
+  try { actualApi = new URL(identity?.apiUrl); expectedApi = new URL(expected.apiUrl); }
+  catch (_) { throw isolationError('App backend identity is unavailable'); }
+  if (!['http:', 'https:'].includes(actualApi.protocol) || actualApi.href !== expectedApi.href ||
+      normalizedProfile(identity?.userDataDir, platform) !== normalizedProfile(expected.userDataDir, platform)) {
+    throw isolationError('Connected app profile or backend does not match this harness launch');
+  }
 }
 
 class AppDriver {
   constructor(opts = {}) {
-    this.cdpPort = opts.cdpPort || 9339;
+    this.cdpPort = opts.cdpPort ?? 0; // Chromium assigns an unused local port.
+    if (!Number.isInteger(this.cdpPort) || this.cdpPort < 0 || this.cdpPort > 65535) throw new Error('Invalid DevTools port');
     this.apiUrl = opts.apiUrl;                   // mock backend URL
     this.fakeAudioWav = opts.fakeAudioWav;       // scenario WAV fed as the mic
     this.userDataDir = opts.userDataDir || path.join(WORK_DIR, 'userdata', opts.name || 'default');
@@ -132,6 +211,7 @@ class AppDriver {
     this.diagnosticsDir = null;
     this.rendererListeners = new Map();
     this.diagnosticWriteErrorReported = false;
+    this.ownedDevTools = null;
   }
 
   assertTestProfile() {
@@ -298,6 +378,11 @@ class AppDriver {
       ...((packagedExe || this.fakeAudioWav || this.appDir) ? { SUISSE_E2E_HOOKS: '1' } : {}),
       ...this.env,
     };
+    // Overrides may tune scenarios but cannot redirect app/profile identity.
+    env.SUISSE_TEST_USERDATA = path.resolve(this.userDataDir);
+    env.SUISSE_TEST_CDP_PORT = String(this.cdpPort);
+    env.API_BASE_URL = this.apiUrl;
+    env.VITE_API_URL = this.apiUrl;
 
     this.detachRendererDiagnostics();
     this.beginDiagnostics(env);
@@ -338,6 +423,8 @@ class AppDriver {
         detached: process.platform !== 'win32',
       });
     }
+    this.ownedDevTools?.close();
+    this.ownedDevTools = watchOwnedDevTools(this.proc, { expectedPort: this.cdpPort });
     const captureOutput = channel => data => {
       const message = data.toString();
       this.log.push(message);
@@ -346,26 +433,37 @@ class AppDriver {
     this.proc.stdout.on('data', captureOutput('stdout'));
     this.proc.stderr.on('data', captureOutput('stderr'));
 
-    // Wait for the CDP endpoint (quasar dev + electron start takes a while)
-    const deadline = Date.now() + 180_000;
-    let version = null;
-    while (Date.now() < deadline) {
-      try {
-        version = await fetchJson(`http://127.0.0.1:${this.cdpPort}/json/version`);
-        break;
-      } catch (e) { await sleep(1500); }
+    try {
+      const endpoint = await this.ownedDevTools.ready;
+      this.ownedDevTools.assertAlive();
+      const owner = this.ownedDevTools;
+      const connecting = puppeteer.connect({ browserWSEndpoint: endpoint, defaultViewport: null }).then(browser => {
+        try { owner.assertAlive(); } catch (error) { browser.disconnect(); throw error; }
+        return browser;
+      });
+      this.browser = await owner.race(diagnosticDeadline(connecting, 15000));
+      await this.waitForStablePage();
+      return this;
+    } catch (error) {
+      await this.close();
+      throw error;
     }
-    if (!version) {
-      throw new Error(`App did not open CDP port ${this.cdpPort} within 3min.\nLast output:\n${this.log.slice(-30).join('')}`);
-    }
+  }
 
-    this.browser = await puppeteer.connect({
-      browserWSEndpoint: version.webSocketDebuggerUrl,
-      defaultViewport: null,
-    });
-
-    await this.waitForStablePage();
-    return this;
+  async verifyPageIdentity(page) {
+    this.ownedDevTools.assertAlive();
+    let identity;
+    try {
+      identity = await this.ownedDevTools.race(diagnosticDeadline(page.evaluate(async () => {
+        const api = window.electronAPI;
+        if (!api?.app?.getUserDataPath || !api?.config?.getApiUrl) return null;
+        const [userDataDir, apiUrl] = await Promise.all([api.app.getUserDataPath(), api.config.getApiUrl()]);
+        return { userDataDir, apiUrl };
+      }), 5000));
+    } catch (error) { throw isolationError(`Could not verify connected app identity: ${error.message}`); }
+    if (!identity) throw isolationError('Connected renderer has no app identity IPC');
+    validateAppIdentity(identity, { userDataDir: path.resolve(this.userDataDir), apiUrl: this.apiUrl });
+    this.ownedDevTools.assertAlive();
   }
 
   /**
@@ -379,10 +477,12 @@ class AppDriver {
     const seenUrls = new Set();
     while (Date.now() < deadline) {
       try {
-        const pages = await this.browser.pages();
+        this.ownedDevTools.assertAlive();
+        const pages = await this.ownedDevTools.race(this.browser.pages());
         this.page = pages.find(p => !p.url().startsWith('devtools://') && p.url() !== 'about:blank')
           || pages.find(p => !p.url().startsWith('devtools://'));
         if (!this.page) { await sleep(1500); continue; }
+        await this.verifyPageIdentity(this.page);
         await this.observeRenderer(this.page);
         seenUrls.add(this.page.url());
         // Fresh profiles land on the WELCOME page ("Anmelden" / "LOSLEGEN")
@@ -412,6 +512,7 @@ class AppDriver {
         await this.page.waitForSelector('input[type=email], [data-test=record-start]', { timeout: 10_000 });
         return this.page;
       } catch (e) {
+        if (e.code === 'HARNESS_ISOLATION_FAILED') throw e;
         lastErr = e;
         await sleep(1500);
       }
@@ -678,11 +779,14 @@ class AppDriver {
       catch (error) { this.log.push('[harness] Final diagnostic write failed: ' + error.message); }
     }
     this.detachRendererDiagnostics();
+    this.ownedDevTools?.close();
     try { this.browser?.disconnect(); } catch (e) { /* ignore */ }
-    if (this.proc && !this.proc.killed) {
+    if (this.proc && !this.proc.killed && Number.isInteger(this.proc.pid) && this.proc.pid > 0 &&
+        (process.platform !== 'win32' || (this.proc.exitCode == null && this.proc.signalCode == null))) {
       // Kill the whole quasar/electron tree
       try {
         if (process.platform === 'win32') execFileSync('taskkill', ['/pid', String(this.proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+        // A detached POSIX launcher may exit before its Electron descendants.
         else process.kill(-this.proc.pid, 'SIGKILL'); // only our detached process group
       } catch (e) { /* already gone */ }
     }
@@ -691,4 +795,4 @@ class AppDriver {
   }
 }
 
-module.exports = { AppDriver, sleep, installSyntheticCaptureProbe };
+module.exports = { AppDriver, sleep, installSyntheticCaptureProbe, watchOwnedDevTools, validateDevToolsEndpoint, validateAppIdentity };
