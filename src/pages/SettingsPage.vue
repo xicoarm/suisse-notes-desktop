@@ -598,6 +598,7 @@ import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
 import { useMeetingPrepStore } from '../stores/meeting-prep';
 import { useDeviceStore } from '../stores/device';
+import { useRecordingStore } from '../stores/recording';
 import { useLanguage } from '../composables/useLanguage';
 import { isCapacitor, isElectron } from '../utils/platform';
 import CustomVocabularyInput from '../components/CustomVocabularyInput.vue';
@@ -621,6 +622,7 @@ const prepTemplateOptions = computed(() => [
 ]);
 const { languages, currentLang, setLanguage, initLanguage } = useLanguage();
 const deviceStore = useDeviceStore();
+const recordingStore = useRecordingStore();
 const isMobileApp = isCapacitor();
 
 const appVersion = ref('1.0.0');
@@ -823,6 +825,13 @@ const confirmForgetDevice = () => {
 };
 
 const handleLogout = async () => {
+  // Logging out resets the history store and drops the user id that every
+  // history write is keyed on — under an active recording/upload that
+  // orphans the in-flight recording's bookkeeping.
+  if (recordingStore.isBlocking) {
+    $q.notify({ type: 'warning', message: t('logoutBlockedWhileRecording'), icon: 'lock', timeout: 5000 });
+    return;
+  }
   await authStore.logout();
   router.push('/login');
 };

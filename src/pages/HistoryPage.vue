@@ -287,9 +287,9 @@ export default {
 
     const uploadStatusText = computed(() => {
       if (retryAttempt.value > 0) {
-        return `Retry attempt ${retryAttempt.value}... ${uploadProgress.value}%`;
+        return t('historyRetryProgress', { attempt: retryAttempt.value, percent: uploadProgress.value });
       }
-      return `Uploading... ${uploadProgress.value}%`;
+      return t('historyUploadingProgress', { percent: uploadProgress.value });
     });
 
     const goToRecord = () => {
@@ -311,7 +311,7 @@ export default {
       if (!authStore.isAuthenticated) {
         $q.notify({
           type: 'warning',
-          message: 'Please login to upload recordings'
+          message: t('historyLoginRequired')
         });
         return;
       }
@@ -319,7 +319,7 @@ export default {
       if (!recording.filePath) {
         $q.notify({
           type: 'negative',
-          message: 'Recording file not found. It may have been deleted.'
+          message: t('historyFileMissing')
         });
         return;
       }
@@ -426,7 +426,7 @@ export default {
 
           $q.notify({
             type: 'positive',
-            message: 'Recording uploaded successfully'
+            message: t('uploadSuccessful')
           });
         } else {
           await historyStore.updateRecording(recording.id, {
@@ -447,7 +447,7 @@ export default {
 
           $q.notify({
             type: 'negative',
-            message: result.error || 'Upload failed',
+            message: result.error || t('uploadFailed'),
             timeout: 5000
           });
         }
@@ -468,7 +468,7 @@ export default {
 
         $q.notify({
           type: 'negative',
-          message: error.message || 'Upload error',
+          message: error.message || t('uploadFailed'),
           timeout: 5000
         });
       } finally {
@@ -617,7 +617,7 @@ export default {
     const onRecordingDeleted = () => {
       $q.notify({
         type: 'info',
-        message: 'Recording deleted'
+        message: t('recordingDeleted')
       });
     };
 

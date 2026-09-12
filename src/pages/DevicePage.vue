@@ -589,7 +589,7 @@ export default {
 
   setup() {
     const $q = useQuasar();
-    const { t } = useI18n();
+    const { t, locale } = useI18n();
     const deviceStore = useDeviceStore();
     const historyStore = useRecordingsHistoryStore();
     const bleAvailable = ref(true);
@@ -788,7 +788,8 @@ export default {
       const d = new Date(timestamp * 1000);
       const now = new Date();
       const isToday = d.toDateString() === now.toDateString();
-      const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const lang = locale.value || undefined;
+      const time = d.toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' });
       if (isToday) return time;
 
       const yesterday = new Date(now);
@@ -796,7 +797,7 @@ export default {
       if (d.toDateString() === yesterday.toDateString()) {
         return `${t('dateYesterday', { time })}`;
       }
-      return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + time;
+      return d.toLocaleDateString(lang, { month: 'short', day: 'numeric' }) + ' ' + time;
     };
 
     const formatFileName = (filename) => {

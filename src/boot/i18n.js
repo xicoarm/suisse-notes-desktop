@@ -492,7 +492,25 @@ const messages = {
     updateReadyMessage: 'Version {version} of Suisse Meets is ready. It contains stability and reliability improvements — we strongly recommend updating now. The app will restart briefly to apply it.',
     updateReadyLaterHint: 'If you choose Later, the update installs automatically the next time you quit the app.',
     updateReadyNow: 'Update now',
-    updateReadyLater: 'Later'
+    updateReadyLater: 'Later',
+
+    // Mobile reliability audit 2026-09
+    recordingGapsWarning: 'Parts of this recording could not be saved: {missing} of {total} audio segments are missing. The file has been kept and will be uploaded, but the transcript may have gaps.',
+    historyCaptureGapsWarning: '{missing} of {total} audio segments missing',
+    recordingRecoveredAfterInterruption: 'Recording recovered after an interruption. Some audio at the end may be missing.',
+    recordingInterruptedChunksKept: 'The recording was interrupted. Its audio segments are saved on this device but could not be combined yet. Please try again from History.',
+    failedToSaveRecording: 'Failed to save the recording',
+    errorProcessingRecording: 'Error while processing the recording',
+    recoveringPreviousRecording: 'Please wait — a previous recording is being recovered…',
+    failedToStartRecording: 'Could not start the recording',
+    storageCriticalCannotStart: 'Cannot start recording: only {freeMB} MB of storage left. Free up at least {minMB} MB and try again.',
+    storageLowWarning: 'Low storage: only {freeMB} MB left. The recording will stop automatically if storage runs out.',
+    historyLoginRequired: 'Please sign in to upload recordings',
+    historyFileMissing: 'The recording file was not found. It may have been deleted.',
+    historyUploadingProgress: 'Uploading… {percent}%',
+    historyRetryProgress: 'Retry attempt {attempt}… {percent}%',
+    recordingDeleted: 'Recording deleted',
+    logoutBlockedWhileRecording: "You can't sign out while a recording or upload is in progress."
   },
   de: {
     // Record Page
@@ -985,7 +1003,25 @@ const messages = {
     updateReadyMessage: 'Version {version} von Suisse Meets ist bereit. Sie enthält Stabilitäts- und Zuverlässigkeitsverbesserungen – wir empfehlen dringend, jetzt zu aktualisieren. Die App wird kurz neu gestartet.',
     updateReadyLaterHint: 'Bei „Später“ wird das Update automatisch beim nächsten Beenden der App installiert.',
     updateReadyNow: 'Jetzt aktualisieren',
-    updateReadyLater: 'Später'
+    updateReadyLater: 'Später',
+
+    // Mobile reliability audit 2026-09
+    recordingGapsWarning: 'Teile dieser Aufnahme konnten nicht gespeichert werden: {missing} von {total} Audio-Segmenten fehlen. Die Datei wurde behalten und wird hochgeladen, das Transkript kann aber Lücken haben.',
+    historyCaptureGapsWarning: '{missing} von {total} Audio-Segmenten fehlen',
+    recordingRecoveredAfterInterruption: 'Aufnahme nach einer Unterbrechung wiederhergestellt. Am Ende kann etwas Audio fehlen.',
+    recordingInterruptedChunksKept: 'Die Aufnahme wurde unterbrochen. Die Audio-Segmente sind auf diesem Gerät gespeichert, konnten aber noch nicht zusammengefügt werden. Bitte im Verlauf erneut versuchen.',
+    failedToSaveRecording: 'Aufnahme konnte nicht gespeichert werden',
+    errorProcessingRecording: 'Fehler beim Verarbeiten der Aufnahme',
+    recoveringPreviousRecording: 'Bitte warten — eine frühere Aufnahme wird wiederhergestellt…',
+    failedToStartRecording: 'Aufnahme konnte nicht gestartet werden',
+    storageCriticalCannotStart: 'Aufnahme nicht möglich: nur noch {freeMB} MB Speicher frei. Bitte mindestens {minMB} MB freigeben und erneut versuchen.',
+    storageLowWarning: 'Wenig Speicher: nur noch {freeMB} MB frei. Die Aufnahme stoppt automatisch, wenn der Speicher voll ist.',
+    historyLoginRequired: 'Bitte anmelden, um Aufnahmen hochzuladen',
+    historyFileMissing: 'Die Aufnahmedatei wurde nicht gefunden. Sie wurde möglicherweise gelöscht.',
+    historyUploadingProgress: 'Wird hochgeladen… {percent}%',
+    historyRetryProgress: 'Erneuter Versuch {attempt}… {percent}%',
+    recordingDeleted: 'Aufnahme gelöscht',
+    logoutBlockedWhileRecording: 'Abmelden ist nicht möglich, solange eine Aufnahme oder ein Upload läuft.'
   },
   fr: {
     // Record Page
@@ -1478,7 +1514,25 @@ const messages = {
     updateReadyMessage: 'La version {version} de Suisse Meets est prête. Elle contient des améliorations de stabilité et de fiabilité – nous vous recommandons vivement de mettre à jour maintenant. L\'application redémarrera brièvement.',
     updateReadyLaterHint: 'Si vous choisissez « Plus tard », la mise à jour s\'installera automatiquement à la prochaine fermeture de l\'application.',
     updateReadyNow: 'Mettre à jour',
-    updateReadyLater: 'Plus tard'
+    updateReadyLater: 'Plus tard',
+
+    // Mobile reliability audit 2026-09
+    recordingGapsWarning: "Certaines parties de cet enregistrement n'ont pas pu être sauvegardées : {missing} segments audio sur {total} manquent. Le fichier a été conservé et sera téléversé, mais la transcription peut comporter des lacunes.",
+    historyCaptureGapsWarning: '{missing} segments audio sur {total} manquants',
+    recordingRecoveredAfterInterruption: "Enregistrement récupéré après une interruption. Il peut manquer de l'audio à la fin.",
+    recordingInterruptedChunksKept: "L'enregistrement a été interrompu. Les segments audio sont sauvegardés sur cet appareil mais n'ont pas encore pu être assemblés. Veuillez réessayer depuis l'historique.",
+    failedToSaveRecording: "Impossible de sauvegarder l'enregistrement",
+    errorProcessingRecording: "Erreur lors du traitement de l'enregistrement",
+    recoveringPreviousRecording: 'Veuillez patienter — un enregistrement précédent est en cours de récupération…',
+    failedToStartRecording: "Impossible de démarrer l'enregistrement",
+    storageCriticalCannotStart: "Enregistrement impossible : il ne reste que {freeMB} Mo d'espace. Libérez au moins {minMB} Mo et réessayez.",
+    storageLowWarning: "Espace faible : il ne reste que {freeMB} Mo. L'enregistrement s'arrêtera automatiquement si l'espace vient à manquer.",
+    historyLoginRequired: 'Veuillez vous connecter pour téléverser des enregistrements',
+    historyFileMissing: "Le fichier de l'enregistrement est introuvable. Il a peut-être été supprimé.",
+    historyUploadingProgress: 'Téléversement… {percent}%',
+    historyRetryProgress: 'Nouvelle tentative {attempt}… {percent}%',
+    recordingDeleted: 'Enregistrement supprimé',
+    logoutBlockedWhileRecording: 'Impossible de se déconnecter pendant un enregistrement ou un téléversement.'
   },
   it: {
     // Record Page
@@ -1971,13 +2025,57 @@ const messages = {
     updateReadyMessage: 'La versione {version} di Suisse Meets è pronta. Contiene miglioramenti di stabilità e affidabilità: consigliamo vivamente di aggiornare ora. L\'app si riavvierà brevemente.',
     updateReadyLaterHint: 'Se scegli "Più tardi", l\'aggiornamento verrà installato automaticamente alla prossima chiusura dell\'app.',
     updateReadyNow: 'Aggiorna ora',
-    updateReadyLater: 'Più tardi'
+    updateReadyLater: 'Più tardi',
+
+    // Mobile reliability audit 2026-09
+    recordingGapsWarning: 'Alcune parti di questa registrazione non sono state salvate: mancano {missing} segmenti audio su {total}. Il file è stato conservato e verrà caricato, ma la trascrizione potrebbe avere delle lacune.',
+    historyCaptureGapsWarning: '{missing} segmenti audio su {total} mancanti',
+    recordingRecoveredAfterInterruption: "Registrazione recuperata dopo un'interruzione. Potrebbe mancare dell'audio alla fine.",
+    recordingInterruptedChunksKept: 'La registrazione è stata interrotta. I segmenti audio sono salvati su questo dispositivo ma non è stato ancora possibile unirli. Riprova dalla cronologia.',
+    failedToSaveRecording: 'Impossibile salvare la registrazione',
+    errorProcessingRecording: "Errore durante l'elaborazione della registrazione",
+    recoveringPreviousRecording: 'Attendere — una registrazione precedente è in fase di recupero…',
+    failedToStartRecording: 'Impossibile avviare la registrazione',
+    storageCriticalCannotStart: 'Impossibile registrare: restano solo {freeMB} MB di spazio. Libera almeno {minMB} MB e riprova.',
+    storageLowWarning: 'Spazio quasi esaurito: restano solo {freeMB} MB. La registrazione si fermerà automaticamente se lo spazio si esaurisce.',
+    historyLoginRequired: 'Accedi per caricare le registrazioni',
+    historyFileMissing: 'Il file della registrazione non è stato trovato. Potrebbe essere stato eliminato.',
+    historyUploadingProgress: 'Caricamento… {percent}%',
+    historyRetryProgress: 'Nuovo tentativo {attempt}… {percent}%',
+    recordingDeleted: 'Registrazione eliminata',
+    logoutBlockedWhileRecording: 'Non è possibile uscire mentre è in corso una registrazione o un caricamento.'
   }
 };
 
+export const SUPPORTED_LOCALES = ['en', 'de', 'fr', 'it'];
+
+/**
+ * Initial UI language: an explicit choice (Settings / login-page switcher,
+ * persisted as `lang`) wins; otherwise the device language when it is one we
+ * ship; otherwise German (the app's home market). Until 3.9.36 the locale was
+ * hard-coded to German for everyone — store reviewers on English devices
+ * landed on "E-Mail / Passwort / Anmelden".
+ */
+export function detectInitialLocale() {
+  try {
+    const saved = localStorage.getItem('lang');
+    if (SUPPORTED_LOCALES.includes(saved)) return saved;
+  } catch { /* storage unavailable */ }
+  const candidates = [];
+  if (typeof navigator !== 'undefined') {
+    if (Array.isArray(navigator.languages)) candidates.push(...navigator.languages);
+    if (navigator.language) candidates.push(navigator.language);
+  }
+  for (const candidate of candidates) {
+    const base = String(candidate || '').toLowerCase().slice(0, 2);
+    if (SUPPORTED_LOCALES.includes(base)) return base;
+  }
+  return 'de';
+}
+
 const i18n = createI18n({
   legacy: false,
-  locale: 'de',
+  locale: detectInitialLocale(),
   fallbackLocale: 'en',
   messages
 });
