@@ -23,6 +23,8 @@ const MAX_REFERENCE_BYTES = ENDURANCE_REFERENCE_SECONDS * 48000 * 2 + 44;
 const COPY_BYTES = 1024 * 1024;
 const CAPTURE_DEADLINE_MS = 4 * 60 * 1000;
 const SUPERVISOR_MS = 10 * 60 * 1000;
+const REQUIRED_DISK_BYTES = 5 * 1024 ** 3;
+const REQUIRED_MEMORY_BYTES = 3 * 1024 ** 3;
 const writeJson = (file, value) => fs.writeFileSync(file, JSON.stringify(value, null, 2));
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
@@ -31,6 +33,43 @@ async function sha256(file) {
   for await (const bytes of fs.createReadStream(file, { highWaterMark: COPY_BYTES })) digest.update(bytes);
   return digest.digest('hex');
 }
+
+function measureResources(directory, readers = {}) {
+  const measurementErrors = {};
+  const read = (name, fn) => {
+    try {
+      if (typeof fn !== 'function') throw new Error('unsupported measurement API');
+      const value = fn();
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error('expected a finite nonnegative integer byte count, received ' + String(value));
+      return value;
+    } catch (error) { measurementErrors[name] = error.message; return null; }
+  };
+  const statfs = readers.statfs || fs.statfsSync;
+  return { measuredAt: new Date().toISOString(),
+    availableBytes: read('availableBytes', () => { const stat = statfs(directory); return Number(stat.bavail) * Number(stat.bsize); }),
+    freeMemoryBytes: read('freeMemoryBytes', readers.freeMemory || os.freemem),
+    totalMemoryBytes: read('totalMemoryBytes', readers.totalMemory || os.totalmem),
+    availableMemoryBytes: read('availableMemoryBytes', Object.hasOwn(readers, 'availableMemory') ? readers.availableMemory : process.availableMemory),
+    memoryMetric: 'process.availableMemory', requiredDiskBytes: REQUIRED_DISK_BYTES, requiredMemoryBytes: REQUIRED_MEMORY_BYTES,
+    measurementErrors };
+}
+
+function assertResources(measurement) {
+  if (measurement.memoryMetric !== 'process.availableMemory' || Object.keys(measurement.measurementErrors).length ||
+      !['availableBytes', 'freeMemoryBytes', 'totalMemoryBytes', 'availableMemoryBytes'].every(key =>
+        Number.isSafeInteger(measurement[key]) && measurement[key] >= 0)) {
+    throw new Error('Startup diagnostic resource measurement unavailable or invalid: ' + JSON.stringify(measurement));
+  }
+  if (measurement.availableBytes < REQUIRED_DISK_BYTES || measurement.availableMemoryBytes < REQUIRED_MEMORY_BYTES) {
+    throw new Error(`Startup diagnostic resource headroom insufficient: disk=${measurement.availableBytes}/${REQUIRED_DISK_BYTES} bytes; ` +
+      `available memory=${measurement.availableMemoryBytes}/${REQUIRED_MEMORY_BYTES} bytes (process.availableMemory)`);
+  }
+}
+
+// Node 24.20.0 Darwin os.freemem() counts only free pages; availableMemory()
+// additionally accounts for reclaimable inactive/purgeable pages. Keep the
+// same 3 GiB headroom requirement and preserve both measurements before gates.
+// https://github.com/nodejs/node/blob/v24.20.0/deps/uv/src/unix/darwin.c#L92-L130
 
 // Both WAVs contain identical numbered PCM for the first two minutes. Only
 // the large WAV has zero-valued PCM afterwards. No holes/truncation or RIFF
@@ -211,12 +250,8 @@ async function captureCase(directory, reference, options) {
   let app, mock, timer, expired = false;
   const guard = () => { if (expired) throw new Error('Startup capture exceeded four-minute owned-process deadline'); };
   try {
-    const free = fs.statfsSync(directory), availableBytes = Number(free.bavail) * Number(free.bsize);
-    result.preflight = { availableBytes, freeMemoryBytes: os.freemem(), requiredDiskBytes: 5 * 1024 ** 3, requiredMemoryBytes: 3 * 1024 ** 3 };
-    if (availableBytes < result.preflight.requiredDiskBytes || result.preflight.freeMemoryBytes < result.preflight.requiredMemoryBytes) {
-      throw new Error('Startup diagnostic needs at least 5 GiB free disk and 3 GiB available memory');
-    }
-    checkpoint();
+    result.preflight = measureResources(directory);
+    checkpoint(); assertResources(result.preflight);
     mock = await startMockBackend({ port: 3000 });
     app = new AppDriver({ name: path.basename(path.dirname(directory)) + '-' + path.basename(directory),
       apiUrl: mock.url, appDir: options.appDir, cdpPort: await unusedPort(), fakeAudioWav: reference.wavPath,
@@ -316,7 +351,7 @@ async function runCaptureStartupDiagnostic(options) {
   const evidenceDir = path.resolve(options.evidenceDir);
   if (!evidenceDir.startsWith(WORK + path.sep) || !fs.statSync(evidenceDir).isDirectory()) throw new Error('Evidence must use a new synthetic work directory');
   const bundle = inventory(appDir);
-  const result = { name: 'capture-startup-diagnostic', pass: false, measurementCompleted: false, cases: [], problems: [], evidenceDir,
+  const result = { name: 'capture-startup-diagnostic', pass: false, measurementCompleted: false, cases: [], preflights: [], problems: [], evidenceDir,
     fiveHourQualificationPassed: false, productionBackendQualified: false, physicalHardwareQualified: false,
     provenance: { applicationBuildCommit: bundleSha, harnessCommit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, windowsHide: true, encoding: 'utf8' }).trim(),
       appDir, bundle, platform: process.platform, architecture: process.arch, electron: require('electron/package.json').version,
@@ -334,12 +369,16 @@ async function runCaptureStartupDiagnostic(options) {
   const checkpoint = () => writeJson(path.join(evidenceDir, 'summary.json'), result);
   checkpoint();
   try {
-    const stat = fs.statfsSync(evidenceDir);
-    if (Number(stat.bavail) * Number(stat.bsize) < 5 * 1024 ** 3 || os.freemem() < 3 * 1024 ** 3) throw new Error('Insufficient bounded diagnostic resources');
+    const resourceGate = stage => {
+      const measurement = { stage, ...measureResources(evidenceDir) };
+      result.preflights.push(measurement); checkpoint(); assertResources(measurement);
+    };
+    resourceGate('before-numbered-prefix-generation');
     const { buildCodedScenario } = require('./lib/coded-audio');
     const prefix = buildCodedScenario('startup-numbered-prefix', [{ type: 'speech', seconds: PREFIX_SECONDS }], { outputDir: path.join(evidenceDir, 'reference') });
     result.prefix = prefix; checkpoint();
     for (const [name, seconds] of [['small-file', PREFIX_SECONDS], ['endurance-size-file', ENDURANCE_REFERENCE_SECONDS]]) {
+      resourceGate('before-reference-generation-' + name);
       const directory = path.join(evidenceDir, name); fs.mkdirSync(directory);
       const reference = extendReference(prefix.wavPath, path.join(directory, name + '.wav'), seconds);
       writeJson(path.join(directory, 'reference.json'), reference);
@@ -411,4 +450,4 @@ if (require.main === module) {
 }
 
 module.exports = { runCaptureStartupDiagnostic, extendReference, installStartupObserver, startupClockReadout, summarizeCases, validateSnapshot,
-  CAPTURE_SECONDS, PREFIX_SECONDS, ENDURANCE_REFERENCE_SECONDS, MAX_REFERENCE_BYTES };
+  measureResources, assertResources, CAPTURE_SECONDS, PREFIX_SECONDS, ENDURANCE_REFERENCE_SECONDS, MAX_REFERENCE_BYTES };

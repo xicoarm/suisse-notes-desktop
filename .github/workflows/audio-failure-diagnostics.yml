@@ -3,6 +3,11 @@ name: Desktop audio failure diagnostics
 # Investigation only. Neither short capture nor replay qualifies endurance.
 on:
   workflow_call:
+    inputs:
+      scope:
+        type: string
+        required: false
+        default: all
 
 permissions:
   contents: read
@@ -10,6 +15,7 @@ permissions:
 
 jobs:
   startup:
+    if: ${{ inputs.scope == 'all' || inputs.scope == 'startup' }}
     name: Synthetic source startup / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -71,6 +77,7 @@ jobs:
           compression-level: 1
 
   intel-finalization:
+    if: ${{ inputs.scope == 'all' || inputs.scope == 'finalization' }}
     name: Replay preserved Intel native recording
     runs-on: macos-15-intel
     timeout-minutes: 90

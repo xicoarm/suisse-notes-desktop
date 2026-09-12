@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import vm from 'node:vm';
 
 const require = createRequire(import.meta.url);
-const { extendReference, installStartupObserver, startupClockReadout, summarizeCases, validateSnapshot, MAX_REFERENCE_BYTES } = require('../e2e-harness/capture-startup-diagnostic');
+const { extendReference, installStartupObserver, startupClockReadout, summarizeCases, validateSnapshot, measureResources, assertResources, MAX_REFERENCE_BYTES } = require('../e2e-harness/capture-startup-diagnostic');
 const temporary = [];
 afterEach(() => {
   for (const directory of temporary.splice(0)) {
@@ -20,6 +20,38 @@ afterEach(() => {
   }
 });
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+
+describe('diagnostic memory headroom', () => {
+  const gib = 1024 ** 3;
+  const readers = overrides => ({ statfs: () => ({ bavail: 10 * gib / 4096, bsize: 4096 }),
+    freeMemory: () => gib, totalMemory: () => 8 * gib, availableMemory: () => 4 * gib, ...overrides });
+
+  it('uses available memory with the unchanged 3 GiB bound while retaining lower free memory as evidence', () => {
+    const measured = measureResources('unused', readers());
+    expect(measured).toMatchObject({ availableBytes: 10 * gib, freeMemoryBytes: gib, availableMemoryBytes: 4 * gib,
+      totalMemoryBytes: 8 * gib, requiredMemoryBytes: 3 * gib, requiredDiskBytes: 5 * gib,
+      memoryMetric: 'process.availableMemory', measurementErrors: {} });
+    expect(() => assertResources(measured)).not.toThrow();
+    expect(() => assertResources(measureResources('unused', readers({ availableMemory: () => 3 * gib - 1 })))).toThrow(/headroom insufficient/);
+  });
+
+  it('fails explicitly without substituting free/total memory when availability is unsupported or nonfinite', () => {
+    for (const availableMemory of [undefined, () => NaN, () => Infinity, () => -1, () => { throw new Error('native measurement failed'); }]) {
+      const measured = measureResources('unused', readers({ availableMemory }));
+      expect(measured.availableMemoryBytes).toBeNull();
+      expect(measured.measurementErrors.availableMemoryBytes).toBeTruthy();
+      expect(() => assertResources(measured)).toThrow(/unavailable or invalid/);
+    }
+  });
+
+  it('retains disk-read failures and does not admit an under-budget disk despite ample memory', () => {
+    const invalid = measureResources('unused', readers({ statfs: () => { throw new Error('disk unavailable'); } }));
+    expect(invalid.measurementErrors.availableBytes).toBe('disk unavailable');
+    expect(() => assertResources(invalid)).toThrow(/unavailable or invalid/);
+    const tight = measureResources('unused', readers({ statfs: () => ({ bavail: 5 * gib - 1, bsize: 1 }) }));
+    expect(() => assertResources(tight)).toThrow(/disk=/);
+  });
+});
 
 function prefixFixture() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'capture-startup-unit-')); temporary.push(directory);

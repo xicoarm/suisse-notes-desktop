@@ -38,6 +38,14 @@ clock, Intel finalization, or Intel short-capture timing failures.
 gh workflow run audio-reliability.yml --ref REVIEWED_BRANCH --field run_failure_diagnostics=true
 ```
 
+Use `--field failure_diagnostic_scope=startup` or `finalization` to rerun just
+that investigation; the default `all` runs both. This avoids repeating a long
+encoder replay when only the startup diagnostic changes. Startup resource gates
+record disk space, available/free/total memory and the selected metric before
+allocating the large fixture. The unchanged 3 GiB headroom requirement uses
+Node's available-memory API; on macOS, free pages alone exclude reclaimable
+inactive/purgeable memory. An unsupported or invalid metric fails visibly.
+
 ## Capture-clock investigation
 
 Manual `run_capture_clock=true` on `audio-reliability.yml` (with `run_endurance=false`)

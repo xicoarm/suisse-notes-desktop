@@ -30,6 +30,12 @@ on:
         type: boolean
         required: false
         default: false
+      failure_diagnostic_scope:
+        description: Select which failure diagnostics to run when that mode is enabled
+        type: choice
+        options: [all, startup, finalization]
+        required: false
+        default: all
 
 # This workflow never signs, publishes, pushes, or creates a release.
 permissions:
@@ -50,6 +56,7 @@ jobs:
           ENDURANCE: ${{ inputs.run_endurance }}
           CAPTURE_CLOCK: ${{ inputs.run_capture_clock }}
           FAILURE_DIAGNOSTICS: ${{ inputs.run_failure_diagnostics }}
+          FAILURE_SCOPE: ${{ inputs.failure_diagnostic_scope }}
         run: |
           count=0
           for mode in "$ENDURANCE" "$CAPTURE_CLOCK" "$FAILURE_DIAGNOSTICS"; do
@@ -59,6 +66,10 @@ jobs:
             echo 'Select only one of endurance, capture-clock, or failure diagnostics.'
             exit 1
           fi
+          case "$FAILURE_SCOPE" in
+            all|startup|finalization) ;;
+            *) echo 'Unknown failure diagnostic scope.'; exit 1 ;;
+          esac
 
   synthetic-capture:
     if: ${{ github.event_name != 'workflow_dispatch' || (!inputs.run_endurance && !inputs.run_failure_diagnostics) }}
@@ -166,3 +177,5 @@ jobs:
       contents: read
       actions: read
     uses: ./.github/workflows/audio-failure-diagnostics.yml
+    with:
+      scope: ${{ inputs.failure_diagnostic_scope }}
