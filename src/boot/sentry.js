@@ -11,6 +11,7 @@
  */
 
 import { isCapacitor, isElectron, getPlatform } from '../utils/platform';
+import { redactSecrets } from '../utils/redact';
 
 let sentryInitialized = false;
 let SentryModule = null;
@@ -83,11 +84,32 @@ function scrubSensitiveData(event, hint) {
   if (event.request?.headers?.authorization) {
     event.request.headers.authorization = '[REDACTED]';
   }
+  if (event.request?.url) {
+    event.request.url = redactSecrets(event.request.url);
+  }
+  // Free-text surfaces that have carried the SSO callback URL (and with it the
+  // session JWT) in the past: message, exception values, breadcrumb messages
+  // and breadcrumb URLs. Redact secret query values and bare JWTs everywhere.
+  if (typeof event.message === 'string') {
+    event.message = redactSecrets(event.message);
+  }
+  if (event.logentry?.message) {
+    event.logentry.message = redactSecrets(event.logentry.message);
+  }
+  if (event.exception?.values) {
+    event.exception.values.forEach(v => {
+      if (typeof v.value === 'string') v.value = redactSecrets(v.value);
+    });
+  }
   if (event.breadcrumbs) {
     event.breadcrumbs.forEach(bc => {
       if (bc.data?.headers?.Authorization) {
         bc.data.headers.Authorization = '[REDACTED]';
       }
+      if (typeof bc.message === 'string') bc.message = redactSecrets(bc.message);
+      if (typeof bc.data?.url === 'string') bc.data.url = redactSecrets(bc.data.url);
+      if (typeof bc.data?.to === 'string') bc.data.to = redactSecrets(bc.data.to);
+      if (typeof bc.data?.from === 'string') bc.data.from = redactSecrets(bc.data.from);
     });
   }
   const message = event.exception?.values?.[0]?.value || '';
@@ -97,6 +119,8 @@ function scrubSensitiveData(event, hint) {
   }
   return event;
 }
+
+export { scrubSensitiveData };
 
 // Shared beforeBreadcrumb filter
 function filterBreadcrumbs(breadcrumb) {
