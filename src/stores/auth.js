@@ -352,6 +352,10 @@ export const useAuthStore = defineStore('auth', {
       const minutesStore = useMinutesStore();
       minutesStore.reset();
 
+      // Custom vocabulary belongs to this account — the next one loads its own.
+      const { useTranscriptionSettingsStore } = await import('./transcription-settings');
+      useTranscriptionSettingsStore().reset();
+
       // Stop token refresh
       this.stopTokenRefresh();
 

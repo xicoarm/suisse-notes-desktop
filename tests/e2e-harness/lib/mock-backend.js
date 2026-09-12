@@ -103,6 +103,7 @@ function startMockBackend({ port = 3000, captureUploadsDir = null } = {}) {
     let bodyBytes = 0;
     const chunks = [];
     const wantBody = (req.headers['content-type']?.includes('json') && url.startsWith('/__control')) ||
+      (url.startsWith('/api/custom-spelling/user') && req.method === 'POST') ||
       (captureUploadsDir && url === '/api/desktop/upload' && req.method === 'POST');
 
     // CORS preflight â€” answer before any body handling.
@@ -169,7 +170,25 @@ function startMockBackend({ port = 3000, captureUploadsDir = null } = {}) {
         // scripting THIS endpoint, never by accident.
         return json(res, 200, { remaining: -1, total: -1, used: 0, unlimited: true }, req);
       }
-      if (url.startsWith('/api/custom-spelling')) return json(res, 200, { entries: [] }, req);
+      if (url.startsWith('/api/custom-spelling')) {
+        // Same shape as production (/api/custom-spelling/merged → { spellings, orgSpellings, userSpellings }).
+        state.vocabulary = state.vocabulary || { org: [], user: [] };
+        const v = state.vocabulary;
+        const merged = () => ({ spellings: [...new Set([...v.org, ...v.user])], orgSpellings: [...v.org], userSpellings: [...v.user] });
+        if (url.startsWith('/api/custom-spelling/merged')) return json(res, 200, merged(), req);
+        if (url.startsWith('/api/custom-spelling/user') && req.method === 'POST') {
+          let body = {};
+          try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch { body = {}; }
+          for (const term of body.terms || []) if (!v.user.includes(term)) v.user.push(term);
+          return json(res, 200, { spellings: [...v.user], added: body.terms || [] }, req);
+        }
+        if (url.startsWith('/api/custom-spelling/user') && req.method === 'DELETE') {
+          const term = new URL(req.url, 'http://mock').searchParams.get('term');
+          v.user = v.user.filter((w) => w !== term);
+          return json(res, 200, { spellings: [...v.user], removed: term }, req);
+        }
+        return json(res, 200, merged(), req);
+      }
       if (url.startsWith('/api/desktop/templates')) return json(res, 200, { templates: [] }, req);
       if (url.startsWith('/api/context-files')) return json(res, 200, { files: [] }, req);
       if (url === '/api/desktop/history') return json(res, 200, { recordings: [], meetings: [] }, req);

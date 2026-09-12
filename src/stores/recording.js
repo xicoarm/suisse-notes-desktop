@@ -145,6 +145,14 @@ export const useRecordingStore = defineStore('recording', {
             } catch (e) {
               console.warn('Could not refresh minutes on foreground:', e);
             }
+            // Custom vocabulary may have been edited on the web meanwhile (throttled).
+            try {
+              const { useTranscriptionSettingsStore } = await import('./transcription-settings');
+              const settingsStore = useTranscriptionSettingsStore();
+              if (settingsStore.loaded) settingsStore.syncFromServer();
+            } catch (e) {
+              console.warn('Could not refresh custom vocabulary on foreground:', e);
+            }
             // Check for recovery needs when coming back
             await this._processRecovery('foreground');
           },

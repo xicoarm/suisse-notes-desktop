@@ -312,8 +312,8 @@
 
         <div class="vocabulary-container">
           <CustomVocabularyInput
-            :session-words="globalVocabulary"
-            :global-words="[]"
+            :session-words="personalVocabulary"
+            :global-words="organizationVocabulary"
             :show-help="false"
             @add-word="addGlobalWord"
             @remove-word="removeGlobalWord"
@@ -647,14 +647,23 @@ const storageOptions = computed(() => [
   { value: 'delete_after_upload', label: t('deleteAfterUpload') }
 ]);
 
-const globalVocabulary = computed(() => transcriptionStore.globalVocabulary);
+// Personal words are editable; organization words are shown locked (the app
+// cannot delete them — they are managed on the web).
+const personalVocabulary = computed(() => transcriptionStore.personalVocabulary);
+const organizationVocabulary = computed(() => transcriptionStore.organizationOnlyVocabulary);
 
-const addGlobalWord = (word) => {
-  transcriptionStore.addGlobalWord(word);
+const addGlobalWord = async (word) => {
+  const result = await transcriptionStore.addGlobalWord(word);
+  if (result && result.ok === false) {
+    $q.notify({ type: 'warning', message: t('vocabularySyncFailed'), position: 'top' });
+  }
 };
 
-const removeGlobalWord = (word) => {
-  transcriptionStore.removeGlobalWord(word);
+const removeGlobalWord = async (word) => {
+  const result = await transcriptionStore.removeGlobalWord(word);
+  if (result && result.ok === false && result.error !== 'organization') {
+    $q.notify({ type: 'warning', message: t('vocabularySyncFailed'), position: 'top' });
+  }
 };
 
 onMounted(async () => {

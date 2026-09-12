@@ -304,6 +304,7 @@ const messages = {
     customSpellingHint: 'Add names, acronyms, or technical terms for better accuracy',
     globalVocabulary: 'Global Custom Vocabulary',
     globalVocabularyDesc: 'Words used for all recordings and uploads',
+    vocabularySyncFailed: 'The vocabulary could not be updated on the server. Check your connection and try again.',
     addWord: 'Add word',
     removeWord: 'Remove',
 
@@ -837,6 +838,7 @@ const messages = {
     customSpellingHint: 'Namen, Akronyme oder Fachbegriffe für bessere Genauigkeit hinzufügen',
     globalVocabulary: 'Globales Vokabular',
     globalVocabularyDesc: 'Wörter für alle Aufnahmen und Uploads verwenden',
+    vocabularySyncFailed: 'Das Vokabular konnte auf dem Server nicht aktualisiert werden. Bitte Verbindung prüfen und erneut versuchen.',
     addWord: 'Wort hinzufügen',
     removeWord: 'Entfernen',
 
@@ -1370,6 +1372,7 @@ const messages = {
     customSpellingHint: 'Ajoutez des noms, acronymes ou termes techniques pour une meilleure précision',
     globalVocabulary: 'Vocabulaire global',
     globalVocabularyDesc: 'Mots utilisés pour tous les enregistrements et téléchargements',
+    vocabularySyncFailed: 'Le vocabulaire n’a pas pu être mis à jour sur le serveur. Vérifiez la connexion et réessayez.',
     addWord: 'Ajouter un mot',
     removeWord: 'Supprimer',
 
@@ -1903,6 +1906,7 @@ const messages = {
     customSpellingHint: 'Aggiungi nomi, acronimi o termini tecnici per una maggiore precisione',
     globalVocabulary: 'Vocabolario globale',
     globalVocabularyDesc: 'Parole utilizzate per tutte le registrazioni e i caricamenti',
+    vocabularySyncFailed: 'Non è stato possibile aggiornare il vocabolario sul server. Controlla la connessione e riprova.',
     addWord: 'Aggiungi parola',
     removeWord: 'Rimuovi',
 
