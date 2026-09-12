@@ -145,7 +145,8 @@ describe('native endurance preserves existing duration and source-clock gates', 
     expect(fast.nativeLosslessFallbackBytes).toBeUndefined();
     expect(fast.nativeExtraCopiesBytes).toBe(native.nativeExtraCopiesBytes);
     expect(fast.nativeStopTailBytes).toBe(90 * 32000 * 5);
-    expect(Object.values(fast).reduce((total, bytes) => total + bytes, 0)).toBe(5842450732);
+    // The 16 kHz endurance reference needs 18,325 s × 64,000 B/s less than the former 48 kHz file.
+    expect(Object.values(fast).reduce((total, bytes) => total + bytes, 0)).toBe(5842450732 - 18325 * 64000);
     expect(() => diskBudget(18300, false, { fastPlan: true })).toThrow('requires native');
   });
 

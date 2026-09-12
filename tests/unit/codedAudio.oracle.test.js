@@ -224,6 +224,19 @@ describe('numbered-frame synthetic audio oracle', () => {
     expect(result.pauses[0].silent).toBeNull();
   });
 
+  it('writes the same coded signal at 16 kHz for long references and verifies it identically', async () => {
+    const compact = buildCodedScenario('reference-16k', [{ type: 'speech', seconds: 12 }], { outputDir: directory, sampleRate: 16000 });
+    const bytes = fs.readFileSync(compact.wavPath);
+    expect(bytes.readUInt32LE(24)).toBe(16000);
+    expect(bytes.readUInt32LE(40)).toBe(12 * 16000 * 2);
+    expect(bytes.length - 44).toBe((original.length - 44) / 3);
+    expect(compact.coded.sampleRate).toBe(16000);
+    const result = await verifyCodedAudio(encode(compact.wavPath, 'reference-16k'), compact, { expectedDurationS: 12 });
+    expect(result.problems).toEqual([]);
+    expect(result.identifiedFrames).toBe(24);
+    expect(() => buildCodedScenario('reference-44k', [{ type: 'speech', seconds: 1 }], { outputDir: directory, sampleRate: 44100 })).toThrow('48000 or 16000');
+  });
+
   it('rejects malformed or overlapping pause declarations', async () => {
     await expect(verifyCodedAudio(scenario.wavPath, scenario, { expectedPauses: [{ startS: 1, lengthS: 0 }] })).rejects.toThrow();
     await expect(verifyCodedAudio(scenario.wavPath, scenario, { expectedPauses: [{ startS: 1, lengthS: 1 }, { startS: 1.5, lengthS: 1 }] })).rejects.toThrow('overlap');

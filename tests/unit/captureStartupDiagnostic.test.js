@@ -8,7 +8,8 @@ import crypto from 'node:crypto';
 import vm from 'node:vm';
 
 const require = createRequire(import.meta.url);
-const { extendReference, installStartupObserver, startupClockReadout, summarizeCases, validateSnapshot, measureResources, assertResources, MAX_REFERENCE_BYTES } = require('../e2e-harness/capture-startup-diagnostic');
+const { extendReference, installStartupObserver, startupClockReadout, summarizeCases, validateSnapshot, measureResources, assertResources, MAX_REFERENCE_BYTES,
+  referenceSampleRate, STARTUP_SAMPLE_RATES } = require('../e2e-harness/capture-startup-diagnostic');
 const temporary = [];
 afterEach(() => {
   for (const directory of temporary.splice(0)) {
@@ -89,6 +90,26 @@ describe('startup WAV load comparison controls', () => {
     fs.writeFileSync(output, 'retained');
     expect(() => extendReference(prefix, output, 120)).toThrow();
     expect(fs.readFileSync(output, 'utf8')).toBe('retained');
+  });
+
+  it('extends a 16 kHz prefix to the 5h15 endurance fixture size and keeps 48 kHz as the default', () => {
+    const { directory } = prefixFixture();
+    const bytes = Buffer.alloc(120 * 16000 * 2 + 44, 5);
+    bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8);
+    bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22);
+    bytes.writeUInt32LE(16000, 24); bytes.writeUInt32LE(32000, 28); bytes.writeUInt16LE(2, 32);
+    bytes.writeUInt16LE(16, 34); bytes.write('data', 36); bytes.writeUInt32LE(bytes.length - 44, 40);
+    const prefix = path.join(directory, 'prefix-16k.wav'); fs.writeFileSync(prefix, bytes);
+    const larger = extendReference(prefix, path.join(directory, 'larger-16k.wav'), 121, 16000);
+    expect(larger.bytes).toBe(121 * 32000 + 44);
+    expect(larger.sampleRate).toBe(16000);
+    expect(fs.readFileSync(larger.wavPath).subarray(44, bytes.length).equals(bytes.subarray(44))).toBe(true);
+    expect(STARTUP_SAMPLE_RATES).toEqual({ 48000: 18325, 16000: 18925 });
+    expect(() => extendReference(prefix, path.join(directory, 'too-long-16k.wav'), 18926, 16000)).toThrow(/Invalid bounded/);
+    expect(() => extendReference(prefix, path.join(directory, 'wrong-rate.wav'), 121)).toThrow(/Invalid bounded/);
+    expect(referenceSampleRate(undefined)).toBe(48000);
+    expect(referenceSampleRate('16000')).toBe(16000);
+    expect(() => referenceSampleRate('44100')).toThrow('48000 or 16000');
   });
 
   it('rejects malformed declared WAV payload sizes before writing a new output', () => {

@@ -41,6 +41,12 @@ on:
         options: [all, startup, finalization]
         required: false
         default: all
+      startup_sample_rate:
+        description: Reference WAV rate for the startup diagnostic (16000 measures the 16 kHz 5h15 endurance fixture)
+        type: choice
+        options: ['48000', '16000']
+        required: false
+        default: '48000'
 
 # This workflow never signs, publishes, pushes, or creates a release.
 permissions:
@@ -63,7 +69,12 @@ jobs:
           FAILURE_DIAGNOSTICS: ${{ inputs.run_failure_diagnostics }}
           MACOS_PACKAGED: ${{ inputs.run_macos_packaged }}
           FAILURE_SCOPE: ${{ inputs.failure_diagnostic_scope }}
+          STARTUP_RATE: ${{ inputs.startup_sample_rate }}
         run: |
+          case "$STARTUP_RATE" in
+            48000|16000) ;;
+            *) echo 'Unknown startup diagnostic sample rate.'; exit 1 ;;
+          esac
           count=0
           for mode in "$ENDURANCE" "$CAPTURE_CLOCK" "$FAILURE_DIAGNOSTICS" "$MACOS_PACKAGED"; do
             if [ "$mode" = true ]; then count=$((count + 1)); fi
@@ -185,6 +196,7 @@ jobs:
     uses: ./.github/workflows/audio-failure-diagnostics.yml
     with:
       scope: ${{ inputs.failure_diagnostic_scope }}
+      startup_sample_rate: ${{ inputs.startup_sample_rate }}
 
   macos-packaged:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_macos_packaged && !inputs.run_endurance && !inputs.run_capture_clock && !inputs.run_failure_diagnostics }}

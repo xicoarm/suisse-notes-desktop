@@ -61,8 +61,8 @@ describe('endurance duration and disk budget', () => {
     for (const value of ['', '44', '20001', '45.5', 'NaN', null]) expect(() => resolveEnduranceSeconds(value)).toThrow();
   });
 
-  it('budgets the streamed reference, three encoded copies at 256 kbps, and one GiB reserve', () => {
-    expect(diskBudget(18300)).toEqual({ referenceBytes: 18325 * 96000 + 44, encodedCopiesBytes: 18300 * 32000 * 3, headroomBytes: 1024 ** 3 });
+  it('budgets the streamed 16 kHz reference, three encoded copies at 256 kbps, and one GiB reserve', () => {
+    expect(diskBudget(18300)).toEqual({ referenceBytes: 18325 * 32000 + 44, encodedCopiesBytes: 18300 * 32000 * 3, headroomBytes: 1024 ** 3 });
   });
 });
 
@@ -131,28 +131,56 @@ describe('endurance source boundaries and acquisition clock', () => {
     }
   });
 
-  // The hosted fake microphone loads its WAV lazily: its first buffer can arrive
-  // seconds after the recorder started, and the recording then begins at
-  // identity 0. That delay is measured from the native timestamps and bounded.
-  it('expects identity 0 at the origin when delivery began after the recorder started, and the request interval otherwise', async () => {
+  // The hosted fake microphone reads its WAV before delivering audio, and a
+  // native MediaRecorder fires its start event with the first buffer. Run
+  // 34697743281 measured 4.67 s on Apple Silicon: the recording then begins at
+  // identity 0, finalization places it at the start call and pads the end.
+  const lateRecorder = { startCalledAt: 950, startedAt: 5650 };
+  const lateAcquisition = [{ requestedAt: 800, receivedAt: 900 }];
+
+  it('expects identity 0 at the origin when first audio came after the start call, and the request interval otherwise', async () => {
     const audio = await verifyCodedAudio(output('late-delivery', slice(0, 12)), reference, { expectedDurationS: 12 });
-    const late = assessSourceCoverage(audio, { startedAt: 1000, startCalledAt: 950 }, acquisition, { lateDeliveryS: 4.7 });
+    const late = assessSourceCoverage(audio, lateRecorder, lateAcquisition);
     expect(late.problems).toEqual([]);
     expect(late.sourceOffsetRangeS).toEqual([0, 0]);
-    expect(late.firstDeliveryDelayS).toBe(4.7);
-    const early = assessSourceCoverage(audio, { startedAt: 1000, startCalledAt: 950 }, acquisition, { lateDeliveryS: 0 });
+    expect(late.firstDeliveryDelayS).toBeCloseTo(4.7, 6);
+    const early = assessSourceCoverage(audio, { startCalledAt: 950, startedAt: 1000 }, lateAcquisition);
     expect(early.problems).toEqual([]);
-    expect(early.sourceOffsetRangeS).toEqual([0, 0.1]);
+    expect(early.firstDeliveryDelayS).toBeCloseTo(0.05, 6);
+    expect(early.sourceOffsetRangeS).toEqual([0, 0.2]);
     const shifted = await verifyCodedAudio(output('late-shifted', slice(3, 15)), reference, { expectedDurationS: 12 });
-    expect(assessSourceCoverage(shifted, { startedAt: 1000, startCalledAt: 950 }, acquisition, { lateDeliveryS: 4.7 }).problems)
-      .toContainEqual(expect.stringMatching('SOURCE CLOCK: decoded numbering'));
+    expect(assessSourceCoverage(shifted, lateRecorder, lateAcquisition).problems).toContainEqual(expect.stringMatching('SOURCE CLOCK: decoded numbering'));
+  });
+
+  it('allows a final anchored at the start call exactly the measured first-delivery delay as trailing silence', async () => {
+    const padded = await verifyCodedAudio(output('start-call-pad', Buffer.concat([slice(0, 9), Buffer.alloc(3 * SAMPLE_RATE * 2)])), reference, { expectedDurationS: 12 });
+    const recorderWithPad = { startCalledAt: 950, startedAt: 3950 };
+    const anchored = assessSourceCoverage(padded, recorderWithPad, lateAcquisition, { anchoredAtStartCall: true });
+    expect(anchored.problems).toEqual([]);
+    expect(anchored.expectedTrailingPadS).toBeCloseTo(3, 6);
+    // The same silence in a native original (no start-call anchor) is missing audio.
+    expect(assessSourceCoverage(padded, recorderWithPad, lateAcquisition).problems).toContainEqual(expect.stringMatching('SOURCE COVERAGE: missing .* suffix'));
+    // More silence than the measured delay explains still fails.
+    const overlong = await verifyCodedAudio(output('start-call-overlong', Buffer.concat([slice(0, 7), Buffer.alloc(5 * SAMPLE_RATE * 2)])), reference, { expectedDurationS: 12 });
+    expect(assessSourceCoverage(overlong, recorderWithPad, lateAcquisition, { anchoredAtStartCall: true }).problems)
+      .toContainEqual(expect.stringMatching(/SOURCE COVERAGE: missing .* suffix \(3\.000s explained by the first-delivery delay\)/));
+  });
+
+  it('measures the suffix on the content timeline when materialized pauses were removed', async () => {
+    const withPause = output('suffix-after-pause', Buffer.concat([slice(0, 5), Buffer.alloc(2 * SAMPLE_RATE * 2), slice(5, 12)]));
+    const audio = await verifyCodedAudio(withPause, reference, { expectedDurationS: 14, expectedPauses: [{ startS: 5, lengthS: 2 }] });
+    expect(audio.problems).toEqual([]);
+    expect(audio.durationS - audio.contentDurationS).toBeCloseTo(2, 6);
+    const result = assessSourceCoverage(audio, { startCalledAt: 950, startedAt: 1000 }, lateAcquisition, { anchoredAtStartCall: true });
+    expect(result.suffixGapS).toBeLessThan(0.2);
+    expect(result.problems).toEqual([]);
   });
 
   it('bounds the first-delivery delay and the recorder start latency at ten seconds', () => {
     const audio = { firstFrame: 0, lastFrame: 23, durationS: 12, sourceOffsetS: 0, firstIdentifiedStartS: 0.02, lastIdentifiedEndS: 11.98 };
-    expect(assessSourceCoverage(audio, { startedAt: 1000, startCalledAt: 950 }, acquisition, { lateDeliveryS: 12 }).problems)
-      .toContainEqual(expect.stringMatching('SOURCE CLOCK: native source delivered its first audio 12.000s'));
-    expect(assessSourceCoverage(audio, { startedAt: 12000, startCalledAt: 11500 }, acquisition, { lateDeliveryS: 0 }).problems)
+    expect(assessSourceCoverage(audio, { startCalledAt: 950, startedAt: 12950 }, lateAcquisition).problems)
+      .toContainEqual(expect.stringMatching('SOURCE CLOCK: native source delivered its first audio 12.000s after the recorder start call'));
+    expect(assessSourceCoverage(audio, { startCalledAt: 11400, startedAt: 11450 }, lateAcquisition).problems)
       .toContainEqual(expect.stringMatching('SOURCE CLOCK: native recorder start was requested 10.500s'));
   });
 });

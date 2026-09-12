@@ -27,14 +27,20 @@ const STOP_TAIL_SECONDS = SAMPLE_SECONDS + 60;
 const SOURCE_BOUNDARY_TOLERANCE_S = 1.5;
 const SOURCE_CLOCK_TOLERANCE_S = 1.5;
 const MAX_SOURCE_ACQUISITION_S = 10;
-// Recorder start/stop events sit tens of milliseconds from the first/last
-// packet edge; above this the native timestamp span is genuinely shorter than
-// wall time, i.e. the source delivered its first buffer after the recorder started.
+// A native MediaRecorder fires its start event when the first audio buffer
+// arrives. Below this delay after the start call the source was already
+// flowing; above it, the numbered source began delivering only after the
+// recorder was requested, so the recording starts at identity 0.
 const FIRST_DELIVERY_SLACK_S = 0.25;
+// The hosted fake microphone reads its whole reference WAV into memory before
+// delivering audio; on macOS runners a 1.8 GB 48 kHz file blocked getUserMedia
+// for 11.9–12.6 s (run 34697743281). 16 kHz carries the identical coded signal
+// at one third of the size; the ten-second acquisition bound is unchanged.
+const ENDURANCE_REFERENCE_SAMPLE_RATE = 16000;
 
 function diskBudget(seconds, nativeSources = false, { fastPlan = false } = {}) {
   if (fastPlan && !nativeSources) throw new Error('Fast endurance budget requires native sources');
-  return { referenceBytes: (seconds + 25) * 48000 * 2 + 44,
+  return { referenceBytes: (seconds + 25) * ENDURANCE_REFERENCE_SAMPLE_RATE * 2 + 44,
     encodedCopiesBytes: Math.ceil(seconds * 256000 / 8) * 3, headroomBytes: HEADROOM_BYTES,
     ...(nativeSources ? { nativeExtraCopiesBytes: Math.ceil(seconds * 256000 / 8) * 2,
       ...(fastPlan ? { nativeStopTailBytes: STOP_TAIL_SECONDS * ENCODED_SOURCE_BYTES_PER_SECOND * 5 }
@@ -418,25 +424,50 @@ async function installConstraintEvidence(app, processingDisabled) {
   }, processingDisabled);
 }
 
-/** The interior oracle alone cannot detect a long silent prefix or suffix. */
-function assessSourceCoverage(audio, recorder, acquisitions, nativeClock = null) {
+/** Delay between a native recorder's start call and its first audio (start event). */
+function firstDeliveryDelay(recorder) {
+  return Number.isFinite(recorder?.startCalledAt) && Number.isFinite(recorder?.startedAt)
+    ? Math.max(0, (recorder.startedAt - recorder.startCalledAt) / 1000) : null;
+}
+
+/**
+ * The interior oracle alone cannot detect a long silent prefix or suffix.
+ * options.anchoredAtStartCall: the audio's timeline begins at the recorder's
+ * start call, as native finalization builds the final. Its first delivered
+ * buffer then sits at time 0 and the stop pads the end by the first-delivery
+ * delay; that measured, bounded delay is the only suffix it may add. A native
+ * original decoded as-is begins at its first buffer and gets no such allowance.
+ */
+function assessSourceCoverage(audio, recorder, acquisitions, options = {}) {
   const problems = [];
   const result = { problems, boundaryToleranceS: SOURCE_BOUNDARY_TOLERANCE_S,
     clockToleranceS: SOURCE_CLOCK_TOLERANCE_S, maximumAcquisitionS: MAX_SOURCE_ACQUISITION_S };
+  // Identity positions lie on the content timeline when declared pauses were
+  // removed from the decode; measure the ends on that same timeline.
+  const contentDurationS = audio?.contentDurationS ?? audio?.durationS;
   if (!Number.isFinite(audio?.sourceOffsetS) || !Number.isInteger(audio?.firstFrame) || !Number.isInteger(audio?.lastFrame) ||
-      !Number.isFinite(audio?.durationS) || !Number.isFinite(recorder?.startedAt) ||
+      !Number.isFinite(contentDurationS) || !Number.isFinite(recorder?.startedAt) ||
       !Number.isFinite(audio?.firstIdentifiedStartS) || !Number.isFinite(audio?.lastIdentifiedEndS) ||
-      audio.firstIdentifiedStartS < 0 || audio.lastIdentifiedEndS < audio.firstIdentifiedStartS || audio.lastIdentifiedEndS > audio.durationS) {
+      audio.firstIdentifiedStartS < 0 || audio.lastIdentifiedEndS < audio.firstIdentifiedStartS || audio.lastIdentifiedEndS > contentDurationS + 1e-9) {
     problems.push('SOURCE COVERAGE: missing numbered audio or native recorder timing');
     return result;
+  }
+  const deliveryDelayS = firstDeliveryDelay(recorder);
+  result.firstDeliveryDelayS = deliveryDelayS;
+  if (deliveryDelayS !== null && deliveryDelayS > MAX_SOURCE_ACQUISITION_S) {
+    problems.push(`SOURCE CLOCK: native source delivered its first audio ${deliveryDelayS.toFixed(3)}s after the recorder start call (limit ${MAX_SOURCE_ACQUISITION_S}s)`);
   }
   // Use measured positions at each boundary. A whole-recording median offset
   // can hide a silent opening/ending when the source drifts later in the file.
   // Keep that median separately for the existing acquisition-clock diagnostic.
   result.prefixGapS = audio.firstIdentifiedStartS;
-  result.suffixGapS = Math.max(0, audio.durationS - audio.lastIdentifiedEndS);
+  result.suffixGapS = Math.max(0, contentDurationS - audio.lastIdentifiedEndS);
+  result.expectedTrailingPadS = options.anchoredAtStartCall && deliveryDelayS !== null ? deliveryDelayS : 0;
   if (result.prefixGapS > SOURCE_BOUNDARY_TOLERANCE_S) problems.push(`SOURCE COVERAGE: missing ${result.prefixGapS.toFixed(3)}s prefix`);
-  if (result.suffixGapS > SOURCE_BOUNDARY_TOLERANCE_S) problems.push(`SOURCE COVERAGE: missing ${result.suffixGapS.toFixed(3)}s suffix`);
+  if (result.suffixGapS - result.expectedTrailingPadS > SOURCE_BOUNDARY_TOLERANCE_S) {
+    problems.push(`SOURCE COVERAGE: missing ${result.suffixGapS.toFixed(3)}s suffix` +
+      (result.expectedTrailingPadS ? ` (${result.expectedTrailingPadS.toFixed(3)}s explained by the first-delivery delay)` : ''));
+  }
   if (!Array.isArray(acquisitions) || acquisitions.length !== 1) {
     problems.push('SOURCE CLOCK: endurance requires exactly one observed native microphone acquisition');
     return result;
@@ -453,22 +484,16 @@ function assessSourceCoverage(audio, recorder, acquisitions, nativeClock = null)
     result.startLatencyS = (recorder.startCalledAt - receivedAt) / 1000;
     if (result.startLatencyS > MAX_SOURCE_ACQUISITION_S) problems.push(`SOURCE CLOCK: native recorder start was requested ${result.startLatencyS.toFixed(3)}s after acquisition (limit ${MAX_SOURCE_ACQUISITION_S}s)`);
   }
-  // Where the numbered source's cursor stood when the recording timeline began.
-  // The hosted fake microphone loads its WAV lazily and advances the cursor
-  // only for buffers it actually delivers. When its first buffer arrived after
-  // the recorder had started (wall time exceeding the native timestamp span),
-  // the recording begins at identity 0; when delivery preceded the recorder
-  // start, the cursor can have advanced by at most the time since the request.
-  // Both delays are measured and bounded rather than assumed away. Without
-  // native timestamp evidence the historical acquisition-based range is kept.
-  const lateDeliveryS = Number.isFinite(nativeClock?.lateDeliveryS) ? nativeClock.lateDeliveryS : null;
-  result.firstDeliveryDelayS = lateDeliveryS;
-  if (lateDeliveryS !== null && lateDeliveryS > MAX_SOURCE_ACQUISITION_S) {
-    problems.push(`SOURCE CLOCK: native source delivered its first audio ${lateDeliveryS.toFixed(3)}s after the recorder started (limit ${MAX_SOURCE_ACQUISITION_S}s)`);
-  }
-  result.sourceOffsetRangeS = lateDeliveryS === null
+  // Where the numbered source's cursor stood when the recording's first buffer
+  // arrived. The hosted fake microphone loads its WAV lazily and advances the
+  // cursor only for buffers it actually delivers. When the first buffer came
+  // clearly after the start call, delivery began only after the recorder was
+  // requested and the recording starts at identity 0. Otherwise the source may
+  // already have been flowing, by at most the time since the request. Without
+  // a start-call observation the historical acquisition-based range is kept.
+  result.sourceOffsetRangeS = deliveryDelayS === null
     ? [(recorder.startedAt - receivedAt) / 1000, (recorder.startedAt - requestedAt) / 1000]
-    : [0, lateDeliveryS > FIRST_DELIVERY_SLACK_S ? 0 : (recorder.startedAt - requestedAt) / 1000];
+    : [0, deliveryDelayS > FIRST_DELIVERY_SLACK_S ? 0 : (recorder.startedAt - requestedAt) / 1000];
   result.sourceClockErrorS = Math.max(0, result.sourceOffsetRangeS[0] - audio.sourceOffsetS, audio.sourceOffsetS - result.sourceOffsetRangeS[1]);
   if (result.sourceClockErrorS > SOURCE_CLOCK_TOLERANCE_S) problems.push(`SOURCE CLOCK: decoded numbering is ${result.sourceClockErrorS.toFixed(3)}s outside native acquisition timing`);
   return result;
@@ -542,7 +567,7 @@ async function runCodedEndurance(opts = {}) {
     result.diskPreflight = { ...budget, availableBytes: availableBytes(evidenceDir), requiredBytes: Object.values(budget).reduce((total, size) => total + size, 0) };
     if (result.diskPreflight.availableBytes < result.diskPreflight.requiredBytes) throw new Error('Insufficient free disk space for the synthetic reference, retained encoded copies, and 1 GiB headroom');
     checkpoint({ event: 'preparing-reference', requestedSeconds: seconds });
-    const reference = buildCodedScenario(name, [{ type: 'speech', seconds: seconds + 25 }]);
+    const reference = buildCodedScenario(name, [{ type: 'speech', seconds: seconds + 25 }], { sampleRate: ENDURANCE_REFERENCE_SAMPLE_RATE });
     result.reference = reference.metaPath;
     mock = await startStreamingMockBackend({ port: opts.mockPort || 3000 });
     app = new EnduranceDriver({ name, appDir, apiUrl: mock.url, fakeAudioWav: reference.wavPath,
@@ -672,7 +697,14 @@ async function runCodedEndurance(opts = {}) {
     if (nativeMode) result.nativeCapture = nativeCapture;
     const recorder = roles?.native || capture?.recorders?.at(-1);
     if (recorder?.startedAt == null || recorder?.stoppedAt == null) throw new Error('Missing native recorder timing evidence');
-    result.expectedDurationS = (recorder.stoppedAt - recorder.startedAt) / 1000;
+    // Recorder wall: first audio (start event) to stop event. Native
+    // finalization places the source at its start call, so the final spans the
+    // start call to the stop; the difference is the first-delivery delay, which
+    // is measured, reported and bounded in source coverage. The legacy live-mix
+    // path keeps its historical event-to-event expectation.
+    result.recorderWallS = (recorder.stoppedAt - recorder.startedAt) / 1000;
+    result.firstDeliveryDelayS = nativeMode ? firstDeliveryDelay(recorder) : null;
+    result.expectedDurationS = result.firstDeliveryDelayS === null ? result.recorderWallS : (recorder.stoppedAt - recorder.startCalledAt) / 1000;
     if (result.expectedDurationS < seconds - 1.5) problem('Native recording ended before the requested duration');
     if (!nativeMode && capture.recorders.length !== 1) problem('Endurance unexpectedly created multiple MediaRecorders');
     const output = app.findOutputFile();
@@ -697,7 +729,7 @@ async function runCodedEndurance(opts = {}) {
       const timestamps = await measureTimestampHoles(nativeOriginal);
       result.nativeTimestamps = { ...timestamps, holeCount: timestamps.holes.length, overlapCount: timestamps.overlaps.length,
         holes: timestamps.holes.slice(0, 200), overlaps: timestamps.overlaps.slice(0, 50) };
-      result.nativeClock = assessNativeClock(timestamps, result.expectedDurationS);
+      result.nativeClock = assessNativeClock(timestamps, result.recorderWallS);
       for (const issue of result.nativeClock.problems) problem(issue);
       expectedPauses = finalPausesFromHoles(timestamps, sourceEvidence.startOffsetMs / 1000);
       nativeEvidence = { nativeOriginal, sourceEvidence, timestamps };
@@ -708,7 +740,7 @@ async function runCodedEndurance(opts = {}) {
         unchecked: audio.pauses.filter(pause => pause.silent === null).length } : null };
     for (const issue of audio.problems) problem(issue);
     result.constraintEvidence = await app.evalTimed(() => window.__enduranceConstraints);
-    result.sourceCoverage = assessSourceCoverage(audio, recorder, result.constraintEvidence?.acquisitions, result.nativeClock);
+    result.sourceCoverage = assessSourceCoverage(audio, recorder, result.constraintEvidence?.acquisitions, { anchoredAtStartCall: nativeMode });
     for (const issue of result.sourceCoverage.problems) problem(issue);
     result.localSha256 = await sha256(output);
     const receipt = JSON.parse(fs.readFileSync(path.join(recordingDir, 'upload-receipt.json'), 'utf8'));

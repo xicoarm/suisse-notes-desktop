@@ -41,13 +41,19 @@ function symbolsForFrame(id) {
   return [code & 15, (code >> 4) & 15, (code >> 8) & 15, code >> 12, crc & 15, crc >> 4];
 }
 
-function wavHeader(samples) {
+// 48 kHz is the default for every scenario. 16 kHz carries the identical coded
+// signal (all symbols and the harmonic bed lie below 3.7 kHz, far under its
+// 8 kHz Nyquist limit) at one third of the size, for long references whose
+// in-memory load by the fake microphone would otherwise delay acquisition.
+const REFERENCE_SAMPLE_RATES = [48000, 16000];
+
+function wavHeader(samples, sampleRate = SAMPLE_RATE) {
   const bytes = samples * 2;
   if (bytes > 0xffffffff - 36) throw new Error('Synthetic WAV exceeds RIFF size limit');
   const header = Buffer.alloc(44);
   header.write('RIFF'); header.writeUInt32LE(bytes + 36, 4); header.write('WAVEfmt ', 8);
   header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22);
-  header.writeUInt32LE(SAMPLE_RATE, 24); header.writeUInt32LE(SAMPLE_RATE * 2, 28);
+  header.writeUInt32LE(sampleRate, 24); header.writeUInt32LE(sampleRate * 2, 28);
   header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34); header.write('data', 36); header.writeUInt32LE(bytes, 40);
   return header;
 }
@@ -62,10 +68,16 @@ function writeAll(fd, bytes) {
  * "speech" is a modulated coded test signal, never generated spoken words;
  * "quiet" attenuates it, while zeros/noise retain their original meanings.
  * opts.outputDir is optional; by default artifacts stay in ignored harness work.
+ * opts.sampleRate is 48000 (default) or 16000; the oracle decodes at 8 kHz
+ * either way, so identities and timing checks are unchanged.
  */
 function buildCodedScenario(name, plan, opts = {}) {
   if (!/^[a-zA-Z0-9_-]+$/.test(name)) throw new Error('Synthetic scenario name must be a simple filename');
   if (opts.frameSeconds !== undefined && opts.frameSeconds !== FRAME_SECONDS) throw new Error('Coded oracle uses fixed 0.5-second frames');
+  const sampleRate = opts.sampleRate ?? SAMPLE_RATE;
+  if (!REFERENCE_SAMPLE_RATES.includes(sampleRate)) throw new Error('Coded references are written at 48000 or 16000 Hz');
+  // 5 ms symbol fades: 240 samples at 48 kHz, exactly as before.
+  const fadeSamples = Math.round(sampleRate * 0.005);
   const dir = path.resolve(opts.outputDir || path.join(__dirname, '..', 'work', 'scenarios'));
   fs.mkdirSync(dir, { recursive: true });
   let totalSeconds = 0;
@@ -80,14 +92,14 @@ function buildCodedScenario(name, plan, opts = {}) {
     return { ...segment, start, end: totalSeconds };
   });
   if (!timeline.length || totalSeconds / FRAME_SECONDS > 65536) throw new Error('Coded reference must contain 1–65536 frames (at most 9h6m8s)');
-  const samplesPerFrame = FRAME_SECONDS * SAMPLE_RATE;
+  const samplesPerFrame = FRAME_SECONDS * sampleRate;
   // Precompute only 96 short tone shapes (~9 MB); long references stream out
   // frame by frame instead of allocating hours of PCM in memory.
   const tones = BASE_FREQUENCIES.map(base => Array.from({ length: 16 }, (_, symbol) => {
     const tone = new Float32Array(samplesPerFrame);
     for (let i = 0; i < tone.length; i++) {
-      const fade = Math.min(1, i / 240, (tone.length - 1 - i) / 240);
-      tone[i] = Math.sin(2 * Math.PI * (base + symbol * FREQUENCY_STEP) * i / SAMPLE_RATE) * fade;
+      const fade = Math.min(1, i / fadeSamples, (tone.length - 1 - i) / fadeSamples);
+      tone[i] = Math.sin(2 * Math.PI * (base + symbol * FREQUENCY_STEP) * i / sampleRate) * fade;
     }
     return tone;
   }));
@@ -98,7 +110,7 @@ function buildCodedScenario(name, plan, opts = {}) {
   let segmentIndex = 0;
   let noiseSeed = 0x13579bdf;
   try {
-    writeAll(fd, wavHeader(totalSeconds * SAMPLE_RATE));
+    writeAll(fd, wavHeader(totalSeconds * sampleRate, sampleRate));
     for (let frame = 0; frame < totalSeconds / FRAME_SECONDS; frame++) {
       const start = frame * FRAME_SECONDS;
       while (start >= timeline[segmentIndex].end) segmentIndex++;
@@ -114,7 +126,7 @@ function buildCodedScenario(name, plan, opts = {}) {
           for (let band = 0; band < 6; band++) value += tones[band][symbols[band]][sample] * 0.065;
           // A modulated harmonic bed exercises varying speech-like level;
           // it contains no spoken words and has no platform voice dependency.
-          const t = start + sample / SAMPLE_RATE;
+          const t = start + sample / sampleRate;
           value += 0.025 * (0.6 + 0.4 * Math.sin(2 * Math.PI * 3.7 * t)) *
             (Math.sin(2 * Math.PI * 135 * t) + 0.4 * Math.sin(2 * Math.PI * 270 * t));
           value *= gain;
@@ -125,7 +137,7 @@ function buildCodedScenario(name, plan, opts = {}) {
     }
   } finally { fs.closeSync(fd); }
   const meta = { name, totalSeconds, timeline, coded: { version: 1, frameSeconds: FRAME_SECONDS,
-    sampleRate: SAMPLE_RATE, description: 'Deterministic synthetic signal; not spoken speech' } };
+    sampleRate, description: 'Deterministic synthetic signal; not spoken speech' } };
   fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
   return { wavPath, metaPath, ...meta };
 }

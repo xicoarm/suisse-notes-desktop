@@ -20,6 +20,16 @@ const CAPTURE_SECONDS = 45;
 const PREFIX_SECONDS = 120;
 const ENDURANCE_REFERENCE_SECONDS = 18325;
 const MAX_REFERENCE_BYTES = ENDURANCE_REFERENCE_SECONDS * 48000 * 2 + 44;
+// Hosted endurance now writes its reference at 16 kHz and, for 5h15, for
+// 18,925 s. SUISSE_CAPTURE_STARTUP_SAMPLE_RATE=16000 measures exactly that
+// fixture size; the default keeps the historical 48 kHz 5h05 comparison.
+const STARTUP_SAMPLE_RATES = { 48000: ENDURANCE_REFERENCE_SECONDS, 16000: 18925 };
+
+function referenceSampleRate(value = process.env.SUISSE_CAPTURE_STARTUP_SAMPLE_RATE) {
+  const rate = value === undefined || value === '' ? 48000 : Number(value);
+  if (!Object.hasOwn(STARTUP_SAMPLE_RATES, rate)) throw new Error('Startup diagnostic reference sample rate must be 48000 or 16000');
+  return rate;
+}
 const COPY_BYTES = 1024 * 1024;
 const CAPTURE_DEADLINE_MS = 4 * 60 * 1000;
 const SUPERVISOR_MS = 10 * 60 * 1000;
@@ -74,11 +84,12 @@ function assertResources(measurement) {
 // Both WAVs contain identical numbered PCM for the first two minutes. Only
 // the large WAV has zero-valued PCM afterwards. No holes/truncation or RIFF
 // padding shortcut: Chromium reads the same byte count as the endurance WAV.
-function extendReference(prefix, destination, seconds) {
-  const totalBytes = seconds * 48000 * 2 + 44;
+function extendReference(prefix, destination, seconds, sampleRate = 48000) {
+  if (!Object.hasOwn(STARTUP_SAMPLE_RATES, sampleRate)) throw new Error('Invalid bounded startup reference sample rate');
+  const totalBytes = seconds * sampleRate * 2 + 44;
   const stat = fs.statSync(prefix);
-  if (!Number.isInteger(seconds) || seconds < PREFIX_SECONDS || totalBytes > MAX_REFERENCE_BYTES ||
-      stat.size !== PREFIX_SECONDS * 48000 * 2 + 44) throw new Error('Invalid bounded startup reference size');
+  if (!Number.isInteger(seconds) || seconds < PREFIX_SECONDS || seconds > STARTUP_SAMPLE_RATES[sampleRate] || totalBytes > MAX_REFERENCE_BYTES ||
+      stat.size !== PREFIX_SECONDS * sampleRate * 2 + 44) throw new Error('Invalid bounded startup reference size');
   const input = fs.openSync(prefix, 'r');
   let output;
   const digest = crypto.createHash('sha256'), prefixDigest = crypto.createHash('sha256');
@@ -97,8 +108,8 @@ function extendReference(prefix, destination, seconds) {
     if (fs.readSync(input, header, 0, 44, 0) !== 44 || header.toString('ascii', 0, 4) !== 'RIFF' ||
         header.toString('ascii', 8, 16) !== 'WAVEfmt ' || header.toString('ascii', 36, 40) !== 'data' ||
         header.readUInt32LE(4) !== stat.size - 8 || header.readUInt32LE(40) !== stat.size - 44 ||
-        header.readUInt32LE(24) !== 48000 || header.readUInt16LE(22) !== 1 || header.readUInt16LE(34) !== 16) {
-      throw new Error('Expected canonical 48 kHz mono PCM16 numbered prefix');
+        header.readUInt32LE(24) !== sampleRate || header.readUInt16LE(22) !== 1 || header.readUInt16LE(34) !== 16) {
+      throw new Error(`Expected canonical ${sampleRate / 1000} kHz mono PCM16 numbered prefix`);
     }
     output = fs.openSync(destination, 'wx');
     header.writeUInt32LE(totalBytes - 8, 4); header.writeUInt32LE(totalBytes - 44, 40); write(header);
@@ -113,7 +124,7 @@ function extendReference(prefix, destination, seconds) {
     fs.fsyncSync(output);
   } finally { fs.closeSync(input); if (output !== undefined) fs.closeSync(output); }
   return { wavPath: destination, bytes: written, sha256: digest.digest('hex'), prefixPcmSha256: prefixDigest.digest('hex'),
-    prefixSeconds: PREFIX_SECONDS, totalSeconds: seconds, tail: seconds > PREFIX_SECONDS ? 'zero-valued PCM' : 'none',
+    sampleRate, prefixSeconds: PREFIX_SECONDS, totalSeconds: seconds, tail: seconds > PREFIX_SECONDS ? 'zero-valued PCM' : 'none',
     generation: 'Identical coded prefix, canonical PCM16 WAV, sequential physical zero writes, 1 MiB buffers; hash computed during writing.' };
 }
 
@@ -374,13 +385,15 @@ async function runCaptureStartupDiagnostic(options) {
       result.preflights.push(measurement); checkpoint(); assertResources(measurement);
     };
     resourceGate('before-numbered-prefix-generation');
+    const sampleRate = referenceSampleRate();
+    result.referenceSampleRate = sampleRate;
     const { buildCodedScenario } = require('./lib/coded-audio');
-    const prefix = buildCodedScenario('startup-numbered-prefix', [{ type: 'speech', seconds: PREFIX_SECONDS }], { outputDir: path.join(evidenceDir, 'reference') });
+    const prefix = buildCodedScenario('startup-numbered-prefix', [{ type: 'speech', seconds: PREFIX_SECONDS }], { outputDir: path.join(evidenceDir, 'reference'), sampleRate });
     result.prefix = prefix; checkpoint();
-    for (const [name, seconds] of [['small-file', PREFIX_SECONDS], ['endurance-size-file', ENDURANCE_REFERENCE_SECONDS]]) {
+    for (const [name, seconds] of [['small-file', PREFIX_SECONDS], ['endurance-size-file', STARTUP_SAMPLE_RATES[sampleRate]]]) {
       resourceGate('before-reference-generation-' + name);
       const directory = path.join(evidenceDir, name); fs.mkdirSync(directory);
-      const reference = extendReference(prefix.wavPath, path.join(directory, name + '.wav'), seconds);
+      const reference = extendReference(prefix.wavPath, path.join(directory, name + '.wav'), seconds, sampleRate);
       writeJson(path.join(directory, 'reference.json'), reference);
       const measured = await captureCase(directory, reference, { appDir });
       result.cases.push(measured); checkpoint();
@@ -450,4 +463,4 @@ if (require.main === module) {
 }
 
 module.exports = { runCaptureStartupDiagnostic, extendReference, installStartupObserver, startupClockReadout, summarizeCases, validateSnapshot,
-  measureResources, assertResources, CAPTURE_SECONDS, PREFIX_SECONDS, ENDURANCE_REFERENCE_SECONDS, MAX_REFERENCE_BYTES };
+  measureResources, assertResources, referenceSampleRate, CAPTURE_SECONDS, PREFIX_SECONDS, ENDURANCE_REFERENCE_SECONDS, MAX_REFERENCE_BYTES, STARTUP_SAMPLE_RATES };

@@ -8,6 +8,10 @@ on:
         type: string
         required: false
         default: all
+      startup_sample_rate:
+        type: string
+        required: false
+        default: '48000'
 
 permissions:
   contents: read
@@ -38,6 +42,7 @@ jobs:
       SUISSE_TEST_NETWORK_ISOLATION: '1'
       SUISSE_E2E_APP_DIR: dist/electron/UnPackaged
       SUISSE_E2E_BUNDLE_SHA: ${{ github.sha }}
+      SUISSE_CAPTURE_STARTUP_SAMPLE_RATE: ${{ inputs.startup_sample_rate }}
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       SENTRY_AUTH_TOKEN: ''
       GH_TOKEN: ''
