@@ -186,7 +186,9 @@ export function useSystemAudio() {
   // to fall back to a non-screen source (the old `|| sources[0]` fallback would
   // silently attach a soundless capture). The 1x1 video constraint also throws
   // OverconstrainedError on some GPU/driver stacks and takes the whole request
-  // down with it, so we retry audio-only if the combined request fails.
+  // down with it, so we retry without the video size/frame-rate constraints.
+  // Chromium 120 requires desktop audio to be paired with desktop video;
+  // an audio-only request reaches ReceivedBadMessage and kills the renderer.
   //
   // Throws on failure. Shared by initial capture and the rebind monitor below.
   const acquireLoopbackStream = async () => {
@@ -197,11 +199,7 @@ export function useSystemAudio() {
     }
 
     // Only a screen source carries loopback audio on Windows.
-    const screenSource = sources.find(s =>
-      s.id.startsWith('screen:') ||
-      s.name === 'Entire Screen' ||
-      /screen/i.test(s.name)
-    );
+    const screenSource = sources.find(s => s.id?.startsWith('screen:'));
     if (!screenSource) {
       diag('error', `no screen-type source among ${sources.length} source(s): ${sources.map(s => s.id).join(', ')}`);
       throw new Error('No screen source available for system audio');
@@ -213,9 +211,8 @@ export function useSystemAudio() {
     };
 
     let stream = null;
-    // Primary: audio + tiny video (Chromium historically required a video
-    // track alongside desktop audio). Fallback: audio-only, in case the video
-    // constraint is what's being rejected.
+    // Both attempts must retain matching desktop audio and video sources.
+    // Stop the video immediately after acquisition; it is never recorded.
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         audio: { mandatory: audioMandatory },
@@ -229,9 +226,10 @@ export function useSystemAudio() {
         }
       });
     } catch (combinedErr) {
-      diag('warn', `combined audio+video loopback request failed (${combinedErr.name}: ${combinedErr.message}); retrying audio-only`);
+      diag('warn', `combined audio+video loopback request failed (${combinedErr.name}: ${combinedErr.message}); retrying with relaxed video constraints`);
       stream = await navigator.mediaDevices.getUserMedia({
-        audio: { mandatory: audioMandatory }
+        audio: { mandatory: audioMandatory },
+        video: { mandatory: { ...audioMandatory } }
       });
     }
 

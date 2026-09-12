@@ -107,6 +107,43 @@ describe('useSystemAudio — Windows loopback rebind on devicechange', () => {
     return stream;
   }
 
+  it('keeps desktop video paired with loopback audio when relaxing rejected video constraints', async () => {
+    const captured = makeLoopbackStream();
+    mediaDevices.getUserMedia.mockRejectedValueOnce(
+      Object.assign(new Error('unsupported video size'), { name: 'OverconstrainedError' })
+    ).mockResolvedValueOnce(captured);
+
+    const stream = await startCapture();
+    expect(mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+    const retry = mediaDevices.getUserMedia.mock.calls[1][0];
+    expect(retry.audio.mandatory).toEqual({ chromeMediaSource: 'desktop', chromeMediaSourceId: 'screen:0:0' });
+    expect(retry.video).toEqual({ mandatory: { ...retry.audio.mandatory } });
+    expect(stream.getAudioTracks()).toEqual(captured.getAudioTracks());
+    captured.getVideoTracks().forEach(track => expect(track.stop).toHaveBeenCalledOnce());
+    captured.getAudioTracks().forEach(track => expect(track.stop).not.toHaveBeenCalled());
+  });
+
+  it('never submits a desktop audio-only request when both acquisition attempts fail', async () => {
+    mediaDevices.getUserMedia.mockRejectedValue(
+      Object.assign(new Error('device unavailable'), { name: 'NotReadableError' })
+    );
+    expect(await sysAudio.startCapture('rec-1')).toBeNull();
+    expect(mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+    for (const [constraints] of mediaDevices.getUserMedia.mock.calls) {
+      expect(constraints.video?.mandatory?.chromeMediaSource).toBe('desktop');
+      expect(constraints.video?.mandatory?.chromeMediaSourceId).toBe(constraints.audio.mandatory.chromeMediaSourceId);
+    }
+    expect(deviceChangeListeners.size).toBe(0);
+    expect(sysAudio.error.value).toBe('device unavailable');
+  });
+
+  it('rejects a window source even if its name contains Screen', async () => {
+    window.electronAPI.systemAudio.getSources.mockResolvedValue([{ id: 'window:123:0', name: 'Screen sharing meeting' }]);
+    expect(await sysAudio.startCapture('rec-1')).toBeNull();
+    expect(mediaDevices.getUserMedia).not.toHaveBeenCalled();
+    expect(deviceChangeListeners.size).toBe(0);
+  });
+
   it('rebinds the loopback and swaps the new stream into the mix on devicechange', async () => {
     const initial = await startCapture();
     expect(mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
@@ -143,7 +180,7 @@ describe('useSystemAudio — Windows loopback rebind on devicechange', () => {
   it('keeps the previous stream when re-acquisition fails', async () => {
     const initial = await startCapture();
 
-    // Both the combined and the audio-only retry fail
+    // Both the constrained and the relaxed paired requests fail.
     mediaDevices.getUserMedia.mockRejectedValue(
       Object.assign(new Error('device busy'), { name: 'NotReadableError' })
     );
