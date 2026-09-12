@@ -42,6 +42,7 @@
           dense
           icon="more_vert"
           size="sm"
+          data-test="device-menu"
         >
           <q-menu>
             <q-list dense>
@@ -62,6 +63,7 @@
               <q-item
                 v-close-popup
                 clickable
+                data-test="device-forget"
                 @click="confirmForget"
               >
                 <q-item-section avatar>
@@ -229,6 +231,7 @@
         :icon="deviceStore.isScanning ? undefined : 'bluetooth_searching'"
         :label="deviceStore.isScanning ? $t('scanning') : $t('scanForDevices')"
         :loading="deviceStore.isScanning"
+        data-test="device-scan"
         @click="deviceStore.isScanning ? deviceStore.stopScan() : startScan()"
       />
     </div>
@@ -245,6 +248,7 @@
         v-for="device in deviceStore.scanResults"
         :key="device.deviceId"
         class="scan-result-item"
+        data-test="device-scan-result"
         @click="connectDevice(device)"
       >
         <div class="scan-result-left">
@@ -368,6 +372,7 @@
           no-caps
           :label="$t('cancelAll')"
           icon="stop"
+          data-test="device-cancel-all"
           @click="cancelSync"
         />
         <q-btn
@@ -378,6 +383,7 @@
           no-caps
           :label="$t('syncAll')"
           icon="sync"
+          data-test="device-sync-all"
           @click="syncAll"
         />
       </div>
@@ -400,6 +406,7 @@
         v-for="file in deviceStore.deviceFiles"
         :key="file.file"
         class="file-card"
+        :data-file="file.file"
       >
         <div class="file-info">
           <div class="file-name">
@@ -428,6 +435,7 @@
             icon="stop"
             :label="$t('cancelThisFile')"
             no-caps
+            data-test="device-cancel-current"
             @click="cancelCurrentFile"
           />
           <!-- Currently saving or uploading — show spinner only, no cancel -->
@@ -498,6 +506,7 @@
               icon="replay"
               size="sm"
               :disable="deviceStore.isSyncing"
+              data-test="device-file-retry"
               @click="retryUpload(file)"
             />
             <q-btn
@@ -540,6 +549,7 @@
               icon="replay"
               size="sm"
               :disable="deviceStore.isSyncing"
+              data-test="device-file-unskip"
               @click="unskipAndSync(file)"
             />
           </div>
@@ -557,6 +567,7 @@
               :label="$t('syncNow')"
               no-caps
               :disable="deviceStore.isSyncing"
+              data-test="device-file-sync"
               @click="syncFile(file)"
             />
             <q-btn

@@ -75,7 +75,7 @@ const LIST_EVERY_N_TICKS = 3;
  */
 export function isBleTransportError(err) {
   const msg = ((err && err.code) ? err.code + ' ' : '') + ((err && err.message) || String(err || ''));
-  return /connection timeout|connection failed|disconnected during transfer|not connected|deviceId required|response timeout|device not found|BLE download cancelled|rejected pairing|connect(ing)? (failed|error)|writing descriptor|DEVICE_MEMORYBUSY|MemoryBusy/i.test(msg);
+  return /connection timeout|connection failed|disconnected during transfer|not connected|deviceId required|response timeout|device not found|BLE download cancelled|rejected pairing|connect(ing)? (failed|error)|writing descriptor|DEVICE_MEMORYBUSY|MemoryBusy|LIST_INCOMPLETE/i.test(msg);
 }
 
 // Notification IDs
@@ -712,6 +712,18 @@ export const useDeviceStore = defineStore('device', {
         this.fileListLoaded = true;
       } catch (e) {
         console.warn('Failed to fetch file list:', e.message);
+        if (e.code === 'LIST_INCOMPLETE') {
+          // The recorder's list arrived truncated (stale frames of an earlier
+          // request in the stream). MERGE what came through into the known
+          // list — replacing it would make the missing recordings disappear
+          // from the device page and from auto-sync. The next poll retries.
+          const byName = new Map(this.deviceFiles.map(f => [f.file, f]));
+          for (const f of e.files || []) byName.set(f.file, f);
+          this.deviceFiles = [...byName.values()].sort((a, b) => b.creat_time - a.creat_time);
+          this.fileListLoaded = true;
+          captureMessage(`BLE file list incomplete: ${e.message} — kept ${this.deviceFiles.length} known file(s)`, 'warning');
+          throw e;
+        }
         if (isBleTransportError(e)) {
           // Link dropped / device busy (card still being scanned) — keep the
           // last known list on screen; the reconnect loop / next poll retries.

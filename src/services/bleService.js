@@ -637,56 +637,93 @@ export class BleDeviceManager {
       // Request file list
       await this._write(buildCmd(CMD_FILE_LIST));
 
-      // First response: file count
-      const countResp = await this._readResponse(CMD_FILE_LIST, 10000);
-      addBreadcrumb({ category: 'ble', message: `getFileList countResp raw: [${Array.from(countResp.slice(0, 20)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(', ')}...] len=${countResp.length}`, level: 'info' });
+      // The count frame and every entry frame look identical on the wire
+      // (0x01 0x1B 0x00 + JSON), so the stream is parsed by JSON SHAPE, never
+      // by position: {"FileNum":N} is the count (and a restart marker if it
+      // arrives again), {"file":…} is an entry, {"…FileList":"Memory…"} is a
+      // device error. Trusting the order made ONE leftover frame desynchronize
+      // every later request — files then disappeared from the list entirely.
+      const files = [];
+      const seen = new Set();
+      let skipped = 0;
+      let sawCount = false;
+      let reads = 0;
+      // Enough reads for the whole list plus the stale frames of one
+      // abandoned list request, so a shifted stream still completes.
+      const maxReads = () => (sawCount ? fileCount * 2 + 8 : 8);
 
-      const countJson = parseJsonFromBuffer(countResp, 3);
-      addBreadcrumb({ category: 'ble', message: `getFileList countJson: ${JSON.stringify(countJson)}`, level: 'info' });
+      while (reads < maxReads() && (!sawCount || files.length < fileCount)) {
+        reads++;
+        let resp;
+        try {
+          resp = await this._readResponse(CMD_FILE_LIST, 10000);
+        } catch (readErr) {
+          if (!sawCount) throw readErr;              // no list at all — real failure
+          addBreadcrumb({ category: 'ble', message: `getFileList: stream ended after ${files.length}/${fileCount} entries (${readErr.message})`, level: 'warning' });
+          break;
+        }
+        let json;
+        try {
+          json = parseJsonFromBuffer(resp, 3);
+        } catch (parseErr) {
+          skipped++;
+          addBreadcrumb({ category: 'ble', message: `getFileList: unparsable frame skipped (${parseErr.message})`, level: 'warning' });
+          continue;
+        }
 
-      // Device-side error instead of a count. The document shows
-      // {"FileList":"MemoryBusy"}; the shipped firmware actually sends
-      // {"AudioFileList":"MemoryBusy"} (Sentry CAPACITOR-RY breadcrumbs, while
-      // the recorder was recording). Until now that case was read as
-      // "0 files". Accept any *FileList key with a string value, and any
-      // Memory* status, and surface a code the UI translates; the next poll
-      // retries once the card is free again.
-      const deviceStatus = Object.entries(countJson)
-        .find(([k, v]) => typeof v === 'string' && (/FileList$/i.test(k) || /^Memory(Busy|Err|Full)$/i.test(v)));
-      if (deviceStatus) {
-        const err = new Error(String(deviceStatus[1]));
-        err.code = 'DEVICE_' + String(deviceStatus[1]).toUpperCase();
+        // Device-side error instead of a list. The document shows
+        // {"FileList":"MemoryBusy"}; the shipped firmware actually sends
+        // {"AudioFileList":"MemoryBusy"} (Sentry CAPACITOR-RY breadcrumbs,
+        // while the recorder was recording) — that case used to read as
+        // "0 files". Surface a code the UI translates; the next poll retries
+        // once the card is free again.
+        const deviceStatus = Object.entries(json)
+          .find(([k, v]) => typeof v === 'string' && (/FileList$/i.test(k) || /^Memory(Busy|Err|Full)$/i.test(v)));
+        if (deviceStatus) {
+          const err = new Error(String(deviceStatus[1]));
+          err.code = 'DEVICE_' + String(deviceStatus[1]).toUpperCase();
+          throw err;
+        }
+
+        if (typeof json.FileNum === 'number') {
+          // The count frame. Seeing it again means the frames so far belonged
+          // to an earlier request — start the collection over.
+          if (sawCount && files.length) {
+            addBreadcrumb({ category: 'ble', message: `getFileList: second count frame — discarding ${files.length} stale entr(ies)`, level: 'warning' });
+            files.length = 0;
+            seen.clear();
+          }
+          sawCount = true;
+          fileCount = json.FileNum;
+          addBreadcrumb({ category: 'ble', message: `getFileList fileCount=${fileCount}`, level: 'info' });
+          continue;
+        }
+        if (json.file) {
+          if (seen.has(json.file)) {
+            // The same name twice can only be a stale frame of an earlier
+            // request — never two recordings (the name carries the timestamp).
+            skipped++;
+            addBreadcrumb({ category: 'ble', message: `getFileList: duplicate entry ${json.file} ignored (stale frame)`, level: 'warning' });
+            continue;
+          }
+          seen.add(json.file);
+          files.push(json);
+          continue;
+        }
+        skipped++;
+        addBreadcrumb({ category: 'ble', message: `getFileList: frame without filename skipped: ${JSON.stringify(json).slice(0, 120)}`, level: 'warning' });
+      }
+
+      const complete = sawCount && files.length >= fileCount;
+      addBreadcrumb({ category: 'ble', message: `getFileList done: ${files.length}/${fileCount} files, ${skipped} skipped, ${reads} reads, complete=${complete}`, level: 'info' });
+      if (!complete) {
+        // A partial list must never REPLACE what the app already knows —
+        // that is how a recording silently disappears from the device page.
+        const err = new Error(`Incomplete file list: ${files.length} of ${fileCount} entries`);
+        err.code = 'LIST_INCOMPLETE';
+        err.files = files;
         throw err;
       }
-
-      fileCount = countJson.FileNum || 0;
-      addBreadcrumb({ category: 'ble', message: `getFileList fileCount=${fileCount}`, level: 'info' });
-      const files = [];
-      let skipped = 0;
-
-      // Read each file info — skip corrupt entries instead of aborting.
-      // All fileCount notifications MUST be consumed, otherwise the device
-      // keeps streaming and stale data floods subsequent commands.
-      for (let i = 0; i < fileCount; i++) {
-        try {
-          // Only FILE_LIST replies count as entries; unsolicited frames
-          // (toggle switch, socket state) no longer consume a file slot.
-          const fileResp = await this._readResponse(CMD_FILE_LIST, 10000);
-
-          const fileJson = parseJsonFromBuffer(fileResp, 3);
-          if (fileJson.file) {
-            files.push(fileJson);
-          } else {
-            skipped++;
-            addBreadcrumb({ category: 'ble', message: `getFileList file[${i}]: skipped entry without filename: ${JSON.stringify(fileJson)}`, level: 'warning' });
-          }
-        } catch (entryErr) {
-          skipped++;
-          addBreadcrumb({ category: 'ble', message: `getFileList file[${i}]: parse error (${entryErr.message}), skipping`, level: 'warning' });
-        }
-      }
-
-      addBreadcrumb({ category: 'ble', message: `getFileList done: ${files.length} files, ${skipped} skipped out of ${fileCount}`, level: 'info' });
       return files;
     } finally {
       // Always exit sync state — even on error/timeout. Without this, the
@@ -779,6 +816,7 @@ export class BleDeviceManager {
     const chunks = [];
     let receivedBytes = 0;
     let expectedIndex = 0;
+    let staleFramesDropped = 0;
 
     try {
       // Drain any stale notifications from previous operations
@@ -808,10 +846,25 @@ export class BleDeviceManager {
           // recorded in the field read 0x02 0xb7, 0x02 0xb8, 0x02 0xb9 —
           // the SECOND byte increments (Sentry CAPACITOR-XN breadcrumbs).
           const frameIndex = (data[3] << 8) | data[4];
-          if (frameIndex !== (expectedIndex & 0xFFFF)) {
-            // A hole in the frame sequence can only end in a CRC mismatch
+          const wanted = expectedIndex & 0xFFFF;
+          if (frameIndex !== wanted) {
+            // Frames the device was still streaming for an ABORTED transfer
+            // (cancel, CRC mismatch, dropped link) can arrive after the next
+            // download has started: their index is behind ours — and before
+            // frame 0 of this file, anything non-zero is stale by definition.
+            // Dropping them is what makes the retry of a failed file work at
+            // all; treating them as a gap failed every retry until the file
+            // was skipped (found by the mobile harness, m5).
+            const stale = expectedIndex === 0
+              ? frameIndex !== 0
+              : ((wanted - frameIndex) & 0xFFFF) < 0x8000;
+            if (stale) {
+              staleFramesDropped++;
+              continue;
+            }
+            // A real hole in the sequence can only end in a CRC mismatch
             // after the whole file — fail fast instead.
-            throw new Error(`CRC mismatch: frame ${frameIndex} received, expected ${expectedIndex & 0xFFFF} (frame gap)`);
+            throw new Error(`CRC mismatch: frame ${frameIndex} received, expected ${wanted} (frame gap)`);
           }
           expectedIndex++;
           const audioData = data.slice(5);
@@ -852,6 +905,9 @@ export class BleDeviceManager {
           }
 
           if (onProgress) onProgress({ percent: 100, bytesReceived: receivedBytes, bytesTotal: totalSize });
+          if (staleFramesDropped) {
+            addBreadcrumb({ category: 'ble', message: `downloadFile ${filename}: dropped ${staleFramesDropped} stale frame(s) of an earlier transfer`, level: 'warning' });
+          }
 
           // Success path: exit sync state cleanly
           await this._write(buildCmd(CMD_SYNC_STATE, [0x00]));

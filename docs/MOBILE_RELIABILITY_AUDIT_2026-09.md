@@ -114,7 +114,7 @@ Every finding below is either **fixed on branch `fix/mobile-reliability-audit`**
   CRC16 verification, cancel/disconnect propagation.
 
 ## 5. Verification done
-- Unit tests: 262/262 pass (33 files; 99 new tests: recorder protocol simulation (download, file list, handshake), automatic sync policy, lifecycle boot, redaction/scrubbing,
+- Unit tests: 268/268 pass (34 files; 105 new tests: stale-frame robustness of the list and download streams, recorder protocol simulation (download, file list, handshake), automatic sync policy, lifecycle boot, redaction/scrubbing,
   Android directory + legacy fallback + migration, disk-space probe, API timeout, BLE lazy
   init + backoff, locale detection, history day grouping, BLE error wording, upload
   verdict classification, storage preference / delete-all, BLE notification routing and
@@ -130,7 +130,10 @@ stop → upload on one Android 13+ phone (confirms chunks now list correctly and
 migration of an existing install), one iPhone (confirms the lifecycle listeners register —
 background the app mid-recording and check the flush breadcrumb), and one BLE sync with the
 Suisse Notes Pro switched off (confirms the backoff and the absence of error events).
-Round 2 adds: "delete after upload" on one Android and one iPhone (the audio must be gone
+The mobile harness (8.8) now covers record/combine/upload, upload resilience, delete after
+upload, crash recovery, and pairing/sync/cancel/unpair against a protocol-accurate virtual
+recorder on both personas; what remains for real devices is the operating system and the
+physical radio. Round 2 adds: "delete after upload" on one Android and one iPhone (the audio must be gone
 from the history card after the upload is verified), a cancelled device transfer (card stays
 as "skipped" with re-sync), a fresh reinstall pairing with a recorder paired by the previous
 install (no "already paired" rejection), and one full pair → sync → unpair cycle with the
@@ -310,6 +313,54 @@ by tests):**
 6. The file list ran inside the sync state on every 20-second tick, disabling the
    recorder's buttons for a second or two each time; it now runs every third tick and
    immediately after the recorder reports a stopped recording.
+
+### 8.8 Mobile reliability harness — and the two defects it found at once
+The mobile app now has the equivalent of the desktop E2E harness
+(`tests/mobile-harness/`, README there): the real Capacitor web bundle in Chromium on a
+**virtual phone** (a native-bridge shim routes every plugin call through
+`Capacitor.nativePromise` into a file system on disk, preferences that survive a
+relaunch, device/app/network/battery state), a **virtual Suisse Notes Pro** speaking the
+T240 protocol as the shipped firmware does, the scenario WAV as the microphone, the
+adversarial mock backend and the forensic audio verifier. Nothing in the bundle is
+changed for the test: platform detection, storage layout, upload path and the Bluetooth
+protocol layer run as on a phone. Scenarios on both personas (Android / iOS); every
+scenario except the endurance run passes on both, the endurance run is listed with its
+own status:
+
+| Scenario | Proves |
+|---|---|
+| m0-selftest | bridge, platform detection, file-system semantics (tmp write → rename → stat → readdir), login |
+| m1-baseline | 90 s meeting → combine → upload: no lost audio (holes = 0), exactly one upload |
+| m2-endurance | long recording: one file without holes, one upload — 12-minute run passed locally (721.8 s, holes 0, 1 upload, heap flat at 10–17 MB); the 5h15 run is the nightly CI job |
+| m3-resilience | upload survives a transient 500, an expired token and a socket cut |
+| m4-delete-after-upload | the Settings choice removes the local audio after the verified upload; the history entry stays |
+| m5-recorder-sync | pair → busy card → empty file skipped → corrupted transfer retried → dropped link resumed → server bytes identical to recorder bytes → button recording picked up → cancel keeps a skipped entry → unpair |
+| m6-crash-recovery | app killed mid-recording → relaunch → recovery combines (no holes) and uploads |
+| m7-repair / m7-foreign-app | reinstall → same recorder pairs again; a recorder bound elsewhere is refused with the actionable message |
+
+CI: `.github/workflows/mobile-reliability.yml` runs all scenarios for both personas on
+every pull request touching the app and the 5h15 endurance run nightly; the
+`Mobile Release` workflow now refuses to build when lint or the unit tests fail.
+
+**Defects found by the first harness run, both fixed and covered by unit tests
+(`bleService.streamRobustness.test.js`):**
+
+1. **Recorder file list parsed by position (present in production).** The count frame
+   and every entry are identical on the wire (`01 1B 00 <json>`). The app took "first
+   reply = count, next N = entries". One leftover frame from an earlier request — a link
+   that dropped mid-list, a read that timed out — shifted the whole stream: the harness
+   recorded the app's list going `[A, B, C, D] → [] → [A, A, C]` while the recorder sent
+   the correct four entries every time. Recordings then **vanished from the device page
+   and from auto-sync** until a clean list happened to arrive — a plausible root cause of
+   the reported device recording the user could not find. The list is now parsed by JSON
+   shape (count = restart marker, entries de-duplicated by name), a truncated list is
+   reported as incomplete and **merged** into the known list instead of replacing it.
+2. **Stale audio frames failed every retry (introduced by the round-2 frame-gap check,
+   caught before any release).** Frames of an aborted transfer were still arriving when
+   the retry started; the gap check treated them as a hole, so a file that arrived
+   corrupted once failed three times and was skipped. Frames behind the expected index
+   (and anything non-zero before frame 0) are now dropped as stale; a real hole still
+   fails fast.
 
 ## 9. Sentry, one issue at a time
 Source: Sentry project `capacitor`, every issue with status *unresolved* seen in the last 90 days, fetched on 2026-09-12 (461 issues, 63,333 events). Each issue was matched to exactly one row below; the issue IDs of every row are listed underneath so the mapping can be checked one by one.
