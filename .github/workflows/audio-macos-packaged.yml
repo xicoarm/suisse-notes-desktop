@@ -70,6 +70,13 @@ jobs:
         timeout-minutes: 16
         run: node tests/e2e-harness/ci/build-macos-packaged.js --arch ${{ matrix.arch }}
 
+      - name: Preserve raw packet and decoded sample evidence from packaged resources
+        timeout-minutes: 4
+        env:
+          SUISSE_TEST_FFMPEG_PATH: ${{ steps.build.outputs.app }}/Contents/Resources/ffmpeg/ffmpeg
+          SUISSE_TEST_FFPROBE_PATH: ${{ steps.build.outputs.app }}/Contents/Resources/ffmpeg/ffprobe
+        run: node tests/e2e-harness/ci/diagnose-packaged-media.js
+
       - name: Verify actual packaged media binaries against native finalization contracts
         timeout-minutes: 8
         shell: bash

@@ -113,6 +113,21 @@ describe('macOS packaged qualification boundaries', () => {
     expect(steps[captureIndex].if).toBeUndefined();
   });
 
+  it('preserves bounded raw native evidence before the unchanged strict media suite', () => {
+    const index = steps.findIndex(step => /diagnose-packaged-media\.js/.test(step.run || ''));
+    const step = steps[index];
+    expect(index).toBeGreaterThan(steps.findIndex(item => item.id === 'build'));
+    expect(index).toBeLessThan(steps.findIndex(item => /vitest\.mjs/.test(item.run || '')));
+    expect(step.env).toEqual({
+      SUISSE_TEST_FFMPEG_PATH: '${{ steps.build.outputs.app }}/Contents/Resources/ffmpeg/ffmpeg',
+      SUISSE_TEST_FFPROBE_PATH: '${{ steps.build.outputs.app }}/Contents/Resources/ffmpeg/ffprobe'
+    });
+    expect(step.run).toBe('node tests/e2e-harness/ci/diagnose-packaged-media.js');
+    expect(step['timeout-minutes']).toBeLessThanOrEqual(4);
+    expect(step['continue-on-error']).toBeUndefined();
+    expect(step.if).toBeUndefined();
+  });
+
   it('has read-only repository access and receives no signing or service credentials', () => {
     expect(packaged.permissions).toEqual({ contents: 'read' });
     expect(job.permissions).toBeUndefined();
