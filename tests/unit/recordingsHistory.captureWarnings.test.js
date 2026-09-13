@@ -5,7 +5,9 @@ const auth = vi.hoisted(() => ({ user: { id: 'u1' }, token: 'tok', isAuthenticat
 vi.mock('../../src/utils/platform', () => ({ isElectron: () => true, isCapacitor: () => false, getPlatform: () => 'windows' }));
 vi.mock('../../src/stores/auth', () => ({ useAuthStore: () => auth }));
 vi.mock('../../src/stores/recording', () => ({ useRecordingStore: () => ({}) }));
-vi.mock('../../src/services/api', () => ({ getApiUrlSync: () => 'https://api.test' }));
+// The store fetches server history through fetchWithTimeout (main 1c13239);
+// delegate to the stubbed global fetch so pending-request cases stay observable.
+vi.mock('../../src/services/api', () => ({ getApiUrlSync: () => 'https://api.test', fetchWithTimeout: (url, options) => fetch(url, options) }));
 import { useRecordingsHistoryStore } from '../../src/stores/recordings-history';
 
 let history;

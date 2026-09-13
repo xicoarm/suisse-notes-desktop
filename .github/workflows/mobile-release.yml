@@ -23,6 +23,22 @@ on:
 
 jobs:
   # =============================================================================
+  # Unit tests + lint gate every mobile build (the separate "CI" workflow is
+  # not a publish gate; this one is)
+  # =============================================================================
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test -- --maxWorkers=1 --minWorkers=1
+
+  # =============================================================================
   # Check if mobile release should run
   # =============================================================================
   check:
@@ -55,7 +71,7 @@ jobs:
   # Android Build & Deploy to Play Store
   # =============================================================================
   android:
-    needs: check
+    needs: [check, test]
     if: |
       needs.check.outputs.should_run == 'true' &&
       (github.event_name == 'push' || github.event.inputs.platform == 'both' || github.event.inputs.platform == 'android')
@@ -153,7 +169,7 @@ jobs:
   # iOS Build & Deploy to TestFlight
   # =============================================================================
   ios:
-    needs: check
+    needs: [check, test]
     if: |
       needs.check.outputs.should_run == 'true' &&
       (github.event_name == 'push' || github.event.inputs.platform == 'both' || github.event.inputs.platform == 'ios')

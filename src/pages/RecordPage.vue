@@ -821,7 +821,7 @@
             size="xs"
             color="grey-6"
           />
-          <span>{{ $t('tipsContact') }} <a href="mailto:info@suisse-notes.ch">info@suisse-notes.ch</a></span>
+          <span>{{ $t('tipsContact') }} <a href="mailto:info@suisse-meets.ch">info@suisse-meets.ch</a></span>
         </div>
       </div>
     </div>
@@ -1641,7 +1641,7 @@ const doStartRecordingInternal = async () => {
   if (recordingStore.recoveryInProgress) {
     $q.notify({
       type: 'warning',
-      message: 'Please wait — recovering a previous recording...',
+      message: t('recoveringPreviousRecording'),
       timeout: 3000
     });
     return;
@@ -1667,7 +1667,7 @@ const doStartRecordingInternal = async () => {
   if (!result.success) {
     $q.notify({
       type: 'negative',
-      message: result.error || 'Failed to start recording'
+      message: result.error || t('failedToStartRecording')
     });
   }
 };
@@ -1712,7 +1712,7 @@ const handleStopInternal = async () => {
       if (result.recovered) {
         $q.notify({
           type: 'warning',
-          message: result.warning || 'Recording recovered after interruption. Some audio at the end may be missing.',
+          message: t('recordingRecoveredAfterInterruption'),
           timeout: 8000
         });
       }
@@ -1738,18 +1738,52 @@ const handleStopInternal = async () => {
       }
 
       // Update existing history entry (created at recording start) with final details
-      await historyStore.updateRecording(recordingStore.recordId, {
+      const stopUpdates = {
         duration: finalDuration.value,
         fileSize: currentFileSize.value,
         filePath: currentFilePath.value,
         uploadStatus: 'pending'
-      });
+      };
+      if (isCapacitor() && result.gapCount > 0) {
+        // Segments went missing between capture and combine. The file is saved
+        // and uploaded as-is, but the user must know it has holes — a persistent
+        // warning now and a marker on the history card.
+        stopUpdates.captureWarning = {
+          type: 'gaps',
+          missing: result.gapCount,
+          total: result.expectedCount || (result.chunkCount + result.gapCount),
+          at: new Date().toISOString()
+        };
+        $q.notify({
+          type: 'warning',
+          icon: 'warning',
+          message: t('recordingGapsWarning', { missing: result.gapCount, total: stopUpdates.captureWarning.total }),
+          timeout: 0,
+          actions: [{ label: t('ok'), color: 'white' }]
+        });
+      }
+      await historyStore.updateRecording(recordingStore.recordId, stopUpdates);
 
       // Processing done, start auto-upload
       // phase transition handled by subsequent action (setUploading/setError/reset)
       await startAutoUpload();
     } else {
       // phase transition handled by subsequent action (setUploading/setError/reset)
+
+      // Stopped before a single 3-second chunk landed (a tap on start followed
+      // by an immediate stop): there is nothing to combine. Treat it like a
+      // cancel — no "failed" entry, no orphan folder — and tell the user why.
+      if (isCapacitor() && /No chunks found|No valid chunk files found/i.test(result.error || '')) {
+        const emptyRecordId = recordingStore.recordId;
+        try {
+          const storage = await import('../services/storage');
+          await storage.deleteDirectory(`recordings/${emptyRecordId}`);
+        } catch (e) { /* best-effort */ }
+        try { await historyStore.deleteRecording(emptyRecordId, true); } catch (e) { /* may not exist */ }
+        recordingStore.reset();
+        $q.notify({ type: 'info', message: t('recordingTooShort'), icon: 'timer_off', timeout: 4000 });
+        return;
+      }
 
       // Update existing history entry (created at recording start) to 'failed' status
       // Do NOT call addRecording — the entry already exists with uploadStatus 'recording'
@@ -1806,10 +1840,12 @@ const handleStopInternal = async () => {
           persistent: true
         }).onOk(() => handleStop());
       } else if (result.partialRecovery) {
-        // Show more detailed error for partial recovery
+        // The audio is preserved but could not be combined: explain it in the
+        // user's language and offer the same save path again in place (it is
+        // also retryable from History). The technical reason stays visible.
         $q.dialog({
           title: t('error'),
-          message: result.error,
+          message: result.error ? `${t('recordingInterruptedChunksKept')}\n\n${result.error}` : t('recordingInterruptedChunksKept'),
           cancel: { flat: true, label: t('cancel') },
           ok: { color: 'primary', label: t('retry') },
           persistent: true
@@ -1817,7 +1853,7 @@ const handleStopInternal = async () => {
       } else {
         $q.notify({
           type: 'negative',
-          message: result.error || 'Failed to save recording'
+          message: result.error || t('failedToSaveRecording')
         });
       }
     }
@@ -1825,7 +1861,7 @@ const handleStopInternal = async () => {
     // phase transition handled by subsequent action (setUploading/setError/reset)
     $q.notify({
       type: 'negative',
-      message: error.message || 'Error processing recording'
+      message: error.message || t('errorProcessingRecording')
     });
   }
 };
@@ -2002,31 +2038,24 @@ const startAutoUpload = async () => {
         ...(ownerUserId ? { userId: ownerUserId } : {})
       });
 
-      // P0 Data Loss Fix: Only delete if upload was verified AND canDelete returns true
-      // Schedule deletion after a safety delay — gives server time to persist
-      if (currentStoragePreference.value === 'delete_after_upload') {
-        if (result.canDelete && recordingStore.canDelete(recordingStore.recordId)) {
-          const deleteRecordId = recordingStore.recordId;
-          // Delay deletion by 30s to allow server to fully persist
-          setTimeout(async () => {
-            try {
-              if (isElectron()) {
-                const deletion = await window.electronAPI.recording.deleteRecording(deleteRecordId, { requireVerified: true });
-                if (!deletion?.success) throw new Error(deletion?.error || 'Local audio could not be deleted');
-              }
-              await historyStore.updateRecording(deleteRecordId, { filePath: null });
-              recordingStore.unlockFile(deleteRecordId);
-            } catch (e) {
-              console.warn('Delayed file deletion failed:', e);
-            }
-          }, 30000);
-        } else {
-          console.warn('File not deleted: upload not verified or file is locked');
-        }
-      }
-
       // P0 Data Loss Fix: Unlock file after successful upload
       recordingStore.unlockFile(recordingStore.recordId);
+
+      // "Delete after upload" (both platforms, one implementation in the
+      // history store — it verifies the cloud copy and the lock itself; on
+      // desktop the main process also requires a verified receipt).
+      // Delayed 30s to give the server time to fully persist.
+      if (currentStoragePreference.value === 'delete_after_upload') {
+        if (result.canDelete) {
+          const deleteRecordId = recordingStore.recordId;
+          setTimeout(() => {
+            historyStore.applyStoragePreference(deleteRecordId)
+              .catch(e => console.warn('Delayed file deletion failed:', e));
+          }, 30000);
+        } else {
+          console.warn('File not deleted: upload not verified');
+        }
+      }
 
       // Reset session after successful upload
       transcriptionStore.resetSession();
@@ -2042,7 +2071,7 @@ const startAutoUpload = async () => {
 
       $q.notify({
         type: 'positive',
-        message: 'Recording uploaded successfully'
+        message: t('uploadSuccessful')
       });
     } else {
       // P0 Data Loss Fix: Keep file locked on failure - will be unlocked on retry or explicit delete

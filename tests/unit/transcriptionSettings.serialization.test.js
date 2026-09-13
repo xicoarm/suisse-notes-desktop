@@ -39,35 +39,49 @@ describe('desktop transcription settings serialization', () => {
     const store = useTranscriptionSettingsStore();
     expect(isProxy(store.globalVocabulary)).toBe(true);
     await store.saveGlobalSettings();
-    expect(stored).toEqual({ vocabulary: [], defaultSpeakerCount: null });
+    expect(stored).toEqual({ vocabulary: [], orgVocabulary: [], userVocabulary: [], defaultSpeakerCount: null });
     expect(console.error).not.toHaveBeenCalled();
   });
 
   it('saves a detached vocabulary snapshot and reloads its exact settings', async () => {
     const store = useTranscriptionSettingsStore();
     store.globalVocabulary = ['Suisse Notes', 'Zürich'];
+    store.orgVocabulary = ['Suisse Notes'];
+    store.userVocabulary = ['Zürich'];
     store.defaultSpeakerCount = 3;
     await store.saveGlobalSettings();
-    expect(stored).toEqual({ vocabulary: ['Suisse Notes', 'Zürich'], defaultSpeakerCount: 3 });
-    expect(isProxy(setSettings.mock.calls[0][0].vocabulary)).toBe(false);
+    expect(stored).toEqual({ vocabulary: ['Suisse Notes', 'Zürich'], orgVocabulary: ['Suisse Notes'], userVocabulary: ['Zürich'], defaultSpeakerCount: 3 });
+    for (const key of ['vocabulary', 'orgVocabulary', 'userVocabulary']) expect(isProxy(setSettings.mock.calls[0][0][key])).toBe(false);
     store.globalVocabulary.push('unsaved change');
     expect(setSettings.mock.calls[0][0].vocabulary).toEqual(['Suisse Notes', 'Zürich']);
     setActivePinia(createPinia());
+    // Loading starts a server sync that replaces the list (main 549b9b5); hold
+    // it pending so the first checks see only the persisted copy.
+    let finishSync;
+    api.getMergedSpellings.mockReturnValue(new Promise(resolve => { finishSync = resolve; }));
     const reloaded = useTranscriptionSettingsStore();
     await reloaded.loadGlobalSettings();
     expect(reloaded.globalVocabulary).toEqual(['Suisse Notes', 'Zürich']);
+    expect(reloaded.orgVocabulary).toEqual(['Suisse Notes']);
+    expect(reloaded.userVocabulary).toEqual(['Zürich']);
     expect(reloaded.defaultSpeakerCount).toBe(3);
+    // Settle the shared in-flight sync so no pending request leaks into later tests.
+    finishSync({ spellings: ['Suisse Notes', 'Zürich'], orgSpellings: ['Suisse Notes'], userSpellings: ['Zürich'] });
+    await reloaded.syncFromServer();
+    expect(reloaded.globalVocabulary).toEqual(['Suisse Notes', 'Zürich']);
     expect(console.error).not.toHaveBeenCalled();
   });
 
-  it('persists the real server-sync merge without passing its reactive array', async () => {
+  // Since main 549b9b5 the server's merged list replaces the local one; this
+  // test keeps covering that the reactive result crosses the IPC boundary.
+  it('persists the server-sync result without passing its reactive arrays', async () => {
     const store = useTranscriptionSettingsStore();
     store.globalVocabulary = ['local', 'shared'];
-    api.getMergedSpellings.mockResolvedValue({ spellings: ['shared', 'server'] });
-    await store.syncFromServer();
-    expect(store.globalVocabulary).toEqual(['local', 'shared', 'server']);
+    api.getMergedSpellings.mockResolvedValue({ spellings: ['shared', 'server'], orgSpellings: ['shared'], userSpellings: ['server'] });
+    await store.syncFromServer({ force: true });
+    expect(store.globalVocabulary).toEqual(['shared', 'server']);
     expect(isProxy(store.globalVocabulary)).toBe(true);
-    expect(stored).toEqual({ vocabulary: ['local', 'shared', 'server'], defaultSpeakerCount: null });
+    expect(stored).toEqual({ vocabulary: ['shared', 'server'], orgVocabulary: ['shared'], userVocabulary: ['server'], defaultSpeakerCount: null });
     expect(console.error).not.toHaveBeenCalled();
   });
 });

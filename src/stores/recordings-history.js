@@ -2,7 +2,52 @@ import { defineStore } from 'pinia';
 import { useAuthStore } from './auth';
 import { useRecordingStore } from './recording';
 import { isElectron, isCapacitor, getPlatform } from '../utils/platform';
-import { getApiUrlSync } from '../services/api';
+import { getApiUrlSync, fetchWithTimeout } from '../services/api';
+import * as storage from '../services/storage';
+
+// ---------------------------------------------------------------------------
+// Device-file index (mobile): deviceFilename → recordId, persisted in
+// Capacitor Preferences. `source: 'device'` and `deviceFilename` are client-
+// only fields the server never returns; they lived solely in the localStorage
+// history cache, which iOS purges under storage pressure. Without them a
+// device recording fell out of the "Device recordings" section (the user
+// "could not find" it) and a re-sync minted a new record. The index survives
+// localStorage loss and restores both fields on every history merge.
+// ---------------------------------------------------------------------------
+const DEVICE_INDEX_KEY = 'recordings_device_index';
+let _deviceIndexCache = null; // { userId, map: { [deviceFilename]: recordId } }
+
+async function _loadDeviceIndex(userId) {
+  if (_deviceIndexCache && _deviceIndexCache.userId === userId) return _deviceIndexCache.map;
+  let map = {};
+  if (isCapacitor()) {
+    try {
+      const { Preferences } = await import('@capacitor/preferences');
+      const { value } = await Preferences.get({ key: `${DEVICE_INDEX_KEY}:u${userId}` });
+      if (value) {
+        const parsed = JSON.parse(value);
+        if (parsed && typeof parsed === 'object') map = parsed;
+      }
+    } catch { /* best-effort */ }
+  }
+  _deviceIndexCache = { userId, map };
+  return map;
+}
+
+async function _rememberDeviceFile(userId, deviceFilename, recordId) {
+  if (!userId || !deviceFilename || !recordId) return;
+  const map = await _loadDeviceIndex(userId);
+  if (map[deviceFilename] === recordId) return;
+  map[deviceFilename] = recordId;
+  if (isCapacitor()) {
+    try {
+      const { Preferences } = await import('@capacitor/preferences');
+      await Preferences.set({ key: `${DEVICE_INDEX_KEY}:u${userId}`, value: JSON.stringify(map) });
+    } catch { /* best-effort */ }
+  }
+}
+
+export function __resetDeviceIndexCache() { _deviceIndexCache = null; }
 
 // Map a client `recording` object to the contract's RegisterRecordingRequest
 // shape (see src/lib/api/desktop-contract.ts → POST /api/desktop/recording).
@@ -154,7 +199,7 @@ async function _serverFetch(endpoint, options = {}) {
   const baseUrl = getApiUrlSync();
   const url = `${baseUrl}${endpoint}`;
 
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -395,7 +440,11 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
               'retryCount', 'lastRetryAt', 'uploadError', '_serverSynced',
               // Pre-meeting preparation (context/template/pre-fill) — client-only,
               // re-sent on retry uploads; the server never returns it.
-              'prep', 'prepAnswered'
+              'prep', 'prepAnswered',
+              // Capture forensics shown on the card (segments lost at stop time).
+              'captureWarning',
+              // Retry bookkeeping and the "audio removed from this phone" marker.
+              'uploadTerminal', 'localAudioDeletedAt'
             ];
             const merged = serverRecordings.map(serverRec => {
               const localRec = cached.find(r => r.id === serverRec.id);
@@ -431,6 +480,19 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
               }
               return serverRec;
             });
+            // Restore device identity (source/deviceFilename) from the durable
+            // index for records whose local cache entry was lost.
+            try {
+              const index = await _loadDeviceIndex(userId);
+              const byId = new Map(Object.entries(index).map(([fn, id]) => [id, fn]));
+              for (const rec of merged) {
+                if (!rec.deviceFilename && byId.has(rec.id)) {
+                  rec.deviceFilename = byId.get(rec.id);
+                  rec.source = rec.source || 'device';
+                }
+              }
+            } catch { /* best-effort */ }
+
             // Preserve local-only recordings (e.g. device recordings pending upload)
             const serverIds = new Set(serverRecordings.map(r => r.id));
             const localOnly = cached.filter(r => r.id && !serverIds.has(r.id));
@@ -541,6 +603,9 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
 
         // Add userId to recording
         const recordingWithUser = { ...recording, userId };
+        if (recording.deviceFilename && recording.id) {
+          _rememberDeviceFile(userId, recording.deviceFilename, recording.id).catch(() => {});
+        }
 
         if (isElectron()) {
           const epoch = this._historyEpoch;
@@ -755,31 +820,113 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
 
       const recordingStore = useRecordingStore();
 
-      // P0 Data Loss Fix: Check file locking before deletion
-      // If storage preference is delete_after_upload, delete the file ONLY if safe
-      // File deletion only applies to Electron (mobile files are managed differently)
-      if (isElectron() && recording && recording.storagePreference === 'delete_after_upload') {
-        // Only delete if canDelete flag is true AND file is not locked
-        if (canDelete && recordingStore.canDelete(id)) {
-          try {
-            const deletion = await window.electronAPI.recording.deleteRecording(id, { requireVerified: true });
-            if (!deletion?.success) throw new Error(deletion?.error || 'Local audio could not be deleted');
-            // Update file path to indicate deletion
-            await this.updateRecording(id, { filePath: null });
-            // Unlock file after successful deletion
-            recordingStore.unlockFile(id);
-          } catch (e) {
-            console.warn('Could not delete file after upload:', e);
-          }
-        } else {
-          console.warn('File not deleted: upload not verified or file is locked');
-        }
+      // "Delete after upload" — one implementation for both platforms. On
+      // desktop applyStoragePreference also requires a verified receipt from
+      // the main process, which currently keeps every local copy.
+      if (recording && canDelete) {
+        await this.applyStoragePreference(id);
+      } else if (recording) {
+        console.warn('File not deleted: upload not verified');
       }
 
       // P0 Data Loss Fix: Clean up mobile chunks after verified upload (V5)
       if (isCapacitor() && canDelete) {
         recordingStore.cleanupChunksAfterUpload(id);
       }
+    },
+
+    /**
+     * Apply the recording's storage preference ("keep" / "delete_after_upload")
+     * once its cloud copy is verified. Until 3.9.36 this ran on desktop only:
+     * on the phone the audio stayed on disk (and playable in History) no
+     * matter what the user chose in Settings, and BLE device recordings never
+     * carried the preference at all.
+     *
+     * Safe by construction: deletes ONLY when the entry is 'uploaded' with an
+     * audioFileId (the server holds the audio) and the file is not locked by
+     * an in-flight upload. The history entry stays — with the transcript link —
+     * only the local audio goes.
+     * @returns {Promise<{deleted: boolean, reason?: string}>}
+     */
+    async applyStoragePreference(id) {
+      const rec = this.recordings.find(r => r.id === id);
+      if (!rec) return { deleted: false, reason: 'not_found' };
+      const pref = rec.storagePreference || this.defaultStoragePreference;
+      if (pref !== 'delete_after_upload') return { deleted: false, reason: 'keep' };
+      if (rec.uploadStatus !== 'uploaded' || !rec.audioFileId) return { deleted: false, reason: 'not_uploaded' };
+      const recordingStore = useRecordingStore();
+      if (!recordingStore.canDelete(id)) return { deleted: false, reason: 'locked' };
+
+      try {
+        if (isElectron()) {
+          // Desktop keeps retained native sources and receipts beside the
+          // final file. Automatic deletion must go through the main process's
+          // verified-receipt check, which refuses while the backend cannot
+          // attest the complete remote contents; manual deletion stays in History.
+          const deletion = await window.electronAPI.recording.deleteRecording(id, { requireVerified: true });
+          if (!deletion?.success) return { deleted: false, reason: deletion?.error || 'delete_refused' };
+        } else if (isCapacitor()) {
+          if (rec.filePath) {
+            const res = await storage.deleteFile(rec.filePath);
+            if (!res?.success && !/does not exist|no such file|not found/i.test(res?.error || '')) {
+              return { deleted: false, reason: res?.error || 'delete_failed' };
+            }
+          }
+          if (rec.source !== 'device') {
+            // App recordings: the whole session folder (chunks + combined file)
+            await storage.deleteDirectory(`recordings/${id}`);
+          }
+        } else {
+          return { deleted: false, reason: 'unsupported' };
+        }
+        await this.updateRecording(id, { filePath: null, localAudioDeletedAt: new Date().toISOString() });
+        recordingStore.unlockFile(id);
+        try { const { removeFromMobileUploadQueue } = await import('../services/upload'); removeFromMobileUploadQueue(id); } catch { /* n/a */ }
+        return { deleted: true };
+      } catch (e) {
+        console.warn('Could not delete local audio after upload:', e);
+        return { deleted: false, reason: e?.message || 'delete_failed' };
+      }
+    },
+
+    /**
+     * Mobile "Delete all recordings": removes every local audio file (app
+     * recordings incl. their chunk folders, device files) and the history
+     * entries that have no cloud copy. Entries with a verified cloud copy stay
+     * — without local audio — so transcripts remain reachable. Did not exist
+     * until 3.9.36 (the Settings button threw "deleteAll is not a function").
+     * @returns {Promise<{success: boolean, deletedCount: number, error?: string}>}
+     */
+    async deleteAll() {
+      const userId = this._getUserId(null, { forWrite: true });
+      if (!userId) return { success: false, deletedCount: 0, error: 'Not authenticated' };
+      if (isElectron()) {
+        const result = await window.electronAPI.history.deleteAll(userId);
+        if (result?.success) this.recordings = [];
+        return result;
+      }
+      let deletedCount = 0;
+      const { removeFromMobileUploadQueue } = await import('../services/upload');
+      const remaining = [];
+      for (const rec of this.recordings) {
+        try {
+          if (rec.filePath) {
+            await storage.deleteFile(rec.filePath).catch(() => {});
+            deletedCount++;
+          }
+          if (rec.source !== 'device' && rec.id) {
+            await storage.deleteDirectory(`recordings/${rec.id}`).catch(() => {});
+          }
+          removeFromMobileUploadQueue(rec.id);
+        } catch (e) {
+          console.warn('deleteAll: could not remove local files for', rec.id, e?.message);
+        }
+        const hasCloudCopy = (rec.uploadStatus === 'uploaded' || rec.uploadStatus === 'pending_verification') && !!rec.audioFileId;
+        if (hasCloudCopy) remaining.push({ ...rec, filePath: null, localAudioDeletedAt: new Date().toISOString() });
+      }
+      this.recordings = remaining;
+      _setCachedRecordings(userId, this.recordings);
+      return { success: true, deletedCount };
     },
 
     // Mark recording as failed
@@ -899,6 +1046,26 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
               retryCount: 0
             });
             console.log(`Auto-retry succeeded for recording ${recording.id}`);
+            try { await this.applyStoragePreference(recording.id); } catch (e) { /* best-effort */ }
+          } else if (result?.localFileMissing) {
+            // The local audio is gone (deleted, reinstalled, moved). Retrying
+            // can never succeed: clear the dead path so the card offers
+            // re-sync (device) / re-upload (file picker) instead of spinning.
+            await this.updateRecording(recording.id, {
+              uploadStatus: 'failed',
+              filePath: null,
+              uploadError: result?.error || 'Local file missing',
+              uploadTerminal: true
+            });
+          } else if (result?.canRetry === false && result?.status !== 401) {
+            // Final server verdict (no speech, too long, out of minutes, …):
+            // the answer will not change by re-sending the same bytes. Park
+            // it until the user presses Retry — no more retry storms.
+            await this.updateRecording(recording.id, {
+              uploadStatus: 'failed',
+              uploadError: result?.error || 'Upload rejected',
+              uploadTerminal: true
+            });
           } else {
             // Terminal = the server told us this exact upload can never
             // succeed (canRetry:false, e.g. 400/413/422 — but NOT 401, which

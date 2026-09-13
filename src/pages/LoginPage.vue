@@ -250,7 +250,7 @@ import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '../stores/auth';
 import { isElectron, isCapacitor, getPlatform } from '../utils/platform';
 import { useLanguage } from '../composables/useLanguage';
-import { captureMessage } from '../boot/sentry';
+import { addBreadcrumb } from '../boot/sentry';
 
 const router = useRouter();
 const authStore = useAuthStore();
@@ -339,9 +339,7 @@ onUnmounted(async () => {
 });
 
 async function handleSSOPayload(payload) {
-  try {
-    captureMessage(`sso: handleSSOPayload entry hasToken=${!!payload?.token} hasError=${!!payload?.error}`, 'info');
-  } catch { /* sentry not loaded */ }
+  addBreadcrumb({ category: 'sso', message: `handleSSOPayload entry hasToken=${!!payload?.token} hasError=${!!payload?.error}`, level: 'info' });
   clearSSOTimeoutHandle();
   ssoLoading.value = null;
   if (!payload || payload.error) {
@@ -354,9 +352,7 @@ async function handleSSOPayload(payload) {
     return;
   }
   const result = await authStore.loginWithSSO(payload);
-  try {
-    captureMessage(`sso: loginWithSSO returned success=${result.success}`, 'info');
-  } catch { /* sentry not loaded */ }
+  addBreadcrumb({ category: 'sso', message: `loginWithSSO returned success=${result.success}`, level: 'info' });
   if (result.success) {
     if (isMobileApp) {
       const { closeSSO } = await import('../services/ssoAuth');

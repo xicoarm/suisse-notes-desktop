@@ -10,14 +10,14 @@ const mocks = vi.hoisted(() => ({
   readFile: vi.fn(),
 }));
 
-vi.mock('../../src/services/storage', () => ({ getFileUri: mocks.getFileUri }));
-vi.mock('../../src/utils/platform', () => ({ isCapacitor: mocks.isCapacitor }));
-vi.mock('../../src/boot/sentry', () => ({ captureMessage: mocks.captureMessage }));
-vi.mock('@capacitor/core', () => ({ Capacitor: { convertFileSrc: mocks.convertFileSrc } }));
-vi.mock('@capacitor/filesystem', () => ({
-  Filesystem: { stat: mocks.stat, readFile: mocks.readFile },
-  Directory: { Documents: 'DOCUMENTS' },
+vi.mock('../../src/services/storage', () => ({
+  getFileUri: mocks.getFileUri,
+  statFile: mocks.stat,
+  readFile: mocks.readFile,
 }));
+vi.mock('../../src/utils/platform', () => ({ isCapacitor: mocks.isCapacitor }));
+vi.mock('../../src/boot/sentry', () => ({ captureMessage: mocks.captureMessage, addBreadcrumb: vi.fn() }));
+vi.mock('@capacitor/core', () => ({ Capacitor: { convertFileSrc: mocks.convertFileSrc } }));
 
 import { readBlobFromCapacitorPath } from '../../src/services/upload-direct';
 
@@ -42,7 +42,7 @@ describe('readBlobFromCapacitorPath — base64 fallback OOM guard', () => {
   });
 
   it('refuses to base64-decode a file above the cap (would OOM) and never reads it into memory', async () => {
-    mocks.stat.mockResolvedValue({ size: 150 * 1024 * 1024 }); // 150 MB > 80 MB cap
+    mocks.stat.mockResolvedValue({ success: true, size: 150 * 1024 * 1024 }); // 150 MB > 80 MB cap
 
     await expect(
       readBlobFromCapacitorPath('recordings/x/combined.webm')
@@ -53,8 +53,8 @@ describe('readBlobFromCapacitorPath — base64 fallback OOM guard', () => {
   });
 
   it('still reads a small file via the base64 fallback (guard does not block normal uploads)', async () => {
-    mocks.stat.mockResolvedValue({ size: 2 * 1024 * 1024 }); // 2 MB < cap
-    mocks.readFile.mockResolvedValue({ data: 'AAAA' }); // valid base64 → 3 bytes
+    mocks.stat.mockResolvedValue({ success: true, size: 2 * 1024 * 1024 }); // 2 MB < cap
+    mocks.readFile.mockResolvedValue({ success: true, data: new Uint8Array([0, 0, 0]).buffer });
 
     const blob = await readBlobFromCapacitorPath('recordings/x/small.webm');
 
@@ -63,8 +63,8 @@ describe('readBlobFromCapacitorPath — base64 fallback OOM guard', () => {
   });
 
   it('proceeds best-effort if stat fails for an unrelated reason', async () => {
-    mocks.stat.mockRejectedValue(new Error('stat unavailable'));
-    mocks.readFile.mockResolvedValue({ data: 'AAAA' });
+    mocks.stat.mockResolvedValue({ success: false, error: 'stat unavailable' });
+    mocks.readFile.mockResolvedValue({ success: true, data: new Uint8Array([0, 0, 0]).buffer });
 
     const blob = await readBlobFromCapacitorPath('recordings/x/small.webm');
 

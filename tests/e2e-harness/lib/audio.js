@@ -75,6 +75,18 @@ function generateSpeechBase(seconds) {
   const cached = path.join(CACHE_DIR, `speech_${seconds}s.wav`);
   if (fs.existsSync(cached)) return cached;
 
+  // No SAPI outside Windows (GitHub Linux runners): synthesize speech-LIKE
+  // audio with ffmpeg alone — three harmonics under a ~4 Hz syllable envelope
+  // with a 0.7 s pause every 6 s. Level and pause structure match what the
+  // verifier's holes/level checks expect from real speech; codecs treat it
+  // like voice. Set SUISSE_E2E_SYNTH_SPEECH=1 to force it anywhere.
+  if (process.platform !== 'win32' || process.env.SUISSE_E2E_SYNTH_SPEECH === '1') {
+    const env = '(0.55+0.45*sin(2*PI*3.7*t))*(0.6+0.4*sin(2*PI*0.23*t))*gt(mod(t\\,6)\\,0.7)';
+    const voice = `0.22*(sin(2*PI*180*t)+0.6*sin(2*PI*540*t+1)+0.35*sin(2*PI*1400*t)+0.15*sin(2*PI*2600*t))*(${env})`;
+    ff(['-f', 'lavfi', '-i', `aevalsrc=${voice}:s=${SAMPLE_RATE}:d=${seconds}`, '-ac', '1', '-ar', String(SAMPLE_RATE), '-c:a', 'pcm_s16le', cached]);
+    return cached;
+  }
+
   const rawPath = path.join(CACHE_DIR, `speech_${seconds}s_raw.wav`);
   // PowerShell SAPI script: alternate through installed voices, speak
   // sentences with 0.6s pauses until the duration budget is exceeded.

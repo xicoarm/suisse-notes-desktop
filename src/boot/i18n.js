@@ -198,12 +198,12 @@ const messages = {
     prepPrefillHint: 'Entries are treated as given and incorporated into the corresponding section.',
     prepPrefillPlaceholder: 'Content you already know for this section…',
     deviceSyncPrepTitle: 'Context & template for this recording',
-    deviceSyncPrepMessage: 'Recording "{title}" from your Suisse Notes Pro is ready to upload.',
+    deviceSyncPrepMessage: 'Recording "{title}" from your Suisse Meets Pro is ready to upload.',
     deviceSyncApplyAll: 'Apply to all remaining recordings',
     deviceSyncSkip: 'Skip',
     deviceSyncContinue: 'Apply & upload',
     statusPendingPrep: 'Waiting for context — tap to answer',
-    settingsDeviceSyncTitle: 'Suisse Notes Pro: context prompt',
+    settingsDeviceSyncTitle: 'Suisse Meets Pro: context prompt',
     settingsAskOnDeviceSync: 'Ask for context & template before uploading',
     settingsAskOnDeviceSyncDesc: 'When off, the defaults below are applied automatically.',
     settingsDeviceSyncDefaultTemplate: 'Default template for device recordings',
@@ -311,6 +311,7 @@ const messages = {
     customSpellingHint: 'Add names, acronyms, or technical terms for better accuracy',
     globalVocabulary: 'Global Custom Vocabulary',
     globalVocabularyDesc: 'Words used for all recordings and uploads',
+    vocabularySyncFailed: 'The vocabulary could not be updated on the server. Check your connection and try again.',
     addWord: 'Add word',
     removeWord: 'Remove',
 
@@ -499,7 +500,47 @@ const messages = {
     updateReadyMessage: 'Version {version} of Suisse Meets is ready. It contains stability and reliability improvements — we strongly recommend updating now. The app will restart briefly to apply it.',
     updateReadyLaterHint: 'If you choose Later, the update installs automatically the next time you quit the app.',
     updateReadyNow: 'Update now',
-    updateReadyLater: 'Later'
+    updateReadyLater: 'Later',
+
+    // Mobile reliability audit 2026-09
+    recordingGapsWarning: 'Parts of this recording could not be saved: {missing} of {total} audio segments are missing. The file has been kept and will be uploaded, but the transcript may have gaps.',
+    historyCaptureGapsWarning: '{missing} of {total} audio segments missing',
+    recordingRecoveredAfterInterruption: 'Recording recovered after an interruption. Some audio at the end may be missing.',
+    recordingInterruptedChunksKept: 'The recording was interrupted. Its audio segments are saved on this device but could not be combined yet. Please try again from History.',
+    failedToSaveRecording: 'Failed to save the recording',
+    errorProcessingRecording: 'Error while processing the recording',
+    recoveringPreviousRecording: 'Please wait — a previous recording is being recovered…',
+    failedToStartRecording: 'Could not start the recording',
+    storageCriticalCannotStart: 'Cannot start recording: only {freeMB} MB of storage left. Free up at least {minMB} MB and try again.',
+    storageLowWarning: 'Low storage: only {freeMB} MB left. The recording will stop automatically if storage runs out.',
+    historyLoginRequired: 'Please sign in to upload recordings',
+    historyFileMissing: 'The recording file was not found. It may have been deleted.',
+    historyUploadingProgress: 'Uploading… {percent}%',
+    historyRetryProgress: 'Retry attempt {attempt}… {percent}%',
+    recordingDeleted: 'Recording deleted',
+    logoutBlockedWhileRecording: "You can't sign out while a recording or upload is in progress.",
+    historyToday: 'Today',
+    historyYesterday: 'Yesterday',
+    historyUndated: 'Undated',
+    bleErrorTimeout: 'The recorder did not respond. Make sure it is switched on and nearby, then try again.',
+    bleErrorDisconnected: 'The connection to the recorder was lost. Move closer and try again.',
+    bleErrorBusy: 'The recorder is still scanning its memory card. Please wait a moment and try again.',
+    bleErrorMemory: 'The recorder reports a storage problem (memory card missing or unsupported).',
+    bleErrorFull: "The recorder's memory card is full.",
+    bleErrorCrc: 'The transfer arrived corrupted. It will be retried automatically.',
+    bleErrorCrcGaveUp: 'This file kept arriving corrupted and was skipped. You can retry it from the device page.',
+    bleErrorEmptyFile: 'This recording on the recorder is empty and was skipped.',
+    bleErrorPairedElsewhere: 'This recorder is still paired with another app installation. Release the pairing there first (Settings → Forget device), then pair again.',
+    bleErrorPermission: 'Bluetooth permission is required. Allow Bluetooth for Suisse Meets in your phone settings.',
+    bleErrorBluetoothOff: 'Bluetooth is switched off. Turn it on and try again.',
+    bleErrorNotFound: 'The recorder was not found. Make sure it is switched on and nearby.',
+    bleErrorGeneric: 'Problem with the recorder: {message}',
+    recordingTooShort: 'The recording was too short to be saved.',
+    networkUnavailable: 'No internet connection. Check your network and try again.',
+    serverUnexpectedResponse: 'The server sent an unexpected response. Please try again in a moment.',
+    deleteAllDone: '{count} local recording(s) deleted',
+    deleteAllFailed: 'The recordings could not be deleted',
+    deleteAllLoginRequired: 'Please sign in to delete recordings'
   },
   de: {
     autoDeletePaused: 'Automatisches Löschen pausiert',
@@ -698,12 +739,12 @@ const messages = {
     prepPrefillHint: 'Einträge gelten als gesetzt und werden in den jeweiligen Abschnitt übernommen.',
     prepPrefillPlaceholder: 'Bereits bekannte Inhalte für diesen Abschnitt…',
     deviceSyncPrepTitle: 'Kontext & Vorlage für diese Aufnahme',
-    deviceSyncPrepMessage: 'Aufnahme «{title}» vom Suisse Notes Pro ist bereit zum Hochladen.',
+    deviceSyncPrepMessage: 'Aufnahme «{title}» vom Suisse Meets Pro ist bereit zum Hochladen.',
     deviceSyncApplyAll: 'Für alle weiteren Aufnahmen übernehmen',
     deviceSyncSkip: 'Überspringen',
     deviceSyncContinue: 'Übernehmen & hochladen',
     statusPendingPrep: 'Wartet auf Kontext — zum Beantworten tippen',
-    settingsDeviceSyncTitle: 'Suisse Notes Pro: Kontext-Abfrage',
+    settingsDeviceSyncTitle: 'Suisse Meets Pro: Kontext-Abfrage',
     settingsAskOnDeviceSync: 'Vor dem Hochladen nach Kontext & Vorlage fragen',
     settingsAskOnDeviceSyncDesc: 'Wenn deaktiviert, werden die untenstehenden Standards automatisch angewendet.',
     settingsDeviceSyncDefaultTemplate: 'Standard-Vorlage für Gerät-Aufnahmen',
@@ -811,6 +852,7 @@ const messages = {
     customSpellingHint: 'Namen, Akronyme oder Fachbegriffe für bessere Genauigkeit hinzufügen',
     globalVocabulary: 'Globales Vokabular',
     globalVocabularyDesc: 'Wörter für alle Aufnahmen und Uploads verwenden',
+    vocabularySyncFailed: 'Das Vokabular konnte auf dem Server nicht aktualisiert werden. Bitte Verbindung prüfen und erneut versuchen.',
     addWord: 'Wort hinzufügen',
     removeWord: 'Entfernen',
 
@@ -999,7 +1041,47 @@ const messages = {
     updateReadyMessage: 'Version {version} von Suisse Meets ist bereit. Sie enthält Stabilitäts- und Zuverlässigkeitsverbesserungen – wir empfehlen dringend, jetzt zu aktualisieren. Die App wird kurz neu gestartet.',
     updateReadyLaterHint: 'Bei „Später“ wird das Update automatisch beim nächsten Beenden der App installiert.',
     updateReadyNow: 'Jetzt aktualisieren',
-    updateReadyLater: 'Später'
+    updateReadyLater: 'Später',
+
+    // Mobile reliability audit 2026-09
+    recordingGapsWarning: 'Teile dieser Aufnahme konnten nicht gespeichert werden: {missing} von {total} Audio-Segmenten fehlen. Die Datei wurde behalten und wird hochgeladen, das Transkript kann aber Lücken haben.',
+    historyCaptureGapsWarning: '{missing} von {total} Audio-Segmenten fehlen',
+    recordingRecoveredAfterInterruption: 'Aufnahme nach einer Unterbrechung wiederhergestellt. Am Ende kann etwas Audio fehlen.',
+    recordingInterruptedChunksKept: 'Die Aufnahme wurde unterbrochen. Die Audio-Segmente sind auf diesem Gerät gespeichert, konnten aber noch nicht zusammengefügt werden. Bitte im Verlauf erneut versuchen.',
+    failedToSaveRecording: 'Aufnahme konnte nicht gespeichert werden',
+    errorProcessingRecording: 'Fehler beim Verarbeiten der Aufnahme',
+    recoveringPreviousRecording: 'Bitte warten — eine frühere Aufnahme wird wiederhergestellt…',
+    failedToStartRecording: 'Aufnahme konnte nicht gestartet werden',
+    storageCriticalCannotStart: 'Aufnahme nicht möglich: nur noch {freeMB} MB Speicher frei. Bitte mindestens {minMB} MB freigeben und erneut versuchen.',
+    storageLowWarning: 'Wenig Speicher: nur noch {freeMB} MB frei. Die Aufnahme stoppt automatisch, wenn der Speicher voll ist.',
+    historyLoginRequired: 'Bitte anmelden, um Aufnahmen hochzuladen',
+    historyFileMissing: 'Die Aufnahmedatei wurde nicht gefunden. Sie wurde möglicherweise gelöscht.',
+    historyUploadingProgress: 'Wird hochgeladen… {percent}%',
+    historyRetryProgress: 'Erneuter Versuch {attempt}… {percent}%',
+    recordingDeleted: 'Aufnahme gelöscht',
+    logoutBlockedWhileRecording: 'Abmelden ist nicht möglich, solange eine Aufnahme oder ein Upload läuft.',
+    historyToday: 'Heute',
+    historyYesterday: 'Gestern',
+    historyUndated: 'Ohne Datum',
+    bleErrorTimeout: 'Das Aufnahmegerät hat nicht geantwortet. Bitte prüfen, ob es eingeschaltet und in der Nähe ist, und erneut versuchen.',
+    bleErrorDisconnected: 'Die Verbindung zum Aufnahmegerät wurde unterbrochen. Näher herangehen und erneut versuchen.',
+    bleErrorBusy: 'Das Aufnahmegerät liest noch seine Speicherkarte ein. Bitte kurz warten und erneut versuchen.',
+    bleErrorMemory: 'Das Aufnahmegerät meldet ein Speicherproblem (Speicherkarte fehlt oder wird nicht unterstützt).',
+    bleErrorFull: 'Die Speicherkarte des Aufnahmegeräts ist voll.',
+    bleErrorCrc: 'Die Übertragung kam beschädigt an. Sie wird automatisch wiederholt.',
+    bleErrorCrcGaveUp: 'Diese Datei kam wiederholt beschädigt an und wurde übersprungen. Sie kann auf der Geräteseite erneut versucht werden.',
+    bleErrorEmptyFile: 'Diese Aufnahme auf dem Gerät ist leer und wurde übersprungen.',
+    bleErrorPairedElsewhere: 'Dieses Aufnahmegerät ist noch mit einer anderen App-Installation gekoppelt. Dort zuerst die Kopplung aufheben (Einstellungen → Gerät vergessen), dann erneut koppeln.',
+    bleErrorPermission: 'Bluetooth-Berechtigung erforderlich. Bitte Bluetooth für Suisse Meets in den Telefoneinstellungen erlauben.',
+    bleErrorBluetoothOff: 'Bluetooth ist ausgeschaltet. Bitte einschalten und erneut versuchen.',
+    bleErrorNotFound: 'Das Aufnahmegerät wurde nicht gefunden. Bitte prüfen, ob es eingeschaltet und in der Nähe ist.',
+    bleErrorGeneric: 'Problem mit dem Aufnahmegerät: {message}',
+    recordingTooShort: 'Die Aufnahme war zu kurz, um gespeichert zu werden.',
+    networkUnavailable: 'Keine Internetverbindung. Bitte Netzwerk prüfen und erneut versuchen.',
+    serverUnexpectedResponse: 'Der Server hat unerwartet geantwortet. Bitte in einem Moment erneut versuchen.',
+    deleteAllDone: '{count} lokale Aufnahme(n) gelöscht',
+    deleteAllFailed: 'Die Aufnahmen konnten nicht gelöscht werden',
+    deleteAllLoginRequired: 'Bitte anmelden, um Aufnahmen zu löschen'
   },
   fr: {
     autoDeletePaused: 'Suppression automatique suspendue',
@@ -1198,12 +1280,12 @@ const messages = {
     prepPrefillHint: 'Les entrées sont considérées comme acquises et reprises dans la section correspondante.',
     prepPrefillPlaceholder: 'Contenu déjà connu pour cette section…',
     deviceSyncPrepTitle: 'Contexte & modèle pour cet enregistrement',
-    deviceSyncPrepMessage: 'L’enregistrement «{title}» de votre Suisse Notes Pro est prêt à être téléversé.',
+    deviceSyncPrepMessage: 'L’enregistrement «{title}» de votre Suisse Meets Pro est prêt à être téléversé.',
     deviceSyncApplyAll: 'Appliquer à tous les enregistrements restants',
     deviceSyncSkip: 'Ignorer',
     deviceSyncContinue: 'Appliquer & téléverser',
     statusPendingPrep: 'En attente du contexte — touchez pour répondre',
-    settingsDeviceSyncTitle: 'Suisse Notes Pro : demande de contexte',
+    settingsDeviceSyncTitle: 'Suisse Meets Pro : demande de contexte',
     settingsAskOnDeviceSync: 'Demander le contexte & le modèle avant le téléversement',
     settingsAskOnDeviceSyncDesc: 'Si désactivé, les valeurs par défaut ci-dessous sont appliquées automatiquement.',
     settingsDeviceSyncDefaultTemplate: 'Modèle par défaut pour les enregistrements de l’appareil',
@@ -1311,6 +1393,7 @@ const messages = {
     customSpellingHint: 'Ajoutez des noms, acronymes ou termes techniques pour une meilleure précision',
     globalVocabulary: 'Vocabulaire global',
     globalVocabularyDesc: 'Mots utilisés pour tous les enregistrements et téléchargements',
+    vocabularySyncFailed: 'Le vocabulaire n’a pas pu être mis à jour sur le serveur. Vérifiez la connexion et réessayez.',
     addWord: 'Ajouter un mot',
     removeWord: 'Supprimer',
 
@@ -1499,7 +1582,47 @@ const messages = {
     updateReadyMessage: 'La version {version} de Suisse Meets est prête. Elle contient des améliorations de stabilité et de fiabilité – nous vous recommandons vivement de mettre à jour maintenant. L\'application redémarrera brièvement.',
     updateReadyLaterHint: 'Si vous choisissez « Plus tard », la mise à jour s\'installera automatiquement à la prochaine fermeture de l\'application.',
     updateReadyNow: 'Mettre à jour',
-    updateReadyLater: 'Plus tard'
+    updateReadyLater: 'Plus tard',
+
+    // Mobile reliability audit 2026-09
+    recordingGapsWarning: "Certaines parties de cet enregistrement n'ont pas pu être sauvegardées : {missing} segments audio sur {total} manquent. Le fichier a été conservé et sera téléversé, mais la transcription peut comporter des lacunes.",
+    historyCaptureGapsWarning: '{missing} segments audio sur {total} manquants',
+    recordingRecoveredAfterInterruption: "Enregistrement récupéré après une interruption. Il peut manquer de l'audio à la fin.",
+    recordingInterruptedChunksKept: "L'enregistrement a été interrompu. Les segments audio sont sauvegardés sur cet appareil mais n'ont pas encore pu être assemblés. Veuillez réessayer depuis l'historique.",
+    failedToSaveRecording: "Impossible de sauvegarder l'enregistrement",
+    errorProcessingRecording: "Erreur lors du traitement de l'enregistrement",
+    recoveringPreviousRecording: 'Veuillez patienter — un enregistrement précédent est en cours de récupération…',
+    failedToStartRecording: "Impossible de démarrer l'enregistrement",
+    storageCriticalCannotStart: "Enregistrement impossible : il ne reste que {freeMB} Mo d'espace. Libérez au moins {minMB} Mo et réessayez.",
+    storageLowWarning: "Espace faible : il ne reste que {freeMB} Mo. L'enregistrement s'arrêtera automatiquement si l'espace vient à manquer.",
+    historyLoginRequired: 'Veuillez vous connecter pour téléverser des enregistrements',
+    historyFileMissing: "Le fichier de l'enregistrement est introuvable. Il a peut-être été supprimé.",
+    historyUploadingProgress: 'Téléversement… {percent}%',
+    historyRetryProgress: 'Nouvelle tentative {attempt}… {percent}%',
+    recordingDeleted: 'Enregistrement supprimé',
+    logoutBlockedWhileRecording: 'Impossible de se déconnecter pendant un enregistrement ou un téléversement.',
+    historyToday: "Aujourd'hui",
+    historyYesterday: 'Hier',
+    historyUndated: 'Sans date',
+    bleErrorTimeout: "L'enregistreur n'a pas répondu. Vérifiez qu'il est allumé et à proximité, puis réessayez.",
+    bleErrorDisconnected: "La connexion avec l'enregistreur a été perdue. Rapprochez-vous et réessayez.",
+    bleErrorBusy: "L'enregistreur analyse encore sa carte mémoire. Patientez un instant et réessayez.",
+    bleErrorMemory: "L'enregistreur signale un problème de stockage (carte mémoire absente ou non prise en charge).",
+    bleErrorFull: "La carte mémoire de l'enregistreur est pleine.",
+    bleErrorCrc: 'Le transfert est arrivé corrompu. Il sera réessayé automatiquement.',
+    bleErrorCrcGaveUp: "Ce fichier arrivait toujours corrompu et a été ignoré. Vous pouvez le réessayer depuis la page de l'appareil.",
+    bleErrorEmptyFile: "Cet enregistrement sur l'appareil est vide et a été ignoré.",
+    bleErrorPairedElsewhere: "Cet enregistreur est encore jumelé avec une autre installation de l'app. Annulez d'abord le jumelage là-bas (Réglages → Oublier l'appareil), puis jumelez à nouveau.",
+    bleErrorPermission: "L'autorisation Bluetooth est requise. Autorisez le Bluetooth pour Suisse Meets dans les réglages du téléphone.",
+    bleErrorBluetoothOff: 'Le Bluetooth est désactivé. Activez-le et réessayez.',
+    bleErrorNotFound: "L'enregistreur est introuvable. Vérifiez qu'il est allumé et à proximité.",
+    bleErrorGeneric: "Problème avec l'enregistreur : {message}",
+    recordingTooShort: "L'enregistrement était trop court pour être sauvegardé.",
+    networkUnavailable: 'Pas de connexion internet. Vérifiez votre réseau et réessayez.',
+    serverUnexpectedResponse: 'Le serveur a renvoyé une réponse inattendue. Veuillez réessayer dans un instant.',
+    deleteAllDone: '{count} enregistrement(s) local(aux) supprimé(s)',
+    deleteAllFailed: "Les enregistrements n'ont pas pu être supprimés",
+    deleteAllLoginRequired: 'Veuillez vous connecter pour supprimer des enregistrements'
   },
   it: {
     autoDeletePaused: 'Eliminazione automatica sospesa',
@@ -1698,12 +1821,12 @@ const messages = {
     prepPrefillHint: 'Le voci sono considerate definitive e riprese nella sezione corrispondente.',
     prepPrefillPlaceholder: 'Contenuti già noti per questa sezione…',
     deviceSyncPrepTitle: 'Contesto e modello per questa registrazione',
-    deviceSyncPrepMessage: 'La registrazione «{title}» dal tuo Suisse Notes Pro è pronta per il caricamento.',
+    deviceSyncPrepMessage: 'La registrazione «{title}» dal tuo Suisse Meets Pro è pronta per il caricamento.',
     deviceSyncApplyAll: 'Applica a tutte le registrazioni rimanenti',
     deviceSyncSkip: 'Salta',
     deviceSyncContinue: 'Applica e carica',
     statusPendingPrep: 'In attesa del contesto — tocca per rispondere',
-    settingsDeviceSyncTitle: 'Suisse Notes Pro: richiesta contesto',
+    settingsDeviceSyncTitle: 'Suisse Meets Pro: richiesta contesto',
     settingsAskOnDeviceSync: 'Chiedi contesto e modello prima del caricamento',
     settingsAskOnDeviceSyncDesc: 'Se disattivato, i valori predefiniti sottostanti vengono applicati automaticamente.',
     settingsDeviceSyncDefaultTemplate: 'Modello predefinito per le registrazioni del dispositivo',
@@ -1811,6 +1934,7 @@ const messages = {
     customSpellingHint: 'Aggiungi nomi, acronimi o termini tecnici per una maggiore precisione',
     globalVocabulary: 'Vocabolario globale',
     globalVocabularyDesc: 'Parole utilizzate per tutte le registrazioni e i caricamenti',
+    vocabularySyncFailed: 'Non è stato possibile aggiornare il vocabolario sul server. Controlla la connessione e riprova.',
     addWord: 'Aggiungi parola',
     removeWord: 'Rimuovi',
 
@@ -1999,13 +2123,79 @@ const messages = {
     updateReadyMessage: 'La versione {version} di Suisse Meets è pronta. Contiene miglioramenti di stabilità e affidabilità: consigliamo vivamente di aggiornare ora. L\'app si riavvierà brevemente.',
     updateReadyLaterHint: 'Se scegli "Più tardi", l\'aggiornamento verrà installato automaticamente alla prossima chiusura dell\'app.',
     updateReadyNow: 'Aggiorna ora',
-    updateReadyLater: 'Più tardi'
+    updateReadyLater: 'Più tardi',
+
+    // Mobile reliability audit 2026-09
+    recordingGapsWarning: 'Alcune parti di questa registrazione non sono state salvate: mancano {missing} segmenti audio su {total}. Il file è stato conservato e verrà caricato, ma la trascrizione potrebbe avere delle lacune.',
+    historyCaptureGapsWarning: '{missing} segmenti audio su {total} mancanti',
+    recordingRecoveredAfterInterruption: "Registrazione recuperata dopo un'interruzione. Potrebbe mancare dell'audio alla fine.",
+    recordingInterruptedChunksKept: 'La registrazione è stata interrotta. I segmenti audio sono salvati su questo dispositivo ma non è stato ancora possibile unirli. Riprova dalla cronologia.',
+    failedToSaveRecording: 'Impossibile salvare la registrazione',
+    errorProcessingRecording: "Errore durante l'elaborazione della registrazione",
+    recoveringPreviousRecording: 'Attendere — una registrazione precedente è in fase di recupero…',
+    failedToStartRecording: 'Impossibile avviare la registrazione',
+    storageCriticalCannotStart: 'Impossibile registrare: restano solo {freeMB} MB di spazio. Libera almeno {minMB} MB e riprova.',
+    storageLowWarning: 'Spazio quasi esaurito: restano solo {freeMB} MB. La registrazione si fermerà automaticamente se lo spazio si esaurisce.',
+    historyLoginRequired: 'Accedi per caricare le registrazioni',
+    historyFileMissing: 'Il file della registrazione non è stato trovato. Potrebbe essere stato eliminato.',
+    historyUploadingProgress: 'Caricamento… {percent}%',
+    historyRetryProgress: 'Nuovo tentativo {attempt}… {percent}%',
+    recordingDeleted: 'Registrazione eliminata',
+    logoutBlockedWhileRecording: 'Non è possibile uscire mentre è in corso una registrazione o un caricamento.',
+    historyToday: 'Oggi',
+    historyYesterday: 'Ieri',
+    historyUndated: 'Senza data',
+    bleErrorTimeout: 'Il registratore non ha risposto. Verifica che sia acceso e nelle vicinanze, poi riprova.',
+    bleErrorDisconnected: 'La connessione con il registratore è stata interrotta. Avvicinati e riprova.',
+    bleErrorBusy: 'Il registratore sta ancora leggendo la scheda di memoria. Attendi un momento e riprova.',
+    bleErrorMemory: 'Il registratore segnala un problema di memoria (scheda assente o non supportata).',
+    bleErrorFull: 'La scheda di memoria del registratore è piena.',
+    bleErrorCrc: 'Il trasferimento è arrivato danneggiato. Verrà ripetuto automaticamente.',
+    bleErrorCrcGaveUp: 'Questo file continuava ad arrivare danneggiato ed è stato saltato. Puoi riprovare dalla pagina del dispositivo.',
+    bleErrorEmptyFile: 'Questa registrazione sul dispositivo è vuota ed è stata saltata.',
+    bleErrorPairedElsewhere: "Questo registratore è ancora associato a un'altra installazione dell'app. Rimuovi prima l'associazione lì (Impostazioni → Dimentica dispositivo), poi associa di nuovo.",
+    bleErrorPermission: "È richiesta l'autorizzazione Bluetooth. Consenti il Bluetooth per Suisse Meets nelle impostazioni del telefono.",
+    bleErrorBluetoothOff: 'Il Bluetooth è spento. Accendilo e riprova.',
+    bleErrorNotFound: 'Registratore non trovato. Verifica che sia acceso e nelle vicinanze.',
+    bleErrorGeneric: 'Problema con il registratore: {message}',
+    recordingTooShort: 'La registrazione era troppo breve per essere salvata.',
+    networkUnavailable: 'Nessuna connessione internet. Controlla la rete e riprova.',
+    serverUnexpectedResponse: 'Il server ha inviato una risposta inattesa. Riprova tra un momento.',
+    deleteAllDone: '{count} registrazione/i locale/i eliminata/e',
+    deleteAllFailed: 'Impossibile eliminare le registrazioni',
+    deleteAllLoginRequired: 'Accedi per eliminare le registrazioni'
   }
 };
 
+export const SUPPORTED_LOCALES = ['en', 'de', 'fr', 'it'];
+
+/**
+ * Initial UI language: an explicit choice (Settings / login-page switcher,
+ * persisted as `lang`) wins; otherwise the device language when it is one we
+ * ship; otherwise German (the app's home market). Until 3.9.36 the locale was
+ * hard-coded to German for everyone — store reviewers on English devices
+ * landed on "E-Mail / Passwort / Anmelden".
+ */
+export function detectInitialLocale() {
+  try {
+    const saved = localStorage.getItem('lang');
+    if (SUPPORTED_LOCALES.includes(saved)) return saved;
+  } catch { /* storage unavailable */ }
+  const candidates = [];
+  if (typeof navigator !== 'undefined') {
+    if (Array.isArray(navigator.languages)) candidates.push(...navigator.languages);
+    if (navigator.language) candidates.push(navigator.language);
+  }
+  for (const candidate of candidates) {
+    const base = String(candidate || '').toLowerCase().slice(0, 2);
+    if (SUPPORTED_LOCALES.includes(base)) return base;
+  }
+  return 'de';
+}
+
 const i18n = createI18n({
   legacy: false,
-  locale: 'de',
+  locale: detectInitialLocale(),
   fallbackLocale: 'en',
   messages
 });

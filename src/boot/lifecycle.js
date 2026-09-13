@@ -6,7 +6,9 @@
 
 import { isCapacitor, isMobile, isAndroid, PlatformConstants } from '../utils/platform';
 import { sentryAppBackground, sentryAppForeground, sentryNetworkChange, sentryLowBattery } from '../services/sentryHelpers';
-import { captureMessage } from './sentry';
+import { addBreadcrumb, captureMessage } from './sentry';
+import { markSessionState } from '../services/sessionHealth';
+import { redactUrl } from '../utils/redact';
 
 // Module-level state for lifecycle management
 let lifecycleInitialized = false;
@@ -73,6 +75,26 @@ function parseSSOCallbackUrl(rawUrl) {
 }
 
 /**
+ * Run one initialization step in isolation. A failing step must never abort
+ * the steps after it: until 3.9.36 the whole initializer sat in ONE try/catch,
+ * and on iOS the very first call (StatusBar.setOverlaysWebView, which is
+ * Android-only and rejects with UNIMPLEMENTED on iOS) threw — so on every
+ * iPhone the app-state, network, battery and deep-link listeners were never
+ * registered: no background flush of the recording buffer, no upload-queue
+ * resume on reconnect, no battery alerts, no foreground recovery scan.
+ */
+async function step(name, fn) {
+  try {
+    await fn();
+    return true;
+  } catch (error) {
+    console.warn(`Lifecycle: step "${name}" failed:`, error?.message || error);
+    addBreadcrumb({ category: 'lifecycle', message: `init step failed: ${name} — ${error?.message || error}`, level: 'warning' });
+    return false;
+  }
+}
+
+/**
  * Initialize Capacitor lifecycle listeners
  * Should be called from the boot file on mobile platforms only
  */
@@ -87,20 +109,26 @@ export const initializeLifecycle = async () => {
     return;
   }
 
-  try {
-    // Enable overlay mode so we control safe area via CSS (both iOS and Android)
+  // Status bar: overlay mode is an Android-only API (iOS always overlays the
+  // web view and rejects the call). Icon style works on both platforms.
+  await step('statusBar', async () => {
     const { StatusBar, Style } = await import('@capacitor/status-bar');
-    await StatusBar.setOverlaysWebView({ overlay: true });
+    if (isAndroid()) {
+      try { await StatusBar.setOverlaysWebView({ overlay: true }); } catch (e) { /* not supported on this build */ }
+    }
     // Dark icons for light-background pages (authenticated). Login/register pages
     // switch to Style.Dark (white icons) for their purple backgrounds.
     await StatusBar.setStyle({ style: Style.Light });
+  });
 
-    // Import Capacitor plugins dynamically
+  // App state changes (foreground/background) — the most important listener:
+  // it drives the recording flush on background and recovery on foreground.
+  const appStateOk = await step('appStateChange', async () => {
     const { App } = await import('@capacitor/app');
-    const { Network } = await import('@capacitor/network');
-
-    // Listen for app state changes (foreground/background)
     appStateListener = await App.addListener('appStateChange', async ({ isActive }) => {
+      // First, before any await: a session that later dies on screen is
+      // reported as an unclean exit on the next launch.
+      markSessionState(isActive);
       if (isActive) {
         console.log('Lifecycle: App came to foreground');
         sentryAppForeground();
@@ -162,8 +190,11 @@ export const initializeLifecycle = async () => {
         }
       }
     });
+  });
 
-    // Listen for network changes
+  // Network changes → resume the persistent upload queue when back online.
+  await step('networkStatusChange', async () => {
+    const { Network } = await import('@capacitor/network');
     networkListener = await Network.addListener('networkStatusChange', async (status) => {
       sentryNetworkChange(status.connected, status.connectionType);
       if (status.connected) {
@@ -178,22 +209,23 @@ export const initializeLifecycle = async () => {
         }
       }
     });
+  });
 
-    // Start battery monitoring (check every 60 seconds)
-    await startBatteryMonitoring();
+  // Battery monitoring (check every 60 seconds, adaptive while recording)
+  await step('batteryMonitoring', () => startBatteryMonitoring());
 
-    // Listen for app URL open (deep links — incl. SSO callback).
-    // Diagnostic Sentry breadcrumbs prove the iOS/Android deep-link routing
-    // reached the JS layer when SSO seems to "do nothing" after the OAuth
-    // round trip.
+  // App URL open (deep links — incl. the SSO callback). Breadcrumbs (not
+  // Sentry events) prove the routing reached the JS layer; the URL is
+  // redacted because it carries the session token.
+  await step('appUrlOpen', async () => {
+    const { App } = await import('@capacitor/app');
     await App.addListener('appUrlOpen', (data) => {
-      console.log('Lifecycle: App opened via URL', data.url);
-      try { captureMessage(`sso: appUrlOpen fired url=${(data.url || '').slice(0, 200)}`, 'info'); } catch { /* sentry not loaded */ }
+      const safeUrl = redactUrl(data?.url || '');
+      console.log('Lifecycle: App opened via URL', safeUrl);
+      addBreadcrumb({ category: 'sso', message: `appUrlOpen fired url=${safeUrl.slice(0, 200)}`, level: 'info' });
       const ssoPayload = parseSSOCallbackUrl(data.url);
-      try {
-        const tag = ssoPayload ? (ssoPayload.error ? 'error:' + ssoPayload.error : 'success+token') : 'null';
-        captureMessage(`sso: parseSSOCallbackUrl result=${tag}`, 'info');
-      } catch { /* sentry not loaded */ }
+      const tag = ssoPayload ? (ssoPayload.error ? 'error:' + ssoPayload.error : 'success+token') : 'null';
+      addBreadcrumb({ category: 'sso', message: `parseSSOCallbackUrl result=${tag}`, level: 'info' });
       if (ssoPayload) {
         // Hand off to the LoginPage (or wherever it's listened to) via a
         // platform-neutral CustomEvent. Mirrors the Electron auth:ssoCallback
@@ -201,21 +233,33 @@ export const initializeLifecycle = async () => {
         window.dispatchEvent(new CustomEvent('sso:callback', { detail: ssoPayload }));
       }
     });
+  });
 
-    // Listen for back button (Android only — the listener throws
-    // "Method not implemented" on iOS and would abort the rest of
-    // initializeLifecycle via the surrounding catch).
-    if (isAndroid()) {
-      await App.addListener('backButton', (event) => {
-        console.log('Lifecycle: Back button pressed', event);
-        // Let Vue Router handle back navigation by default
+  // Back button (Android only — the listener throws "Method not implemented"
+  // on iOS).
+  if (isAndroid()) {
+    await step('backButton', async () => {
+      const { App } = await import('@capacitor/app');
+      await App.addListener('backButton', async ({ canGoBack }) => {
+        // Registering ANY backButton listener disables the plugin's default
+        // handling, so we must act: go back through the (hash) router history,
+        // and at the root send the app to the background instead of leaving
+        // the button dead.
+        if (canGoBack || (typeof window !== 'undefined' && window.history.length > 1)) {
+          window.history.back();
+        } else {
+          try { await App.minimizeApp(); } catch { /* not available — ignore */ }
+        }
       });
-    }
+    });
+  }
 
-    lifecycleInitialized = true;
+  lifecycleInitialized = appStateOk;
+  if (appStateOk) {
     console.log('Lifecycle: Initialized successfully');
-  } catch (error) {
-    console.error('Lifecycle: Failed to initialize', error);
+  } else {
+    console.error('Lifecycle: app-state listener could not be registered');
+    captureMessage('lifecycle: appStateChange listener failed to register — background flush/recovery disabled', 'error');
   }
 };
 
@@ -410,6 +454,11 @@ export const isAppActive = async () => {
     return true;
   }
 };
+
+/**
+ * Whether the app-state listener is registered (test/diagnostic hook).
+ */
+export const isLifecycleInitialized = () => lifecycleInitialized;
 
 /**
  * Quasar boot function

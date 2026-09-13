@@ -300,22 +300,27 @@ class BackgroundRecordingPlugin : Plugin() {
             return
         }
 
-        // Use same directory resolution as ForegroundRecordingService and Capacitor Directory.Documents
-        val documentsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
-            ?: ctx.filesDir
-        val chunksDir = File(documentsDir, "recordings/$recordId/chunks")
-
-        // Also check filesDir as fallback (old recordings may be there)
-        val effectiveChunksDir = if (chunksDir.exists() && (chunksDir.listFiles()?.isNotEmpty() == true)) {
-            chunksDir
-        } else {
-            val fallbackDir = File(ctx.filesDir, "recordings/$recordId/chunks")
-            if (fallbackDir.exists() && (fallbackDir.listFiles()?.isNotEmpty() == true)) {
-                fallbackDir
-            } else {
-                chunksDir // Use default, will fail gracefully below
-            }
+        // Base directory candidates, in order of preference:
+        //  1. App-specific external files dir — Capacitor Directory.External. Where
+        //     the JS layer writes chunks since 3.9.37 (app-private, no MediaStore/
+        //     FUSE listing filter, no storage permission on any API level).
+        //  2. Public Documents — Capacitor Directory.Documents, the pre-3.9.37
+        //     location. Recordings that started on an older version are combined
+        //     in place; the output goes next to the chunks so the JS read fallback
+        //     resolves it.
+        //  3. filesDir — the original location from the very first releases.
+        val candidateBases = listOfNotNull(
+            ctx.getExternalFilesDir(null),
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+            ctx.filesDir
+        )
+        val hasChunks: (File) -> Boolean = { dir ->
+            dir.exists() && (dir.listFiles()?.any { it.name.startsWith("chunk_") } == true)
         }
+        val documentsDir = candidateBases.firstOrNull { base ->
+            hasChunks(File(base, "recordings/$recordId/chunks"))
+        } ?: candidateBases.first()
+        val effectiveChunksDir = File(documentsDir, "recordings/$recordId/chunks")
 
         // List and sort chunk files — accept both .m4a and .webm
         val chunkFiles = effectiveChunksDir.listFiles()

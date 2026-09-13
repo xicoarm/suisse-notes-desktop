@@ -36,7 +36,13 @@ jobs:
       - name: Write release notes
         run: |
           cat > /tmp/release-notes.txt <<'NOTES'
-          Die App verbindet sich neu mit app.suisse-meets.ch. Anmeldung mit Google und Microsoft, Aufnahme, Upload und Transkription funktionieren unverändert. Bereits geteilte Links und ältere App-Versionen bleiben weiterhin gültig.
+          Diese Version behebt mehrere von Nutzern gemeldete Punkte:
+          - Der Link zu einer neuen Transkription führt jetzt direkt zum Meeting, auch wenn die Transkription noch läuft.
+          - Support-Adresse und rechtliche Links zeigen auf Suisse Meets.
+          - Das individuelle Vokabular wird zuverlässig mit dem Konto abgeglichen.
+          - «Gerät vergessen» beendet die Übertragungsanzeige sofort.
+          - Die Übertragung vom Rekorder beginnt mit der ältesten Aufnahme.
+          - Stabilität und Fehlerdiagnose wurden verbessert.
           NOTES
           cat /tmp/release-notes.txt
 

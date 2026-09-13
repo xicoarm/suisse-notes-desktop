@@ -1,6 +1,7 @@
 package ch.suissenotes.app;
 
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -41,10 +42,15 @@ public class MainActivity extends BridgeActivity {
         // Enable DOM storage for app state
         webSettings.setDomStorageEnabled(true);
 
-        // Allow mixed content (HTTP resources on HTTPS pages) - needed for dev mode
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            webSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        }
+        // Mixed content (HTTP resources inside the HTTPS app origin) is only
+        // ever needed by the live-reload dev server. Production builds serve
+        // the bundle from https://localhost and talk HTTPS to the API, so the
+        // permissive mode was pure attack surface there. Debuggable builds
+        // keep the old behaviour.
+        boolean debuggable = (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        webSettings.setMixedContentMode(
+            debuggable ? WebSettings.MIXED_CONTENT_ALWAYS_ALLOW : WebSettings.MIXED_CONTENT_NEVER_ALLOW
+        );
 
         // Fix: Android system navigation bar overlaps the app's bottom tab bar.
         // CSS env(safe-area-inset-bottom) returns 0 on Android WebView, and
@@ -70,8 +76,30 @@ public class MainActivity extends BridgeActivity {
             @Override
             public void onPermissionRequest(final PermissionRequest request) {
                 runOnUiThread(() -> {
-                    // Grant all requested permissions (microphone, camera if needed)
-                    request.grant(request.getResources());
+                    // Only the app's own origin (https://localhost, the Capacitor
+                    // bundle host) may capture audio/video. Previously EVERY
+                    // requested resource was granted to ANY origin the WebView
+                    // happened to be on.
+                    Uri origin = request.getOrigin();
+                    String host = origin != null ? origin.getHost() : null;
+                    boolean isAppOrigin = host != null && (host.equals("localhost") || host.endsWith(".localhost"));
+                    if (!isAppOrigin) {
+                        Log.w("MainActivity", "Denied WebView permission request from origin " + origin);
+                        request.deny();
+                        return;
+                    }
+                    java.util.ArrayList<String> granted = new java.util.ArrayList<>();
+                    for (String resource : request.getResources()) {
+                        if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)
+                                || PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(resource)) {
+                            granted.add(resource);
+                        }
+                    }
+                    if (granted.isEmpty()) {
+                        request.deny();
+                    } else {
+                        request.grant(granted.toArray(new String[0]));
+                    }
                 });
             }
 

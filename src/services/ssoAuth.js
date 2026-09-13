@@ -17,7 +17,8 @@
 
 import { registerPlugin } from '@capacitor/core';
 import { isIOS, isAndroid } from '../utils/platform';
-import { captureMessage } from '../boot/sentry';
+import { addBreadcrumb, captureMessage } from '../boot/sentry';
+import { redactUrl } from '../utils/redact';
 
 const SSOAuth = registerPlugin('SSOAuth');
 
@@ -65,9 +66,13 @@ export function parseSSOCallbackUrl(rawUrl) {
  * user cancel). On iOS it awaits the native plugin's completion handler;
  * on Android it returns immediately because the 'sso:callback' arrives
  * asynchronously via the appUrlOpen → CustomEvent chain.
+ *
+ * Diagnostics are breadcrumbs (they ride along with a real error) and every
+ * URL is redacted: the callback URL carries the session token.
  */
 export async function openSSO({ url, callbackScheme = 'suissenotes' }) {
-  try { captureMessage(`sso: openSSO start platform=${isIOS() ? 'ios' : (isAndroid() ? 'android' : 'web')} url=${url.slice(0, 200)}`, 'info'); } catch { /* sentry not loaded */ }
+  const platform = isIOS() ? 'ios' : (isAndroid() ? 'android' : 'web');
+  addBreadcrumb({ category: 'sso', message: `openSSO start platform=${platform} url=${redactUrl(url).slice(0, 200)}`, level: 'info' });
 
   if (isIOS()) {
     // ASWebAuthenticationSession auto-closes when the redirect URL's scheme
@@ -76,20 +81,24 @@ export async function openSSO({ url, callbackScheme = 'suissenotes' }) {
     // silently drop the redirect.
     try {
       const { url: callbackUrl } = await SSOAuth.startAuth({ url, callbackScheme });
-      try { captureMessage(`sso: SSOAuth.startAuth returned url=${(callbackUrl || '').slice(0, 200)}`, 'info'); } catch { /* sentry not loaded */ }
+      addBreadcrumb({ category: 'sso', message: `SSOAuth.startAuth returned url=${redactUrl(callbackUrl || '').slice(0, 200)}`, level: 'info' });
       const payload = parseSSOCallbackUrl(callbackUrl);
       if (payload) {
         window.dispatchEvent(new CustomEvent('sso:callback', { detail: payload }));
       } else {
+        captureMessage('sso: iOS callback URL did not parse as an SSO callback', 'warning');
         window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: 'invalid_callback' } }));
       }
     } catch (err) {
       const msg = err?.message || String(err);
-      try { captureMessage(`sso: SSOAuth.startAuth rejected reason=${msg.slice(0, 200)}`, 'warning'); } catch { /* sentry not loaded */ }
-      // Treat user-cancel quietly; everything else surfaces as an error.
-      if (msg === 'USER_CANCELED') {
+      // Treat user-cancel quietly (Android USER_CANCELED, iOS
+      // ASWebAuthenticationSession error 1 = canceledLogin); everything else
+      // surfaces as a warning.
+      if (msg === 'USER_CANCELED' || /WebAuthenticationSession error 1\b|canceledLogin/i.test(msg)) {
+        addBreadcrumb({ category: 'sso', message: 'SSOAuth.startAuth cancelled by user', level: 'info' });
         window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: 'canceled' } }));
       } else {
+        captureMessage(`sso: SSOAuth.startAuth rejected reason=${msg.slice(0, 200)}`, 'warning');
         window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: msg } }));
       }
     }

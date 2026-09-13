@@ -1,8 +1,47 @@
 import { useQuasar } from 'quasar';
 import { useI18n } from 'vue-i18n';
-import { isElectron, isCapacitor } from '../utils/platform';
+import { isElectron, isCapacitor, isAndroid } from '../utils/platform';
 import { useAuthStore } from '../stores/auth';
-import { getApiUrlSync } from '../services/api';
+import { getApiUrlSync, fetchWithTimeout } from '../services/api';
+import { captureMessage, addBreadcrumb } from '../boot/sentry';
+
+// Shared across every card/page: one in-app browser open at a time. A second
+// launch while one is starting kills the just-opened Custom Tab and, on
+// Android, the plugin's helper activity, and the second Browser.open() never
+// resolves — the caller's spinner would spin forever.
+let browserOpening = false;
+
+/**
+ * Detect the @capacitor/browser Android freeze: after the Custom Tab closes,
+ * its translucent helper activity can stay on top as an invisible,
+ * touch-eating window, so the WebView is visible but never resumes. Report it
+ * to Sentry (so the field rate is known) and try to recover by asking the
+ * plugin to close, which finishes that activity.
+ */
+async function watchForStuckBrowser() {
+  if (!isAndroid()) return;
+  let App;
+  try { ({ App } = await import('@capacitor/app')); } catch { return; }
+  const deadline = Date.now() + 20000;
+  let stuck = 0;
+  const timer = setInterval(async () => {
+    let active = true;
+    try { active = (await App.getState()).isActive !== false; } catch { /* assume active */ }
+    const visible = typeof document === 'undefined' || document.visibilityState === 'visible';
+    if (active) { clearInterval(timer); return; }          // normal: tab on top, or app resumed
+    if (visible && !active) {
+      // The app is drawn but not resumed — the classic stray-activity signature.
+      if (++stuck >= 3) {
+        clearInterval(timer);
+        captureMessage('browser: app visible but not resumed after closing the in-app browser (stray Android BrowserControllerActivity)', 'error');
+        try { const { Browser } = await import('@capacitor/browser'); await Browser.close(); } catch { /* best-effort recovery */ }
+      }
+    } else {
+      stuck = 0;
+    }
+    if (Date.now() > deadline) clearInterval(timer);
+  }, 1000);
+}
 
 /**
  * Composable for generating shareable meeting links and opening them in the system browser.
@@ -35,7 +74,7 @@ export function useShareLink() {
     } else if (isCapacitor()) {
       try {
         if (authStore.token) {
-          const response = await fetch(`${getApiUrlSync()}/api/auth/desktop/create-web-session`, {
+          const response = await fetchWithTimeout(`${getApiUrlSync()}/api/auth/desktop/create-web-session`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -74,12 +113,19 @@ export function useShareLink() {
       }
       window.electronAPI.shell.openExternal(url);
     } else if (isCapacitor()) {
+      if (browserOpening) return;   // a tap already opened one; ignore the double-tap
+      browserOpening = true;
       try {
         const { Browser } = await import('@capacitor/browser');
         await Browser.open({ url });
-      } catch {
-        // Fallback
+        watchForStuckBrowser();
+      } catch (e) {
+        addBreadcrumb({ category: 'ui', message: `Browser.open failed, falling back to window.open: ${e?.message || e}`, level: 'warning' });
         window.open(url, '_blank');
+      } finally {
+        // Release shortly after: long enough to swallow a rapid double-tap,
+        // short enough that a real second open later still works.
+        setTimeout(() => { browserOpening = false; }, 1500);
       }
     }
   };
