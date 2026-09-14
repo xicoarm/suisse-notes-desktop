@@ -6,10 +6,9 @@
  */
 'use strict';
 
-const { spawn, execSync } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const http = require('http');
 const puppeteer = require('puppeteer-core');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
@@ -17,37 +16,360 @@ const WORK_DIR = path.join(__dirname, '..', 'work');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-async function fetchJson(url) {
-  return new Promise((resolve, reject) => {
-    http.get(url, (res) => {
-      let d = '';
-      res.on('data', c => d += c);
-      res.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
-    }).on('error', reject);
-  });
+function diagnosticDeadline(promise, ms = 3000) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Diagnostic sample timed out')), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+function macFakeAudioLaunchArgs(env, platform = process.platform) {
+  if (platform !== 'darwin' || env.SUISSE_E2E_HOOKS !== '1' ||
+      env.SUISSE_TEST_NETWORK_ISOLATION !== '1' || !env.SUISSE_TEST_FAKE_AUDIO) return [];
+  const isLoopback = value => {
+    try {
+      const url = new URL(value);
+      return url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+    } catch (_) { return false; }
+  };
+  if (!isLoopback(env.API_BASE_URL) || !isLoopback(env.VITE_API_URL)) return [];
+  try { if (!fs.statSync(env.SUISSE_TEST_FAKE_AUDIO).isFile()) return []; }
+  catch (_) { return []; }
+  // Chromium 120's sandboxed macOS audio service cannot open the fake WAV.
+  // Only this synthetic native launch gets an audio-service exception; do not
+  // disable renderer/global sandboxing or change the production app defaults.
+  return ['--disable-features=AudioServiceSandbox'];
+}
+
+// Runs only in synthetic/local test pages. Wrapping start observes both an
+// already-constructed recorder and future instances, without replacing their
+// native handlers, constructor, capture stream, or recording implementation.
+function installSyntheticCaptureProbe() {
+  if (window.__suisseCaptureDiagnostics || !window.MediaRecorder) return;
+  const entries = new Map();
+  const observed = new WeakMap();
+  let nextId = 0;
+  const nativeStart = MediaRecorder.prototype.start;
+  MediaRecorder.prototype.start = function (...args) {
+    let entry, startCalledAt;
+    try {
+      startCalledAt = performance.now();
+      entry = observed.get(this);
+      if (!entry) {
+        entry = { id: ++nextId, ref: new WeakRef(this), events: 0, bytes: 0, emptyEvents: 0, firstDataAt: null, lastDataAt: null, startedAt: null, stoppedAt: null,
+          requestedTimesliceMs: null, startCalledAt: null, successfulStartCalls: 0 };
+        observed.set(this, entry);
+        entries.set(entry.id, entry);
+        // Bound diagnostic bookkeeping during extended/multi-recording runs.
+        if (entries.size > 20) entries.delete(entries.keys().next().value);
+        for (const type of ['start', 'dataavailable', 'pause', 'resume', 'stop', 'error']) {
+          this.addEventListener(type, event => {
+            try {
+              const now = performance.now();
+              if (type === 'start') entry.startedAt = event.timeStamp;
+              if (type === 'stop') entry.stoppedAt = event.timeStamp;
+              const size = type === 'dataavailable' ? event.data?.size || 0 : null;
+              if (type === 'dataavailable') {
+                entry.events++; entry.bytes += size;
+                if (!size) entry.emptyEvents++;
+                entry.firstDataAt ??= now; entry.lastDataAt = now;
+              }
+              console.debug('[synthetic-capture] ' + JSON.stringify({ id: entry.id, event: type, at: now,
+                state: event.target?.state, bytes: size, error: event.error?.name || null }));
+            } catch (_) { /* diagnostics must never throw into capture */ }
+          });
+        }
+      }
+    } catch (_) { /* native start must still run unchanged */ }
+    // Observe exactly what the application supplied; never replace a timeslice
+    // or request extra data to make a different source policy appear tested.
+    const result = Reflect.apply(nativeStart, this, args);
+    try {
+      entry.requestedTimesliceMs = Number.isFinite(args[0]) ? args[0] : null;
+      entry.startCalledAt = startCalledAt;
+      entry.successfulStartCalls++;
+    } catch (_) { /* diagnostic failure must not alter the native return */ }
+    return result;
+  };
+  window.__suisseCaptureDiagnostics = {
+    snapshot: () => ({ at: performance.now(), visibility: document.visibilityState, recorders: [...entries.values()].map(entry => {
+      const recorder = entry.ref.deref();
+      const counts = { id: entry.id, events: entry.events, bytes: entry.bytes, emptyEvents: entry.emptyEvents,
+        firstDataAt: entry.firstDataAt, lastDataAt: entry.lastDataAt, startedAt: entry.startedAt, stoppedAt: entry.stoppedAt,
+        requestedTimesliceMs: entry.requestedTimesliceMs, startCalledAt: entry.startCalledAt, successfulStartCalls: entry.successfulStartCalls };
+      return { ...counts, state: recorder?.state || 'released', tracks: recorder?.stream?.getAudioTracks().map(track => ({
+        readyState: track.readyState, enabled: track.enabled, muted: track.muted,
+      })) || [] };
+    }) }),
+  };
+}
+
+function isolationError(message) {
+  return Object.assign(new Error(message), { code: 'HARNESS_ISOLATION_FAILED' });
+}
+
+// Puppeteer/CDP errors raised when the renderer navigates or replaces its
+// frame while an evaluation is in flight (welcome → login, hot reload). They
+// are transient lifecycle events, never evidence about which application is
+// connected. A closed target or session is deliberately not included.
+function isNavigationInterruption(error) {
+  return /Execution context was destroyed|Cannot find context with specified id|Execution context is not available|Inspected target navigated|frame was detached|Frame .* detached/i
+    .test(String(error?.message || ''));
+}
+
+function validateDevToolsEndpoint(value, expectedPort = 0) {
+  let url;
+  try { url = new URL(value); } catch (_) { throw isolationError('Owned child emitted an invalid DevTools endpoint'); }
+  // Numeric loopback only: no DNS, credentials, redirects or remote WebSocket.
+  if (url.protocol !== 'ws:' || !['127.0.0.1', '[::1]'].includes(url.hostname) ||
+      !url.port || url.username || url.password || url.search || url.hash ||
+      !/^\/devtools\/browser\/[a-zA-Z0-9-]+$/.test(url.pathname) ||
+      (expectedPort !== 0 && Number(url.port) !== expectedPort)) {
+    throw isolationError('Owned child emitted a non-loopback or unexpected DevTools endpoint');
+  }
+  return url.href;
+}
+
+/** Trust only a fresh endpoint printed by this spawned child's stderr. */
+function watchOwnedDevTools(child, { expectedPort = 0, timeoutMs = 180000, maxLineBytes = 16384 } = {}) {
+  let buffer = '', endpoint = null, failure = null, closed = false, timer;
+  let resolveEndpoint, rejectEndpoint, rejectFailure;
+  const ready = new Promise((resolve, reject) => { resolveEndpoint = resolve; rejectEndpoint = reject; });
+  const failed = new Promise((_, reject) => { rejectFailure = reject; });
+  ready.catch(() => {}); failed.catch(() => {});
+  const fail = error => {
+    if (closed || failure) return;
+    failure = error?.code === 'HARNESS_ISOLATION_FAILED' ? error : isolationError(error?.message || String(error));
+    clearTimeout(timer); rejectEndpoint(failure); rejectFailure(failure);
+  };
+  const line = value => {
+    if (/bind\(\).*failed|address already in use|cannot start http server for devtools/i.test(value)) {
+      fail(isolationError('Owned child could not bind its DevTools endpoint')); return;
+    }
+    const match = /^\s*DevTools listening on (\S+)\s*$/.exec(value);
+    if (!match) return;
+    try {
+      const found = validateDevToolsEndpoint(match[1], expectedPort);
+      endpoint = found; clearTimeout(timer); resolveEndpoint(found);
+    } catch (error) { fail(error); }
+  };
+  const onData = chunk => {
+    if (closed || failure || endpoint) return;
+    // Process each piece without retaining unbounded startup output, including
+    // a child that writes forever without a newline.
+    for (const piece of chunk.toString().split(/(?<=\n)/)) {
+      if (Buffer.byteLength(buffer) + Buffer.byteLength(piece) > maxLineBytes) {
+        fail(isolationError('Owned child DevTools startup line exceeded its bound')); return;
+      }
+      buffer += piece;
+      if (buffer.endsWith('\n')) {
+        line(buffer.trimEnd()); buffer = '';
+        if (endpoint) { child.stderr.off('data', onData); return; }
+      }
+    }
+  };
+  const onExit = (code, signal) => fail(isolationError(`Owned app exited (${code ?? signal ?? 'unknown'})`));
+  const onError = error => fail(isolationError(`Owned app failed: ${error.message}`));
+  child.stderr.on('data', onData); child.on('exit', onExit); child.on('error', onError);
+  timer = setTimeout(() => fail(isolationError('Owned app did not announce DevTools before the startup deadline')), timeoutMs);
+  if (child.exitCode != null || child.signalCode != null) onExit(child.exitCode, child.signalCode);
+  return {
+    ready,
+    race: promise => Promise.race([promise, failed]),
+    assertAlive: () => { if (failure) throw failure; if (closed) throw isolationError('Owned app connection is closed'); },
+    close: () => {
+      fail(isolationError('Owned app connection is closed'));
+      closed = true; clearTimeout(timer); buffer = '';
+      child.stderr.off('data', onData); child.off('exit', onExit); child.off('error', onError);
+    },
+  };
+}
+
+function normalizedProfile(value, platform = process.platform) {
+  const paths = platform === 'win32' ? path.win32 : path.posix;
+  if (typeof value !== 'string' || !paths.isAbsolute(value)) throw isolationError('App profile identity is not an absolute path');
+  const normalized = paths.resolve(value);
+  return platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function validateAppIdentity(identity, expected, platform = process.platform) {
+  let actualApi, expectedApi;
+  try { actualApi = new URL(identity?.apiUrl); expectedApi = new URL(expected.apiUrl); }
+  catch (_) { throw isolationError('App backend identity is unavailable'); }
+  if (!['http:', 'https:'].includes(actualApi.protocol) || actualApi.href !== expectedApi.href ||
+      normalizedProfile(identity?.userDataDir, platform) !== normalizedProfile(expected.userDataDir, platform)) {
+    throw isolationError('Connected app profile or backend does not match this harness launch');
+  }
 }
 
 class AppDriver {
   constructor(opts = {}) {
-    this.cdpPort = opts.cdpPort || 9339;
+    this.cdpPort = opts.cdpPort ?? 0; // Chromium assigns an unused local port.
+    if (!Number.isInteger(this.cdpPort) || this.cdpPort < 0 || this.cdpPort > 65535) throw new Error('Invalid DevTools port');
     this.apiUrl = opts.apiUrl;                   // mock backend URL
     this.fakeAudioWav = opts.fakeAudioWav;       // scenario WAV fed as the mic
     this.userDataDir = opts.userDataDir || path.join(WORK_DIR, 'userdata', opts.name || 'default');
     this.env = opts.env || {};                   // extra env (e.g. VITE_SUISSE_MAX_DURATION_SECONDS)
     this.packagedExe = opts.packagedExe || null; // drive the built .exe instead of quasar dev
+    this.appDir = opts.appDir || process.env.SUISSE_E2E_APP_DIR || null;
     this.proc = null;
     this.browser = null;
     this.page = null;
     this.log = [];
+    this.diagnosticsDir = null;
+    this.rendererListeners = new Map();
+    this.diagnosticWriteErrorReported = false;
+    this.ownedDevTools = null;
+  }
+
+  assertTestProfile() {
+    const allowed = path.resolve(WORK_DIR, 'userdata');
+    const target = path.resolve(this.userDataDir);
+    if (!target.startsWith(allowed + path.sep)) throw new Error('Refusing to modify a non-test profile');
   }
 
   get recordingsDir() {
     return path.join(this.userDataDir, 'recordings');
   }
 
+  beginDiagnostics(env) {
+    // This driver is also used by live-backend scripts. Persist diagnostics
+    // only for fake audio against a local mock API in the isolated profile.
+    const isLocal = value => {
+      try { return ['localhost', '127.0.0.1', '[::1]'].includes(new URL(value).hostname); }
+      catch (_) { return false; }
+    };
+    this.diagnosticsDir = null;
+    this.diagnosticWriteErrorReported = false;
+    this.log = [];
+    if (!env.SUISSE_TEST_FAKE_AUDIO || !isLocal(env.API_BASE_URL) || !isLocal(env.VITE_API_URL) ||
+        path.resolve(env.SUISSE_TEST_USERDATA) !== path.resolve(this.userDataDir)) return;
+    const logsRoot = path.join(WORK_DIR, 'logs');
+    fs.mkdirSync(logsRoot, { recursive: true });
+    const profile = path.basename(path.resolve(this.userDataDir)).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    this.diagnosticsDir = fs.mkdtempSync(path.join(logsRoot, `${profile}-${stamp}-`));
+    this.writeDiagnostic('driver', 'Starting synthetic capture; profile=' + this.userDataDir);
+  }
+
+  writeDiagnostic(channel, message) {
+    if (!this.diagnosticsDir) return;
+    // Append during the run, not just after success: renderer/process crashes
+    // and harness termination must leave their last observations available.
+    try {
+      fs.appendFileSync(path.join(this.diagnosticsDir, channel + '.log'),
+        JSON.stringify({ time: new Date().toISOString(), message: String(message) }) + '\n');
+    } catch (error) {
+      // A diagnostic disk error must not prevent app cleanup or create the
+      // very recording interruption this harness is trying to investigate.
+      if (!this.diagnosticWriteErrorReported) this.log.push('[harness] Diagnostic write failed: ' + error.message);
+      this.diagnosticWriteErrorReported = true;
+    }
+  }
+
+  async observeRenderer(page) {
+    if (!this.diagnosticsDir || this.rendererListeners.has(page)) return;
+    const onConsole = message => this.writeDiagnostic('renderer',
+      `${page.url()} [${message.type()}] ${message.text()}`);
+    const onPageError = error => this.writeDiagnostic('renderer',
+      `${page.url()} [pageerror] ${error.stack || error.message || error}`);
+    page.on('console', onConsole);
+    page.on('pageerror', onPageError);
+    const observer = { onConsole, onPageError, closed: false, contexts: new Map(), cdp: null, timer: null, sampling: false };
+    this.rendererListeners.set(page, observer);
+    this.writeDiagnostic('driver', 'Observing renderer ' + page.url());
+    try {
+      await diagnosticDeadline(page.evaluateOnNewDocument(installSyntheticCaptureProbe));
+      await diagnosticDeadline(page.evaluate(installSyntheticCaptureProbe));
+    } catch (error) { this.writeDiagnostic('driver', 'Recorder probe unavailable: ' + error.message); }
+    try {
+      const cdp = await diagnosticDeadline(page.target().createCDPSession());
+      if (observer.closed) { await cdp.detach().catch(() => {}); return; }
+      observer.cdp = cdp;
+      for (const type of ['contextCreated', 'contextChanged']) {
+        cdp.on('WebAudio.' + type, ({ context }) => {
+          if (observer.closed) return;
+          observer.contexts.set(context.contextId, context);
+          this.writeDiagnostic('webaudio', JSON.stringify({ event: type, context }));
+        });
+      }
+      cdp.on('WebAudio.contextWillBeDestroyed', ({ contextId }) => {
+        observer.contexts.delete(contextId);
+        if (!observer.closed) this.writeDiagnostic('webaudio', JSON.stringify({ event: 'contextWillBeDestroyed', contextId }));
+      });
+      await diagnosticDeadline(cdp.send('WebAudio.enable'));
+    } catch (error) { this.writeDiagnostic('driver', 'WebAudio diagnostics unavailable: ' + error.message); }
+    if (observer.closed) return;
+    const sample = async () => {
+      if (observer.closed || observer.sampling) return;
+      observer.sampling = true;
+      try {
+        this.writeDiagnostic('progress', JSON.stringify({ disk: this.captureDiskProgress() }));
+        const jobs = [diagnosticDeadline(page.evaluate(() => {
+          const pinia = window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia;
+          const state = pinia?.state?.value?.recording;
+          return { capture: window.__suisseCaptureDiagnostics?.snapshot(), store: state ? {
+            phase: state.phase, duration: state.duration, chunkIndex: state.chunkIndex,
+            chunkSaveErrors: state.chunkSaveErrors, recordingInterrupted: state.recordingInterrupted,
+          } : null };
+        })).then(value => { if (!observer.closed) this.writeDiagnostic('progress', JSON.stringify(value)); })];
+        for (const context of observer.contexts.values()) {
+          if (context.contextState === 'closed' || !observer.cdp) continue;
+          jobs.push(diagnosticDeadline(observer.cdp.send('WebAudio.getRealtimeData', { contextId: context.contextId }))
+            .then(value => { if (!observer.closed) this.writeDiagnostic('webaudio', JSON.stringify({
+              event: 'sample', contextId: context.contextId, contextState: context.contextState, ...value,
+            })); }));
+        }
+        const results = await Promise.allSettled(jobs);
+        for (const result of results) {
+          if (result.status === 'rejected' && !observer.closed) this.writeDiagnostic('driver', result.reason?.message || 'Diagnostic sample failed');
+        }
+      } catch (error) { if (!observer.closed) this.writeDiagnostic('driver', 'Progress diagnostics failed: ' + error.message); }
+      finally { observer.sampling = false; }
+    };
+    observer.timer = setInterval(() => { void sample(); }, 5000);
+    observer.timer.unref?.();
+    void sample();
+  }
+
+  captureDiskProgress() {
+    this.assertTestProfile();
+    const activePath = path.join(this.userDataDir, 'active-recording.json');
+    if (!fs.existsSync(activePath)) return { active: false };
+    const active = JSON.parse(fs.readFileSync(activePath, 'utf8')).activeSession;
+    if (!active || !/^[a-f0-9-]{36}$/i.test(active.recordId || '')) return { active: false };
+    const result = { active: true, recordId: active.recordId, chunkCount: active.chunkCount, lastChunkAt: active.lastChunkAt, sourceFiles: 0, sourceBytes: 0, finalBytes: null };
+    const walk = directory => {
+      if (!fs.existsSync(directory)) return;
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const filename = path.join(directory, entry.name);
+        // Dirent checks exclude links; inspect file metadata, never audio data.
+        if (entry.isDirectory()) walk(filename);
+        else if (entry.isFile() && /\.(webm|pcm|wav|m4a)$/.test(entry.name)) {
+          const size = fs.statSync(filename).size;
+          if (/^audio\.(webm|wav|m4a)$/.test(entry.name)) result.finalBytes = size;
+          else { result.sourceFiles++; result.sourceBytes += size; }
+        }
+      }
+    };
+    walk(path.join(this.recordingsDir, active.recordId));
+    return result;
+  }
+
+  detachRendererDiagnostics() {
+    for (const [page, handlers] of this.rendererListeners) {
+      handlers.closed = true;
+      if (handlers.timer) clearInterval(handlers.timer);
+      if (handlers.cdp) handlers.cdp.detach().catch(() => {});
+      page.off('console', handlers.onConsole);
+      page.off('pageerror', handlers.onPageError);
+    }
+    this.rendererListeners.clear();
+  }
+
   async launch({ freshProfile = true } = {}) {
-    if (freshProfile) fs.rmSync(this.userDataDir, { recursive: true, force: true });
-    fs.mkdirSync(this.userDataDir, { recursive: true });
+    this.assertTestProfile();
 
     // Packaged-build mode (opts.packagedExe or SUISSE_E2E_PACKAGED_EXE): drive
     // the built .exe instead of `quasar dev`. Removes the dev-server HMR/websocket
@@ -62,13 +384,42 @@ class AppDriver {
       SUISSE_TEST_USERDATA: this.userDataDir,
       SUISSE_TEST_CDP_PORT: String(this.cdpPort),
       ...(this.fakeAudioWav ? { SUISSE_TEST_FAKE_AUDIO: this.fakeAudioWav } : {}),
-      ...(packagedExe ? { SUISSE_E2E_HOOKS: '1' } : {}),
+      ...((packagedExe || this.fakeAudioWav || this.appDir) ? { SUISSE_E2E_HOOKS: '1' } : {}),
       ...this.env,
     };
+    // Overrides may tune scenarios but cannot redirect app/profile identity.
+    env.SUISSE_TEST_USERDATA = path.resolve(this.userDataDir);
+    env.SUISSE_TEST_CDP_PORT = String(this.cdpPort);
+    env.API_BASE_URL = this.apiUrl;
+    env.VITE_API_URL = this.apiUrl;
 
-    if (packagedExe) {
+    this.detachRendererDiagnostics();
+    this.beginDiagnostics(env);
+    // Diagnostics live outside userdata and survive both fresh profiles and
+    // close({ keepProfile: false }). Every launch gets a distinct directory.
+    if (freshProfile && fs.existsSync(this.userDataDir)) {
+      // Keep every previous run, including failures, before starting afresh.
+      // Move only this verified test profile into a unique evidence directory.
+      const evidenceRoot = path.resolve(WORK_DIR, 'evidence');
+      fs.mkdirSync(evidenceRoot, { recursive: true });
+      const evidence = fs.mkdtempSync(path.join(evidenceRoot, path.basename(this.userDataDir) + '-'));
+      const destination = path.resolve(evidence, 'userdata');
+      if (!destination.startsWith(evidenceRoot + path.sep)) throw new Error('Invalid evidence path');
+      fs.renameSync(path.resolve(this.userDataDir), destination);
+      this.writeDiagnostic('driver', 'Previous profile preserved at ' + destination);
+    }
+    fs.mkdirSync(this.userDataDir, { recursive: true });
+
+    const childOptions = { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' };
+    const nativeArgs = (this.appDir || packagedExe) ? macFakeAudioLaunchArgs(env) : [];
+    if (nativeArgs.length) this.writeDiagnostic('driver', 'Synthetic macOS fake WAV: AudioServiceSandbox disabled for this native test launch only');
+    if (this.appDir) {
+      const appDirectory = path.resolve(this.appDir);
+      if (!fs.existsSync(path.join(appDirectory, 'package.json'))) throw new Error('Build the Electron app before using SUISSE_E2E_APP_DIR');
+      this.proc = spawn(require('electron'), [...nativeArgs, appDirectory], childOptions);
+    } else if (packagedExe) {
       // Spawn the packaged app directly (no shell, no dev server).
-      this.proc = spawn(packagedExe, [], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      this.proc = spawn(packagedExe, nativeArgs, childOptions);
     } else {
       // shell:true — Node 20+ on Windows refuses to spawn .cmd shims directly
       // (CVE-2024-27980 hardening); the whole tree is killed via taskkill /T.
@@ -77,31 +428,58 @@ class AppDriver {
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: true,
+        windowsHide: true,
+        detached: process.platform !== 'win32',
       });
     }
-    this.proc.stdout.on('data', d => this.log.push(d.toString()));
-    this.proc.stderr.on('data', d => this.log.push(d.toString()));
+    this.ownedDevTools?.close();
+    this.ownedDevTools = watchOwnedDevTools(this.proc, { expectedPort: this.cdpPort });
+    const captureOutput = channel => data => {
+      const message = data.toString();
+      this.log.push(message);
+      this.writeDiagnostic(channel, message);
+    };
+    this.proc.stdout.on('data', captureOutput('stdout'));
+    this.proc.stderr.on('data', captureOutput('stderr'));
 
-    // Wait for the CDP endpoint (quasar dev + electron start takes a while)
-    const deadline = Date.now() + 180_000;
-    let version = null;
-    while (Date.now() < deadline) {
-      try {
-        version = await fetchJson(`http://127.0.0.1:${this.cdpPort}/json/version`);
-        break;
-      } catch (e) { await sleep(1500); }
+    try {
+      const endpoint = await this.ownedDevTools.ready;
+      this.ownedDevTools.assertAlive();
+      const owner = this.ownedDevTools;
+      const connecting = puppeteer.connect({ browserWSEndpoint: endpoint, defaultViewport: null }).then(browser => {
+        try { owner.assertAlive(); } catch (error) { browser.disconnect(); throw error; }
+        return browser;
+      });
+      this.browser = await owner.race(diagnosticDeadline(connecting, 15000));
+      await this.waitForStablePage();
+      return this;
+    } catch (error) {
+      await this.close();
+      throw error;
     }
-    if (!version) {
-      throw new Error(`App did not open CDP port ${this.cdpPort} within 3min.\nLast output:\n${this.log.slice(-30).join('')}`);
+  }
+
+  async verifyPageIdentity(page) {
+    this.ownedDevTools.assertAlive();
+    let identity;
+    try {
+      identity = await this.ownedDevTools.race(diagnosticDeadline(page.evaluate(async () => {
+        const api = window.electronAPI;
+        if (!api?.app?.getUserDataPath || !api?.config?.getApiUrl) return null;
+        const [userDataDir, apiUrl] = await Promise.all([api.app.getUserDataPath(), api.config.getApiUrl()]);
+        return { userDataDir, apiUrl };
+      }), 5000));
+    } catch (error) {
+      // The renderer navigating (welcome → login, hot reload) while the
+      // identity IPC is in flight destroys the evaluation context. That is not
+      // an identity mismatch: the stable-page loop re-resolves the page and
+      // verifies again. Timeouts and other failures stay isolation failures.
+      if (isNavigationInterruption(error)) throw new Error(`Renderer navigated during identity verification; retrying: ${error.message}`);
+      throw isolationError(`Could not verify connected app identity: ${error.message}`);
     }
-
-    this.browser = await puppeteer.connect({
-      browserWSEndpoint: version.webSocketDebuggerUrl,
-      defaultViewport: null,
-    });
-
-    await this.waitForStablePage();
-    return this;
+    if (!identity) throw isolationError('Connected renderer has no app identity IPC');
+    validateAppIdentity(identity, { userDataDir: path.resolve(this.userDataDir), apiUrl: this.apiUrl });
+    this.ownedDevTools.assertAlive();
   }
 
   /**
@@ -115,10 +493,13 @@ class AppDriver {
     const seenUrls = new Set();
     while (Date.now() < deadline) {
       try {
-        const pages = await this.browser.pages();
+        this.ownedDevTools.assertAlive();
+        const pages = await this.ownedDevTools.race(this.browser.pages());
         this.page = pages.find(p => !p.url().startsWith('devtools://') && p.url() !== 'about:blank')
           || pages.find(p => !p.url().startsWith('devtools://'));
         if (!this.page) { await sleep(1500); continue; }
+        await this.verifyPageIdentity(this.page);
+        await this.observeRenderer(this.page);
         seenUrls.add(this.page.url());
         // Fresh profiles land on the WELCOME page ("Anmelden" / "LOSLEGEN")
         // before any login form exists — click through it like a user.
@@ -147,6 +528,7 @@ class AppDriver {
         await this.page.waitForSelector('input[type=email], [data-test=record-start]', { timeout: 10_000 });
         return this.page;
       } catch (e) {
+        if (e.code === 'HARNESS_ISOLATION_FAILED') throw e;
         lastErr = e;
         await sleep(1500);
       }
@@ -376,7 +758,7 @@ class AppDriver {
 
   async crashRenderer() {
     const client = await this.page.target().createCDPSession();
-    await client.send('Page.crash').catch(() => { /* connection dies with the crash */ });
+    await Promise.race([client.send('Page.crash').catch(() => {}), sleep(5000)]);
   }
 
   async screenshot(name) {
@@ -395,7 +777,7 @@ class AppDriver {
       for (const e of fs.readdirSync(d, { withFileTypes: true })) {
         const p = path.join(d, e.name);
         if (e.isDirectory()) walk(p);
-        else if (/\.(webm|m4a|wav)$/.test(e.name) && !e.name.startsWith('chunk')) files.push(p);
+        else if (/^audio\.(webm|m4a|wav)$/.test(e.name)) files.push(p);
       }
     };
     walk(this.recordingsDir);
@@ -404,14 +786,29 @@ class AppDriver {
   }
 
   async close({ keepProfile = true } = {}) {
+    this.assertTestProfile();
+    this.writeDiagnostic('driver', 'Closing synthetic app; keepProfile=' + keepProfile);
+    // Save the complete buffered child output before disconnect/kill; streamed
+    // channel logs above additionally survive a crash before close is reached.
+    if (this.diagnosticsDir) {
+      try { fs.writeFileSync(path.join(this.diagnosticsDir, 'child-combined.log'), this.log.join('')); }
+      catch (error) { this.log.push('[harness] Final diagnostic write failed: ' + error.message); }
+    }
+    this.detachRendererDiagnostics();
+    this.ownedDevTools?.close();
     try { this.browser?.disconnect(); } catch (e) { /* ignore */ }
-    if (this.proc && !this.proc.killed) {
+    if (this.proc && !this.proc.killed && Number.isInteger(this.proc.pid) && this.proc.pid > 0 &&
+        (process.platform !== 'win32' || (this.proc.exitCode == null && this.proc.signalCode == null))) {
       // Kill the whole quasar/electron tree
-      try { execSync(`taskkill /pid ${this.proc.pid} /T /F`, { stdio: 'ignore' }); } catch (e) { /* already gone */ }
+      try {
+        if (process.platform === 'win32') execFileSync('taskkill', ['/pid', String(this.proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+        // A detached POSIX launcher may exit before its Electron descendants.
+        else process.kill(-this.proc.pid, 'SIGKILL'); // only our detached process group
+      } catch (e) { /* already gone */ }
     }
     this.proc = null;
     if (!keepProfile) fs.rmSync(this.userDataDir, { recursive: true, force: true });
   }
 }
 
-module.exports = { AppDriver, sleep };
+module.exports = { AppDriver, sleep, installSyntheticCaptureProbe, watchOwnedDevTools, validateDevToolsEndpoint, validateAppIdentity, isNavigationInterruption };

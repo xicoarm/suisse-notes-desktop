@@ -23,7 +23,17 @@ vi.mock('../../src/services/storage', () => ({
 }));
 vi.mock('@capacitor/share', () => ({ Share: { share: mocks.share } }));
 
-import { buildExportFilename, exportAudio } from '../../src/services/export';
+import { buildExportFilename, buildExportNotice, exportAudio } from '../../src/services/export';
+
+describe('desktop export completion notice', () => {
+  it('surfaces recovered capture warnings instead of an unqualified positive notice', () => {
+    expect(buildExportNotice({ recovered: true, captureWarnings: ['native-source-interrupted'] }, key => key))
+      .toEqual({ type: 'warning', message: 'exportSaved', caption: 'historyCaptureWarningDescription', timeout: 7000 });
+  });
+  it('preserves the normal successful export notice when there are no capture warnings', () => {
+    expect(buildExportNotice({ success: true }, key => key)).toEqual({ type: 'positive', message: 'exportSaved', timeout: 2500 });
+  });
+});
 
 describe('buildExportFilename', () => {
   it('builds "<title>_<date>.<ext>" and strips filesystem-illegal characters', () => {

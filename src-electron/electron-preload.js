@@ -2,12 +2,20 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 // Timeout wrapper for IPC calls to prevent indefinite blocking
 function withTimeout(promise, timeoutMs, operationName) {
+  let timer;
   return Promise.race([
     promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs)
-    )
-  ]);
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs);
+    })
+  ]).finally(() => clearTimeout(timer));
+}
+
+function finalizationTimeoutMs(expectedDurationSec) {
+  // Multi-hour native reconstruction re-encodes the meeting. The old fixed
+  // five-minute renderer deadline could expire while main was still saving.
+  const seconds = Number(expectedDurationSec);
+  return Math.min(2 * 3600000, 15 * 60000 + (Number.isFinite(seconds) && seconds > 0 ? seconds * 500 : 0));
 }
 
 // Default timeouts for different operations
@@ -81,12 +89,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Recording (WhisperTranscribe pattern)
   recording: {
-    createSession: (id, ext, userId) =>
+    createSession: (id, ext, userId, options) =>
       withTimeout(
-        ipcRenderer.invoke('recording:createSession', id, ext, userId),
+        ipcRenderer.invoke('recording:createSession', id, ext, userId, options),
         IPC_TIMEOUTS.default,
         'Create session'
       ),
+    beginSource: (id, descriptor) => withTimeout(
+      ipcRenderer.invoke('recording:beginSource', id, descriptor), IPC_TIMEOUTS.save, 'Reserve native source'),
+    markSourceStarted: (id, sourceId, descriptor) => withTimeout(
+      ipcRenderer.invoke('recording:markSourceStarted', id, sourceId, descriptor), IPC_TIMEOUTS.save, 'Start native source'),
+    saveSourceChunk: (id, sourceId, bytes, index) => withTimeout(
+      ipcRenderer.invoke('recording:saveSourceChunk', id, sourceId, bytes, index), IPC_TIMEOUTS.save, 'Save native source'),
+    endSource: (id, sourceId, descriptor) => withTimeout(
+      ipcRenderer.invoke('recording:endSource', id, sourceId, descriptor), IPC_TIMEOUTS.save, 'Finish native source'),
     saveChunk: (id, chunkData, chunkIndex, ext, userId) =>
       withTimeout(
         ipcRenderer.invoke('recording:saveChunk', id, chunkData, chunkIndex, ext, userId),
@@ -101,10 +117,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ),
     // expectedDurationSec: the renderer's wall-clock duration, so main can tell
     // whether the combined file really contains the meeting (truncation guard).
-    combineChunks: (id, ext, expectedDurationSec) =>
+    combineChunks: (id, ext, expectedDurationSec, options) =>
       withTimeout(
-        ipcRenderer.invoke('recording:combineChunks', id, ext, expectedDurationSec),
-        IPC_TIMEOUTS.combine,
+        ipcRenderer.invoke('recording:combineChunks', id, ext, expectedDurationSec, options),
+        finalizationTimeoutMs(expectedDurationSec),
         'Combine chunks'
       ),
     isRecoveryRunning: () => ipcRenderer.invoke('recording:isRecoveryRunning'),
@@ -120,9 +136,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
         IPC_TIMEOUTS.quick,
         'Get file path'
       ),
-    deleteRecording: (id) =>
+    deleteRecording: (id, options) =>
       withTimeout(
-        ipcRenderer.invoke('recording:deleteRecording', id),
+        ipcRenderer.invoke('recording:deleteRecording', id, options),
         IPC_TIMEOUTS.default,
         'Delete recording'
       ),
@@ -142,6 +158,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Recording state for window close protection
     setInProgress: (inProgress) =>
       ipcRenderer.invoke('recording:setInProgress', inProgress),
+    setUnsavedAudio: (recordId) =>
+      ipcRenderer.invoke('recording:setUnsavedAudio', recordId),
     setProcessing: (processing) =>
       ipcRenderer.invoke('recording:setProcessing', processing),
     // Metadata
@@ -245,6 +263,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     isSupported: () => ipcRenderer.invoke('systemAudio:isSupported'),
     start: (recordId, offsetMs = 0) => ipcRenderer.invoke('systemAudio:start', recordId, offsetMs),
     stop: () => ipcRenderer.invoke('systemAudio:stop'),
+    setPaused: (paused) => ipcRenderer.invoke('systemAudio:setPaused', paused),
     // Legacy (kept for backward compat)
     getSources: () => ipcRenderer.invoke('systemAudio:getSources'),
     diag: (level, message) => ipcRenderer.invoke('systemAudio:diag', level, message),

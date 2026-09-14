@@ -603,3 +603,31 @@ Test-harness fixes shipped alongside: `confirmDead()` (retry before declaring
 death), renderer memory/DOM instrumentation, CDP-free `verify-longrun.js`,
 chunk-count completion (sleep-proof), and E2E auto-update gate
 (`SUISSE_E2E_HOOKS`) so a test build never self-updates to a new release mid-run.
+
+
+---
+
+## H-004 — Harness: hosted fake microphone pauses its waveform behind timestamp holes (FIXED in the oracle, 2026-09-12)
+
+- **Type:** harness/environment finding, not an app defect · **Status:** fixed (oracle models the pauses)
+- **Scenarios:** s11 renderer-stall (Windows runs 34682725721, 34689957816; Intel 34684148755), native mixer suspension (Apple Silicon 34689957816, Intel 34686326960), s15 crash (Intel 34689957816, Apple Silicon 34686326960).
+- **Evidence:** `work/native-preservation/TIMESTAMP-HOLES-ROOT-CAUSE-20260912.md` and `ci-34689957816/REPORT.md`.
+- Every failing case had a native original that passed the as-is content oracle (all half-second identities, full spans) while its packet timestamps contained forward holes in 10 ms multiples (0.94 s / 1.47 s Windows, 0.11 s Apple Silicon, 0.05 s Intel). Recorder wall time equalled decoded PCM plus holes. Chromium 120's `FakeAudioWorker::DoRead` skips late intervals and hands the stream the scheduled read time; `FileSource::OnMoreData` advances the WAV cursor only for callbacks that ran. The finalizer materializes the holes as silence (correct for real devices), and the old oracle labelled that silence as duplicated/reordered/incomplete markers, alignment drift or excess duration.
+- **Fix:** `lib/native-timestamps.js` measures holes from the original's packet timestamps; `lib/coded-audio.js` accepts `expectedPauses`, removes them from the content timeline and requires them to decode as silence. s11 now also runs the strict as-is oracle on the native original (previously only bytes/chunk counts), cross-checks the plan's gap accounting and the recorder wall clock. No tolerance changed. The old `APP-DEFECT` candidates written for these cases (`DUPLICATED FRAME 32`) were this detector label.
+- **Still open, separately:** five-hour Windows marker 1153 (native original itself shortened: real loss upstream of the cursor) and live-mix dropout; Apple Silicon five-hour acquisition-clock mismatch from the lazy 1.76 GB WAV load; Intel five-hour finalization budget.
+- **Addendum (run 34697063535, Intel s12-reconnect):** frames 59→90 measured 15.650 s instead of 15.500 s (+150 ms, step tolerance 146.5 ms). The three preserved epochs carried 6 / 7 / 2 holes (0.07 / 0.16 / 0.03 s); 90 ms of them lay between the two frames, the rest were skips during the simulated outage that no recorder observes. The device scenario now concatenates every preserved epoch, runs the strict as-is oracle on it, measures its holes, cross-checks the plan and removes the holes from the final's timeline at each epoch's placement; outage-time skips remain an environment residual inside the unchanged tolerance.
+
+## H-005 — Harness: renderer navigation during the identity check was treated as an isolation failure (FIXED 2026-09-12)
+
+- **Type:** harness limitation, not an app defect · **Status:** fixed
+- **Scenario:** s11 blob-delay on Windows, run 34696017699 (first matrix at the hole-aware oracle): `Could not verify connected app identity: Execution context was destroyed, most likely because of a navigation.` 1.8 s after launch, before any recording. All other cases on all platforms passed.
+- **Cause:** `AppDriver.verifyPageIdentity` wrapped every evaluation error as `HARNESS_ISOLATION_FAILED`, which `waitForStablePage` deliberately never retries. The welcome → login navigation destroyed the evaluation context mid-IPC.
+- **Fix:** navigation interruptions (`Execution context was destroyed`, `Cannot find context with specified id`, detached frames) are retried within the existing 300 s stable-page deadline; the identity is verified again on the retry. Closed targets, timeouts and identity mismatches still fail closed. Unit test in `tests/unit/appDriver.isolation.test.js`.
+
+## H-006 — Harness: macOS fake-microphone load and start-call origin failed the 5h endurance on content-complete recordings (FIXED 2026-09-12)
+
+- **Type:** harness/fixture finding, not an app defect · **Status:** fixed in the harness; formal pass requires a new endurance run
+- **Run:** 34697743281 at 3ca94f0 — Windows 5h15 PASS; Intel 5h05 and Apple Silicon 5h15 FAIL with complete content (native as-is and final oracles carry every identity; holes match plans; uploads match).
+- **Causes:** (1) coverage measured the final's suffix as decoded duration including materialized holes minus the content-timeline last identity (Intel 15.10 s of holes); (2) the macOS fake microphone reads its 1.76/1.82 GB WAV before `getUserMedia` resolves (11.87 / 12.64 s > unchanged 10 s bound; Windows 4 ms); (3) the recorder start event fires with the first audio buffer, up to 4.67 s after the start call on Apple Silicon, while native finalization anchors the source at the start call — the harness measured the recording from the start event. The retained live mix proves the delay is at the source: its identity 0 appears 4.48 s after its own start on Apple Silicon (predicted 4.41 s from recorder events), while the native original begins at identity 0.
+- **Fix:** suffix on the content timeline; final expected duration from the start call, trailing silence allowed only up to the measured first-audio delay (bounded at 10 s, reported); endurance reference WAV at 16 kHz (identical coded signal, one third of the size); startup diagnostic can measure the 16 kHz fixture (`startup_sample_rate=16000`).
+- **Product note (open alignment gate):** a microphone whose first buffer arrives late is placed earlier than a paired system-audio lane by that delay; content is unaffected.

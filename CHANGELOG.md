@@ -2,6 +2,69 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [4.7.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.6.0...v4.7.0) (2026-09-14)
+
+
+### Features
+
+* **audio:** add durable native-source archive primitives ([32fa3e3](https://github.com/xicoarm/suisse-notes-desktop/commit/32fa3e359937f526a168f5bd10c16f8529e194ba))
+* **audio:** reconstruct recordings from preserved native sources ([d39d235](https://github.com/xicoarm/suisse-notes-desktop/commit/d39d23584b71c5a88408f5b42884f00d3e409aa2))
+* **ci:** submit iOS releases through the App Store Connect API ([d6f38f1](https://github.com/xicoarm/suisse-notes-desktop/commit/d6f38f16d965186f424881bb347fc5e556ec02f1))
+* **mobile:** capture every error type in Sentry, also offline and after crashes ([2dcfc84](https://github.com/xicoarm/suisse-notes-desktop/commit/2dcfc84796afbdbce74d9f54b978d118add25e94))
+* **mobile:** detect the device language, translate the remaining UI strings ([736ddb8](https://github.com/xicoarm/suisse-notes-desktop/commit/736ddb8d06b91f58710003cda2725ddecf9b775b))
+* **mobile:** group the history list by day ([0974539](https://github.com/xicoarm/suisse-notes-desktop/commit/0974539f6b3eceaf00dd2a62cceff650914259b4))
+* **mobile:** sync the oldest recording from the recorder first ([04e4c5b](https://github.com/xicoarm/suisse-notes-desktop/commit/04e4c5bcc455121e30d56079f9cf5d9352ee830e))
+* **rebrand:** point desktop and mobile clients at app.suisse-meets.ch ([9ed44ef](https://github.com/xicoarm/suisse-notes-desktop/commit/9ed44ef33f569e5d5dff9e4cdb18a1642365c80a))
+
+
+### Bug Fixes
+
+* **android:** declare the browser helper activity inside <application> ([3ae8104](https://github.com/xicoarm/suisse-notes-desktop/commit/3ae81046e00311d7c78b10e4ee43eb2bf2c55d47))
+* **android:** keep recordings in app-private storage; real disk-space checks ([42c0310](https://github.com/xicoarm/suisse-notes-desktop/commit/42c031033d66ac41dd3c10eb101e300ce4eca799))
+* **android:** stop the app freezing after returning from the transcript browser ([2bb7726](https://github.com/xicoarm/suisse-notes-desktop/commit/2bb77265f405d7f566c7ac18ccca3dd0fbac5c5c))
+* append desktop chunk integrity without growing copies ([31df006](https://github.com/xicoarm/suisse-notes-desktop/commit/31df006fc588040bf32c0681e5e424aaf5e0ea7a))
+* **audio:** block incomplete system-audio finalization and uploads ([bbe04b5](https://github.com/xicoarm/suisse-notes-desktop/commit/bbe04b536067ecb4be65e6fa1495709a70b9abdb))
+* **audio:** capture native sources before the live mixer ([64961cf](https://github.com/xicoarm/suisse-notes-desktop/commit/64961cf27c75eda597098ae9896b7a8ad3944c8c))
+* **audio:** keep desktop video paired during loopback retries ([2478ef4](https://github.com/xicoarm/suisse-notes-desktop/commit/2478ef4168bfa9f3a9ed555c4aff61715f974b2e))
+* **audio:** keep local deletion opt-in after accepted uploads ([ff31287](https://github.com/xicoarm/suisse-notes-desktop/commit/ff312876748f701f1fda7504c8f61bf825d689c3))
+* **audio:** preserve PCM capture evidence and validate encoded samples ([aa2f203](https://github.com/xicoarm/suisse-notes-desktop/commit/aa2f203874371c2357daee5c50276b4d1d51422f))
+* **audio:** preserve sub-millisecond native source onset ([a54be4a](https://github.com/xicoarm/suisse-notes-desktop/commit/a54be4ac614772c853cb139105ec67907a480515))
+* **audio:** read Opus header length from older Mac probes ([62d7265](https://github.com/xicoarm/suisse-notes-desktop/commit/62d726594a83b665e39e77e241afe8e172daa94f))
+* **audio:** recover retained recording sources during export ([64bf9c1](https://github.com/xicoarm/suisse-notes-desktop/commit/64bf9c19b2c215026628cda0bfe585efaeabe38b))
+* **audio:** retry legacy uploads after broken pipe connections ([8bf83a0](https://github.com/xicoarm/suisse-notes-desktop/commit/8bf83a02a28273abcb29f71d8b527121f4b9d475))
+* **audio:** support bundled FFmpeg resampler generations ([c6c3e8c](https://github.com/xicoarm/suisse-notes-desktop/commit/c6c3e8c74156e9e20fb39107a4797ba774e1a912))
+* **audio:** support bundled Mac ffprobe in Opus validation ([e192cdd](https://github.com/xicoarm/suisse-notes-desktop/commit/e192cdd885825a06a31e1e81fe647694619d0022))
+* **audio:** validate actual coded Opus sample spans ([87ed93f](https://github.com/xicoarm/suisse-notes-desktop/commit/87ed93fa7083c01b59c91d99b1d56f8094067bdf))
+* **audio:** validate lossless reconstruction files by their format ([a40e2e2](https://github.com/xicoarm/suisse-notes-desktop/commit/a40e2e2fdd1b65fe71a5ed801f656fcfb57cf7de))
+* **ble:** conform to the recorder protocol as shipped (frame index, busy card, polling) ([52bafd2](https://github.com/xicoarm/suisse-notes-desktop/commit/52bafd21ab8ed7a08a481d51c196a9c46f9b3490))
+* **ble:** lazy Bluetooth init, reconnect backoff, transport errors as warnings ([b8ddc6a](https://github.com/xicoarm/suisse-notes-desktop/commit/b8ddc6a6ab07ad69166b4661bb8e656d56db7983))
+* **ci:** verify and correct the App Store reviewer demo login before submitting ([4272af7](https://github.com/xicoarm/suisse-notes-desktop/commit/4272af7134384cf750ae0b18b25754b752834f0f))
+* expose loopback teardown for pageless recording stops ([c96377c](https://github.com/xicoarm/suisse-notes-desktop/commit/c96377cc46c217cf7a8ad8c6773e6007d6e2b8d2))
+* isolate loopback rebinds across recording generations ([f240bc5](https://github.com/xicoarm/suisse-notes-desktop/commit/f240bc5fb7f6dfac58477d0bdb20f368a81a4dc5))
+* keep recording capture warnings visible in desktop history ([2bd96a5](https://github.com/xicoarm/suisse-notes-desktop/commit/2bd96a5c896d3b4f1b892610e9c7976c74f44a8c))
+* **mobile:** API request deadlines, Android WebView/backup hardening ([1c13239](https://github.com/xicoarm/suisse-notes-desktop/commit/1c1323939991971ab051dac8e79ff2013addbfe7))
+* **mobile:** boot the iOS lifecycle layer and stop leaking SSO tokens to Sentry ([09f1b5c](https://github.com/xicoarm/suisse-notes-desktop/commit/09f1b5c4f46eff0c494784d6c0ce8e1809560602))
+* **mobile:** custom vocabulary follows the server ([549b9b5](https://github.com/xicoarm/suisse-notes-desktop/commit/549b9b58e0cb1c348768956983d860068627c954))
+* **mobile:** deadlines on the upload status poll, SAS init/complete and share-link calls ([af6e80f](https://github.com/xicoarm/suisse-notes-desktop/commit/af6e80f3d17c3a24d645a27c9bf8bab6210f0d40))
+* **mobile:** delete-after-upload on the phone, stable device history, recorder protocol hardening ([82bba91](https://github.com/xicoarm/suisse-notes-desktop/commit/82bba91212cb108b307ae086ff50f71710dbea3e))
+* **mobile:** forgetting a device clears the transfer indicator ([da5583f](https://github.com/xicoarm/suisse-notes-desktop/commit/da5583f1b6fd1759d62b6d423abaea914d6456f4))
+* **mobile:** point the Sentry source-map upload at src-capacitor/www ([f417759](https://github.com/xicoarm/suisse-notes-desktop/commit/f41775935f1681eb03fb2d81da46c7cd87cfbf5b))
+* **mobile:** Suisse Meets support address, legal links and recorder name ([d71638b](https://github.com/xicoarm/suisse-notes-desktop/commit/d71638be7e7f531bd4960eaf8f0115a20d0276a6))
+* **mobile:** upload source maps under the native app version so stack traces resolve ([5090cb0](https://github.com/xicoarm/suisse-notes-desktop/commit/5090cb06be5408a107a8612b46c92e4060177837))
+* protect desktop history from stale async responses ([c9ab4aa](https://github.com/xicoarm/suisse-notes-desktop/commit/c9ab4aa9b8a5ba988dde2c5863bab771ad2c5d96))
+* publish desktop recording chunks every second ([2d18544](https://github.com/xicoarm/suisse-notes-desktop/commit/2d18544008cbfcac8004f03472d2299a365c2567))
+* **recording:** bind silent microphone recovery to its actual device ([06f6880](https://github.com/xicoarm/suisse-notes-desktop/commit/06f68804e6d6e789a5cd21d989ea880555e1858e))
+* **recording:** bound audio readiness and preserve capture stall evidence ([827cd84](https://github.com/xicoarm/suisse-notes-desktop/commit/827cd842c2aa3877c90e6ae8d7e37b9405249be3))
+* **recording:** isolate late recorder events and retain unsaved audio ([ac143bc](https://github.com/xicoarm/suisse-notes-desktop/commit/ac143bce01fbdb123d845f146ee3068429f697fa))
+* **recording:** preserve audio through capture and upload failures ([82f26ff](https://github.com/xicoarm/suisse-notes-desktop/commit/82f26ff6d4f5b3c6784f36dcf5f85fc70cf98af0))
+* **recording:** retain microphone loss warnings and clear recovered notices ([7fd676a](https://github.com/xicoarm/suisse-notes-desktop/commit/7fd676a1eabc0fd649096081d7cb06e6cb618556))
+* revoke loopback monitoring during safety-net stops ([05c37f8](https://github.com/xicoarm/suisse-notes-desktop/commit/05c37f85d88bdce15fa7fc231b13207b47e4168d))
+* **sentry:** capture network detail on the new domain too ([5c24396](https://github.com/xicoarm/suisse-notes-desktop/commit/5c243962357326320b6ead224dd5024f99cd61db))
+* **settings:** serialize plain vocabulary for desktop IPC ([11fa06c](https://github.com/xicoarm/suisse-notes-desktop/commit/11fa06c62c689039a420d689c7edaa6b915a7ad3))
+* stop capture safely when durable writes fall behind ([ab725a0](https://github.com/xicoarm/suisse-notes-desktop/commit/ab725a042fe1fb61c38d3c24c89b2cb67884daab))
+* **test:** retain Linux zero process-group snapshot rows ([e1b5dcd](https://github.com/xicoarm/suisse-notes-desktop/commit/e1b5dcde2dae3f2f244983a79f6ad1140f3fca2b))
+* **upload:** retain local audio until remote content can be verified ([427a06a](https://github.com/xicoarm/suisse-notes-desktop/commit/427a06ac1fa46ae80e26e004bab4d3d81f699987))
+
 ## [4.6.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.5.8...v4.6.0) (2026-08-18)
 
 

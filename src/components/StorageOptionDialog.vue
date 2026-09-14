@@ -9,7 +9,7 @@
           Storage Options
         </div>
         <div class="text-subtitle text-grey-6">
-          What should happen to recordings after upload?
+          {{ isDesktop ? $t('desktopAudioRetentionNotice') : 'What should happen to recordings after upload?' }}
         </div>
       </q-card-section>
 
@@ -65,8 +65,10 @@
 </template>
 
 <script>
-import { ref, watch } from 'vue';
+import { ref, watch, computed } from 'vue';
+import { useI18n } from 'vue-i18n';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
+import { isElectron } from '../utils/platform';
 
 export default {
   name: 'StorageOptionDialog',
@@ -82,12 +84,14 @@ export default {
 
   setup(props, { emit }) {
     const historyStore = useRecordingsHistoryStore();
+    const { t } = useI18n();
+    const isDesktop = isElectron();
 
     const dialogVisible = ref(props.modelValue);
     const selectedOption = ref('keep');
     const rememberChoice = ref(false);
 
-    const storageOptions = [
+    const storageOptions = computed(() => [
       {
         value: 'keep',
         label: 'Keep locally',
@@ -95,10 +99,11 @@ export default {
       },
       {
         value: 'delete_after_upload',
-        label: 'Delete after upload',
-        description: 'Automatically delete files once successfully uploaded'
+        label: isDesktop ? t('autoDeletePaused') : 'Delete after upload',
+        description: isDesktop ? t('desktopAudioRetentionNotice') : 'Automatically delete files once successfully uploaded',
+        disable: isDesktop
       }
-    ];
+    ]);
 
     // Sync dialog visibility with prop
     watch(() => props.modelValue, (val) => {
@@ -132,6 +137,7 @@ export default {
       selectedOption,
       rememberChoice,
       storageOptions,
+      isDesktop,
       onConfirm,
       onCancel
     };

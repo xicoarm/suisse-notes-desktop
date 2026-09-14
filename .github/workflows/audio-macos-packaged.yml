@@ -1,0 +1,112 @@
+name: Desktop macOS packaged audio qualification
+
+# Explicit manual mode of audio-reliability.yml only. These synthetic bundles
+# are unsigned evidence, never distributable releases or hardware qualification.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  packaged-capture:
+    name: Packaged synthetic capture / ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-intel
+            os: macos-15-intel
+            arch: x64
+          - name: macos-arm64
+            os: macos-26
+            arch: arm64
+    env:
+      CI: 'true'
+      HUSKY: '0'
+      API_BASE_URL: http://localhost:3000
+      VITE_API_URL: http://localhost:3000
+      SUISSE_E2E_HOOKS: '1'
+      SUISSE_TEST_NETWORK_ISOLATION: '1'
+      SUISSE_E2E_BUNDLE_SHA: ${{ github.sha }}
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      CSC_LINK: ''
+      CSC_KEYCHAIN: ''
+      CSC_KEY_PASSWORD: ''
+      CSC_NAME: ''
+      APPLE_ID: ''
+      APPLE_APP_SPECIFIC_PASSWORD: ''
+      APPLE_API_KEY: ''
+      APPLE_API_KEY_ID: ''
+      APPLE_API_ISSUER: ''
+      APPLE_API_KEY_PATH: ''
+      SENTRY_AUTH_TOKEN: ''
+      GH_TOKEN: ''
+      GITHUB_TOKEN: ''
+    steps:
+      - name: Check out the exact revision and release media resources
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          persist-credentials: false
+
+      - name: Set up native Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          architecture: ${{ matrix.arch }}
+          cache: npm
+
+      - name: Install locked root dependencies
+        timeout-minutes: 8
+        run: npm ci
+
+      # Preserve checked-out LFS FFmpeg/ffprobe. prepare-ffmpeg.js would replace
+      # the release resources and would invalidate this package resource check.
+      - name: Build and verify one unsigned native app bundle
+        id: build
+        timeout-minutes: 16
+        run: node tests/e2e-harness/ci/build-macos-packaged.js --arch ${{ matrix.arch }}
+
+      - name: Preserve raw packet and decoded sample evidence from packaged resources
+        timeout-minutes: 4
+        env:
+          SUISSE_TEST_FFMPEG_PATH: ${{ steps.build.outputs.app }}/Contents/Resources/ffmpeg/ffmpeg
+          SUISSE_TEST_FFPROBE_PATH: ${{ steps.build.outputs.app }}/Contents/Resources/ffmpeg/ffprobe
+        run: node tests/e2e-harness/ci/diagnose-packaged-media.js
+
+      - name: Verify actual packaged media binaries against native finalization contracts
+        timeout-minutes: 8
+        shell: bash
+        env:
+          SUISSE_TEST_FFMPEG_PATH: ${{ steps.build.outputs.app }}/Contents/Resources/ffmpeg/ffmpeg
+          SUISSE_TEST_FFPROBE_PATH: ${{ steps.build.outputs.app }}/Contents/Resources/ffmpeg/ffprobe
+        run: |
+          set -o pipefail
+          node node_modules/vitest/vitest.mjs run tests/unit/nativeSourceFinalization.test.js --maxWorkers=1 --minWorkers=1 --reporter=default --reporter=json --outputFile=tests/e2e-harness/work/macos-packaged/media-compatibility-result.json 2>&1 | tee tests/e2e-harness/work/macos-packaged/media-compatibility.log
+
+      # The scripts own 15/10-minute deadlines. Outer steps leave time for their
+      # finally blocks to preserve partial results and tar files after failure.
+      - name: Qualify packaged resources, capture, finalization, and local upload
+        timeout-minutes: 11
+        env:
+          SUISSE_QUAL_APP: ${{ steps.build.outputs.app }}
+        run: node tests/e2e-harness/ci/run-macos-packaged-qualification.js --app "$SUISSE_QUAL_APP" --arch ${{ matrix.arch }} --seconds 45
+
+      - name: Preserve synthetic audio, profiles, logs, and non-distributable bundles
+        if: always()
+        timeout-minutes: 7
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-packaged-synthetic-not-for-release-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            tests/e2e-harness/work/
+            !tests/e2e-harness/work/macos-packaged/**/package/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          # The scripts archive .app directories as tar files, preserving the
+          # executable modes and symlinks that upload-artifact otherwise loses.
+          compression-level: 1

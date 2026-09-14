@@ -424,6 +424,7 @@ import { useQuasar } from 'quasar';
 import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingStore } from '../stores/recording';
+import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useMinutesStore } from '../stores/minutes';
 import { useRouter, useRoute } from 'vue-router';
 import { isElectron, isMobile, isIOS } from '../utils/platform';
@@ -435,6 +436,7 @@ const $q = useQuasar();
 const { t } = useI18n();
 const authStore = useAuthStore();
 const recordingStore = useRecordingStore();
+const historyStore = useRecordingsHistoryStore();
 const minutesStore = useMinutesStore();
 const router = useRouter();
 const route = useRoute();
@@ -531,7 +533,8 @@ onMounted(() => {
     });
 
     // Listen for background upload completion (from processPendingUploads)
-    window.electronAPI.upload.onComplete((data) => {
+    window.electronAPI.upload.onComplete(async (data) => {
+      if (data.background) await historyStore.loadRecordings().catch(() => {});
       if (data.success && data.background) {
         $q.notify({
           type: 'positive',

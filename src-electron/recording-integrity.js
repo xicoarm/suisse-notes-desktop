@@ -11,11 +11,10 @@
  */
 'use strict';
 
-// A shortfall must clear BOTH floors to count. Encoders legitimately trim a
-// fraction of a second, and a short meeting must not be judged by percentage
-// alone — 10% of 90 s is 9 s, which is noise, not data loss.
-const TRUNCATION_MIN_SHORTFALL_SEC = 30;
-const TRUNCATION_MIN_SHORTFALL_RATIO = 0.10;
+// Allow small codec/start-stop timing differences. Missing several seconds
+// still matters in a long meeting; a percentage threshold must not hide it.
+// This warns and retains sources, without blocking access to surviving audio.
+const TRUNCATION_MIN_SHORTFALL_SEC = 5;
 
 /**
  * Is the produced audio materially shorter than the session that was recorded?
@@ -42,14 +41,10 @@ function evaluateTruncation(producedSec, expectedSec) {
   if (shortfall < TRUNCATION_MIN_SHORTFALL_SEC) {
     return { truncated: false, shortfallSec: shortfall, reason: 'below-absolute-floor' };
   }
-  if (shortfall < expected * TRUNCATION_MIN_SHORTFALL_RATIO) {
-    return { truncated: false, shortfallSec: shortfall, reason: 'below-relative-floor' };
-  }
   return { truncated: true, shortfallSec: shortfall };
 }
 
 module.exports = {
   evaluateTruncation,
   TRUNCATION_MIN_SHORTFALL_SEC,
-  TRUNCATION_MIN_SHORTFALL_RATIO,
 };

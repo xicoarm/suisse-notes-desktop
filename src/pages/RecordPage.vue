@@ -540,10 +540,10 @@
             color="negative"
           />
           <h3>{{ $t('recordingErrorTitle') }}</h3>
-          <p>{{ $t('recordingErrorMessage') }}</p>
+          <p>{{ recordingStore.error || $t('recordingErrorMessage') }}</p>
           <div class="error-card-actions">
             <q-btn
-              v-if="recordingStore.chunkIndex > 0"
+              v-if="recordingStore.chunkIndex > 0 || recordingStore.captureMode === 'native-sources-v1'"
               color="primary"
               :label="$t('retrySaving')"
               icon="refresh"
@@ -853,10 +853,11 @@ import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useTranscriptionSettingsStore } from '../stores/transcription-settings';
 import { useMinutesStore } from '../stores/minutes';
 import { useRecorder } from '../composables/useRecorder';
+import { useMicSwitchNotifications } from '../composables/useMicSwitchNotifications';
 import { isElectron, isCapacitor, isAndroid } from '../utils/platform';
 import { humanizeStorageError } from '../utils/storageErrors';
 import { uploadWithVerification } from '../services/upload';
-import { forceCaptureRecovery } from '../services/recordingService';
+import { forceCaptureRecovery, getState as getRecordingServiceState } from '../services/recordingService';
 import { getApiUrlSync } from '../services/api';
 import { stopStorageMonitor } from '../services/storageMonitor';
 import { setRecordingActive } from '../boot/lifecycle';
@@ -975,29 +976,9 @@ watch(recordingErrorInfo, (info) => {
   });
 });
 
-watch(micSwitchEvent, (ev) => {
-  if (!ev) return;
-  micSwitchEvent.value = null; // consume (transient event)
-  if (ev.unverified) return;   // probe unavailable — nothing truthful to say
-  const device = ev.label || t('micGenericDevice');
-  if (ev.ok) {
-    // The auto-switch case gets its own, more prominent toast below.
-    if (ev.context === 'auto-recovery') return;
-    $q.notify({
-      type: 'positive',
-      message: t('micSwitchOkToast', { device }),
-      icon: 'mic',
-      timeout: 4000
-    });
-  } else {
-    $q.notify({
-      type: 'negative',
-      message: t('micSwitchSilentToast', { device }),
-      icon: 'mic_off',
-      timeout: 0,
-      actions: [{ label: t('ok', 'OK'), color: 'white' }]
-    });
-  }
+useMicSwitchNotifications({
+  notify: options => $q.notify(options), t, micSwitchEvent, recordingHealth,
+  recordId: () => recordingStore.recordId
 });
 
 // MSIG: the service auto-switched to another device after the selected mic
@@ -1289,7 +1270,8 @@ const isUploadedFromRecording = computed(() => {
 const showUploadSection = computed(() => {
   // Show blocking overlay during processing, uploading, and error only.
   // Once uploaded, overlay dismisses — success shown inline on the record page.
-  return ['processing', 'uploading', 'error'].includes(recordingStore.phase);
+  return ['processing', 'uploading'].includes(recordingStore.phase) ||
+    (recordingStore.phase === 'error' && Boolean(recordingStore.uploadError));
 });
 
 // Hide tab switcher when recording is in progress
@@ -1666,8 +1648,9 @@ const doStartRecordingInternal = async () => {
   }
 
   const result = await startRecording();
-  if (result.success) {
-    // Add to history immediately so recording survives app kill
+  if (result.success || (result.partialRecovery && !result.cancelled && recordingStore.recordId)) {
+    // Native capture can precede a mixer startup failure. Keep that partial
+    // meeting visible and retryable even when no mixed chunk was produced.
     await historyStore.addRecording({
       id: recordingStore.recordId,
       userId: authStore.user?.id || authStore.user?.userId || null,
@@ -1675,11 +1658,13 @@ const doStartRecordingInternal = async () => {
       duration: 0,
       fileSize: 0,
       filePath: null,
-      uploadStatus: 'recording',
+      uploadStatus: result.success ? 'recording' : 'failed',
+      ...(!result.success ? { uploadError: result.error } : {}),
       storagePreference: currentStoragePreference.value,
       prep: prepStore.historySnapshot
     });
-  } else {
+  }
+  if (!result.success) {
     $q.notify({
       type: 'negative',
       message: result.error || t('failedToStartRecording')
@@ -1839,7 +1824,13 @@ const handleStopInternal = async () => {
       // in-place retry (re-runs the combine via the recovery path) instead of
       // a dead-end error toast. If the user dismisses, launch recovery
       // combines the chunks automatically once space is freed.
-      if (result.diskFull) {
+      if (result.unsavedAudio) {
+        $q.dialog({
+          title: t('error'), message: t('unsavedAudioMessage'),
+          cancel: { flat: true, color: 'negative', label: t('discardRecording') },
+          ok: { color: 'primary', label: t('retry') }, persistent: true
+        }).onOk(() => handleStop()).onCancel(() => handleDiscardDeadRecording());
+      } else if (result.diskFull) {
         const mb = result.shortfallMB || result.neededMB || 200;
         $q.dialog({
           title: t('diskFullFinalizeTitle'),
@@ -1849,12 +1840,16 @@ const handleStopInternal = async () => {
           persistent: true
         }).onOk(() => handleStop());
       } else if (result.partialRecovery) {
-        // Show more detailed error for partial recovery
-        $q.notify({
-          type: 'warning',
-          message: t('recordingInterruptedChunksKept'),
-          timeout: 10000
-        });
+        // The audio is preserved but could not be combined: explain it in the
+        // user's language and offer the same save path again in place (it is
+        // also retryable from History). The technical reason stays visible.
+        $q.dialog({
+          title: t('error'),
+          message: result.error ? `${t('recordingInterruptedChunksKept')}\n\n${result.error}` : t('recordingInterruptedChunksKept'),
+          cancel: { flat: true, label: t('cancel') },
+          ok: { color: 'primary', label: t('retry') },
+          persistent: true
+        }).onOk(() => handleStop());
       } else {
         $q.notify({
           type: 'negative',
@@ -2047,7 +2042,8 @@ const startAutoUpload = async () => {
       recordingStore.unlockFile(recordingStore.recordId);
 
       // "Delete after upload" (both platforms, one implementation in the
-      // history store — it verifies the cloud copy and the lock itself).
+      // history store — it verifies the cloud copy and the lock itself; on
+      // desktop the main process also requires a verified receipt).
       // Delayed 30s to give the server time to fully persist.
       if (currentStoragePreference.value === 'delete_after_upload') {
         if (result.canDelete) {
@@ -2079,7 +2075,7 @@ const startAutoUpload = async () => {
       });
     } else {
       // P0 Data Loss Fix: Keep file locked on failure - will be unlocked on retry or explicit delete
-      handleUploadError(result.error, ownerUserId);
+      handleUploadError(result.error, ownerUserId, result);
     }
   } catch (error) {
     // phase reset handled by store actions
@@ -2087,7 +2083,8 @@ const startAutoUpload = async () => {
   }
 };
 
-const handleUploadError = async (errorMessage, ownerUserId = null) => {
+const handleUploadError = async (errorMessage, ownerUserId = null, outcome = {}) => {
+  recordingStore.setError(errorMessage || 'Upload confirmation is pending');
   // Make "Insufficient minutes" error more user-friendly
   if (errorMessage && errorMessage.includes('Insufficient minutes')) {
     recordingStore.uploadError ='No recording minutes remaining. Please upgrade your plan or purchase more minutes at app.suisse-meets.ch';
@@ -2104,7 +2101,8 @@ const handleUploadError = async (errorMessage, ownerUserId = null) => {
   // ownerUserId keeps this write valid even after a forced logout nulled
   // authStore.user (the userId ownership guard would otherwise refuse it).
   await historyStore.updateRecording(recordingStore.recordId, {
-    uploadStatus: 'failed',
+    uploadStatus: outcome.pendingVerification ? 'pending_verification' : 'failed',
+    ...(outcome.audioFileId ? { audioFileId: outcome.audioFileId } : {}),
     uploadError: errorMessage,
     ...(ownerUserId ? { userId: ownerUserId } : {})
   });
@@ -2176,8 +2174,7 @@ const retryUpload = async () => {
   recordingStore.uploadRetryAttempt = 0;
 
   try {
-    // Remove from history (will re-add based on result)
-    await historyStore.deleteRecording(recordingStore.recordId, false);
+    // Preserve history and ownership across retry and any intervening crash.
 
     isRetrying.value = false;
     await startAutoUpload();
@@ -2188,14 +2185,15 @@ const retryUpload = async () => {
 };
 
 const retryChunkCombine = async () => {
+  // The service must drain late native final events and retry retained blobs
+  // before the main process is allowed to publish or upload this meeting.
+  if (isElectron()) return handleStop();
   recordingStore.phase = 'processing';
   recordingStore.error = null;
   recordingStore.phase = 'stopped';
 
   let result;
-  if (isElectron()) {
-    result = await window.electronAPI.recording.combineChunks(recordingStore.recordId, '.webm');
-  } else if (isCapacitor()) {
+  if (isCapacitor()) {
     result = await recordingStore.combineChunksNative();
   } else {
     result = { success: false, error: 'Unsupported platform' };
@@ -2301,15 +2299,16 @@ const handleDiscardDeadRecording = () => {
     cancel: { flat: true, label: t('cancel') },
     ok: { color: 'negative', label: t('discardRecording') },
     persistent: true
-  }).onOk(() => {
-    recordingStore.reset();
-    // phase transition handled by subsequent action (setUploading/setError/reset)
-    // phase reset handled by store actions
-    recordingStore.uploadError =null;
-  });
+  }).onOk(() => handleCancel());
 };
 
 const handleNewRecording = () => {
+  const nativePhase = getRecordingServiceState().nativeSources?.phase;
+  if (nativePhase && !['closed', 'cancelled'].includes(nativePhase)) {
+    // Preserve the identity used by in-flight source writes. The save flow
+    // already offers an explicit discard if the user cannot finish saving.
+    return handleStop();
+  }
   recordingStore.reset();
   // phase transition handled by subsequent action (setUploading/setError/reset)
   // phase reset handled by store actions

@@ -1,0 +1,203 @@
+name: Desktop audio reliability
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_endurance:
+        description: Run the real five-hour native endurance matrix (5h15 on Windows and Apple Silicon, 5h05 on Intel) instead of the short suites
+        type: boolean
+        required: false
+        default: false
+      run_capture_clock:
+        description: Run the paired native-input and app-mixer diagnostic (leave run_endurance false)
+        type: boolean
+        required: false
+        default: false
+      capture_buffer_trace:
+        description: Add a bounded 30-second native buffer trace to the capture-clock diagnostic
+        type: boolean
+        required: false
+        default: false
+      capture_fixed_format:
+        description: Require 48kHz mono in both capture-clock processing modes
+        type: boolean
+        required: false
+        default: false
+      run_failure_diagnostics:
+        description: Diagnose large-input startup and replay the preserved Intel finalization (leave other modes false)
+        type: boolean
+        required: false
+        default: false
+      run_macos_packaged:
+        description: Qualify unsigned native Intel and ARM macOS app bundles (leave other modes false)
+        type: boolean
+        required: false
+        default: false
+      failure_diagnostic_scope:
+        description: Select which failure diagnostics to run when that mode is enabled
+        type: choice
+        options: [all, startup, finalization]
+        required: false
+        default: all
+      startup_sample_rate:
+        description: Reference WAV rate for the startup diagnostic (16000 measures the 16 kHz 5h15 endurance fixture)
+        type: choice
+        options: ['48000', '16000']
+        required: false
+        default: '48000'
+
+# This workflow never signs, publishes, pushes, or creates a release.
+permissions:
+  contents: read
+
+concurrency:
+  group: audio-reliability-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-mode:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Reject conflicting diagnostic modes
+        env:
+          ENDURANCE: ${{ inputs.run_endurance }}
+          CAPTURE_CLOCK: ${{ inputs.run_capture_clock }}
+          FAILURE_DIAGNOSTICS: ${{ inputs.run_failure_diagnostics }}
+          MACOS_PACKAGED: ${{ inputs.run_macos_packaged }}
+          FAILURE_SCOPE: ${{ inputs.failure_diagnostic_scope }}
+          STARTUP_RATE: ${{ inputs.startup_sample_rate }}
+        run: |
+          case "$STARTUP_RATE" in
+            48000|16000) ;;
+            *) echo 'Unknown startup diagnostic sample rate.'; exit 1 ;;
+          esac
+          count=0
+          for mode in "$ENDURANCE" "$CAPTURE_CLOCK" "$FAILURE_DIAGNOSTICS" "$MACOS_PACKAGED"; do
+            if [ "$mode" = true ]; then count=$((count + 1)); fi
+          done
+          if [ "$count" -gt 1 ]; then
+            echo 'Select only one of endurance, capture-clock, failure diagnostics, or macOS packaged qualification.'
+            exit 1
+          fi
+          case "$FAILURE_SCOPE" in
+            all|startup|finalization) ;;
+            *) echo 'Unknown failure diagnostic scope.'; exit 1 ;;
+          esac
+
+  synthetic-capture:
+    if: ${{ github.event_name != 'workflow_dispatch' || (!inputs.run_endurance && !inputs.run_failure_diagnostics && !inputs.run_macos_packaged) }}
+    name: Synthetic capture / ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-2022
+          - name: macos-intel
+            os: macos-15-intel
+          - name: macos-arm64
+            os: macos-26
+    env:
+      CI: 'true'
+      HUSKY: '0'
+      API_BASE_URL: http://127.0.0.1:3000
+      VITE_API_URL: http://127.0.0.1:3000
+      SUISSE_E2E_HOOKS: '1'
+      SUISSE_TEST_NETWORK_ISOLATION: '1'
+      SUISSE_E2E_APP_DIR: dist/electron/UnPackaged
+      # No signing/upload credentials are supplied to this test workflow.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      SENTRY_AUTH_TOKEN: ''
+      GH_TOKEN: ''
+      GITHUB_TOKEN: ''
+
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install locked dependencies
+        timeout-minutes: 10
+        run: npm ci
+
+      - name: Prepare native FFmpeg and ffprobe
+        timeout-minutes: 2
+        run: node scripts/prepare-ffmpeg.js
+
+      - name: Build an unsigned Electron test bundle
+        id: build
+        timeout-minutes: 10
+        run: npx quasar build -m electron --skip-pkg
+
+      - name: Qualify the synthetic capture pipeline
+        if: ${{ !inputs.run_capture_clock }}
+        timeout-minutes: 23
+        run: node tests/e2e-harness/ci/run-qualification.js
+
+      - name: Preserve native input through an actual mixer suspension
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && !inputs.run_capture_clock }}
+        timeout-minutes: 12
+        run: node tests/e2e-harness/native-source-qualification.js --seconds 45 --expect-preserved --app-dir dist/electron/UnPackaged --bundle-sha ${{ github.sha }}
+
+      - name: Qualify synthetic device loss and signal recovery
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && !inputs.run_capture_clock }}
+        timeout-minutes: 23
+        run: node tests/e2e-harness/ci/run-qualification.js s12-device-qualification
+
+      - name: Qualify full app-process crash recovery
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && !inputs.run_capture_clock }}
+        timeout-minutes: 13
+        run: node tests/e2e-harness/ci/run-qualification.js s15-main-crash-qualification
+
+      - name: Compare native-input and actual app-mixer clocks
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.run_capture_clock }}
+        env:
+          SUISSE_CAPTURE_CLOCK_TRACE: ${{ inputs.capture_buffer_trace && '1' || '0' }}
+          SUISSE_CAPTURE_CLOCK_FIXED_FORMAT: ${{ inputs.capture_fixed_format && '1' || '0' }}
+        timeout-minutes: 23
+        run: node tests/e2e-harness/ci/run-qualification.js s16-capture-clock-diagnostic
+
+      # Keep failed captures and their original chunks, not just a verdict.
+      # The harness uses generated audio and fake credentials against localhost.
+      - name: Preserve audio, profiles, and diagnostics
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: audio-reliability-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tests/e2e-harness/work/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 1
+
+  manual-endurance:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_endurance && !inputs.run_capture_clock && !inputs.run_failure_diagnostics && !inputs.run_macos_packaged }}
+    uses: ./.github/workflows/audio-endurance.yml
+
+  failure-diagnostics:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_failure_diagnostics && !inputs.run_endurance && !inputs.run_capture_clock && !inputs.run_macos_packaged }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/audio-failure-diagnostics.yml
+    with:
+      scope: ${{ inputs.failure_diagnostic_scope }}
+      startup_sample_rate: ${{ inputs.startup_sample_rate }}
+
+  macos-packaged:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_macos_packaged && !inputs.run_endurance && !inputs.run_capture_clock && !inputs.run_failure_diagnostics }}
+    uses: ./.github/workflows/audio-macos-packaged.yml

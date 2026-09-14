@@ -102,9 +102,11 @@ function startMockBackend({ port = 3000, captureUploadsDir = null } = {}) {
     const url = req.url.split('?')[0];
     let bodyBytes = 0;
     const chunks = [];
-    const wantBody = (req.headers['content-type']?.includes('json') && url.startsWith('/__control')) ||
-      (url.startsWith('/api/custom-spelling/user') && req.method === 'POST') ||
-      (captureUploadsDir && url === '/api/desktop/upload' && req.method === 'POST');
+    const isUpload = url === '/api/desktop/upload' && req.method === 'POST';
+    // Uploads are always buffered so their exact bytes can be hashed.
+    const wantBody = isUpload || (req.headers['content-type']?.includes('json') && url.startsWith('/__control')) ||
+      (url.startsWith('/api/custom-spelling/user') && req.method === 'POST');
+    req.on('error', () => {}); // scripted connection resets
 
     // CORS preflight â€” answer before any body handling.
     if (req.method === 'OPTIONS') {
@@ -219,10 +221,19 @@ function startMockBackend({ port = 3000, captureUploadsDir = null } = {}) {
           return;
         }
         const audioFileId = `e2e-audio-${crypto.randomUUID()}`;
-        state.uploads.set(audioFileId, { status: 'PROCESSING' });
+        const body = Buffer.concat(chunks);
+        const boundary = req.headers['content-type']?.match(/boundary=(.+)$/)?.[1];
+        let fileBytes = null;
+        if (boundary) {
+          const filename = body.indexOf(Buffer.from('filename='));
+          const begin = filename >= 0 ? body.indexOf(Buffer.from('\r\n\r\n'), filename) + 4 : -1;
+          const end = begin > 3 ? body.indexOf(Buffer.from('\r\n--' + boundary), begin) : -1;
+          if (end > begin) fileBytes = body.subarray(begin, end);
+        }
+        state.uploads.set(audioFileId, { status: 'PROCESSING', fileSize: fileBytes?.length, sha256: fileBytes ? crypto.createHash('sha256').update(fileBytes).digest('hex') : null });
         if (captureUploadsDir) {
           try {
-            const part = extractUploadedFile(Buffer.concat(chunks), req.headers['content-type']);
+            const part = extractUploadedFile(body, req.headers['content-type']);
             if (part) {
               fs.writeFileSync(path.join(captureUploadsDir, `${audioFileId}.bin`), part.data);
               fs.writeFileSync(path.join(captureUploadsDir, `${audioFileId}.json`), JSON.stringify({ name: part.name, bytes: part.data.length, attempt, at: Date.now() }));
@@ -236,11 +247,13 @@ function startMockBackend({ port = 3000, captureUploadsDir = null } = {}) {
       // â”€â”€ Upload status poll â”€â”€
       const statusMatch = url.match(/^\/api\/desktop\/upload\/([^/]+)\/status$/);
       if (statusMatch) {
+        if (state.mode === 'status-404') return json(res, 404, { error: 'Recording not found' }, req);
+        if (state.mode === 'status-401') return json(res, 401, { error: 'Expired authentication' }, req);
         if (state.mode === 'status-unknown') {
           return json(res, 200, { status: 'QUEUED_FOR_SOMETHING_NEW' }, req);
         }
         const up = state.uploads.get(statusMatch[1]);
-        return json(res, 200, { status: up ? up.status : 'PROCESSING' }, req);
+        return up ? json(res, 200, { status: up.status }, req) : json(res, 404, { error: 'Recording not found' }, req);
       }
       if (url.startsWith('/api/desktop/meeting/')) {
         return json(res, 200, { status: 'COMPLETED' }, req);

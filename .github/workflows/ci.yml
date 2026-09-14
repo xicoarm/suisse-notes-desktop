@@ -8,7 +8,11 @@ on:
 
 jobs:
   lint-and-test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout code
@@ -27,7 +31,9 @@ jobs:
         run: npm run lint
 
       - name: Run tests
-        run: npm run test
+        # Real fsync and FFmpeg tests share the runner's disk. Avoid competing
+        # test files exhausting an unrelated persistence test's time budget.
+        run: npm run test -- --maxWorkers=1 --minWorkers=1
 
   build-validation:
     runs-on: ubuntu-latest

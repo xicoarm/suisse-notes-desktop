@@ -422,7 +422,8 @@ export default {
             uploadError: null
           });
 
-          // "Delete after upload" — one implementation for both platforms.
+          // "Delete after upload" — one implementation for both platforms. On
+          // desktop the main process additionally requires a verified receipt.
           recordingStore.unlockFile(recording.id);
           if (result.canDelete) {
             try { await historyStore.applyStoragePreference(recording.id); } catch (e) { console.warn('Could not delete file after upload:', e); }
@@ -434,7 +435,8 @@ export default {
           });
         } else {
           await historyStore.updateRecording(recording.id, {
-            uploadStatus: 'failed',
+            uploadStatus: result.pendingVerification ? 'pending_verification' : 'failed',
+            ...(result.audioFileId ? { audioFileId: result.audioFileId } : {}),
             uploadError: result.error
           });
 
@@ -631,9 +633,8 @@ export default {
       if (!historyStore.loaded) {
         await historyStore.loadRecordings();
       } else if (isElectron()) {
-        // Desktop: silently refresh so recordings made on other devices (or
-        // since the last visit) appear without an app restart. Mobile already
-        // accumulates its full history via the local cache, so it's left as-is.
+        // Refresh local capture warnings without delaying progress listeners
+        // while server history is unavailable or slow.
         historyStore.loadRecordings({ background: true });
       }
 
