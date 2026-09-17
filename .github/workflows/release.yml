@@ -419,7 +419,9 @@ jobs:
 
       - name: Verify release has auto-update files
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          # The uploads above authenticate with the workflow token (the action's
+          # token input); the GH_PAT secret made gh fail with HTTP 401 in 4.6.0/4.7.0.
+          GH_TOKEN: ${{ github.token }}
         run: |
           echo "=== Verifying GitHub Release assets ==="
           TAG="${{ github.ref_name }}"
