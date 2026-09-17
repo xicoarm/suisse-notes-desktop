@@ -41,8 +41,16 @@ export const sentryUploadSuccess = (recordId, audioFileId) => {
   addBreadcrumb({ category: 'upload', message: 'Upload succeeded', data: { recordId, audioFileId }, level: 'info' });
 };
 
+// An upload that never arrives is the user's recording not arriving. This used
+// to add a breadcrumb only, so it created no issue and could not be counted:
+// the failures were visible solely inside events raised for other reasons.
 export const sentryUploadFail = (recordId, error) => {
-  addBreadcrumb({ category: 'upload', message: 'Upload failed', data: { recordId, error: typeof error === 'string' ? error : error?.message }, level: 'error' });
+  const message = typeof error === 'string' ? error : error?.message;
+  addBreadcrumb({ category: 'upload', message: 'Upload failed', data: { recordId, error: message }, level: 'error' });
+  captureException(error instanceof Error ? error : new Error(message || 'Upload failed'), {
+    tags: { operation: 'upload', recordId },
+    contexts: { upload: { recordId, error: message } },
+  });
 };
 
 // --- Auth ---

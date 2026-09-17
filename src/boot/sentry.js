@@ -29,7 +29,11 @@ let SentryModule = null;
 // the boot files, the async SDK import) happen before Sentry's own global
 // handlers exist. Buffer them from the first moment this module is evaluated
 // and replay them right after init.
-const earlyErrors = (typeof window !== 'undefined' && window.Capacitor?.isNativePlatform?.())
+// The desktop renderer starts the same way, and its boot failures (a preload
+// that did not expose electronAPI, a store that throws while restoring) used to
+// be lost as well.
+const earlyErrors = (typeof window !== 'undefined' &&
+  (window.Capacitor?.isNativePlatform?.() || !!window.electronAPI))
   ? createEarlyErrorBuffer(window)
   : null;
 
@@ -167,6 +171,7 @@ async function initElectronRenderer(app, router) {
     // (@sentry/electron/renderer uses sentry-ipc: protocol which fails with contextIsolation)
     const SentryVue = await import('@sentry/vue');
     SentryModule = SentryVue;
+    const sampler = createOccurrenceSampler();
 
     // E2E runs drive the packaged app (import.meta.env.DEV === false), so without
     // this guard the synthetic mic-health/recovery/crash telemetry the renderer
@@ -181,8 +186,13 @@ async function initElectronRenderer(app, router) {
       dsn,
       environment: rendererEnvironment,
       release: `suisse-notes@${appVersion}`,
+      // Sessions come from the main process (@sentry/electron/main tracks the
+      // app session); a second session per renderer would distort crash-free
+      // rates. Client reports stay on: they are free and show what the SDK
+      // itself dropped.
       autoSessionTracking: false,
-      sendClientReports: false,
+      sendClientReports: true,
+      maxBreadcrumbs: 200,
       integrations: [
         SentryVue.vueIntegration({
           app,
@@ -191,6 +201,16 @@ async function initElectronRenderer(app, router) {
           trackComponents: true,
         }),
         SentryVue.browserTracingIntegration({ router }),
+        // The desktop UI reports its handled failures the same way the mobile
+        // app does: every console.error and console.warn call site becomes an
+        // event (sampled per session), and failed HTTP answers are captured.
+        // Without this, a failed recording start, a refused IPC call or a
+        // dropped upload retry existed only in the user's DevTools console.
+        SentryVue.captureConsoleIntegration({ levels: ['error', 'warn'] }),
+        SentryVue.httpClientIntegration({ failedRequestStatusCodes: HTTP_CAPTURE_STATUS_CODES }),
+        // The default ignore list silently dropped bridge errors; the mobile
+        // client removed it for the same reason.
+        SentryVue.eventFiltersIntegration({ disableErrorDefaults: true }),
         SentryVue.replayIntegration({
           maskAllText: false,
           maskAllInputs: true,
@@ -202,7 +222,7 @@ async function initElectronRenderer(app, router) {
       tracesSampleRate: 0.1,
       replaysSessionSampleRate: 0.1,
       replaysOnErrorSampleRate: 1.0,
-      beforeSend: scrubSensitiveData,
+      beforeSend: (event, hint) => appBeforeSend(event, hint, sampler),
       beforeBreadcrumb: filterBreadcrumbs,
     });
 
@@ -212,6 +232,19 @@ async function initElectronRenderer(app, router) {
     SentryVue.setTag('app.version', appVersion);
     SentryVue.setTag('process', 'renderer');
 
+    // Errors raised before init, in the order they happened.
+    earlyErrors?.drain(({ kind, error }) => {
+      SentryVue.captureException(error ?? new Error(`${kind} before Sentry init (no reason)`), {
+        tags: { phase: 'boot', early_error: kind }
+      });
+    });
+
+    // A lazy route chunk that fails to load after an update leaves a blank
+    // window and never reaches Vue's error handler.
+    router?.onError?.((err) => {
+      SentryVue.captureException(err, { tags: { source: 'router' } });
+    });
+
     console.log(`Sentry: Initialized desktop renderer (v${appVersion}) with Session Replay`);
   } catch (error) {
     console.error('Sentry: Failed to initialize desktop renderer', error);
@@ -219,11 +252,11 @@ async function initElectronRenderer(app, router) {
 }
 
 /**
- * beforeSend for mobile events: scrub secrets, keep failed HTTP answers out of
- * the crash-free-session statistics, attach whitelisted error details and
- * apply the per-session occurrence sampling.
+ * beforeSend for app events on both platforms: scrub secrets, keep failed HTTP
+ * answers out of the crash-free-session statistics, attach whitelisted error
+ * details and apply the per-session occurrence sampling.
  */
-export function mobileBeforeSend(event, hint, sampler) {
+export function appBeforeSend(event, hint, sampler) {
   const scrubbed = scrubSensitiveData(event, hint);
   if (!scrubbed) return null;
   treatHttpClientAsHandled(scrubbed);
@@ -310,7 +343,7 @@ async function initCapacitor(app, router) {
         SentryVue.eventFiltersIntegration({ disableErrorDefaults: true }),
       ],
       tracesSampleRate: 0.1,
-      beforeSend: (event, hint) => mobileBeforeSend(event, hint, sampler),
+      beforeSend: (event, hint) => appBeforeSend(event, hint, sampler),
       beforeBreadcrumb: filterBreadcrumbs,
     });
 
