@@ -60,6 +60,58 @@ describe('iOS native crash reporting', () => {
   });
 });
 
+describe('the iOS wiring survives a Capacitor sync', () => {
+  const os = require('node:os');
+  const path = require('node:path');
+  const { patchIosProject } = require('../../scripts/patch-capacitor-ios.cjs');
+  const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+
+  // The release workflow runs `npm run cap:sync` before it builds, and the CLI
+  // regenerates both files — so the patch has to run there, not only here.
+  it('is applied by the cap:sync script', () => {
+    expect(packageJson.scripts['cap:sync']).toContain('scripts/patch-capacitor-ios.cjs');
+  });
+
+  it('re-adds the package and the plugin registration a regeneration removed', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-sync-'));
+    const spm = path.join(root, 'ios', 'App', 'CapApp-SPM');
+    const app = path.join(root, 'ios', 'App', 'App');
+    fs.mkdirSync(spm, { recursive: true });
+    fs.mkdirSync(app, { recursive: true });
+    // Exactly what the Capacitor CLI writes: no Sentry, no custom plugin.
+    fs.writeFileSync(path.join(spm, 'Package.swift'), [
+      'let package = Package(',
+      '    dependencies: [',
+      '        .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", exact: "6.2.1"),',
+      '        .package(name: "CapacitorApp", path: "../../../node_modules/@capacitor/app")',
+      '    ],',
+      '    targets: [',
+      '        .target(',
+      '            dependencies: [',
+      '                .product(name: "Capacitor", package: "capacitor-swift-pm"),',
+      '                .product(name: "Cordova", package: "capacitor-swift-pm")',
+      '            ]',
+      '        )',
+      '    ]',
+      ')',
+    ].join('\n'));
+    fs.writeFileSync(path.join(app, 'capacitor.config.json'), JSON.stringify({ appId: 'ch.suissenotes.app' }, null, '\t'));
+
+    const first = patchIosProject(root);
+    const patched = fs.readFileSync(path.join(spm, 'Package.swift'), 'utf8');
+    expect(patched).toContain('getsentry/sentry-cocoa');
+    expect(patched).toContain('.product(name: "Sentry", package: "sentry-cocoa")');
+    expect(JSON.parse(fs.readFileSync(path.join(app, 'capacitor.config.json'), 'utf8')).packageClassList)
+      .toContain('BackgroundRecordingPlugin');
+    expect(first.every(result => result.changed)).toBe(true);
+
+    // Running it again changes nothing (the sync script runs on every build).
+    const second = patchIosProject(root);
+    expect(second.every(result => result.changed)).toBe(false);
+    expect(fs.readFileSync(path.join(spm, 'Package.swift'), 'utf8')).toBe(patched);
+  });
+});
+
 describe('native failures that reach the app layer', () => {
   const service = fs.readFileSync('src-capacitor/android/app/src/main/java/ch/suissenotes/app/ForegroundRecordingService.kt', 'utf8');
   const androidPlugin = fs.readFileSync('src-capacitor/android/app/src/main/java/ch/suissenotes/app/BackgroundRecordingPlugin.kt', 'utf8');
