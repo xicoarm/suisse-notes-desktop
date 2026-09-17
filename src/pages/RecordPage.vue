@@ -160,6 +160,18 @@
         <PreMeetingPrepOptions />
       </div>
 
+      <!-- PREPARING STATE: session, native sources and mixer are starting -->
+      <div
+        v-if="recordingStore.phase === 'preparing'"
+        class="recording-starting-card modern-card no-hover"
+      >
+        <q-spinner-dots
+          color="primary"
+          size="40px"
+        />
+        <span>{{ $t('startingRecording') }}</span>
+      </div>
+
       <!-- RECORDING/PAUSED STATE: Full-width recording card -->
       <div
         v-if="(recordingStore.isRecording || recordingStore.isPaused) && !isUploadedFromRecording"
@@ -589,7 +601,8 @@
                 color="primary"
                 size="40px"
               />
-              <span>Processing recording...</span>
+              <span>{{ $t('pipelinePreparingMessage') }}</span>
+              <span class="processing-hint">{{ $t('pipelinePreparingHint') }}</span>
             </div>
           </div>
 
@@ -1276,7 +1289,8 @@ const showUploadSection = computed(() => {
 
 // Hide tab switcher when recording is in progress
 const isRecordingActive = computed(() => {
-  return recordingStore.isRecording ||
+  return recordingStore.phase === 'preparing' ||
+         recordingStore.isRecording ||
          recordingStore.isPaused ||
          isProcessing.value ||
          isAutoUploading.value ||
@@ -1298,10 +1312,10 @@ const uploadIconColor = computed(() => {
 });
 
 const uploadHeaderText = computed(() => {
-  if (isProcessing.value) return 'Processing Recording';
-  if (isAutoUploading.value) return 'Uploading Recording';
-  if (uploadError.value) return 'Upload Failed';
-  if (recordingStore.isUploaded) return 'Upload Complete';
+  if (isProcessing.value) return t('pipelinePreparingTitle');
+  if (isAutoUploading.value) return t('pipelineUploadingTitle');
+  if (uploadError.value) return t('uploadFailed');
+  if (recordingStore.isUploaded) return t('uploadComplete');
   return 'Upload';
 });
 
@@ -1695,6 +1709,13 @@ const handleStop = async () => {
   }
 };
 
+// The processing screen blocks navigation until the upload starts. A save that
+// fails without settling the phase (e.g. a history write after finalization)
+// must fall back to the error card, whose Retry Saving re-runs the stop flow.
+const failProcessing = (message) => {
+  if (recordingStore.phase === 'processing') recordingStore.setError(message);
+};
+
 const handleStopInternal = async () => {
   // Save duration before stopping
   recordingStore.setFinalDuration(recordingStore.duration);
@@ -1769,6 +1790,7 @@ const handleStopInternal = async () => {
       await startAutoUpload();
     } else {
       // phase transition handled by subsequent action (setUploading/setError/reset)
+      if (!result.cancelled) failProcessing(result.error || t('failedToSaveRecording'));
 
       // Stopped before a single 3-second chunk landed (a tap on start followed
       // by an immediate stop): there is nothing to combine. Treat it like a
@@ -1859,6 +1881,7 @@ const handleStopInternal = async () => {
     }
   } catch (error) {
     // phase transition handled by subsequent action (setUploading/setError/reset)
+    failProcessing(error.message || t('errorProcessingRecording'));
     $q.notify({
       type: 'negative',
       message: error.message || t('errorProcessingRecording')
@@ -2188,9 +2211,9 @@ const retryChunkCombine = async () => {
   // The service must drain late native final events and retry retained blobs
   // before the main process is allowed to publish or upload this meeting.
   if (isElectron()) return handleStop();
+  // Stay in 'processing' through the combine: it is the phase with a view.
   recordingStore.phase = 'processing';
   recordingStore.error = null;
-  recordingStore.phase = 'stopped';
 
   let result;
   if (isCapacitor()) {
@@ -2276,6 +2299,7 @@ const handleSaveDeadRecording = async () => {
       await startAutoUpload();
     } else {
       // phase transition handled by subsequent action (setUploading/setError/reset)
+      if (!result.cancelled) failProcessing(result.error || 'Failed to save recording');
       $q.notify({
         type: 'negative',
         message: result.error || 'Failed to save recording'
@@ -2283,6 +2307,7 @@ const handleSaveDeadRecording = async () => {
     }
   } catch (error) {
     // phase transition handled by subsequent action (setUploading/setError/reset)
+    failProcessing(error.message || 'Error processing recording');
     $q.notify({
       type: 'negative',
       message: error.message || 'Error processing recording'
@@ -2724,6 +2749,22 @@ const removeSessionWord = (word) => {
   }
 }
 
+.recording-starting-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 48px 40px;
+  margin-bottom: 32px;
+  border-radius: 16px;
+  color: #64748b;
+  font-size: 14px;
+
+  @media (max-width: 600px) {
+    padding: 32px 16px;
+  }
+}
+
 .error-card {
   padding: 36px 40px;
   margin-bottom: 32px;
@@ -2816,10 +2857,16 @@ const removeSessionWord = (word) => {
     display: flex;
     flex-direction: column;
     align-items: center;
+    text-align: center;
     gap: 12px;
     padding: 24px;
     color: #64748b;
     font-size: 13px;
+
+    .processing-hint {
+      font-size: 12px;
+      color: #94a3b8;
+    }
   }
 
   .upload-progress-section {

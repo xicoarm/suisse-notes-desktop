@@ -767,6 +767,7 @@ const SCENARIOS = {
     maxTailExposureS: 2.5,
   })),
   's16-capture-clock-diagnostic': async () => report('s16-capture-clock-diagnostic', await require('./capture-clock-diagnostic').runCaptureClockDiagnostic()),
+  's17-finalizing-view': async () => report('s17-finalizing-view', await require('./finalizing-view-check').runFinalizingViewCheck()),
 };
 
 (async () => {

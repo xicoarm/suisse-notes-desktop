@@ -213,6 +213,44 @@ describe('Recording Store', () => {
         expect(store.audioFilePath).toBe('/path/to/audio.webm');
         expect(store.phase).toBe('stopped');
       });
+
+      // A 62-minute 4.7.0 recording spent 73 s here; the former 'stopped'
+      // phase rendered an empty Record page with clickable tabs meanwhile.
+      it('holds a rendered, blocking phase for the whole finalization', async () => {
+        const store = useRecordingStore();
+        store.recordId = 'test-id';
+        store.phase = 'recording';
+        let finish;
+        mockElectronAPI.recording.combineChunks.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+        const stopping = store.stopRecording(3714);
+        await vi.waitFor(() => expect(mockElectronAPI.recording.combineChunks).toHaveBeenCalledTimes(1));
+        expect(store.phase).toBe('processing');
+        expect(store.isBlocking).toBe(true);
+        expect(await store.startRecording()).toMatchObject({ success: false });
+        finish({ success: true, outputPath: '/path/to/audio.webm' });
+        expect(await stopping).toMatchObject({ success: true });
+        expect(store.phase).toBe('stopped');
+      });
+
+      it('leaves the Record page stop flow in processing until that flow starts the upload', async () => {
+        const store = useRecordingStore();
+        store.recordId = 'test-id';
+        store.phase = 'processing';
+        mockElectronAPI.recording.combineChunks.mockResolvedValue({ success: true, outputPath: '/path/to/audio.webm' });
+        expect(await store.stopRecording(60)).toMatchObject({ success: true });
+        expect(store.phase).toBe('processing');
+      });
+
+      it('reports a failed finalization as an error, not as an endless processing screen', async () => {
+        const store = useRecordingStore();
+        store.recordId = 'test-id';
+        store.phase = 'processing';
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        mockElectronAPI.recording.combineChunks.mockResolvedValue({ success: false, error: 'Encode native recording directly failed' });
+        expect(await store.stopRecording(60)).toMatchObject({ success: false, partialRecovery: false });
+        expect(store.phase).toBe('error');
+        expect(store.isBlocking).toBe(false);
+      });
     });
 
     describe('saveChunk', () => {

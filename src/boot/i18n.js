@@ -99,6 +99,11 @@ const messages = {
     processingOnServer: 'Processing on server...',
     uploadComplete: 'Upload complete',
     processing: 'Processing...',
+    startingRecording: 'Starting recording...',
+    pipelinePreparingTitle: 'Preparing recording',
+    pipelinePreparingMessage: 'Saving the recording and preparing it for upload...',
+    pipelinePreparingHint: 'Long meetings can take a few minutes. Please keep the app open.',
+    pipelineUploadingTitle: 'Uploading recording',
 
     // Recording Health Monitor
     recordingStoppedUnexpectedly: 'Recording Stopped Unexpectedly',
@@ -640,6 +645,11 @@ const messages = {
     processingOnServer: 'Wird auf dem Server verarbeitet...',
     uploadComplete: 'Upload abgeschlossen',
     processing: 'Wird verarbeitet...',
+    startingRecording: 'Aufnahme wird gestartet...',
+    pipelinePreparingTitle: 'Aufnahme wird vorbereitet',
+    pipelinePreparingMessage: 'Die Aufnahme wird gesichert und für den Upload vorbereitet...',
+    pipelinePreparingHint: 'Bei langen Meetings kann das einige Minuten dauern. Bitte die App geöffnet lassen.',
+    pipelineUploadingTitle: 'Aufnahme wird hochgeladen',
 
     // Recording Health Monitor
     recordingStoppedUnexpectedly: 'Aufnahme unerwartet gestoppt',
@@ -1181,6 +1191,11 @@ const messages = {
     processingOnServer: 'Traitement sur le serveur...',
     uploadComplete: 'Téléchargement terminé',
     processing: 'Traitement...',
+    startingRecording: "Démarrage de l'enregistrement...",
+    pipelinePreparingTitle: "Préparation de l'enregistrement",
+    pipelinePreparingMessage: "L'enregistrement est sauvegardé et préparé pour l'envoi...",
+    pipelinePreparingHint: "Pour les longues réunions, cela peut prendre quelques minutes. Veuillez laisser l'application ouverte.",
+    pipelineUploadingTitle: "Envoi de l'enregistrement",
 
     // Recording Health Monitor
     recordingStoppedUnexpectedly: 'Enregistrement arrêté de manière inattendue',
@@ -1722,6 +1737,11 @@ const messages = {
     processingOnServer: 'Elaborazione sul server...',
     uploadComplete: 'Caricamento completato',
     processing: 'Elaborazione...',
+    startingRecording: 'Avvio della registrazione...',
+    pipelinePreparingTitle: 'Preparazione della registrazione',
+    pipelinePreparingMessage: 'La registrazione viene salvata e preparata per il caricamento...',
+    pipelinePreparingHint: "Per le riunioni lunghe può richiedere alcuni minuti. Tieni aperta l'app.",
+    pipelineUploadingTitle: 'Caricamento della registrazione',
 
     // Recording Health Monitor
     recordingStoppedUnexpectedly: 'Registrazione interrotta inaspettatamente',
