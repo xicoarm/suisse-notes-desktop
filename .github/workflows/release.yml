@@ -137,15 +137,38 @@ jobs:
           Write-Host "latest.yml OK:"
           Write-Host $content
 
+      # Uploaded one file at a time with retries. The release action deletes an
+      # existing asset before it re-uploads it, so a failed large upload (the
+      # 4.7.2 release hit repeated HTML error pages on the 170-215 MB files)
+      # left the release without the file the update manifest points at.
+      # `gh release upload --clobber` replaces in place and never deletes first.
       - name: Upload Windows artifacts to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: |
-            dist/electron/Packaged/*.exe
-            dist/electron/Packaged/latest.yml
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # No .exe.blockmap: it is generated before signing, so it no longer
+          # matches the signed installer and a differential update would fall
+          # back to a full download anyway.
+          files=(dist/electron/Packaged/*.exe dist/electron/Packaged/latest.yml)
+          test ${#files[@]} -gt 0
+          for file in "${files[@]}"; do
+            for attempt in 1 2 3 4 5; do
+              echo "Uploading $(basename "$file") (attempt $attempt)"
+              if gh release upload "$TAG" "$file" --clobber --repo "$GITHUB_REPOSITORY"; then
+                echo "Uploaded $(basename "$file")"
+                break
+              fi
+              if [ "$attempt" = "5" ]; then
+                echo "FATAL: could not upload $(basename "$file") after 5 attempts"
+                exit 1
+              fi
+              sleep $((attempt * 20))
+            done
+          done
 
   # =============================================================================
   # macOS Build - sign, notarize, then upload to release
@@ -404,18 +427,33 @@ jobs:
           done
           echo "=== All DMGs notarized and stapled ==="
 
+      # See the Windows job: one file at a time, retried, and replaced in place.
+      # The update manifest goes last, so the release never advertises a build
+      # whose files are not all there yet.
       - name: Upload macOS artifacts to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: |
-            dist/electron/Packaged/*.dmg
-            dist/electron/Packaged/*.dmg.blockmap
-            dist/electron/Packaged/*.zip
-            dist/electron/Packaged/*.zip.blockmap
-            dist/electron/Packaged/latest-mac.yml
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/electron/Packaged/*.dmg dist/electron/Packaged/*.dmg.blockmap                  dist/electron/Packaged/*.zip dist/electron/Packaged/*.zip.blockmap                  dist/electron/Packaged/latest-mac.yml)
+          test ${#files[@]} -gt 0
+          for file in "${files[@]}"; do
+            for attempt in 1 2 3 4 5; do
+              echo "Uploading $(basename "$file") (attempt $attempt)"
+              if gh release upload "$TAG" "$file" --clobber --repo "$GITHUB_REPOSITORY"; then
+                echo "Uploaded $(basename "$file")"
+                break
+              fi
+              if [ "$attempt" = "5" ]; then
+                echo "FATAL: could not upload $(basename "$file") after 5 attempts"
+                exit 1
+              fi
+              sleep $((attempt * 20))
+            done
+          done
 
       - name: Verify release has auto-update files
         env:
