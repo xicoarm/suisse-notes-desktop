@@ -390,6 +390,9 @@ public class BackgroundRecordingPlugin: CAPPlugin {
 
             var insertTime = CMTime.zero
             var loadedChunkCount = 0
+            // A chunk that cannot be read is lost meeting audio. Counting the
+            // skips turns a silent partial loss into something the app reports.
+            var skippedChunks: [String] = []
 
             for chunkURL in chunkFiles {
                 let asset = AVURLAsset(url: chunkURL)
@@ -397,6 +400,7 @@ public class BackgroundRecordingPlugin: CAPPlugin {
                 let tracks = asset.tracks(withMediaType: .audio)
                 guard let assetTrack = tracks.first else {
                     NSLog("BackgroundRecording: Skipping corrupt chunk: \(chunkURL.lastPathComponent)")
+                    skippedChunks.append("\(chunkURL.lastPathComponent): no audio track")
                     continue
                 }
 
@@ -411,13 +415,17 @@ public class BackgroundRecordingPlugin: CAPPlugin {
                     loadedChunkCount += 1
                 } catch {
                     NSLog("BackgroundRecording: Error inserting chunk \(chunkURL.lastPathComponent): \(error)")
+                    skippedChunks.append("\(chunkURL.lastPathComponent): \(error.localizedDescription)")
                     continue
                 }
             }
 
             if loadedChunkCount == 0 {
-                call.reject("Could not read any audio chunks")
+                call.reject("Could not read any audio chunks", "COMBINE_NO_READABLE_CHUNKS")
                 return
+            }
+            if !skippedChunks.isEmpty {
+                NSLog("BackgroundRecording: combining with \(skippedChunks.count) unreadable chunk(s) of \(chunkFiles.count)")
             }
 
             // Remove existing output file if present
@@ -457,13 +465,16 @@ public class BackgroundRecordingPlugin: CAPPlugin {
                     "outputPath": relativePath,
                     "fileSize": fileSize,
                     "chunkCount": loadedChunkCount,
-                    "duration": totalDurationSeconds.isFinite ? totalDurationSeconds : 0
+                    "duration": totalDurationSeconds.isFinite ? totalDurationSeconds : 0,
+                    "skippedChunkCount": skippedChunks.count,
+                    "expectedChunkCount": chunkFiles.count,
+                    "skippedChunks": Array(skippedChunks.prefix(20))
                 ])
 
             case .failed:
                 let errorMsg = exportSession.error?.localizedDescription ?? "Export failed"
                 NSLog("BackgroundRecording: Export failed: \(errorMsg)")
-                call.reject("Failed to combine chunks: \(errorMsg)")
+                call.reject("Failed to combine chunks: \(errorMsg)", "COMBINE_EXPORT_FAILED", exportSession.error)
 
             case .cancelled:
                 call.reject("Export was cancelled")
@@ -516,6 +527,12 @@ public class BackgroundRecordingPlugin: CAPPlugin {
             // Expiration handler — iOS is about to kill our background time
             guard let self = self else { return }
             NSLog("BackgroundRecording: Background task expiring, saving checkpoint")
+            self.notifyListeners("nativeFailure", data: [
+                "stage": "background-expiry",
+                "message": "iOS ended the app's background time; the recording was checkpointed and stopped",
+                "fatal": true,
+                "platform": "ios"
+            ])
             // Save state checkpoint
             if let session = self.recordingSession {
                 UserDefaults.standard.set(session.id, forKey: "bgRecording_recordId")
@@ -568,7 +585,16 @@ public class BackgroundRecordingPlugin: CAPPlugin {
                 do {
                     try self.audioSession?.setActive(true)
                 } catch {
+                    // Execution continues as if the session were live; without
+                    // this report nobody could see that a meeting went silent
+                    // right after a phone call.
                     NSLog("BackgroundRecording: Failed to reactivate audio session: \(error)")
+                    self.notifyListeners("nativeFailure", data: [
+                        "stage": "resume",
+                        "message": "Failed to reactivate the audio session after an interruption: \(error.localizedDescription)",
+                        "fatal": false,
+                        "platform": "ios"
+                    ])
                 }
 
                 if let recorder = self.audioRecorder {
