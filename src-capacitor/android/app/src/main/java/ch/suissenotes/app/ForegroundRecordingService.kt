@@ -65,6 +65,15 @@ class ForegroundRecordingService : Service() {
             private set
 
         // Broadcast actions
+        // Failures that do not kill the recording but that nobody could see:
+        // they were written to Logcat and nowhere else, so a recording that
+        // never started, a resume that failed after a call, or a last chunk
+        // that was never closed looked like a healthy session from the app.
+        const val ACTION_RECORDING_FAILURE = "ch.suissenotes.app.RECORDING_FAILURE"
+        const val EXTRA_STAGE = "stage"
+        const val EXTRA_MESSAGE = "message"
+        const val EXTRA_FATAL = "fatal"
+
         const val ACTION_RECORDING_DEAD = "ch.suissenotes.app.RECORDING_DEAD"
         const val ACTION_RECORDING_INTERRUPTED = "ch.suissenotes.app.RECORDING_INTERRUPTED"
         const val ACTION_RECORDING_RESUMED = "ch.suissenotes.app.RECORDING_RESUMED"
@@ -191,7 +200,10 @@ class ForegroundRecordingService : Service() {
 
     private fun startRecording(recordId: String) {
         if (isRecording) {
+            // The app asked for a second recording while one is running: the
+            // first one keeps going and the new request is silently ignored.
             Log.w(TAG, "Already recording")
+            broadcastFailure("start", "A recording is already running; the new start request was ignored", false)
             return
         }
 
@@ -233,6 +245,10 @@ class ForegroundRecordingService : Service() {
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start recording", e)
+            // The plugin already answered success to JavaScript (the service is
+            // started with an Intent), so without this the app believes it is
+            // recording while nothing is being captured.
+            broadcastFailure("start", "Failed to start recording: ${e.message}", true)
             onError?.invoke("Failed to start recording: ${e.message}")
             releaseWakeLock()
             abandonAudioFocus()
@@ -324,6 +340,7 @@ class ForegroundRecordingService : Service() {
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start new chunk", e)
+            broadcastFailure("chunk", "Failed to start new chunk: ${e.message}", true)
             onError?.invoke("Failed to save chunk: ${e.message}")
             // FIX 4: Escalate chunk creation failure to recording death
             handleRecordingDeath("chunk_creation_failed")
@@ -383,6 +400,26 @@ class ForegroundRecordingService : Service() {
         stopSelf()
     }
 
+    /**
+     * Report a native failure to the app layer, which logs it and reports it.
+     * `fatal` marks a failure that means no audio is being captured any more.
+     */
+    private fun broadcastFailure(stage: String, message: String?, fatal: Boolean) {
+        try {
+            val intent = Intent(ACTION_RECORDING_FAILURE).apply {
+                putExtra(EXTRA_STAGE, stage)
+                putExtra(EXTRA_MESSAGE, message ?: "unknown error")
+                putExtra(EXTRA_FATAL, fatal)
+                putExtra(EXTRA_RECORD_ID, currentRecordId ?: "")
+                putExtra(EXTRA_CHUNK_COUNT, chunkIndex)
+                setPackage(packageName)
+            }
+            sendBroadcast(intent)
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not broadcast failure ($stage)", e)
+        }
+    }
+
     private fun broadcastRecordingDeath(reason: String) {
         val intent = Intent(ACTION_RECORDING_DEAD).apply {
             putExtra(EXTRA_REASON, reason)
@@ -409,6 +446,7 @@ class ForegroundRecordingService : Service() {
             Log.i(TAG, "Recording paused")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to pause recording", e)
+            broadcastFailure("pause", "Failed to pause recording: ${e.message}", false)
         }
     }
 
@@ -428,7 +466,10 @@ class ForegroundRecordingService : Service() {
 
             Log.i(TAG, "Recording resumed")
         } catch (e: Exception) {
+            // Nothing is captured from here on, but the app and the
+            // notification still show a running recording.
             Log.e(TAG, "Failed to resume recording", e)
+            broadcastFailure("resume", "Failed to resume recording after an interruption: ${e.message}", true)
         }
     }
 
@@ -443,7 +484,10 @@ class ForegroundRecordingService : Service() {
                 try {
                     stop()
                 } catch (e: Exception) {
+                    // A MediaRecorder that cannot stop leaves its last chunk
+                    // truncated or unusable: that is lost meeting audio.
                     Log.w(TAG, "Error stopping recorder", e)
+                    broadcastFailure("stop", "The last chunk could not be closed: ${e.message}", false)
                 }
                 release()
             }
@@ -459,6 +503,7 @@ class ForegroundRecordingService : Service() {
 
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping recording", e)
+            broadcastFailure("stop", "Error while stopping the recording: ${e.message}", false)
         } finally {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()

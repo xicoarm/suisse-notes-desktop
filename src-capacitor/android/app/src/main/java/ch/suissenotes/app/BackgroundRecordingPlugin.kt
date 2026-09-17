@@ -18,6 +18,7 @@ import android.provider.Settings
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
@@ -95,6 +96,26 @@ class BackgroundRecordingPlugin : Plugin() {
         }
     }
 
+    // Native failures that do not kill the recording. Without this channel they
+    // reached Logcat only, so the app could not log or report them: a recording
+    // that never started, a resume that failed after a call, a last chunk that
+    // could not be closed.
+    private val recordingFailureReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ForegroundRecordingService.ACTION_RECORDING_FAILURE) {
+                val data = JSObject().apply {
+                    put("stage", intent.getStringExtra(ForegroundRecordingService.EXTRA_STAGE) ?: "unknown")
+                    put("message", intent.getStringExtra(ForegroundRecordingService.EXTRA_MESSAGE) ?: "unknown error")
+                    put("fatal", intent.getBooleanExtra(ForegroundRecordingService.EXTRA_FATAL, false))
+                    put("recordId", intent.getStringExtra(ForegroundRecordingService.EXTRA_RECORD_ID) ?: "")
+                    put("chunkCount", intent.getIntExtra(ForegroundRecordingService.EXTRA_CHUNK_COUNT, 0))
+                    put("platform", "android")
+                }
+                notifyListeners("nativeFailure", data)
+            }
+        }
+    }
+
     override fun load() {
         super.load()
         // Register broadcast receiver for recording death events
@@ -102,15 +123,18 @@ class BackgroundRecordingPlugin : Plugin() {
         // FIX 3: Register receivers for audio focus interruption/resume events
         val interruptedFilter = IntentFilter(ForegroundRecordingService.ACTION_RECORDING_INTERRUPTED)
         val resumedFilter = IntentFilter(ForegroundRecordingService.ACTION_RECORDING_RESUMED)
+        val failureFilter = IntentFilter(ForegroundRecordingService.ACTION_RECORDING_FAILURE)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             context.registerReceiver(recordingDeadReceiver, deadFilter, Context.RECEIVER_NOT_EXPORTED)
             context.registerReceiver(recordingInterruptedReceiver, interruptedFilter, Context.RECEIVER_NOT_EXPORTED)
             context.registerReceiver(recordingResumedReceiver, resumedFilter, Context.RECEIVER_NOT_EXPORTED)
+            context.registerReceiver(recordingFailureReceiver, failureFilter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             context.registerReceiver(recordingDeadReceiver, deadFilter)
             context.registerReceiver(recordingInterruptedReceiver, interruptedFilter)
             context.registerReceiver(recordingResumedReceiver, resumedFilter)
+            context.registerReceiver(recordingFailureReceiver, failureFilter)
         }
     }
 
@@ -124,6 +148,9 @@ class BackgroundRecordingPlugin : Plugin() {
         } catch (e: Exception) { /* Already unregistered */ }
         try {
             context.unregisterReceiver(recordingResumedReceiver)
+        } catch (e: Exception) { /* Already unregistered */ }
+        try {
+            context.unregisterReceiver(recordingFailureReceiver)
         } catch (e: Exception) { /* Already unregistered */ }
     }
 
@@ -361,7 +388,7 @@ class BackgroundRecordingPlugin : Plugin() {
 
                 if (loadedChunkCount == 0) {
                     outputFile.delete()
-                    call.reject("Could not read any audio chunks")
+                    call.reject("Could not read any audio chunks", "COMBINE_NO_READABLE_CHUNKS")
                     return
                 }
 
@@ -397,6 +424,10 @@ class BackgroundRecordingPlugin : Plugin() {
             var outputTrackIndex = -1
             var loadedChunkCount = 0
             var timeOffsetUs = 0L
+            // A chunk that cannot be read is lost meeting audio. Counting the
+            // skips turns a silent partial loss into something the app can
+            // report and show in History.
+            val skippedChunks = mutableListOf<String>()
 
             try {
                 muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
@@ -423,6 +454,7 @@ class BackgroundRecordingPlugin : Plugin() {
 
                         if (audioTrackIdx < 0) {
                             Log.w(TAG, "Skipping chunk with no audio track: ${chunkFile.name}")
+                            skippedChunks.add("${chunkFile.name}: no audio track")
                             continue
                         }
 
@@ -460,6 +492,7 @@ class BackgroundRecordingPlugin : Plugin() {
                         loadedChunkCount++
                     } catch (e: Exception) {
                         Log.w(TAG, "Error processing chunk ${chunkFile.name}: ${e.message}")
+                        skippedChunks.add("${chunkFile.name}: ${e.message}")
                         continue
                     } finally {
                         extractor.release()
@@ -488,6 +521,12 @@ class BackgroundRecordingPlugin : Plugin() {
                     put("fileSize", fileSize)
                     put("chunkCount", loadedChunkCount)
                     put("duration", totalDurationSeconds)
+                    put("skippedChunkCount", skippedChunks.size)
+                    put("expectedChunkCount", chunkFiles.size)
+                    put("skippedChunks", JSArray(skippedChunks.take(20)))
+                }
+                if (skippedChunks.isNotEmpty()) {
+                    Log.w(TAG, "Combined with ${skippedChunks.size} unreadable chunk(s) of ${chunkFiles.size}")
                 }
                 call.resolve(result)
 
@@ -495,7 +534,7 @@ class BackgroundRecordingPlugin : Plugin() {
                 muxer?.release()
                 if (outputFile.exists()) outputFile.delete()
                 Log.e(TAG, "Failed to combine chunks", e)
-                call.reject("Failed to combine chunks: ${e.message}")
+                call.reject("Failed to combine chunks: ${e.message}", "COMBINE_FAILED", e)
             }
         }
     }

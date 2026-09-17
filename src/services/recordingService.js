@@ -22,7 +22,10 @@ async function showRecordingNotification() {
 
     await BackgroundRecording.startForegroundService();
   } catch (e) {
-    console.warn('Could not start foreground service:', e);
+    // Without the foreground service Android may suspend the WebView mid-
+    // meeting; on Android 12+ the start can also be refused outright. Report
+    // it as an error, not a warning: the recording is at risk from here on.
+    console.error('Could not start the recording foreground service:', e?.code || '', e?.message || e);
   }
 }
 
