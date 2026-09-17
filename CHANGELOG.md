@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.0...v4.7.1) (2026-09-17)
+
+
+### Bug Fixes
+
+* **record:** show the processing screen during finalization, not an empty page ([bd445c9](https://github.com/xicoarm/suisse-notes-desktop/commit/bd445c9a4f7835a4f048e80a62c9b703b425e223))
+
 ## [4.7.0](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.6.0...v4.7.0) (2026-09-14)
 
 
