@@ -125,8 +125,9 @@ corrected analysis; they do not establish a one-second loss guarantee.
 rendered Record page view every 100 ms through start, a 240-second recording
 (`SUISSE_FINALIZING_VIEW_SECONDS`), finalization and upload. It fails on any
 sample whose phase renders no view, the empty page with only the mode tabs, and on
-mode tabs shown in a pipeline phase. On 4.7.0 it showed ~9 s of an empty page
-after stop.
+mode tabs shown in a pipeline phase. It keeps a screenshot two seconds into the save
+and one after upload. On 4.7.0 it showed ~9 s of an empty page after stop. Pull
+requests run it on Windows, Intel Mac and Apple Silicon.
 
 Do not rebuild the active bundle, run competing captures, or run unrelated heavy
 tests during a baseline. Intentional contention should be a named fault case.

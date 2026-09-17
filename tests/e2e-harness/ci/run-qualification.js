@@ -11,7 +11,7 @@ const repository = path.resolve(__dirname, '../../..');
 const work = path.join(repository, 'tests/e2e-harness/work');
 const bundle = path.join(repository, 'dist/electron/UnPackaged');
 const scenario = process.argv[2] || 's11-capture-qualification';
-if (!['s11-capture-qualification', 's12-device-qualification', 's13-coded-endurance', 's15-main-crash-qualification', 's16-capture-clock-diagnostic'].includes(scenario)) {
+if (!['s11-capture-qualification', 's12-device-qualification', 's13-coded-endurance', 's15-main-crash-qualification', 's16-capture-clock-diagnostic', 's17-finalizing-view'].includes(scenario)) {
   throw new Error('Unknown hosted qualification scenario');
 }
 const diagnostics = path.join(work, 'ci', scenario);

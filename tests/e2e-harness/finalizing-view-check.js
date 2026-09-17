@@ -3,7 +3,8 @@
 // finalized and uploaded after stop. Every phase must render a visible view;
 // an empty page with only the mode tabs is the reported "white screen".
 
-const { buildScenario } = require('./lib/audio');
+const path = require('path');
+const { buildCodedScenario, WORK_DIR } = require('./lib/audio');
 const { startMockBackend } = require('./lib/mock-backend');
 const { AppDriver, sleep } = require('./lib/app-driver');
 
@@ -27,13 +28,16 @@ function sampleView(views) {
   };
 }
 
-function startSampler(app, intervalMs = 100) {
+function startSampler(app, { intervalMs = 100, onSample = null } = {}) {
   const samples = [];
   let running = true;
   const loop = (async () => {
     while (running) {
-      try { samples.push(await app.evalTimed(sampleView, VIEWS, 5000)); }
-      catch (error) { samples.push({ at: Date.now(), error: error.message }); }
+      let sample;
+      try { sample = await app.evalTimed(sampleView, VIEWS, 5000); }
+      catch (error) { sample = { at: Date.now(), error: error.message }; }
+      samples.push(sample);
+      if (onSample && !sample.error) await onSample(sample);
       await sleep(intervalMs);
     }
   })();
@@ -58,15 +62,20 @@ const PIPELINE_PHASES = ['preparing', 'stopping', 'stopped', 'processing', 'uplo
 function assessSamples(samples, label) {
   const problems = [];
   const runs = summarize(samples);
+  let emptySamples = 0;
   for (const run of runs) {
     const { sample } = run;
     if (sample.error) continue;
     const ms = run.until - run.from;
-    if (!sample.shown.length) problems.push(`${label}: empty page in phase '${sample.phase}' for ~${ms} ms (${run.samples} samples, tabs visible: ${sample.tabs})`);
-    else if (sample.tabs && PIPELINE_PHASES.includes(sample.phase)) problems.push(`${label}: mode tabs clickable in phase '${sample.phase}' for ~${ms} ms`);
+    if (!sample.shown.length) {
+      emptySamples += run.samples;
+      problems.push(`${label}: empty page in phase '${sample.phase}' for ~${ms} ms (${run.samples} samples, tabs visible: ${sample.tabs})`);
+    } else if (sample.tabs && PIPELINE_PHASES.includes(sample.phase)) {
+      problems.push(`${label}: mode tabs clickable in phase '${sample.phase}' for ~${ms} ms`);
+    }
   }
   const notes = runs.map(run => `${label}: ${run.key} for ~${run.until - run.from} ms (${run.samples} samples)`);
-  return { problems, notes, runs };
+  return { problems, notes, runs, emptySamples };
 }
 
 async function runFinalizingViewCheck({
@@ -74,12 +83,18 @@ async function runFinalizingViewCheck({
   cdpPort = 9339,
   mockPort = 3000,
 } = {}) {
-  const scenario = buildScenario('s17-finalizing-view', [{ type: 'speech', seconds: recordSeconds + 90 }]);
+  const name = 's17-finalizing-view';
+  const reference = buildCodedScenario(name, [{ type: 'speech', seconds: recordSeconds + 90 }]);
   const mock = await startMockBackend({ port: mockPort });
-  const app = new AppDriver({ name: 's17-finalizing-view', apiUrl: mock.url, fakeAudioWav: scenario.wavPath, cdpPort });
+  const app = new AppDriver({ name, apiUrl: mock.url, fakeAudioWav: reference.wavPath, cdpPort,
+    env: { SUISSE_TEST_NETWORK_ISOLATION: '1' } });
+  const result = { name, pass: false, problems: [], notes: [], platform: `${process.platform}/${process.arch}`,
+    bundleSha: process.env.SUISSE_E2E_BUNDLE_SHA || null, recordSeconds, screenshots: [] };
   try {
     await app.launch({ freshProfile: true });
     await app.login();
+    const apiUrl = await app.evalTimed(() => window.electronAPI.config.getApiUrl());
+    if (apiUrl !== mock.url) throw new Error('The app is not using the local test backend');
 
     const start = startSampler(app);
     await app.startRecording();
@@ -89,25 +104,46 @@ async function runFinalizingViewCheck({
 
     await sleep(recordSeconds * 1000);
 
-    const stop = startSampler(app);
+    // Capture what the user sees two seconds into the save, whatever it is.
+    let leftRecordingAt = null;
+    const stop = startSampler(app, {
+      onSample: async sample => {
+        if (leftRecordingAt === null && !['recording', 'paused'].includes(sample.phase)) leftRecordingAt = sample.at;
+        if (leftRecordingAt !== null && !result.screenshots.length && Date.now() - leftRecordingAt >= 2000 &&
+            ['stopping', 'stopped', 'processing'].includes(sample.phase)) {
+          const file = await app.screenshot(`${name}-during-save-${sample.phase}`);
+          result.screenshots.push({ file: path.relative(WORK_DIR, file), phase: sample.phase, shown: sample.shown,
+            tabs: sample.tabs, msAfterRecordingEnded: Date.now() - leftRecordingAt });
+        }
+      },
+    });
     const stoppedAt = Date.now();
     await app.stopRecording();
     await app.waitForPhase(['uploaded', 'error'], 600_000);
     const settledAt = Date.now();
     await sleep(1500);
     await stop.stop();
+    const uploadedShot = await app.screenshot(`${name}-after-upload`);
+    result.screenshots.push({ file: path.relative(WORK_DIR, uploadedShot), phase: await app.getPhase() });
 
     const started = assessSamples(start.samples, 'start');
     const stopped = assessSamples(stop.samples, 'stop');
     const finalPhase = await app.getPhase();
-    const problems = [...started.problems, ...stopped.problems];
-    if (finalPhase !== 'uploaded') problems.push(`Expected the recording to finish uploaded, final phase '${finalPhase}'`);
-    return {
-      pass: problems.length === 0,
-      problems,
-      notes: [`recorded ~${recordSeconds}s; stop to uploaded ${settledAt - stoppedAt} ms`, ...started.notes, ...stopped.notes],
-      samples: { start: start.samples, stop: stop.samples },
-    };
+    result.problems.push(...started.problems, ...stopped.problems);
+    if (finalPhase !== 'uploaded') result.problems.push(`Expected the recording to finish uploaded, final phase '${finalPhase}'`);
+    if (!result.screenshots.some(shot => shot.msAfterRecordingEnded !== undefined)) {
+      result.notes.push('The save finished within two seconds; no mid-save screenshot was taken');
+    }
+    result.emptySamplesAfterStop = stopped.emptySamples;
+    result.notes.push(`${result.platform}: recorded ~${recordSeconds}s; stop request to ${finalPhase} ${settledAt - stoppedAt} ms`,
+      ...started.notes, ...stopped.notes);
+    result.samples = { start: start.samples, stop: stop.samples };
+    result.pass = result.problems.length === 0;
+    return result;
+  } catch (error) {
+    result.problems.push(`Check did not complete: ${error.message}`);
+    await app.screenshot(`${name}-failure`).catch(() => {});
+    return result;
   } finally {
     await app.close({ keepProfile: true });
     await mock.close();

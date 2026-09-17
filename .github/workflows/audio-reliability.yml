@@ -162,6 +162,13 @@ jobs:
         timeout-minutes: 13
         run: node tests/e2e-harness/ci/run-qualification.js s15-main-crash-qualification
 
+      # UI check: every phase from start through save and upload renders a view
+      # (4.7.0 showed an empty page with only the mode tabs while saving).
+      - name: Check the Record page view through start, save and upload
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && !inputs.run_capture_clock }}
+        timeout-minutes: 15
+        run: node tests/e2e-harness/ci/run-qualification.js s17-finalizing-view
+
       - name: Compare native-input and actual app-mixer clocks
         if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.run_capture_clock }}
         env:
