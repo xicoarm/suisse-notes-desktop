@@ -108,15 +108,23 @@ Sentry.init({
     ? 'e2e'
     : (app.isPackaged ? 'production' : 'development'),
   release: `suisse-notes@${app.getVersion()}`,
+  // Desktop diagnosis used to depend on asking the user for main.log. Keep the
+  // stack of every captured message and a long breadcrumb trail so a single
+  // event carries the steps that led to it.
+  attachStacktrace: true,
+  maxBreadcrumbs: 200,
   beforeSend(event, hint) {
     // Scrub sensitive data from error reports
     if (event.request?.headers?.authorization) {
       event.request.headers.authorization = '[REDACTED]';
     }
-    // Filter out read-only volume errors — handled via UX (move-to-Applications dialog)
-    const message = event.exception?.values?.[0]?.value || '';
+    // Read-only volume: the app guides the user to move it to /Applications, so
+    // this is not an incident — but it stays reportable, because how often it
+    // happens is exactly what we could not see while it was dropped here.
+    const message = event.exception?.values?.[0]?.value || event.message || '';
     if (message.includes('read-only volume') || (message.includes('read-only') && message.includes('move the application'))) {
-      return null;
+      event.level = 'warning';
+      event.tags = { ...(event.tags || {}), handled_by_ux: 'read-only-volume' };
     }
     // Downgrade client-transient network errors to 'warning' so alert rules
     // scoped to error level stop paging on user WiFi drops.
@@ -127,6 +135,14 @@ Sentry.init({
     return event;
   }
 });
+
+// Everything the main process logs is now reported: an error line becomes a
+// Sentry event, a warning becomes a warning-level event, and info lines become
+// breadcrumbs. Before this, a failed AudioTee start, a failed finalization or a
+// refused IPC call existed only in the user's local main.log.
+const sentryReporting = require('./sentry-reporting');
+sentryReporting.installLogReporting({ log, Sentry });
+const windowReporting = sentryReporting.installWindowReporting({ Sentry, log });
 
 // === Global Error Handlers ===
 // Catch uncaught exceptions in main process
@@ -143,7 +159,10 @@ process.on('unhandledRejection', (reason, promise) => {
   // sleep/wake). The updater retries internally and surfaces a real failure
   // via autoUpdater.on('error') if it gives up — so this rejection is noise.
   if (/net::ERR_NETWORK_CHANGED|net::ERR_NETWORK_IO_SUSPENDED|net::ERR_INTERNET_DISCONNECTED/i.test(msg)) {
-    log.warn('Suppressed transient net:: rejection (likely auto-updater during network change):', msg);
+    // Keep it out of the error stream, but no longer invisible: the log hook
+    // files it as a warning, so a download that really dies in this shape is
+    // still countable.
+    log.warn('Transient net:: rejection (likely auto-updater during network change):', msg);
     return;
   }
   log.error('Unhandled Rejection at:', promise, 'reason:', reason);
@@ -1320,6 +1339,10 @@ function createWindow() {
       backgroundThrottling: false
     }
   });
+
+  // A hung window, a failed preload and a window that never loads are all
+  // invisible from main otherwise — they produce no exception anywhere.
+  windowReporting.attachWindow(mainWindow, { isRecording: () => isRecordingInProgress });
 
   // Load the app
   // In dev mode, load from Vite dev server; in production, load the bundled file
