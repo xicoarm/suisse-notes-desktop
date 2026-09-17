@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.1...v4.7.2) (2026-09-17)
+
+
+### Features
+
+* **desktop:** report every failure to Sentry, not only crashes ([2016308](https://github.com/xicoarm/suisse-notes-desktop/commit/2016308db25f05f5aadac16a8059591b5440bcbc))
+
 ### [4.7.1](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.0...v4.7.1) (2026-09-17)
 
 
