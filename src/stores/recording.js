@@ -25,7 +25,8 @@ export const useRecordingStore = defineStore('recording', {
   state: () => ({
     recordId: null,
     userId: null, // Track userId for multi-account handling
-    // Single authoritative state: idle | preparing | recording | paused | stopping | processing | uploading | uploaded | error
+    // Single authoritative state: idle | preparing | recording | paused | stopping | processing | stopped | uploading | uploaded | error
+    // ('stopped' = saved by a stop outside the Record page's upload flow)
     phase: 'idle',
     startTime: null,
     duration: 0, // in seconds
@@ -372,8 +373,14 @@ export const useRecordingStore = defineStore('recording', {
     },
 
     async stopRecording(expectedDurationSec = this.duration) {
+      // Finalization rebuilds the file from the preserved sources and takes
+      // minutes for long meetings. 'processing' keeps the pipeline screen and
+      // every navigation/update/logout guard active meanwhile; the former
+      // 'stopped' here rendered an empty Record page. Page stop flows enter
+      // 'processing' first and continue to upload; other stops settle below.
+      const settleWhenSaved = this.phase !== 'processing';
       try {
-        this.phase ='stopped';
+        this.phase = 'processing';
         stopStorageMonitor();
         // P0 Data Loss Fix: Notify lifecycle for adaptive battery monitoring (V9)
         setRecordingActive(false);
@@ -400,6 +407,7 @@ export const useRecordingStore = defineStore('recording', {
           if (result.success) {
             this.finalizationRecoveryNeeded = false;
             this.audioFilePath = result.outputPath;
+            if (settleWhenSaved) this.phase = 'stopped';
             sentryRecordingStop(this.recordId, this.duration);
             return { success: true, filePath: result.outputPath, duration: result.duration || null, warning: result.warning };
           } else if (result.diskFull) {
@@ -434,6 +442,7 @@ export const useRecordingStore = defineStore('recording', {
           const result = await this.combineChunksNative(null, { isRecovery: this.chunkSaveErrors > 0 });
           if (result.success) {
             this.audioFilePath = result.outputPath;
+            if (settleWhenSaved) this.phase = 'stopped';
             // Always prefer native-reported duration over JS timer
             const nativeDuration = result.duration || null;
             if (nativeDuration) {

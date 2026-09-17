@@ -121,6 +121,13 @@ Two exceed a stricter 1.5-second budget. Original results used an optimistic
 event-clock/all-survivor calculation and remain preserved separately from the
 corrected analysis; they do not establish a one-second loss guarantee.
 
+`s17-finalizing-view` is a UI check, not an audio qualification. It samples the
+rendered Record page view every 100 ms through start, a 240-second recording
+(`SUISSE_FINALIZING_VIEW_SECONDS`), finalization and upload. It fails on any
+sample whose phase renders no view, the empty page with only the mode tabs, and on
+mode tabs shown in a pipeline phase. On 4.7.0 it showed ~9 s of an empty page
+after stop.
+
 Do not rebuild the active bundle, run competing captures, or run unrelated heavy
 tests during a baseline. Intentional contention should be a named fault case.
 Record the built revision separately if the working tree changes during a run.
