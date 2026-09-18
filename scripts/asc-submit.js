@@ -80,8 +80,10 @@ async function main() {
   const notesFile = arg('notes-file', null);
   const doSubmit = arg('submit', false) === true;
 
-  if (!appId || !version || !build) {
-    console.error('usage: --app <id> --version <x.y.z> --build <n> [--notes-file f] [--submit]');
+  const statusOnly = arg('status', false) === true;
+
+  if (!appId || !version || (!build && !statusOnly)) {
+    console.error('usage: --app <id> --version <x.y.z> (--build <n> [--notes-file f] [--submit] | --status)');
     process.exit(2);
   }
 
@@ -95,6 +97,35 @@ async function main() {
   keyContent = keyContent.replace(/\\n/g, '\n').trim();
   TOKEN = makeToken(keyId, issuerId, keyContent);
   console.log(`authenticated as key ${keyId}`);
+
+  // ---- 0. read-only status ----------------------------------------------
+  // `--status` only reads: it is the safe way to check a version that is
+  // already in review, where any PATCH could pull it back out.
+  if (statusOnly) {
+    const vs = await api(
+      'GET',
+      `/v1/apps/${appId}/appStoreVersions?filter[versionString]=${encodeURIComponent(version)}&limit=5`
+    );
+    if (!vs.data.length) {
+      console.log(`version ${version} does not exist for app ${appId}`);
+      return;
+    }
+    const v = vs.data[0];
+    console.log(`version ${version} -> ${v.id}`);
+    console.log(`  appStoreState = ${v.attributes.appStoreState}`);
+    console.log(`  releaseType   = ${v.attributes.releaseType}`);
+    const b = await api('GET', `/v1/appStoreVersions/${v.id}/build`).catch(() => null);
+    if (b && b.data) {
+      console.log(`  build         = ${b.data.attributes.version} (${b.data.attributes.processingState})`);
+    } else {
+      console.log('  build         = none attached');
+    }
+    const subs = await api('GET', `/v1/apps/${appId}/reviewSubmissions?limit=5`).catch(() => null);
+    for (const sub of (subs && subs.data) || []) {
+      console.log(`  reviewSubmission ${sub.id}: state=${sub.attributes.state} submitted=${sub.attributes.submittedDate || '-'}`);
+    }
+    return;
+  }
 
   // ---- 1. locate the build already on TestFlight -------------------------
   const builds = await api(

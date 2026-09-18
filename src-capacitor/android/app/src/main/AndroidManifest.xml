@@ -53,6 +53,23 @@
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="false"
         android:networkSecurityConfig="@xml/network_security_config">
+        <!-- Native crash and ANR reporting (sentry-android auto-init).
+             Sessions stay off: the WebView layer already reports one session
+             per app run, and a second native session would distort the
+             crash-free rate. No screenshots, no view hierarchy and no default
+             PII: this app's screens show meeting content. -->
+        <meta-data android:name="io.sentry.dsn" android:value="https://f5f1d2b53d297a64e9b76ca26d2d8397@o4510659364716544.ingest.de.sentry.io/4510958727462992" />
+        <meta-data android:name="io.sentry.environment" android:value="production" />
+        <meta-data android:name="io.sentry.release" android:value="${sentryRelease}" />
+        <meta-data android:name="io.sentry.dist" android:value="${sentryDist}" />
+        <meta-data android:name="io.sentry.auto-session-tracking.enable" android:value="false" />
+        <meta-data android:name="io.sentry.anr.enable" android:value="true" />
+        <meta-data android:name="io.sentry.anr.report-debug" android:value="false" />
+        <meta-data android:name="io.sentry.send-default-pii" android:value="false" />
+        <meta-data android:name="io.sentry.attach-screenshot" android:value="false" />
+        <meta-data android:name="io.sentry.attach-view-hierarchy" android:value="false" />
+        <meta-data android:name="io.sentry.traces.sample-rate" android:value="0.0" />
+        <meta-data android:name="io.sentry.breadcrumbs.user-interaction" android:value="false" />
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
             android:name=".MainActivity"

@@ -1,5 +1,8 @@
 import UIKit
 import Capacitor
+#if canImport(Sentry)
+import Sentry
+#endif
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -7,8 +10,43 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Override point for customization after application launch.
+        startCrashReporting()
         return true
+    }
+
+    /// Native crash, app-hang and out-of-memory reporting.
+    ///
+    /// The WebView layer reports its own errors over HTTPS, but it cannot
+    /// report a process that died: a native crash in the recording plugin, a
+    /// watchdog kill during a long meeting, an out-of-memory termination in the
+    /// background. Those were only ever guessed at afterwards from a heuristic
+    /// "previous session ended unexpectedly" message. This starts before the
+    /// WebView, so a crash during startup is reported too.
+    private func startCrashReporting() {
+        #if canImport(Sentry)
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "unknown"
+        let build = info?["CFBundleVersion"] as? String ?? "unknown"
+        SentrySDK.start { options in
+            options.dsn = "https://f5f1d2b53d297a64e9b76ca26d2d8397@o4510659364716544.ingest.de.sentry.io/4510958727462992"
+            // Same release name the WebView layer uses, so a native crash and
+            // the JavaScript breadcrumbs around it belong to one release.
+            options.releaseName = "ch.suissenotes.mobile@\(version)"
+            options.dist = build
+            options.environment = "production"
+            // The WebView layer already reports one session per app run.
+            options.enableAutoSessionTracking = false
+            options.enableAppHangTracking = true
+            options.appHangTimeoutInterval = 5
+            options.enableWatchdogTerminationTracking = true
+            // This app's screens show meeting content and transcripts.
+            options.attachScreenshot = false
+            options.attachViewHierarchy = false
+            options.sendDefaultPii = false
+            options.tracesSampleRate = 0
+            options.enableAutoBreadcrumbTracking = true
+        }
+        #endif
     }
 
     func applicationWillResignActive(_ application: UIApplication) {

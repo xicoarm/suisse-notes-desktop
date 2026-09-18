@@ -922,6 +922,16 @@ export const useRecordingStore = defineStore('recording', {
             return { success: false, error: `Output verification failed: ${verifyError.message}` };
           }
 
+          // The native combiner skips chunks it cannot read instead of
+          // failing. That is lost meeting audio inside a "successful" result,
+          // and until now nothing counted or reported it.
+          const skippedChunkCount = Number(result.skippedChunkCount) || 0;
+          if (skippedChunkCount > 0) {
+            console.error(`Native combine skipped ${skippedChunkCount} unreadable chunk(s) of ` +
+              `${result.expectedChunkCount ?? 'unknown'} for ${targetRecordId}: ` +
+              `${(result.skippedChunks || []).slice(0, 5).join('; ')}`);
+          }
+
           return {
             success: true,
             outputPath,
@@ -929,7 +939,8 @@ export const useRecordingStore = defineStore('recording', {
             chunkCount: result.chunkCount,
             duration: result.duration ? Math.round(result.duration) : null,
             hadGaps: validation.gaps.length > 0 ? validation.gaps : undefined,
-            gapCount: validation.gaps.length,
+            gapCount: validation.gaps.length + skippedChunkCount,
+            skippedChunkCount,
             expectedCount: validation.expectedCount
           };
         }

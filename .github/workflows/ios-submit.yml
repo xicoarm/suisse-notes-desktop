@@ -14,12 +14,18 @@ on:
         required: true
         type: string
       build:
-        description: 'CFBundleVersion of the TestFlight build (e.g. 2609021248)'
-        required: true
+        description: 'CFBundleVersion of the TestFlight build (e.g. 2609021248) - not needed with status'
+        required: false
+        default: ''
         type: string
       submit:
         description: 'Actually submit for review (unchecked = prepare only)'
         required: true
+        default: false
+        type: boolean
+      status:
+        description: 'Only read and print the state of that version (changes nothing)'
+        required: false
         default: false
         type: boolean
 
@@ -33,20 +39,28 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Read the state of the version (changes nothing)
+        if: ${{ inputs.status }}
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          ASC_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+        run: |
+          node scripts/asc-submit.js             --app 6758680707             --version "${{ inputs.version }}"             --status
+
       - name: Write release notes
+        if: ${{ !inputs.status }}
         run: |
           cat > /tmp/release-notes.txt <<'NOTES'
-          Diese Version behebt mehrere von Nutzern gemeldete Punkte:
-          - Der Link zu einer neuen Transkription führt jetzt direkt zum Meeting, auch wenn die Transkription noch läuft.
-          - Support-Adresse und rechtliche Links zeigen auf Suisse Meets.
-          - Das individuelle Vokabular wird zuverlässig mit dem Konto abgeglichen.
-          - «Gerät vergessen» beendet die Übertragungsanzeige sofort.
-          - Die Übertragung vom Rekorder beginnt mit der ältesten Aufnahme.
-          - Stabilität und Fehlerdiagnose wurden verbessert.
+          Diese Version macht Probleme sichtbar, statt sie zu verschweigen:
+          - Abstürze, eingefrorene Aufnahmen und vom System beendete Aufnahmen werden automatisch gemeldet, damit wir Fehler finden und beheben können.
+          - Fehler beim Zusammenfügen einer Aufnahme werden erkannt und gemeldet, statt unbemerkt zu bleiben.
+          - Verbesserte Stabilität bei Unterbrechungen, etwa durch einen Anruf.
           NOTES
           cat /tmp/release-notes.txt
 
       - name: Create version, attach build, submit
+        if: ${{ !inputs.status }}
         env:
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
