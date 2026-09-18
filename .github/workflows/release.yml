@@ -150,6 +150,10 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+          # 'gh release upload' needs the release to exist. The action it
+          # replaced created it implicitly, so on a fresh tag the first
+          # uploading job has to create it (the other job may win the race).
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "" ||             gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
           # No .exe.blockmap: it is generated before signing, so it no longer
           # matches the signed installer and a differential update would fall
           # back to a full download anyway.
@@ -438,6 +442,10 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+          # 'gh release upload' needs the release to exist. The action it
+          # replaced created it implicitly, so on a fresh tag the first
+          # uploading job has to create it (the other job may win the race).
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "" ||             gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
           files=(dist/electron/Packaged/*.dmg dist/electron/Packaged/*.dmg.blockmap                  dist/electron/Packaged/*.zip dist/electron/Packaged/*.zip.blockmap                  dist/electron/Packaged/latest-mac.yml)
           test ${#files[@]} -gt 0
           for file in "${files[@]}"; do
