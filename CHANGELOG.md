@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.4](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.3...v4.7.4) (2026-09-18)
+
+
+### Features
+
+* **mobile:** native crash reporting and native failures that reach the app ([fa85558](https://github.com/xicoarm/suisse-notes-desktop/commit/fa8555888840b0aa5468bf7abc8da6afe53b7be4))
+* **mobile:** native crash reporting and native failures that reach the app ([#13](https://github.com/xicoarm/suisse-notes-desktop/issues/13)) ([194e77b](https://github.com/xicoarm/suisse-notes-desktop/commit/194e77b9c96a7fd3dc26af35457e11532d591d4f))
+
+
+### Bug Fixes
+
+* **mobile:** keep the iOS Sentry package across Capacitor syncs ([5d886a7](https://github.com/xicoarm/suisse-notes-desktop/commit/5d886a79e4b1e1e96b53fb17f330b1c8f47c1761))
+* **record:** translate the recording status line ([6372bb2](https://github.com/xicoarm/suisse-notes-desktop/commit/6372bb2907d8a7d959a1ae2e769fa44ed792f85b))
+* **release:** create the release before uploading assets ([c048c89](https://github.com/xicoarm/suisse-notes-desktop/commit/c048c891ee04d8073864aea14ae74a992de4b8df))
+* **windows:** read signatures reliably and never pay twice for one file ([63f954d](https://github.com/xicoarm/suisse-notes-desktop/commit/63f954d017c62254ce435c864b85b9fc9e10d189))
+* **windows:** sign every shipped binary, not only the installer ([7be1d2e](https://github.com/xicoarm/suisse-notes-desktop/commit/7be1d2e105107cb9d83080be568b8c0f7d830016))
+* **windows:** sign native .node modules through a .dll alias ([8170170](https://github.com/xicoarm/suisse-notes-desktop/commit/81701709eccd0650936c07e2a8c335aae4d444ba))
+
 ### [4.7.3](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.2...v4.7.3) (2026-09-17)
 
 ### [4.7.2](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.1...v4.7.2) (2026-09-17)
