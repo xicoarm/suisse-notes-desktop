@@ -1243,20 +1243,22 @@ const currentAudioFileId = computed(() => recordingStore.audioFileId);
 const finalDuration = computed(() => recordingStore.finalDuration);
 
 const statusText = computed(() => {
-  if (isProcessing.value) return 'Processing...';
-  if (isAutoUploading.value) return retryAttempt.value > 0 ? `Retrying upload (${retryAttempt.value})...` : 'Uploading...';
-  if (uploadError.value) return 'Upload failed';
+  if (isProcessing.value) return t('processing');
+  if (isAutoUploading.value) {
+    return retryAttempt.value > 0 ? t('recordingUploadRetry', { attempt: retryAttempt.value }) : t('uploading');
+  }
+  if (uploadError.value) return t('uploadFailed');
   if (recordingStore.isRecording && !isMicHealthy.value) return t('micHealthStatusIssue');
 
   switch (recordingStore.phase) {
-    case 'idle': return 'Ready to record';
-    case 'recording': return 'Recording in progress';
-    case 'paused': return 'Recording paused';
-    case 'stopping': return 'Stopping...';
-    case 'processing': return 'Processing recording...';
-    case 'uploading': return 'Uploading...';
-    case 'uploaded': return 'Upload complete';
-    case 'error': return 'Error occurred';
+    case 'idle': return t('readyToRecord');
+    case 'recording': return t('recordingInProgress');
+    case 'paused': return t('recordingPaused');
+    case 'stopping': return t('recordingStopping');
+    case 'processing': return t('processing');
+    case 'uploading': return t('uploading');
+    case 'uploaded': return t('uploadComplete');
+    case 'error': return t('recordingError');
     default: return '';
   }
 });
