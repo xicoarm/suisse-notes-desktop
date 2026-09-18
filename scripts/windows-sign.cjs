@@ -22,9 +22,18 @@
 
 const { execFile } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const SIGNER_SUBJECT_PREFIX = 'CN=Suisse IT GmbH,';
+// CodeSignTool picks the signature format from the file extension and rejects
+// ".node" ("Unsupported file format for signing - node"), although a native
+// Node module is an ordinary PE DLL. Such files are signed as a ".dll" copy.
+const CODESIGNTOOL_EXTENSIONS = new Set(['.exe', '.dll', '.msi']);
+
+function needsDllAlias(file) {
+  return !CODESIGNTOOL_EXTENSIONS.has(path.extname(file).toLowerCase());
+}
 const TOTP_WINDOW_MS = 30000;
 const ATTEMPTS = 3;
 const SIGN_TIMEOUT_MS = 5 * 60 * 1000;
@@ -127,6 +136,21 @@ async function signNow(file, env = process.env) {
 
   const java = path.join(values.javaHome, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
   const jar = codeSignToolJar(values.toolDir);
+  let target = file;
+  let tempDir = null;
+  if (needsDllAlias(file)) {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'windows-sign-'));
+    target = path.join(tempDir, `${path.basename(file, path.extname(file))}.dll`);
+    fs.copyFileSync(file, target);
+  }
+  try {
+    return await signTarget({ file, target, name, java, jar, values });
+  } finally {
+    if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function signTarget({ file, target, name, java, jar, values }) {
   let lastError = '';
 
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
@@ -137,11 +161,12 @@ async function signNow(file, env = process.env) {
       `-password=${values.password}`,
       `-credential_id=${values.credentialId}`,
       `-totp_secret=${values.totpSecret}`,
-      `-input_file_path=${file}`,
+      `-input_file_path=${target}`,
       '-override=true',
     ], { cwd: values.toolDir, timeout: SIGN_TIMEOUT_MS });
     const reportedSigned = result.code === 0 && /Code signed successfully/i.test(result.output);
 
+    if (reportedSigned && target !== file) fs.copyFileSync(target, file);
     const after = await readSignature(file);
     if (after.status === 'Valid' && after.subject.startsWith(SIGNER_SUBJECT_PREFIX)) {
       console.log(`  - windows-sign: signed ${name}${attempt > 1 ? ` (attempt ${attempt})` : ''}`);
@@ -151,8 +176,9 @@ async function signNow(file, env = process.env) {
       describeFailure(result.output);
     // Every eSigner signature is billed. When the service reports the file as
     // signed but it does not verify, signing again would only pay for the same
-    // result - stop and report instead.
-    if (reportedSigned) break;
+    // result - stop and report instead. A rejected format fails the same way
+    // on every attempt.
+    if (reportedSigned || /Unsupported file format/i.test(result.output)) break;
     console.warn(`  - windows-sign: attempt ${attempt} for ${name} failed: ${lastError}`);
   }
 
@@ -175,4 +201,5 @@ module.exports = sign;
 module.exports.sign = sign;
 module.exports.signFile = signFile;
 module.exports.credentials = credentials;
+module.exports.needsDllAlias = needsDllAlias;
 module.exports.SIGNER_SUBJECT_PREFIX = SIGNER_SUBJECT_PREFIX;

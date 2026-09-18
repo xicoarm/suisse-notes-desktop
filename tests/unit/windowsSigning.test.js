@@ -72,6 +72,13 @@ describe('the signing hook', () => {
     log.mockRestore();
   });
 
+  it('signs native modules through a .dll alias (CodeSignTool rejects ".node")', () => {
+    const { needsDllAlias } = require('../../scripts/windows-sign.cjs');
+    expect(needsDllAlias('C:/app/resources/app.asar.unpacked/node_modules/win-ca/lib/crypt32-x64.node')).toBe(true);
+    expect(needsDllAlias('C:/app/ffmpeg.dll')).toBe(false);
+    expect(needsDllAlias('C:/app/Suisse Meets.EXE')).toBe(false);
+  });
+
   it('reads every credential from the environment', () => {
     const { missing } = credentials({
       SSL_COM_USERNAME: 'u', SSL_COM_PASSWORD: 'p', SSL_COM_CREDENTIAL_ID: 'c',
