@@ -5,7 +5,10 @@
 
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const windowsSign = require('./scripts/windows-sign.cjs');
+// A path, not the function: the builder config must stay plain data (the
+// macOS packaged qualification clones it). electron-builder requires the
+// module and uses its `sign` export.
+const windowsSignHook = require.resolve('./scripts/windows-sign.cjs');
 
 // Native mobile version (Android versionName; the iOS MARKETING_VERSION is kept
 // in lock-step by the release runbook). Falls back to package.json only if the
@@ -226,7 +229,7 @@ export default function (ctx) {
           // Microsoft Store accepts an EXE installer only if every PE file in
           // it is signed. Without eSigner credentials (local and PR builds)
           // the hook skips; the release job sets WINDOWS_SIGN_REQUIRED=1.
-          sign: windowsSign,
+          sign: windowsSignHook,
           signingHashAlgorithms: ['sha256'],
           signExts: ['.dll', '.node']
         },

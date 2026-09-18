@@ -16,9 +16,16 @@ const releaseWorkflow = fs.readFileSync('.github/workflows/release.yml', 'utf8')
 const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 
 describe('every Windows binary is signed during the build', () => {
-  it('routes all of electron-builder\'s signing through the eSigner hook', () => {
-    expect(quasarConfig).toContain("const windowsSign = require('./scripts/windows-sign.cjs');");
-    expect(quasarConfig).toContain('sign: windowsSign,');
+  it('routes all of electron-builder\'s signing through the eSigner hook', async () => {
+    expect(quasarConfig).toContain("const windowsSignHook = require.resolve('./scripts/windows-sign.cjs');");
+    expect(quasarConfig).toContain('sign: windowsSignHook,');
+    // electron-builder requires the path and calls its `sign` export; the
+    // config itself stays plain data (it is cloned by the macOS qualification).
+    const { default: makeQuasarConfig } = await import('../../quasar.config.js');
+    const win = makeQuasarConfig({ mode: { electron: true }, dev: false, prod: true }).electron.builder.win;
+    expect(typeof win.sign).toBe('string');
+    expect(typeof require(win.sign).sign).toBe('function');
+    expect(() => structuredClone(win)).not.toThrow();
     // One signature per file: the default (sha1 + sha256) would call the hook
     // twice per file and pay for two eSigner signings.
     expect(quasarConfig).toContain("signingHashAlgorithms: ['sha256'],");
