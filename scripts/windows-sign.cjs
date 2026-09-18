@@ -48,12 +48,23 @@ function run(command, args, options = {}) {
 }
 
 async function readSignature(file) {
-  const script = '$s = Get-AuthenticodeSignature -LiteralPath $env:SIGN_TARGET; ' +
-    '"$($s.Status)|$(if ($s.SignerCertificate) { $s.SignerCertificate.Subject })"';
-  const result = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-    env: { ...process.env, SIGN_TARGET: file },
-  });
-  const [status = '', subject = ''] = result.output.trim().split(/\r?\n/)[0].split('|');
+  const env = { ...process.env, SIGN_TARGET: file };
+  // The Actions default shell is PowerShell 7. Windows PowerShell 5.1 started
+  // from it inherits PowerShell 7's PSModulePath, cannot load
+  // Microsoft.PowerShell.Security and reports no signature at all.
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === 'psmodulepath') delete env[key];
+  }
+  const script = "$ErrorActionPreference = 'Stop'; " +
+    '$s = Get-AuthenticodeSignature -LiteralPath $env:SIGN_TARGET; ' +
+    "$subject = if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { '' }; " +
+    "Write-Output ('SIGNATURE|' + $s.Status + '|' + $subject)";
+  const result = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { env });
+  const line = result.output.split(/\r?\n/).find(text => text.startsWith('SIGNATURE|'));
+  if (!line) {
+    throw new Error(`cannot read the signature of ${path.basename(file)}: ${describeFailure(result.output)}`);
+  }
+  const [, status = '', subject = ''] = line.split('|');
   return { status: status.trim(), subject: subject.trim() };
 }
 
@@ -129,13 +140,19 @@ async function signNow(file, env = process.env) {
       `-input_file_path=${file}`,
       '-override=true',
     ], { cwd: values.toolDir, timeout: SIGN_TIMEOUT_MS });
+    const reportedSigned = result.code === 0 && /Code signed successfully/i.test(result.output);
 
     const after = await readSignature(file);
     if (after.status === 'Valid' && after.subject.startsWith(SIGNER_SUBJECT_PREFIX)) {
       console.log(`  - windows-sign: signed ${name}${attempt > 1 ? ` (attempt ${attempt})` : ''}`);
       return true;
     }
-    lastError = `exit ${result.code}, signature ${after.status || 'none'}: ${describeFailure(result.output)}`;
+    lastError = `exit ${result.code}, signature ${after.status || 'none'} ${after.subject.split(',')[0]}: ` +
+      describeFailure(result.output);
+    // Every eSigner signature is billed. When the service reports the file as
+    // signed but it does not verify, signing again would only pay for the same
+    // result - stop and report instead.
+    if (reportedSigned) break;
     console.warn(`  - windows-sign: attempt ${attempt} for ${name} failed: ${lastError}`);
   }
 
