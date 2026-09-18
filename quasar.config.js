@@ -5,6 +5,7 @@
 
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
+const windowsSign = require('./scripts/windows-sign.cjs');
 
 // Native mobile version (Android versionName; the iOS MARKETING_VERSION is kept
 // in lock-step by the release runbook). Falls back to package.json only if the
@@ -215,10 +216,19 @@ export default function (ctx) {
           // MUST stay true: this flag also gates the rcedit step that embeds
           // the icon + version metadata into the exe. With it false, every
           // build shipped with Electron's default atom icon on the executable
-          // (and "Electron" file properties). No signing happens here anyway —
-          // CI builds with -P never and no certs; SSL.com eSigner signs the
-          // finished installer afterwards, so edit-then-sign is the right order.
-          signAndEditExecutable: true
+          // (and "Electron" file properties). electron-builder writes those
+          // resources first and signs afterwards, so edit-then-sign holds.
+          signAndEditExecutable: true,
+          // Sign every PE file, not only the installer: the app exe, its DLLs
+          // and .node modules, ffmpeg/ffprobe, elevate.exe, the uninstaller
+          // and the installer all go through SSL.com eSigner here. Windows 11
+          // Smart App Control blocks unsigned executables and DLLs, and the
+          // Microsoft Store accepts an EXE installer only if every PE file in
+          // it is signed. Without eSigner credentials (local and PR builds)
+          // the hook skips; the release job sets WINDOWS_SIGN_REQUIRED=1.
+          sign: windowsSign,
+          signingHashAlgorithms: ['sha256'],
+          signExts: ['.dll', '.node']
         },
         nsis: {
           oneClick: true,  // Silent auto-updates (no wizard prompts)

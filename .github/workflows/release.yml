@@ -54,9 +54,58 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build Electron app (unsigned)
+      # The build signs every Windows binary itself (quasar.config.js win.sign ->
+      # scripts/windows-sign.cjs): the app exe, its DLLs and .node modules,
+      # ffmpeg/ffprobe, elevate.exe, the uninstaller and the installer. Until
+      # 4.7.3 only the installer was signed, so Windows 11 Smart App Control
+      # blocked the installed app and the Microsoft Store EXE route was closed.
+      - name: Set up Java for CodeSignTool
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up SSL.com CodeSignTool
+        shell: pwsh
+        run: |
+          # Same CodeSignTool version sslcom/esigner-codesign uses (proven with
+          # this credential); the platform-neutral zip, run on our own Java 17.
+          $version = 'v1.3.0'
+          $sha256 = '359782CEE5C709B172610E2ABD8CB49445BFADD26F44073CA18600C585B91B8D'
+          $zip = Join-Path $env:RUNNER_TEMP 'CodeSignTool.zip'
+          $dest = Join-Path $env:RUNNER_TEMP 'CodeSignTool'
+          Invoke-WebRequest "https://github.com/SSLcom/CodeSignTool/releases/download/$version/CodeSignTool-$version.zip" -OutFile $zip
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($actual -ne $sha256) {
+            Write-Error "FATAL: CodeSignTool $version checksum $actual does not match the pinned $sha256"
+            exit 1
+          }
+          Expand-Archive $zip -DestinationPath $dest -Force
+          if (-not (Get-ChildItem (Join-Path $dest 'jar') -Filter 'code_sign_tool-*.jar')) {
+            Write-Error 'FATAL: CodeSignTool jar missing after extraction'
+            exit 1
+          }
+          # Production endpoints, exactly as sslcom/esigner-codesign writes them.
+          @(
+            'CLIENT_ID=kaXTRACNijSWsFdRKg_KAfD3fqrBlzMbWs6TwWHwAn8',
+            'OAUTH2_ENDPOINT=https://login.ssl.com/oauth2/token',
+            'CSC_API_ENDPOINT=https://cs.ssl.com',
+            'TSA_URL=http://ts.ssl.com',
+            'TSA_LEGACY_URL=http://ts.ssl.com/legacy'
+          ) | Set-Content -Path (Join-Path $dest 'conf/code_sign_tool.properties') -Encoding ascii
+          "CODE_SIGN_TOOL_PATH=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "CodeSignTool $version ready at $dest"
+
+      - name: Build and sign Electron app
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          SSL_COM_USERNAME: ${{ secrets.SSL_COM_USERNAME }}
+          SSL_COM_PASSWORD: ${{ secrets.SSL_COM_PASSWORD }}
+          SSL_COM_CREDENTIAL_ID: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
+          SSL_COM_TOTP_SECRET: ${{ secrets.SSL_COM_TOTP_SECRET }}
+          # A missing credential or an unverifiable signature fails the build
+          # instead of shipping an unsigned file.
+          WINDOWS_SIGN_REQUIRED: '1'
         run: npx quasar build -m electron -P never
 
       - name: Find installer exe
@@ -67,17 +116,13 @@ jobs:
           echo "EXE_PATH=$($exe.FullName)" >> $env:GITHUB_OUTPUT
           echo "Found installer: $($exe.Name)"
 
-      - name: Sign Windows installer with SSL.com eSigner
-        uses: sslcom/esigner-codesign@main
-        with:
-          command: sign
-          username: ${{ secrets.SSL_COM_USERNAME }}
-          password: ${{ secrets.SSL_COM_PASSWORD }}
-          credential_id: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.SSL_COM_TOTP_SECRET }}
-          file_path: ${{ steps.find-exe.outputs.EXE_PATH }}
-          override: true
-          environment_name: PROD
+      # Installs the signed installer silently on this runner, exactly as a
+      # customer would, and fails unless the installer and every .exe, .dll
+      # and .node it installs carry a valid signature (ours, or the vendor's
+      # for Microsoft's own DLLs). Also a first-start smoke test.
+      - name: Verify every shipped Windows binary is signed
+        shell: pwsh
+        run: ./scripts/verify-windows-signatures.ps1 -Installer "${{ steps.find-exe.outputs.EXE_PATH }}"
 
       - name: Update latest.yml after signing
         shell: pwsh
