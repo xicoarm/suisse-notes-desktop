@@ -245,6 +245,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   },
 
+  // Clipboard (native OS clipboard operations that work without window focus)
+  clipboard: {
+    writeText: (text) => ipcRenderer.invoke('clipboard:writeText', text)
+  },
+
   // Shell (for opening external URLs and file locations)
   shell: {
     openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),

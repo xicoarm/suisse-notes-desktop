@@ -140,14 +140,20 @@ export function useShareLink() {
     const url = await generateTranscriptUrl(audioFileId);
 
     try {
-      await navigator.clipboard.writeText(url);
+      if (isElectron() && window.electronAPI?.clipboard?.writeText) {
+        await window.electronAPI.clipboard.writeText(url);
+      } else if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+      } else {
+        throw new Error('Clipboard API unavailable');
+      }
       $q.notify({
         type: 'positive',
         message: t('linkCopied'),
         timeout: 2000
       });
     } catch (error) {
-      console.error('Failed to copy URL:', error);
+      console.warn('Failed to copy URL to clipboard:', error?.message || error);
       $q.notify({
         type: 'negative',
         message: t('linkCopyFailed'),

@@ -59,6 +59,37 @@ describe('desktop renderer Sentry init', () => {
     expect(h.calls.tags.process).toBe('renderer');
   });
 
+  it('downgrades transient browser fetch and network errors to warning', async () => {
+    await boot();
+    const beforeSend = h.calls.init.beforeSend;
+
+    // Chromium Failed to fetch
+    const fetchEvent = beforeSend({
+      level: 'error',
+      exception: { values: [{ type: 'TypeError', value: 'Failed to fetch (app.suisse-meets.ch)' }] }
+    }, { originalException: new TypeError('Failed to fetch') });
+    expect(fetchEvent.level).toBe('warning');
+    expect(fetchEvent.tags.transient_network).toBe('true');
+
+    // Safari Load failed
+    const safariEvent = beforeSend({
+      level: 'error',
+      exception: { values: [{ type: 'TypeError', value: 'Load failed' }] }
+    }, { originalException: new TypeError('Load failed') });
+    expect(safariEvent.level).toBe('warning');
+    expect(safariEvent.tags.transient_network).toBe('true');
+
+    // TimeoutError
+    const timeoutErr = new Error('Request timed out after 30s');
+    timeoutErr.name = 'TimeoutError';
+    const timeoutEvent = beforeSend({
+      level: 'error',
+      exception: { values: [{ type: 'TimeoutError', value: 'Request timed out after 30s (network error)' }] }
+    }, { originalException: timeoutErr });
+    expect(timeoutEvent.level).toBe('warning');
+    expect(timeoutEvent.tags.transient_network).toBe('true');
+  });
+
   it('scrubs, tags and samples repeats through beforeSend', async () => {
     await boot();
     const beforeSend = h.calls.init.beforeSend;
