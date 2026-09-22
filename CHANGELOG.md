@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.5](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.4...v4.7.5) (2026-09-22)
+
+
+### Bug Fixes
+
+* **desktop:** eliminate Sentry alert noise and fix clipboard copy in Electron ([b5b8727](https://github.com/xicoarm/suisse-notes-desktop/commit/b5b87272b2c8d0beb9f34c68ae6a5383e7a5686e))
+
 ### [4.7.4](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.3...v4.7.4) (2026-09-18)
 
 
