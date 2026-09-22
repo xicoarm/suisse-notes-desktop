@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu, Tray, nativeImage, desktopCapturer, systemPreferences, powerMonitor, powerSaveBlocker } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu, Tray, nativeImage, desktopCapturer, systemPreferences, powerMonitor, powerSaveBlocker, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { writeFileAtomic, writeFileAtomicSync, publishFile, concatenateFiles, archiveChunkBatch, listChunkBatches, syncDirectorySync } = require('./durable-files');
@@ -216,10 +216,23 @@ app.on('render-process-gone', (event, webContents, details) => {
 });
 
 app.on('child-process-gone', (event, details) => {
-  log.error('Child process gone:', details);
-  Sentry.captureMessage(`Child process crashed: ${details.reason}`, 'error');
+  // Normal process termination (e.g. idle worker or clean shutdown) is expected lifecycle
+  if (details.reason === 'clean-exit') {
+    log.info('Child process exited cleanly:', details.type || 'unknown');
+    return;
+  }
 
-  // Detect Audio Service crash (macOS ScreenCaptureKit bug) and notify renderer to recover
+  // OS process termination
+  if (details.reason === 'killed') {
+    log.warn('Child process killed:', details);
+    return;
+  }
+
+  log.warn('Child process gone:', details);
+
+  const isRecording = Boolean(isRecordingInProgress || (typeof getActiveRecording === 'function' && getActiveRecording()?.recordId));
+
+  // Detect Audio Service crash (macOS ScreenCaptureKit bug / Windows audio reset) and notify renderer to recover
   if (details.serviceName === 'audio.mojom.AudioService' && details.reason === 'crashed') {
     log.warn('Audio Service crashed — notifying renderer to recover system audio');
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -229,6 +242,47 @@ app.on('child-process-gone', (event, details) => {
       });
     }
   }
+
+  // Chromium GPU process restarts automatically on driver/display reset (Windows TDR / macOS GPU switch)
+  if (details.type === 'GPU') {
+    Sentry.withScope(scope => {
+      scope.setLevel('warning');
+      scope.setTag('source', 'child-process');
+      scope.setTag('process_type', 'GPU');
+      if (details.exitCode !== undefined) scope.setTag('exit_code', String(details.exitCode));
+      scope.setTag('recording_active', String(isRecording));
+      scope.setExtra('details', details);
+      Sentry.captureMessage(`GPU process crashed (${details.reason || 'crashed'})`, 'warning');
+    });
+    return;
+  }
+
+  // If a child process crashes during an active recording, report as error
+  if (isRecording) {
+    Sentry.withScope(scope => {
+      scope.setLevel('error');
+      scope.setTag('source', 'child-process');
+      scope.setTag('process_type', details.type || 'unknown');
+      if (details.serviceName) scope.setTag('service_name', details.serviceName);
+      if (details.exitCode !== undefined) scope.setTag('exit_code', String(details.exitCode));
+      scope.setTag('recording_active', 'true');
+      scope.setExtra('details', details);
+      Sentry.captureMessage(`Child process crashed during recording: ${details.serviceName || details.type || 'unknown'} (${details.reason})`, 'error');
+    });
+    return;
+  }
+
+  // Idle background utility / worker restart that Chromium handles
+  Sentry.withScope(scope => {
+    scope.setLevel('warning');
+    scope.setTag('source', 'child-process');
+    scope.setTag('process_type', details.type || 'unknown');
+    if (details.serviceName) scope.setTag('service_name', details.serviceName);
+    if (details.exitCode !== undefined) scope.setTag('exit_code', String(details.exitCode));
+    scope.setTag('recording_active', 'false');
+    scope.setExtra('details', details);
+    Sentry.captureMessage(`Child process gone: ${details.serviceName || details.type || 'unknown'} (${details.reason})`, 'warning');
+  });
 });
 
 // === SSO Custom Protocol (suissenotes://) ===
@@ -2767,8 +2821,12 @@ function probeBinary(binPath, timeoutMs = 30000) {
       finish();
     }, timeoutMs);
 
+    let stderr = '';
     child.stdout.on('data', (d) => { stdout = (stdout + d.toString()).slice(-65536); });
-    child.stderr.resume(); // Drain diagnostics so a child cannot block on a full pipe.
+    if (typeof child.stderr?.on === 'function') {
+      child.stderr.on('data', (d) => { stderr = (stderr + d.toString()).slice(-4096); });
+    }
+    child.stderr?.resume?.(); // Drain diagnostics so a child cannot block on a full pipe.
     child.on('error', (err) => {
       clearTimeout(timer);
       record.error = err.message;
@@ -2782,7 +2840,9 @@ function probeBinary(binPath, timeoutMs = 30000) {
         record.available = true;
         record.versionLine = (stdout.split('\n')[0] || '').slice(0, 200);
       } else {
-        record.error = `exit ${code}${signal ? ' (' + signal + ')' : ''}`;
+        const stderrSnippet = stderr.trim().slice(0, 200);
+        record.error = `exit ${code}${signal ? ' (' + signal + ')' : ''}${stderrSnippet ? ': ' + stderrSnippet : ''}`;
+        record.exitCode = code;
       }
       finish();
     });
@@ -2813,12 +2873,19 @@ async function probeBundledBinaries() {
 function reportBinaryHealthOnce(triggerSource) {
   if (binaryHealthReported) return;
   binaryHealthReported = true;
-  Sentry.captureMessage('Bundled FFmpeg/ffprobe binary unavailable', {
-    level: 'error',
+  const failedBinaries = [];
+  if (binaryHealth.ffmpeg.available === false) failedBinaries.push(`ffmpeg (${binaryHealth.ffmpeg.error || 'unavailable'})`);
+  if (binaryHealth.ffprobe.available === false) failedBinaries.push(`ffprobe (${binaryHealth.ffprobe.error || 'unavailable'})`);
+  const failureSummary = failedBinaries.join(', ') || 'unknown';
+
+  Sentry.captureMessage(`Bundled media binary unavailable: ${failureSummary}`, {
+    level: 'warning',
     tags: {
       operation: 'binaryHealth',
       'binary.platform': process.platform,
       'binary.arch': process.arch,
+      'binary.ffmpeg_available': String(binaryHealth.ffmpeg.available),
+      'binary.ffprobe_available': String(binaryHealth.ffprobe.available),
     },
     extra: {
       trigger: triggerSource,
@@ -4530,6 +4597,17 @@ ipcMain.handle('shell:showItemInFolder', async (event, filePath) => {
     return { success: true };
   } catch (error) {
     console.error('Error showing item in folder:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Native OS clipboard helper (writes reliably without window focus or active DOM gesture)
+ipcMain.handle('clipboard:writeText', async (event, text) => {
+  try {
+    clipboard.writeText(typeof text === 'string' ? text : String(text || ''));
+    return { success: true };
+  } catch (error) {
+    log.warn('Native clipboard write failed:', error.message);
     return { success: false, error: error.message };
   }
 });

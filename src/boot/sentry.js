@@ -92,11 +92,14 @@ const TRANSIENT_NETWORK_STATUSES = new Set([408]);
 function isTransientNetworkError(err, message) {
   if (err && TRANSIENT_NETWORK_CODES.has(err.code)) return true;
   if (err?.response?.status && TRANSIENT_NETWORK_STATUSES.has(err.response.status)) return true;
-  if (typeof message === 'string') {
-    if (/socket hang up/i.test(message)) return true;
-    if (/network error/i.test(message)) return true;
-    if (/getaddrinfo/i.test(message)) return true;
-  }
+  if (err?.name === 'TimeoutError' || err?.name === 'AbortError') return true;
+  const errMessage = err?.message || '';
+  const text = `${typeof message === 'string' ? message : ''} ${errMessage}`;
+  if (/failed to fetch/i.test(text)) return true;
+  if (/load failed/i.test(text)) return true;
+  if (/network error/i.test(text)) return true;
+  if (/socket hang up/i.test(text)) return true;
+  if (/getaddrinfo/i.test(text)) return true;
   return false;
 }
 
@@ -133,7 +136,7 @@ function scrubSensitiveData(event, hint) {
       if (typeof bc.data?.from === 'string') bc.data.from = redactSecrets(bc.data.from);
     });
   }
-  const message = event.exception?.values?.[0]?.value || '';
+  const message = event.exception?.values?.[0]?.value || event.message || event.logentry?.message || '';
   if (isTransientNetworkError(hint?.originalException, message)) {
     event.level = 'warning';
     event.tags = { ...(event.tags || {}), transient_network: 'true' };

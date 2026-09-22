@@ -172,7 +172,14 @@ export const useMinutesStore = defineStore('minutes', {
         this.setFromServer(data);
         return { success: true };
       } catch (error) {
-        console.error('Failed to fetch minutes:', error);
+        const isNetworkFailure = error?.name === 'TypeError'
+          || /fetch|network|timeout|offline/i.test(error?.message || '')
+          || (typeof navigator !== 'undefined' && !navigator.onLine);
+        if (isNetworkFailure) {
+          console.warn('Minutes refresh skipped (network/offline, keeping cached balance):', error.message);
+        } else {
+          console.error('Failed to fetch minutes:', error);
+        }
         this.error = error.message;
         return { success: false, error: error.message };
       } finally {
