@@ -1133,4 +1133,40 @@ describe('recordingService mic signal forensics (MSIG)', () => {
     // The silent candidate was probed and rejected, not announced.
     expect(events.verified.some(e => e.ok === false && e.context === 'auto-recovery')).toBe(true);
   });
+
+  it('probes the lost device and its Default alias last during auto-recovery (ELECTRON-62)', async () => {
+    const store = createMockRecordingStore();
+    const { micTrack } = await startHealthyRecording(store, { trackSettings: { deviceId: 'speaker-1', groupId: 'grp-speaker' } });
+    await vi.advanceTimersByTimeAsync(1000);
+    const fireDeviceChange = global.navigator.mediaDevices.addEventListener.mock.calls.find(c => c[0] === 'devicechange')[1];
+
+    micTrack.readyState = 'ended';
+    ctrl.amplitude = 0;
+    ctrl.byteVal = 0;
+    await vi.advanceTimersByTimeAsync(300);
+    expect(healthNow().reasonCode).toBe('track_ended');
+
+    // The dead speakerphone is still enumerated, and 'default' still points at it.
+    global.navigator.mediaDevices.enumerateDevices.mockResolvedValue([
+      { kind: 'audioinput', deviceId: 'default', groupId: 'grp-speaker', label: 'Default - Speakerphone' },
+      { kind: 'audioinput', deviceId: 'communications', groupId: 'grp-speaker', label: 'Communications - Speakerphone' },
+      { kind: 'audioinput', deviceId: 'speaker-1', groupId: 'grp-speaker', label: 'Speakerphone' },
+      { kind: 'audioinput', deviceId: 'intel-array', groupId: 'grp-intel', label: 'Intel Mic Array' }
+    ]);
+    const opened = [];
+    global.navigator.mediaDevices.getUserMedia.mockImplementation(async (req) => {
+      const id = req?.audio?.deviceId?.exact || 'unknown';
+      opened.push(id);
+      return new MockMediaStream([createTrack({ deviceId: id, label: id })]);
+    });
+    ctrl.amplitude = 0.1;
+    ctrl.byteVal = 50;
+    const recovery = fireDeviceChange();
+    await vi.advanceTimersByTimeAsync(1000);
+    await recovery;
+
+    expect(opened).toEqual(['intel-array']);
+    expect(events.autoSwitched.map(e => e.deviceId)).toEqual(['intel-array']);
+    expect(healthNow().status).toBe('ok');
+  });
 });

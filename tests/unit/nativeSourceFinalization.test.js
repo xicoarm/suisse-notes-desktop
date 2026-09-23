@@ -218,6 +218,32 @@ describe('native source finalization real-media custody', () => {
     expect(Math.max(...commands)).toBeLessThanOrEqual(2);
   }, 60000);
 
+  it('finalizes a normal stop around a closed auto-recovery candidate that saved no audio (ELECTRON-66)', async () => {
+    // Device loss: the dead "Default" alias is tried, emits no blob, and is
+    // replaced by a working microphone. Its end marker durably confirms zero chunks.
+    await source(await encoded(1, 440), { end: 1000, reason: 'device-ended' });
+    const empty = randomUUID();
+    await beginSource(root, { sourceId: empty, kind: 'microphone', startOffsetMs: 1000, mimeType: 'audio/webm;codecs=opus', settings: { channelCount: 1 } });
+    await markSourceStarted(root, empty, { startOffsetMs: 1000 });
+    await endSource(root, empty, { endOffsetMs: 1500, chunkCount: 0, reason: 'replacement' });
+    await source(await encoded(1, 880), { start: 1500, end: 2500 });
+    const result = await finalizer().build(root, path.join(root, 'audio_building.webm'), { expectedDurationSec: 2.5 });
+    const audio = await decoded(result.outputPath);
+    expect(audio.samples).toBe(120000);
+    expect(amplitude(audio, 440, 0.2, 0.8)).toBeGreaterThan(0.08);
+    expect(amplitude(audio, 880, 1.7, 2.3)).toBeGreaterThan(0.08);
+    expect(result.warnings).toContainEqual({ kind: 'native-source-audio-missing', sourceId: empty, confirmedEmpty: true });
+    expect(result.sourceIds).not.toContain(empty);
+  }, 60000);
+
+  it('still refuses a normal stop whose only started source saved no audio', async () => {
+    const empty = randomUUID();
+    await beginSource(root, { sourceId: empty, kind: 'microphone', startOffsetMs: 0, mimeType: 'audio/webm;codecs=opus', settings: { channelCount: 1 } });
+    await markSourceStarted(root, empty, { startOffsetMs: 0 });
+    await endSource(root, empty, { endOffsetMs: 1000, chunkCount: 0, reason: 'stopped' });
+    await expect(finalizer().build(root, path.join(root, 'audio_building.webm'))).rejects.toThrow(/No acknowledged native audio/);
+  });
+
   it('preserves independent mic/system identities and cuts only the explicit replacement overlap', async () => {
     const firstBytes = await encoded(2, 440);
     const first = await source(firstBytes, { end: 1000, reason: 'replacement' });
