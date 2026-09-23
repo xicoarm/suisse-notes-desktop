@@ -307,6 +307,26 @@ describe('native source finalization real-media custody', () => {
     if (mode === 'general') expect(amplitude(audio, 880, 2.2, 2.8)).toBeGreaterThan(0.08);
   }, 60000);
 
+  it.each(['fast', 'general'])('keeps every sample of a source with overlapping native timestamps in the %s path (ELECTRON-68)', async mode => {
+    // A backward clock step inside one encoder stream: 0.3 s of the 880-Hz
+    // half is stamped on top of the 440-Hz half. Distinct speech, not duplicates.
+    const webm = path.join(root, `${randomUUID()}.webm`);
+    await run(ffmpeg().input('sine=f=440:d=1:r=48000').inputFormat('lavfi').input('sine=f=880:d=1:r=48000').inputFormat('lavfi')
+      .complexFilter("[0][1]concat=n=2:v=0:a=1,asetpts='if(gte(T,1),PTS-0.3/TB,PTS)'").audioCodec('libopus').output(webm));
+    const overlapped = await source(fs.readFileSync(webm), { end: 2000 });
+    if (mode === 'general') await source(await encoded(1, 660), { start: 2000, end: 3000 });
+    const result = await finalizer().build(root, path.join(root, 'audio_building.webm'));
+    const audio = await decoded(result.outputPath);
+    expect(result.fastPathUsed).toBe(false);
+    expect(result.warnings).toContainEqual(expect.objectContaining({ kind: 'native-source-timestamp-overlap', sourceId: overlapped, timeline: 'sample-order' }));
+    expect(amplitude(audio, 440, 0.2, 0.8)).toBeGreaterThan(0.08);
+    // The overlapped start of the 880-Hz half survives instead of being dropped.
+    expect(amplitude(audio, 880, 1.05, 1.3)).toBeGreaterThan(0.08);
+    expect(amplitude(audio, 880, 1.5, 1.9)).toBeGreaterThan(0.08);
+    expect(audio.samples).toBeGreaterThanOrEqual(mode === 'fast' ? 96000 : 144000);
+    if (mode === 'general') expect(amplitude(audio, 660, 2.2, 2.8)).toBeGreaterThan(0.08);
+  }, 60000);
+
   it('includes active-time AudioTee PCM once and rejects simultaneous native system copies', async () => {
     await source(await encoded(1, 440), { end: 1000 });
     await fs.promises.writeFile(path.join(root, 'system_audio.raw'), wave(1, 660).subarray(44));

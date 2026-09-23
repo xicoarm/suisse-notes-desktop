@@ -323,12 +323,14 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
           }).output(candidate);
         await run(command, timeout(Math.max(targetSamples / RATE, sourceBytes / 8000)), 'Encode native recording directly');
         const fastWarnings = [...warnings], fastEvidence = [];
-        let observedEnd = 0;
+        let observedEnd = 0, overlapped = false;
         for (const lane of lanes) {
           const timing = lane.evidence.result();
           if (!timing.frames) throw failure('Native source has no decoded frame evidence');
           if (timing.resamplerFailure) throw failure('Native timestamp compensation failed', 'NATIVE_SOURCE_TIMESTAMP_RESAMPLE_FAILED');
-          if (timing.overlapCount) throw failure('Native source has overlapping native timestamps', 'NATIVE_SOURCE_TIMESTAMP_OVERLAP');
+          // The resampler would drop overlapped samples. Re-render per source
+          // below, where overlap switches that source to a sample-count timeline.
+          if (timing.overlapCount) overlapped = true;
           const mediaSamples = Math.round(timing.lastEndPts - timing.firstPts);
           lane.endSample = lane.startSample + mediaSamples;
           observedEnd = Math.max(observedEnd, lane.endSample);
@@ -341,11 +343,13 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
         // With two lanes, an unexpected tail beyond the common padded end can
         // change old amix's normalization. Preserve it through general planning
         // instead of trimming it or publishing an end-of-stream gain change.
-        if (lanes.length === 1 || observedEnd <= targetSamples) {
+        if (!overlapped && (lanes.length === 1 || observedEnd <= targetSamples)) {
           return await finish(candidate, { sourceEvidence: fastEvidence, lanes: lanes.map(lane => ({ kind: lane.kind,
             startSample: lane.startSample, mediaEndSample: lane.endSample })), warnings: fastWarnings }, Math.max(targetSamples, observedEnd), true);
         }
-        warnings.push({ kind: 'native-source-fast-path-tail-fallback', observedEndSeconds: observedEnd / RATE, plannedEndSeconds: targetSamples / RATE });
+        warnings.push(overlapped
+          ? { kind: 'native-source-fast-path-overlap-fallback' }
+          : { kind: 'native-source-fast-path-tail-fallback', observedEndSeconds: observedEnd / RATE, plannedEndSeconds: targetSamples / RATE });
         await checkSpace(estimateScratchBytes({ sourceBytes, timelineSeconds: observedEnd / RATE,
           sourceSeconds: fastEvidence.reduce((sum, source) => sum + source.decodedDuration, 0) + (hasPcm ? pcm.duration : 0), lanes: estimatedLanes }));
       }
@@ -354,25 +358,40 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
         const normalizedPath = path.join(scratchDirectory, `${source.sourceId}.flac`);
         const evidence = createTimestampEvidence();
         // Resampler policy: materialize forward timestamp gaps without gradual
-        // clock stretching. Significant overlap is rejected after this pass,
+        // clock stretching. Overlap re-renders in sample order after this pass,
         // before any output can replace the requested building file.
         // https://ffmpeg.org/ffmpeg-resampler.html
-        const command = lossless(input(rawPath).audioFilters([
+        const normalize = (filters, onStderr) => run(lossless(input(rawPath).audioFilters(filters))
+          .on('stderr', onStderr).output(normalizedPath), timeout(Math.max(options.expectedDurationSec || 0, (source.endOffsetMs || 0) / 1000)), 'Normalize native source');
+        await normalize([
           'asettb=1/48000', 'ashowinfo', 'asetpts=PTS-STARTPTS',
           // Copy mono center to BOTH speakers at unity, while preserving
           // separate stereo channels (including anti-phase USB inputs).
           stereo, resample,
-        ])).on('stderr', line => evidence.consume(line)).output(normalizedPath);
-        await run(command, timeout(Math.max(options.expectedDurationSec || 0, (source.endOffsetMs || 0) / 1000)), 'Normalize native source');
+        ], line => evidence.consume(line));
         const timing = evidence.result();
         if (!timing.frames) throw failure(`Native source ${source.sourceId} has no decoded frame evidence`);
         if (timing.resamplerFailure) throw failure(`Native source ${source.sourceId} timestamp compensation failed`, 'NATIVE_SOURCE_TIMESTAMP_RESAMPLE_FAILED');
-        if (timing.overlapCount) throw failure(`Native source ${source.sourceId} has overlapping native timestamps`, 'NATIVE_SOURCE_TIMESTAMP_OVERLAP');
-        if (timing.gapCount) warnings.push({ kind: 'native-source-timestamp-gaps', sourceId: source.sourceId,
-          count: timing.gapCount, gapSeconds: timing.gapSamples / RATE });
+        // Overlapping timestamps within one MediaRecorder stream (ELECTRON-68)
+        // carry distinct encoded audio behind a backward clock step. Refusing
+        // stranded the whole meeting, and the timestamp resampler would drop
+        // that speech. Keep every decoded sample in order instead; gaps then
+        // close too, so this lane's later onsets are approximate (warned).
+        const sequential = timing.overlapCount > 0;
+        if (sequential) {
+          const replay = createTimestampEvidence();
+          await normalize(['asettb=1/48000', 'ashowinfo', 'asetpts=N/SR/TB', stereo, 'aresample=48000'], line => replay.consume(line));
+          if (replay.result().frames !== timing.frames) throw failure(`Native source ${source.sourceId} sample-order replay decoded a different stream`);
+          warnings.push({ kind: 'native-source-timestamp-overlap', sourceId: source.sourceId, timeline: 'sample-order',
+            count: timing.overlapCount, overlapSeconds: timing.overlapSamples / RATE,
+            collapsedGapCount: timing.gapCount, collapsedGapSeconds: timing.gapSamples / RATE, onsetIsApproximate: true });
+        } else if (timing.gapCount) {
+          warnings.push({ kind: 'native-source-timestamp-gaps', sourceId: source.sourceId,
+            count: timing.gapCount, gapSeconds: timing.gapSamples / RATE });
+        }
         const duration = await validDuration(normalizedPath, 'flac');
         const mediaSamples = samples(duration);
-        const span = timing.lastEndPts - timing.firstPts;
+        const span = sequential ? timing.decodedSamples : timing.lastEndPts - timing.firstPts;
         if (Math.abs(mediaSamples - span) > TIMING_TOLERANCE_SAMPLES) throw failure(`Native source ${source.sourceId} normalization changed its timestamp span`);
         normalized.push({ ...source, normalizedPath, mediaSamples, startSample: samples(source.startOffsetMs / 1000) });
         sourceEvidence.push({ sourceId: source.sourceId, kind: source.kind, rawPath, normalizedPath,
