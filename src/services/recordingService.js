@@ -1271,19 +1271,38 @@ async function handleMicDeviceChange() {
   micAutoRecovering = true;
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
+    const allInputs = devices.filter(d => d.kind === 'audioinput' && d.deviceId);
     // 'communications' is a Windows pseudo-device that duplicates 'default'
     // semantics — skip it so it cannot burn a candidate slot.
-    const inputs = devices.filter(d => d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'communications');
+    const inputs = allInputs.filter(d => d.deviceId !== 'communications');
     if (inputs.length === 0) return;
     // Prefer the originally-requested device if it reappeared, then walk the
     // remaining inputs. Every candidate must PROVE it delivers signal (a
     // still-enumerated phantom endpoint opens fine and records silence) —
     // up to 3 candidates, ~5s probe each.
     const preferred = inputs.find(d => d.deviceId === lastRequestedDeviceId);
-    const candidates = [
+    // The lost microphone often stays enumerated (wedged endpoint, or not yet
+    // removed) and the 'default' alias keeps pointing at it. Probing it first
+    // cost 5s of silence and an empty archive epoch (ELECTRON-62/66). Probe
+    // each physical device (groupId) once, concrete IDs before aliases, and
+    // the lost device last.
+    const lostDeviceId = micHealthState.actualDeviceId || null;
+    const lostGroupId = allInputs.find(d => d.deviceId === lostDeviceId)?.groupId ||
+      stream?.getAudioTracks?.()[0]?.getSettings?.()?.groupId || null;
+    const isLost = d => (lostDeviceId && d.deviceId === lostDeviceId) || (lostGroupId && d.groupId === lostGroupId);
+    const isAlias = d => d.deviceId === 'default';
+    const seenGroups = new Set();
+    const unique = [
       ...(preferred ? [preferred] : []),
-      ...inputs.filter(d => d !== preferred)
-    ].slice(0, 3);
+      ...inputs.filter(d => d !== preferred && !isAlias(d)),
+      ...inputs.filter(d => d !== preferred && isAlias(d))
+    ].filter(d => {
+      if (!d.groupId) return true;
+      if (seenGroups.has(d.groupId)) return false;
+      seenGroups.add(d.groupId);
+      return true;
+    });
+    const candidates = [...unique.filter(d => !isLost(d)), ...unique.filter(isLost)].slice(0, 3);
     const fromLabel = micHealthState.trackLabel || '';
     for (const candidate of candidates) {
       const result = await switchMicrophoneStream(candidate.deviceId, { verifyContext: 'auto-recovery' });
@@ -1305,6 +1324,8 @@ async function handleMicDeviceChange() {
     }
     // Every candidate was silent: the last one stays active and the health
     // state already shows the precise ZERO_SIGNAL after-switch message.
+    // Individual silent probes are warnings; only exhausting them is an error.
+    captureMessage(`mic-health: auto-recovery found no microphone with signal after ${candidates.length} candidate(s)`, 'error');
   } catch (e) {
     console.warn('Mic auto-recovery on devicechange failed:', e);
   } finally {
@@ -1812,7 +1833,8 @@ function startMicHealthMonitoring(micStream, recordingStore) {
             afterSwitch: true, silenceSince: v.since
           });
           setSilenceWarning(micHealthState.message);
-          captureMessage(`mic-health: switch to "${v.label || v.deviceId || 'default'}" delivered NO signal within ${SWITCH_VERIFY_MS / 1000}s (${v.context})`, 'error');
+          captureMessage(`mic-health: switch to "${v.label || v.deviceId || 'default'}" delivered NO signal within ${SWITCH_VERIFY_MS / 1000}s (${v.context})`,
+            v.context === 'auto-recovery' ? 'warning' : 'error');
           emit('micSwitchVerified', { ok: false, context: v.context, label: v.label, deviceId: v.deviceId });
         }
         return; // while verifying, the regular detectors stand down
