@@ -94,8 +94,11 @@ function classifySources(sources, pcm, { recovery = false, requiredKinds = [] } 
       continue;
     }
     if (!source.hasAudio) {
-      if (!recovery) throw failure(`Started native source ${source.sourceId} has no saved audio`);
-      warnings.push({ kind: 'native-source-audio-missing', sourceId: source.sourceId });
+      // Past the checks above, a closed source's end marker durably confirms
+      // zero chunks: its recorder never emitted a non-empty blob (e.g. a dead
+      // auto-recovery candidate replaced within seconds). Nothing was lost, so
+      // it must not block the meeting. Other lanes/epochs still gate below.
+      warnings.push({ kind: 'native-source-audio-missing', sourceId: source.sourceId, confirmedEmpty: !source.interrupted });
       continue;
     }
     if (source.interrupted) warnings.push({ kind: 'native-source-interrupted', sourceId: source.sourceId });
