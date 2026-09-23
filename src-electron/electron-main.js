@@ -693,6 +693,13 @@ async function recoverOrphanedRecordings() {
         const hasPcm = fs.existsSync(pcmPath) && fs.statSync(pcmPath).size > 0;
         const hasNative = usesNativeSources(dirPath);
         if (!hasChunks && !hasSessions && !hasBatches && !hasOutput && !hasPcm && !hasNative) continue;
+        // Older releases deleted sources after combining and wrote no receipt.
+        // Such an audio.webm that history already points at, in a settled state,
+        // needs nothing; without this every launch "recovered" it again (32 at
+        // once for one user). Pending/failed ones still go to the upload queue.
+        if (!finalized && hasOutput && !hasChunks && !hasSessions && !hasBatches && !hasPcm && !hasNative &&
+            existingRecord?.filePath === audioPath &&
+            ['completed', 'uploaded', 'skipped', 'cancelled', 'pending_verification'].includes(existingRecord.uploadStatus)) continue;
 
         // Never touch a recording that is being written RIGHT NOW. This scan
         // runs ~5s after launch — a recording started inside that window
@@ -867,9 +874,11 @@ async function recoverOrphanedRecordings() {
       }
 
       // Give the user clear feedback and refresh the (now-stale) renderer history.
-      if (mainWindow && !mainWindow.isDestroyed()) {
+      // Count only recordings that actually came back to the user; a history
+      // entry whose path was merely repaired is not news to them.
+      if (recoveredRecords.length > 0 && mainWindow && !mainWindow.isDestroyed()) {
         try {
-          mainWindow.webContents.send('recording:recovered', { count: recoveredCount, records: recoveredRecords });
+          mainWindow.webContents.send('recording:recovered', { count: recoveredRecords.length, records: recoveredRecords });
         } catch (e) { /* ignore */ }
       }
 
