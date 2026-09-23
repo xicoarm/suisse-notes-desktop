@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.8](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.7...v4.7.8) (2026-09-23)
+
+
+### Bug Fixes
+
+* **recovery:** stop re-recovering settled legacy recordings on every launch ([addaad9](https://github.com/xicoarm/suisse-notes-desktop/commit/addaad9df8c757123be254d158b0ff1e1af795c5))
+
 ### [4.7.7](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.6...v4.7.7) (2026-09-23)
 
 
