@@ -92,6 +92,10 @@ function isTransientNetworkError(err, message) {
     if (/socket hang up/i.test(message)) return true;
     if (/network error/i.test(message)) return true;
     if (/getaddrinfo/i.test(message)) return true;
+    // The SDK's own unhandled-rejection hook reports these before the
+    // process handler below can filter them (ELECTRON-67: an update download
+    // cut by the laptop going back to sleep; the updater retries later).
+    if (/net::ERR_NETWORK_CHANGED|net::ERR_NETWORK_IO_SUSPENDED|net::ERR_INTERNET_DISCONNECTED/i.test(message)) return true;
   }
   return false;
 }
