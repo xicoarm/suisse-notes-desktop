@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.9](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.8...v4.7.9) (2026-09-24)
+
+
+### Bug Fixes
+
+* **api:** ride out backend restarts and never parse HTML as JSON ([591e7ac](https://github.com/xicoarm/suisse-notes-desktop/commit/591e7accfc2c3033968be59c8b0f51d830c6c1df))
+* **minutes:** treat HTML/5xx minutes responses as transient (ELECTRON-6E) ([ce6b55c](https://github.com/xicoarm/suisse-notes-desktop/commit/ce6b55cd5e2c158107da88354fd9201d8db1a85a))
+* **upload:** report transient upload failures as warnings ([eb38d97](https://github.com/xicoarm/suisse-notes-desktop/commit/eb38d97ff57e4bb1514a0060076581142ac0ca1b))
+
 ### [4.7.8](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.7...v4.7.8) (2026-09-23)
 
 
