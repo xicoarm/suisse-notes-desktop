@@ -19,7 +19,7 @@
  */
 
 import { getFileUri, statFile, readFile } from "./storage";
-import { fetchWithTimeout } from "./api";
+import { fetchWithTimeout, parseJsonSafe } from "./api";
 import { isCapacitor } from "../utils/platform";
 import { addBreadcrumb, captureMessage } from "../boot/sentry";
 
@@ -352,7 +352,7 @@ export async function uploadViaPresignedSas(opts) {
       signal: abortSignal,
       timeoutMs: 30000,
     });
-    initData = await initResp.json().catch(() => ({}));
+    initData = await parseJsonSafe(initResp);
     crumb(`POST /api/uploads/init returned status=${initResp.status} mode=${initData?.mode || '-'}`);
   } catch (err) {
     if (err?.name === "AbortError") {
@@ -396,6 +396,14 @@ export async function uploadViaPresignedSas(opts) {
     // Transient → throw so caller's outer retry kicks in
     const e = new Error(error);
     e.status = status;
+    throw e;
+  }
+
+  if (initData.nonJson) {
+    // 2xx with an HTML body: a captive portal or proxy answered instead of
+    // the backend. Transient — the caller's outer retry sends init again.
+    const e = new Error(initData.error);
+    e.status = initResp.status;
     throw e;
   }
 
@@ -468,7 +476,7 @@ export async function uploadViaPresignedSas(opts) {
             }),
             signal: abortSignal,
           });
-          const reinitData = await reinit.json().catch(() => ({}));
+          const reinitData = await parseJsonSafe(reinit);
           if (reinit.ok && reinitData.mode === "azure" && reinitData.sasUrl && reinitData.audioFileId) {
             if (reinitData.audioFileId === audioFileId) {
               // Same session — fresh SAS, staged blocks still valid.
@@ -558,7 +566,7 @@ export async function uploadViaPresignedSas(opts) {
       signal: abortSignal,
       timeoutMs: 60000,
     });
-    completeData = await completeResp.json().catch(() => ({}));
+    completeData = await parseJsonSafe(completeResp);
   } catch (err) {
     if (err?.name === "AbortError") {
       return { mode: "azure", success: false, cancelled: true, canRetry: false };
@@ -584,6 +592,15 @@ export async function uploadViaPresignedSas(opts) {
     }
     const e = new Error(error);
     e.status = status;
+    throw e;
+  }
+
+  if (completeData.nonJson) {
+    // 2xx with an HTML body: the backend's answer never reached us. The
+    // blocks are committed in Azure and the server dedups, so the outer
+    // retry repeats complete.
+    const e = new Error(completeData.error);
+    e.status = completeResp.status;
     throw e;
   }
 

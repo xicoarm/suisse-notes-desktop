@@ -17,7 +17,7 @@ import { addBreadcrumb, captureMessage } from '../boot/sentry';
 
 const crumb = (message, level = 'info') => addBreadcrumb({ category: 'upload', message, level });
 import { uploadViaPresignedSas, isTransientUploadError, readBlobFromCapacitorPath } from './upload-direct';
-import { fetchWithTimeout } from './api';
+import { fetchWithTimeout, readJson } from './api';
 
 // --- Persistent Mobile Upload Queue (localStorage + Preferences backup) ---
 const MOBILE_UPLOAD_QUEUE_KEY = 'mobile_upload_queue';
@@ -688,7 +688,7 @@ const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts 
         throw new Error(`Status check failed: ${response.status}`);
       }
 
-      const status = await response.json();
+      const status = await readJson(response);
 
       // Map the server contract enum (src/lib/api/desktop-contract.ts →
       // UploadStatusResponse.status: RecordingStatus) onto the verification

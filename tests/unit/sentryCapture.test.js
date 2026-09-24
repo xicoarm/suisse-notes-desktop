@@ -14,8 +14,11 @@ const inRanges = (status) => HTTP_CAPTURE_STATUS_CODES.some((r) => (Array.isArra
 
 describe('HTTP capture status codes', () => {
   it('captures client and server failures but not the answers of normal operation', () => {
-    for (const s of [400, 403, 404, 405, 408, 410, 413, 422, 429, 500, 502, 503, 504, 599]) expect(inRanges(s), `status ${s}`).toBe(true);
+    for (const s of [400, 403, 404, 405, 408, 410, 413, 422, 429, 500, 501, 505, 599]) expect(inRanges(s), `status ${s}`).toBe(true);
     for (const s of [200, 204, 301, 304, 401, 402, 409, 600]) expect(inRanges(s), `status ${s}`).toBe(false);
+  });
+  it('leaves gateway answers (backend restarting) to the API retry layer (ELECTRON-6F)', () => {
+    for (const s of [502, 503, 504]) expect(inRanges(s), `status ${s}`).toBe(false);
   });
 });
 

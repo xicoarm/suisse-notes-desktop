@@ -2,7 +2,7 @@ import { useQuasar } from 'quasar';
 import { useI18n } from 'vue-i18n';
 import { isElectron, isCapacitor, isAndroid } from '../utils/platform';
 import { useAuthStore } from '../stores/auth';
-import { getApiUrlSync, fetchWithTimeout } from '../services/api';
+import { getApiUrlSync, fetchWithTimeout, parseJsonSafe } from '../services/api';
 import { captureMessage, addBreadcrumb } from '../boot/sentry';
 
 // Shared across every card/page: one in-app browser open at a time. A second
@@ -81,8 +81,8 @@ export function useShareLink() {
               'Authorization': `Bearer ${authStore.token}`
             }
           });
-          const data = await response.json();
-          if (data.success && data.sessionToken) {
+          const data = await parseJsonSafe(response);
+          if (response.ok && data.success && data.sessionToken) {
             url += `?session=${encodeURIComponent(data.sessionToken)}`;
           }
         }

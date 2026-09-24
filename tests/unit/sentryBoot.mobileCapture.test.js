@@ -62,7 +62,7 @@ describe('mobile Sentry init — capture wiring', () => {
     expect(o.transportOptions).toMatchObject({ flushAtStartup: true, maxQueueSize: 100 });
     const byName = Object.fromEntries(o.integrations.map((i) => [i.name, i.o]));
     expect(byName.CaptureConsole.levels).toEqual(['error', 'warn']);
-    expect(byName.HttpClient.failedRequestStatusCodes).toEqual([400, [403, 408], [410, 599]]);
+    expect(byName.HttpClient.failedRequestStatusCodes).toEqual([400, [403, 408], [410, 501], [505, 599]]);
     expect(byName.EventFilters.disableErrorDefaults).toBe(true);
     expect(byName.Vue).toBeTruthy();
     expect(router.onError).toHaveBeenCalledTimes(1);
