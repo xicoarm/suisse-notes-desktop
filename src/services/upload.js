@@ -1036,9 +1036,13 @@ export const uploadWithVerification = async (options) => {
       fallback: verification.fallback
     };
   } catch (error) {
-    console.error('Upload failed:', error);
+    // A failure the retry queue will overcome (backend restarting behind
+    // nginx, 5xx, timeout, network) is a warning; everything else an error.
+    const transient = isTransientUploadFailure(error);
+    if (transient) console.warn('Upload failed (transient, will retry):', error);
+    else console.error('Upload failed:', error);
     onStatusChange('error');
-    sentryUploadFail(recordId, error);
+    sentryUploadFail(recordId, error, { transient });
     // Keep the HTTP classification: the retry drivers decide "retry later"
     // vs "terminal" on canRetry/status, and the local-file-missing case must
     // clear the dead path instead of retrying forever (CAPACITOR-N2/N3).
@@ -1057,6 +1061,21 @@ export const uploadWithVerification = async (options) => {
     _endMobileUpload(recordId);
   }
 };
+
+/**
+ * True for an upload failure the retry queue is expected to overcome: a
+ * gateway/HTML answer (backend restarting), any 5xx, 408/429, a timeout or a
+ * network error. Terminal verdicts (4xx, missing file, no minutes) are not.
+ */
+export function isTransientUploadFailure(error) {
+  if (!error) return false;
+  if (error.transient === true) return true;
+  if (error.insufficientMinutes || error.canRetry === false) return false;
+  const status = Number(error.status);
+  if (status >= 500 || status === 408 || status === 429) return true;
+  if (['TypeError', 'TimeoutError'].includes(error.name) || error.code === 'ETIMEDOUT') return true;
+  return /Unexpected server response|network|timed out|Failed to fetch|Load failed/i.test(error.message || '');
+}
 
 /**
  * Classify a non-2xx legacy-upload response. 4xx answers (bad file, no
