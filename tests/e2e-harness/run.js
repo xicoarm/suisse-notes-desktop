@@ -376,10 +376,10 @@ async function s18GatewayRestart() {
 
     mock.gatewayOutage(3500);
     const before = mock.state.requests.filter(r => r.url === '/api/desktop/minutes').length;
-    const minutes = await app.evalTimed(async () => {
-      const pinia = window.__pinia || document.querySelector('#q-app')?.__vue_app__?.config?.globalProperties?.$pinia;
-      return pinia._s.get('minutes').fetchMinutes(pinia._s.get('auth').token, true);
-    }, null, 45_000);
+    // Main-process path (axios through api-resilience.js). The renderer's
+    // fetch path is the code m9-gateway-restart verifies on the mobile bundle;
+    // a built app's CSP only allows the production API host, not this mock.
+    const minutes = await app.evalTimed(() => window.electronAPI.minutes.fetch(), null, 45_000);
     const minuteCalls = mock.state.requests.filter(r => r.url === '/api/desktop/minutes').length - before;
     notes.push(`minutes during restart: ${JSON.stringify(minutes)} after ${minuteCalls} requests`);
     if (!minutes?.success) problems.push(`minutes refresh did not survive the restart: ${JSON.stringify(minutes)}`);
@@ -403,7 +403,8 @@ async function s18GatewayRestart() {
     const mainLog = app.log.join('');
     const jsonCrash = (rendererLog + mainLog).split('\n').filter(l => /Unexpected token|is not valid JSON|JSON Parse error|SyntaxError/i.test(l));
     if (jsonCrash.length) problems.push(`HTML page parsed as JSON: ${jsonCrash.slice(0, 3).join(' | ').slice(0, 300)}`);
-    const rendererErrors = rendererLog.split('\n').filter(l => /\[error\]/.test(l) && /minutes|502|gateway|history|template/i.test(l));
+    const rendererErrors = rendererLog.split('\n').filter(l => /\[error\]/.test(l) && /minutes|502|gateway|history|template|upload/i.test(l)
+      && !/Content Security Policy/.test(l));
     if (rendererErrors.length) problems.push(`renderer logged errors during the restart: ${rendererErrors.slice(0, 3).join(' | ').slice(0, 300)}`);
     const recovered = mainLog.split('\n').filter(l => /recovered after \d+ attempts/.test(l));
     notes.push(`main-process recoveries logged: ${recovered.length}`);
