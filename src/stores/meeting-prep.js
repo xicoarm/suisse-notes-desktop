@@ -18,7 +18,7 @@
 
 import { defineStore } from 'pinia';
 import { isElectron, isCapacitor } from '../utils/platform';
-import { getApiUrlSync } from '../services/api';
+import { getApiUrlSync, fetchWithTimeout, readJson, parseJsonSafe } from '../services/api';
 import { useAuthStore } from './auth';
 
 // Lazy accessor - resolved on first use so store definition order can't bite.
@@ -248,11 +248,11 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
       if (!authStore.token) return;
       if (!force && this.templatesFetchedAt && Date.now() - this.templatesFetchedAt < TEMPLATE_CACHE_TTL_MS) return;
       try {
-        const res = await fetch(`${getApiUrlSync()}/api/desktop/templates`, {
+        const res = await fetchWithTimeout(`${getApiUrlSync()}/api/desktop/templates`, {
           headers: this._authHeaders()
         });
         if (!res.ok) throw new Error(`templates ${res.status}`);
-        const data = await res.json();
+        const data = await readJson(res);
         if (Array.isArray(data.templates)) {
           this.templates = data.templates;
           this.templatesFetchedAt = Date.now();
@@ -266,11 +266,11 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
     async fetchSections(templateId) {
       if (!templateId) return [];
       try {
-        const res = await fetch(`${getApiUrlSync()}/api/desktop/templates/${templateId}/sections`, {
+        const res = await fetchWithTimeout(`${getApiUrlSync()}/api/desktop/templates/${templateId}/sections`, {
           headers: this._authHeaders()
         });
         if (!res.ok) throw new Error(`sections ${res.status}`);
-        const data = await res.json();
+        const data = await readJson(res);
         const sections = Array.isArray(data.sections) ? data.sections : [];
         this.sectionsByTemplate = { ...this.sectionsByTemplate, [templateId]: sections };
         this._persistCache();
@@ -316,16 +316,17 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
       try {
         const formData = new FormData();
         formData.append('file', file, file.name);
-        const res = await fetch(`${getApiUrlSync()}/api/context-files`, {
+        const res = await fetchWithTimeout(`${getApiUrlSync()}/api/context-files`, {
           method: 'POST',
           headers: this._authHeaders(),
-          body: formData
+          body: formData,
+          timeoutMs: 0 // no deadline: server-side text extraction/OCR can be slow
         });
         if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
+          const err = await parseJsonSafe(res);
           throw new Error(err.error || `Upload failed (${res.status})`);
         }
-        const data = await res.json();
+        const data = await readJson(res);
         return {
           success: true,
           file: {
@@ -372,7 +373,7 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
     /** Best-effort delete of an uploaded-but-unattached context file. */
     async deleteContextFileRaw(fileId) {
       try {
-        await fetch(`${getApiUrlSync()}/api/context-files/${fileId}`, {
+        await fetchWithTimeout(`${getApiUrlSync()}/api/context-files/${fileId}`, {
           method: 'DELETE',
           headers: this._authHeaders()
         });

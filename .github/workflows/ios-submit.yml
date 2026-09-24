@@ -52,10 +52,9 @@ jobs:
         if: ${{ !inputs.status }}
         run: |
           cat > /tmp/release-notes.txt <<'NOTES'
-          Diese Version macht Probleme sichtbar, statt sie zu verschweigen:
-          - Abstürze, eingefrorene Aufnahmen und vom System beendete Aufnahmen werden automatisch gemeldet, damit wir Fehler finden und beheben können.
-          - Fehler beim Zusammenfügen einer Aufnahme werden erkannt und gemeldet, statt unbemerkt zu bleiben.
-          - Verbesserte Stabilität bei Unterbrechungen, etwa durch einen Anruf.
+          Zuverlässigere Verbindung zum Server:
+          - Kurze Unterbrechungen auf unserer Seite, etwa während eines Updates, überbrückt die App jetzt selbst, statt einen Fehler anzuzeigen.
+          - Uploads, Anmeldung und das Minutenguthaben bleiben stabil, auch wenn ein WLAN-Anmeldeportal oder ein Proxy statt des Servers antwortet.
           NOTES
           cat /tmp/release-notes.txt
 

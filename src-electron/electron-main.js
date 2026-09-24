@@ -83,10 +83,15 @@ const TRANSIENT_NETWORK_CODES = new Set([
   'ENETUNREACH',    // no route to host
   'EAI_AGAIN'       // transient DNS failure
 ]);
-const TRANSIENT_NETWORK_STATUSES = new Set([408]); // Request Timeout — server gave up waiting for client
+// 408: the server gave up waiting for the client. 502/503/504: nginx while the
+// backend restarts — already retried by api-resilience.js, so one that
+// reaches a log line is a restart or outage, not a client bug.
+const TRANSIENT_NETWORK_STATUSES = new Set([408, 502, 503, 504]);
 
 function isTransientNetworkError(err, message) {
   if (err && TRANSIENT_NETWORK_CODES.has(err.code)) return true;
+  // api-resilience.js: HTML page instead of JSON, or an exhausted gateway retry.
+  if (err?.code === 'ENONJSON' || err?.transient === true) return true;
   if (err?.response?.status && TRANSIENT_NETWORK_STATUSES.has(err.response.status)) return true;
   if (typeof message === 'string') {
     if (/socket hang up/i.test(message)) return true;
@@ -445,6 +450,9 @@ if (!app.isPackaged || process.env.SUISSE_E2E_HOOKS === '1') {
 const { getApiUrl, getEnvironmentInfo } = require('./config');
 const API_BASE_URL = getApiUrl();
 log.info('Environment:', getEnvironmentInfo());
+// Backend restarts answer 502-504 for a few seconds: idempotent requests are
+// retried, and an HTML page in place of JSON becomes a transient error.
+require('./api-resilience').installApiResilience({ axios, log, getApiBaseUrl: () => API_BASE_URL });
 
 // Disk space utilities for recording safety
 const { canStartRecording, shouldForceStopRecording, canFinalizeRecording, getAvailableSpaceDetailed, formatBytes } = require('./disk-utils');
@@ -2021,6 +2029,8 @@ ipcMain.handle('auth:login', async (event, email, password) => {
       appVersion: app.getVersion()
     }, {
       timeout: 30000,
+      // Safe to resend: a gateway answer means the backend was restarting.
+      retryGateway: true,
       headers: {
         'Content-Type': 'application/json',
         'X-Desktop-App-Version': app.getVersion()
@@ -2049,7 +2059,9 @@ ipcMain.handle('auth:login', async (event, email, password) => {
   } catch (error) {
     let errorMessage = 'Login failed';
 
-    if (error.response) {
+    if (error.nonJson) {
+      errorMessage = 'Unexpected response from the server. Please try again in a moment.';
+    } else if (error.response) {
       // Server responded with error
       errorMessage = error.response.data?.error || error.response.data?.message || `Server error: ${error.response.status}`;
     } else if (error.code === 'ECONNREFUSED') {
@@ -4263,13 +4275,17 @@ async function uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, a
                           error.code === 'ECONNRESET' ||
                           error.code === 'EPIPE' ||
                           (error.message && error.message.includes('socket hang up')) ||
+                          error.transient === true || // api-resilience: HTML instead of JSON, exhausted gateway retry
                           (error.response && error.response.status >= 500);
 
       // If we've exhausted retries or error is not retryable
       if (attempt >= maxRetries || !isRetryable) {
         let errorMessage = 'Upload failed';
         let status = 0;
-        if (error.response) {
+        if (error.nonJson) {
+          errorMessage = error.message;
+          status = error.status || 0;
+        } else if (error.response) {
           errorMessage = error.response.data?.error || `Server error: ${error.response.status}`;
           status = error.response.status;
         } else if (error.code === 'ECONNREFUSED') {

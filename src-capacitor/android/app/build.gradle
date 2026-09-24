@@ -15,8 +15,8 @@ android {
         applicationId "ch.suissenotes.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 42
-        versionName "3.9.39"
+        versionCode 43
+        versionName "3.9.40"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         // The native crash reporter must file its events under the same release
         // name the WebView layer uses, or a native crash and the JavaScript

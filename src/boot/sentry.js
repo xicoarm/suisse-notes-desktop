@@ -55,10 +55,13 @@ export const captureException = (error, context) => {
 
 /**
  * Capture a message
+ * @param {string} message
+ * @param {string} [level]
+ * @param {Object} [context] - extra capture context (fingerprint, tags, extra)
  */
-export const captureMessage = (message, level = 'info') => {
+export const captureMessage = (message, level = 'info', context = null) => {
   if (!sentryInitialized || !SentryModule) return;
-  SentryModule.captureMessage(message, level);
+  SentryModule.captureMessage(message, context ? { ...context, level } : level);
 };
 
 /**

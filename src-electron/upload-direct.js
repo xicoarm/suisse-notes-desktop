@@ -45,6 +45,7 @@ const FATAL_HTTP_STATUSES = new Set([
 
 // Network-level errors that ARE retryable — transient connectivity.
 const RETRYABLE_AXIOS_CODES = new Set([
+  'ENONJSON', // api-resilience.js: an HTML page answered instead of the backend
   'ECONNREFUSED',
   'ETIMEDOUT',
   'ECONNABORTED',

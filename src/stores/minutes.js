@@ -11,7 +11,7 @@
  */
 
 import { defineStore } from 'pinia';
-import { authenticatedRequest, API_ENDPOINTS } from '../services/api';
+import { authenticatedRequest, readJson, apiErrorFromResponse, ApiResponseError, API_ENDPOINTS } from '../services/api';
 
 // Auto-refresh interval (60 seconds)
 const REFRESH_INTERVAL_MS = 60 * 1000;
@@ -153,8 +153,7 @@ export const useMinutesStore = defineStore('minutes', {
               if (refreshResult.success) {
                 const retryResponse = await authenticatedRequest(API_ENDPOINTS.desktopMinutes, authStore.token);
                 if (retryResponse.ok) {
-                  const retryData = await retryResponse.json();
-                  this.setFromServer(retryData);
+                  this.setFromServer(await readJson(retryResponse));
                   return { success: true };
                 }
               }
@@ -162,21 +161,26 @@ export const useMinutesStore = defineStore('minutes', {
                 return { success: false, error: 'Session expired' };
               }
             } catch (refreshErr) {
+              if (refreshErr instanceof ApiResponseError) throw refreshErr;
               console.warn('Token refresh failed during fetchMinutes:', refreshErr);
             }
           }
-          const data = await response.json();
-          throw new Error(data.error || 'Failed to fetch minutes');
+          throw await apiErrorFromResponse(response, 'Failed to fetch minutes');
         }
-        const data = await response.json();
-        this.setFromServer(data);
+        this.setFromServer(await readJson(response));
         return { success: true };
       } catch (error) {
-        const isNetworkFailure = error?.name === 'TypeError'
-          || /fetch|network|timeout|offline/i.test(error?.message || '')
+        // An HTTP answer (gateway page during a backend restart, 5xx, 4xx) or
+        // a network failure keeps the cached balance; the next tick retries.
+        // Failed HTTP answers other than 502-504 already reach Sentry through
+        // the HTTP-client integration, so they are not reported twice.
+        // Anything else is a bug in this code path.
+        const isExpected = error instanceof ApiResponseError
+          || error?.name === 'TypeError'
+          || error?.name === 'TimeoutError'
           || (typeof navigator !== 'undefined' && !navigator.onLine);
-        if (isNetworkFailure) {
-          console.warn('Minutes refresh skipped (network/offline, keeping cached balance):', error.message);
+        if (isExpected) {
+          console.warn('Minutes refresh skipped (server/network unavailable, keeping cached balance):', error.message);
         } else {
           console.error('Failed to fetch minutes:', error);
         }

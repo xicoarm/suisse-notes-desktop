@@ -13,10 +13,14 @@ import { redactSecrets } from './redact';
  * HTTP answers captured as events by the HTTP-client integration. Everything
  * from 400 to 599 except the answers that are part of normal operation:
  * 401 (expired session, refreshed automatically), 402 (no transcription
- * minutes left, shown to the user) and 409 (upload already registered,
- * treated as success).
+ * minutes left, shown to the user), 409 (upload already registered, treated
+ * as success) and the gateway answers 502/503/504. Those are nginx saying the
+ * backend is restarting; the integration sees every attempt before the API
+ * layer retries it, so a 2-second deploy restart became an error issue
+ * (ELECTRON-6F). services/api.js retries them and reports the ones that
+ * persist as one "Backend unavailable" issue.
  */
-export const HTTP_CAPTURE_STATUS_CODES = [400, [403, 408], [410, 599]];
+export const HTTP_CAPTURE_STATUS_CODES = [400, [403, 408], [410, 501], [505, 599]];
 
 /**
  * Per-session sampling burst by level: the first N occurrences of an event

@@ -16,6 +16,9 @@
  *   s5-resilience     Transient 500 / 401-expiry / socket-cut - upload must
  *                     survive all three and never lose the file
  *   s6-crash          Renderer crash mid-recording -> relaunch -> recovery
+ *   s18-gateway-restart  Backend restarts behind nginx (HTML 502 on every /api
+ *                     call): login, minutes and upload ride it out, no JSON
+ *                     parse error (ELECTRON-6E/6F)
  *
  * Everything runs in an isolated userData profile against a local mock
  * backend. No production system is touched.
@@ -350,6 +353,70 @@ async function s5Resilience() {
     else notes.push(`${label} OK`);
   }
   return report('s5-resilience-summary', { pass: problems.length === 0, problems, notes });
+}
+
+// s18 — the backend restarts behind nginx (ELECTRON-6E/6F): every /api call
+// gets nginx's HTML 502 page for a few seconds. Login (main-process axios),
+// the minutes poll (renderer fetch) and a recording's upload must ride it
+// out, and nothing may parse the HTML page as JSON.
+async function s18GatewayRestart() {
+  const sc = buildScenario('s18', [{ type: 'speech', seconds: 30 }]);
+  const mock = await startMockBackend({ port: 3000 });
+  const app = new AppDriver({ name: 's18-gateway-restart', apiUrl: mock.url, fakeAudioWav: sc.wavPath, cdpPort: 9339 });
+  const problems = [];
+  const notes = [];
+  const gateway = () => mock.state.requests.filter(r => r.note === 'GATEWAY 502');
+  try {
+    await app.launch();
+    mock.gatewayOutage(3500);
+    await app.login();
+    const logins = mock.state.requests.filter(r => r.url === '/api/auth/desktop');
+    notes.push(`login during restart: ${logins.length} attempts, ${gateway().length} answered 502`);
+    if (logins.length < 2) problems.push(`login never met the restart window (${logins.length} attempt)`);
+
+    mock.gatewayOutage(3500);
+    const before = mock.state.requests.filter(r => r.url === '/api/desktop/minutes').length;
+    // Main-process path (axios through api-resilience.js). The renderer's
+    // fetch path is the code m9-gateway-restart verifies on the mobile bundle;
+    // a built app's CSP only allows the production API host, not this mock.
+    const minutes = await app.evalTimed(() => window.electronAPI.minutes.fetch(), null, 45_000);
+    const minuteCalls = mock.state.requests.filter(r => r.url === '/api/desktop/minutes').length - before;
+    notes.push(`minutes during restart: ${JSON.stringify(minutes)} after ${minuteCalls} requests`);
+    if (!minutes?.success) problems.push(`minutes refresh did not survive the restart: ${JSON.stringify(minutes)}`);
+    if (minuteCalls < 2) problems.push(`minutes refresh was never retried (${minuteCalls} request)`);
+
+    await app.seedUnlimitedMinutes();
+    await app.startRecording();
+    await sleep(25_000);
+    mock.gatewayOutage(6000);
+    await app.stopRecording();
+    try {
+      await app.waitForPhase(['uploaded', 'idle'], 300_000);
+    } catch (e) {
+      problems.push(`upload did not complete after the restart (${e.message})`);
+    }
+    const uploads = mock.state.requests.filter(r => /\/api\/(desktop\/upload|uploads\/)/.test(r.url));
+    notes.push(`upload requests: ${uploads.length}, gateway 502 answers in total: ${gateway().length}`);
+
+    const rendererLog = app.diagnosticsDir && fs.existsSync(path.join(app.diagnosticsDir, 'renderer.log'))
+      ? fs.readFileSync(path.join(app.diagnosticsDir, 'renderer.log'), 'utf8') : '';
+    const mainLog = app.log.join('');
+    const jsonCrash = (rendererLog + mainLog).split('\n').filter(l => /Unexpected token|is not valid JSON|JSON Parse error|SyntaxError/i.test(l));
+    if (jsonCrash.length) problems.push(`HTML page parsed as JSON: ${jsonCrash.slice(0, 3).join(' | ').slice(0, 300)}`);
+    const rendererErrors = rendererLog.split('\n').filter(l => /\[error\]/.test(l) && /minutes|502|gateway|history|template|upload/i.test(l)
+      && !/Content Security Policy/.test(l));
+    if (rendererErrors.length) problems.push(`renderer logged errors during the restart: ${rendererErrors.slice(0, 3).join(' | ').slice(0, 300)}`);
+    const recovered = mainLog.split('\n').filter(l => /recovered after \d+ attempts/.test(l));
+    notes.push(`main-process recoveries logged: ${recovered.length}`);
+    fs.writeFileSync(path.join(WORK_DIR, 's18-requests.json'), JSON.stringify(mock.state.requests, null, 1));
+    return report('s18-gateway-restart', { pass: problems.length === 0, problems, notes });
+  } catch (e) {
+    await app.screenshot('s18-crash').catch(() => {});
+    return report('s18-gateway-restart', { pass: false, problems: [`scenario crashed: ${e.message}`], notes });
+  } finally {
+    await app.close({ keepProfile: true });
+    await mock.close();
+  }
 }
 
 async function s6Crash() {
@@ -754,6 +821,7 @@ const SCENARIOS = {
   's5-resilience': s5Resilience,
   's6-crash': s6Crash,
   's10-upload-custody': s10UploadCustody,
+  's18-gateway-restart': s18GatewayRestart,
   's7-endurance': s7Endurance,
   's8-sysaudio': s8SysAudio,
   's11-capture-qualification': async () => report('s11-capture-qualification', await require('./qualification').runCaptureQualification()),

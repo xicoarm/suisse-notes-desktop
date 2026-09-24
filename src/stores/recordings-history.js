@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { useAuthStore } from './auth';
 import { useRecordingStore } from './recording';
 import { isElectron, isCapacitor, getPlatform } from '../utils/platform';
-import { getApiUrlSync, fetchWithTimeout } from '../services/api';
+import { getApiUrlSync, fetchWithTimeout, readJson, ApiResponseError } from '../services/api';
 import * as storage from '../services/storage';
 
 // ---------------------------------------------------------------------------
@@ -209,10 +209,10 @@ async function _serverFetch(endpoint, options = {}) {
   });
 
   if (!response.ok) {
-    throw new Error(`Server returned ${response.status}`);
+    throw new ApiResponseError(`Server returned ${response.status}`, { status: response.status });
   }
 
-  return response.json();
+  return readJson(response);
 }
 
 export const useRecordingsHistoryStore = defineStore('recordings-history', {

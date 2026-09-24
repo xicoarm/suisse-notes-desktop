@@ -36,7 +36,7 @@ vi.mock('../../src/services/api', () => ({
   fetchWithTimeout: async () => { throw new Error('offline (test)'); }
 }));
 
-import { classifyUploadHttpFailure, uploadWithVerification } from '../../src/services/upload';
+import { classifyUploadHttpFailure, uploadWithVerification, isTransientUploadFailure } from '../../src/services/upload';
 
 describe('classifyUploadHttpFailure', () => {
   it('4xx verdicts are terminal and keep the server message', () => {
@@ -73,5 +73,25 @@ describe('uploadWithVerification guards', () => {
   it('refuses to upload without a recordId (would register an unfindable meeting)', async () => {
     const r = await uploadWithVerification({ filePath: '/x.webm', recordId: null, apiUrl: 'https://api.test', authToken: 't' });
     expect(r).toMatchObject({ success: false, canRetry: false, canDelete: false });
+  });
+});
+
+describe('isTransientUploadFailure (report level of a failed upload)', () => {
+  const err = (props) => Object.assign(new Error(props.message || 'x'), props);
+  it('a backend restart, 5xx, timeout or network failure is transient (warning, the queue retries)', () => {
+    expect(isTransientUploadFailure(err({ message: 'Unexpected server response (HTTP 502)', status: 502 }))).toBe(true);
+    expect(isTransientUploadFailure(err({ message: 'Unexpected server response (HTTP 200)', status: 200 }))).toBe(true);
+    expect(isTransientUploadFailure(err({ status: 503 }))).toBe(true);
+    expect(isTransientUploadFailure(err({ status: 429 }))).toBe(true);
+    expect(isTransientUploadFailure(err({ name: 'TypeError', message: 'Load failed' }))).toBe(true);
+    expect(isTransientUploadFailure(err({ name: 'TimeoutError' }))).toBe(true);
+    expect(isTransientUploadFailure(err({ transient: true }))).toBe(true);
+  });
+  it('a terminal verdict stays an error', () => {
+    expect(isTransientUploadFailure(err({ status: 400, canRetry: false }))).toBe(false);
+    expect(isTransientUploadFailure(err({ status: 402, insufficientMinutes: true }))).toBe(false);
+    expect(isTransientUploadFailure(err({ status: 500, canRetry: false }))).toBe(false);
+    expect(isTransientUploadFailure(err({ message: 'Upload reported success but server returned no audioFileId' }))).toBe(false);
+    expect(isTransientUploadFailure(null)).toBe(false);
   });
 });

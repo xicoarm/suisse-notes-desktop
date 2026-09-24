@@ -51,7 +51,9 @@ async function platformLogin(username, password) {
   try {
     response = await apiRequest(API_ENDPOINTS.login, {
       method: 'POST',
-      body: JSON.stringify({ email: username, password })
+      body: JSON.stringify({ email: username, password }),
+      // Safe to resend: a gateway answer means the backend was restarting.
+      retryGateway: true
     });
   } catch (error) {
     if (isNetworkFailure(error)) {
@@ -61,7 +63,7 @@ async function platformLogin(username, password) {
     throw error;
   }
   const data = await parseJsonSafe(response);
-  if (!response.ok) {
+  if (!response.ok || data.nonJson) {
     addBreadcrumb({ category: 'auth', message: `Login failed: ${data.error || response.status}`, level: 'warning' });
     return { success: false, error: data.nonJson ? tr('serverUnexpectedResponse') : (data.error || 'Login failed') };
   }
@@ -84,7 +86,7 @@ async function platformRegister(email, password, name) {
     throw error;
   }
   const data = await parseJsonSafe(response);
-  if (!response.ok) {
+  if (!response.ok || data.nonJson) {
     return { success: false, error: data.nonJson ? tr('serverUnexpectedResponse') : (data.error || 'Registration failed') };
   }
   return { success: true, token: data.token, user: data.user };
