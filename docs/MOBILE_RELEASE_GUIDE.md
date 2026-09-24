@@ -609,6 +609,18 @@ On top of 3.9.37, this release fixes six field reports and hardens error capture
 Scope: **all P1** plus the six above and their neighbours — A3, B3, B6, B8, C1, D2, D6,
 E2, E5, F1, F5, F7, F8, G8–G12, G15, G16, I1, K1, K2, and the Problem-4/5/6 checks.
 
+### Scope of 3.9.40
+
+Network hardening only (ELECTRON-6E/6F): the backend restarts behind nginx several times a
+day and answers every API call with an HTML 502 page for 1–8 s (sometimes 40–50 s). The app
+now re-sends idempotent requests (and login) through that window, reads every API body
+through `readJson`/`parseJsonSafe` (an HTML page is a transient error, never a JSON
+`SyntaxError`), treats an HTML answer to upload init/complete as retryable, and no longer
+reports gateway answers to Sentry unless they outlast the retries. Automated:
+harness scenario `m9-gateway-restart`, unit `api.gatewayRetry`, `upload-direct.nonJson`.
+
+Scope: **all P1**, plus B1–B3 (login), E1, E2, E5 (upload and retry), I1 (minutes).
+
 ---
 
 ## 10. Troubleshooting — failures that already happened

@@ -18,6 +18,8 @@
  *   m7-repair          reinstall (storage wiped) → the recorder still bound to the user's UUID → pairs again
  *   m8-sentry-capture  every error type reaches Sentry: uncaught, rejection, Vue, console.error/warn,
  *                      failed HTTP answers, errors before init, offline queue, unclean exit after a kill
+ *   m9-gateway-restart backend restarts behind nginx (HTML 502 for every /api call): login, minutes
+ *                      poll and upload ride it out, no JSON parse error, no error event (ELECTRON-6E/6F)
  *   all                everything except m2
  */
 'use strict';
@@ -614,6 +616,58 @@ async function m8SentryCapture() {
   });
 }
 
+/**
+ * m9 — the backend restarts behind nginx (ELECTRON-6E/6F): every /api call
+ * gets nginx's HTML 502 page for a few seconds, as on every production deploy.
+ * The app must ride it out without an error: login, the minutes poll and a
+ * recording's upload all complete, nothing parses the HTML page as JSON, and
+ * no error-level event about it reaches Sentry.
+ */
+async function m9GatewayRestart() {
+  const sc = buildScenario('m9', [{ type: 'speech', seconds: 25 }]);
+  // mockMode gateway-restart: the first /api call (the login) opens a 5 s window.
+  return withApp('m9-gateway-restart', { scenario: sc, mockMode: 'gateway-restart' }, async (app, mock) => {
+    const problems = [], notes = [];
+    const gateway = () => mock.state.requests.filter(r => r.note === 'GATEWAY 502');
+    const logins = mock.state.requests.filter(r => r.url === '/api/auth/desktop');
+    notes.push(`login: ${logins.length} attempts, ${gateway().length} answered 502`);
+    if (logins.length < 2) problems.push(`login never met the restart window (${logins.length} attempt) — scenario did not test anything`);
+
+    // Minutes poll during a second restart: must succeed after the retries.
+    mock.gatewayOutage(3500);
+    const before = mock.state.requests.filter(r => r.url === '/api/desktop/minutes').length;
+    const minutes = await app.evalTimed(async () => {
+      const pinia = window.__harness.pinia();
+      return pinia._s.get('minutes').fetchMinutes(pinia._s.get('auth').token, true);
+    }, null, 45_000);
+    const minuteCalls = mock.state.requests.filter(r => r.url === '/api/desktop/minutes').length - before;
+    notes.push(`minutes during restart: ${JSON.stringify(minutes)} after ${minuteCalls} requests`);
+    if (!minutes?.success) problems.push(`minutes refresh did not survive the restart: ${JSON.stringify(minutes)}`);
+    if (minuteCalls < 2) problems.push(`minutes refresh was never retried (${minuteCalls} request)`);
+
+    // Record, then restart the backend exactly when the upload starts.
+    await app.startRecording();
+    await sleep(22_000);
+    mock.gatewayOutage(6000);
+    await app.stopRecording();
+    const done = await app.waitFor(async () => {
+      const hist = await app.getHistory();
+      return hist.find(r => r.uploadStatus === 'uploaded' || r.uploadStatus === 'pending_verification') || null;
+    }, { timeoutMs: 300_000, every: 2000, label: 'upload after restart' }).catch(() => null);
+    const hist = await app.getHistory();
+    notes.push(`upload: ${uploadsOf(mock).length} attempts, history ${hist.map(r => r.uploadStatus).join(',')}`);
+    if (!done) problems.push(`upload never completed after the restart (${hist.map(r => `${r.uploadStatus}/${r.uploadError || ''}`).join(',')})`);
+    notes.push(`gateway 502 answers in total: ${gateway().length}`);
+
+    const jsonCrash = app.console.filter(l => /Unexpected token|is not valid JSON|JSON Parse error|SyntaxError/i.test(l));
+    if (jsonCrash.length) problems.push(`HTML page parsed as JSON: ${jsonCrash.slice(0, 3).join(' | ').slice(0, 300)}`);
+    const errorEvents = app.sentryEvents().filter(e => (e.level || 'error') === 'error'
+      && /502|Bad Gateway|Unexpected token|not valid JSON|Backend unavailable|status code: 50/i.test(sentryEventText(e)));
+    if (errorEvents.length) problems.push(`restart still raised error-level Sentry events: ${errorEvents.map(e => sentryEventText(e).slice(0, 90)).join(' | ')}`);
+    return { pass: problems.length === 0, problems, notes };
+  });
+}
+
 const SCENARIOS = {
   'm0-selftest': m0Selftest,
   'm1-baseline': m1Baseline,
@@ -623,7 +677,8 @@ const SCENARIOS = {
   'm5-recorder-sync': m5RecorderSync,
   'm6-crash-recovery': m6CrashRecovery,
   'm7-repair': m7Repair,
-  'm8-sentry-capture': m8SentryCapture
+  'm8-sentry-capture': m8SentryCapture,
+  'm9-gateway-restart': m9GatewayRestart
 };
 
 (async () => {

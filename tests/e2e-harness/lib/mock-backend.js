@@ -13,6 +13,12 @@
  *   upload-cut-50     â€” socket destroyed halfway through the request body,
  *                       then succeeds (connection-reset resilience)
  *   upload-slow       â€” 20s stall before responding (timeout behavior)
+ *   gateway-restart   — the backend restarts behind nginx: from the first /api
+ *                       request on, every /api request gets nginx's HTML 502
+ *                       page (with the CORS headers production nginx adds
+ *                       `always`) for 5 s, then everything succeeds
+ *                       (ELECTRON-6E/6F). gatewayOutage(ms) / POST
+ *                       /__control/gateway {ms} start another window.
  *   status-unknown    â€” status endpoint returns an unknown enum (drift test)
  *
  * Introspection: GET /__control/requests â†’ every request with timestamps,
@@ -68,7 +74,12 @@ function startMockBackend({ port = 3000, captureUploadsDir = null } = {}) {
     requests: [],           // { t, method, url, bodyBytes }
     uploads: new Map(),     // audioFileId -> { recordId, status }
     counters: new Map(),    // per-key attempt counters for -once modes
+    gatewayDownUntil: 0,    // epoch ms: /api answers nginx 502 until then
   };
+
+  const NGINX_502 = ['<html>', '<head><title>502 Bad Gateway</title></head>', '<body>', '<center><h1>502 Bad Gateway</h1></center>', '<hr><center>nginx/1.24.0 (Ubuntu)</center>', '</body>', '</html>', ''].join(String.fromCharCode(13, 10));
+
+  const gatewayOutage = (ms) => { state.gatewayDownUntil = Date.now() + ms; };
 
   const bump = (key) => {
     const n = (state.counters.get(key) || 0) + 1;
@@ -152,6 +163,23 @@ function startMockBackend({ port = 3000, captureUploadsDir = null } = {}) {
         state.uploads.clear();
         state.mode = 'ok';
         return json(res, 200, { ok: true }, req);
+      }
+      if (url === '/__control/gateway' && req.method === 'POST') {
+        try {
+          const { ms } = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+          gatewayOutage(Number(ms) || 5000);
+          return json(res, 200, { ok: true, until: state.gatewayDownUntil }, req);
+        } catch (e) { return json(res, 400, { error: e.message }, req); }
+      }
+
+      // ── Backend restarting behind nginx ──
+      if (url.startsWith('/api/')) {
+        if (state.mode === 'gateway-restart' && bump('gateway-restart') === 1) gatewayOutage(5000);
+        if (Date.now() < state.gatewayDownUntil) {
+          state.requests[state.requests.length - 1].note = 'GATEWAY 502';
+          res.writeHead(502, { 'Content-Type': 'text/html', 'Content-Length': Buffer.byteLength(NGINX_502), ...cors(req) });
+          return res.end(NGINX_502);
+        }
       }
 
       // â”€â”€ Auth â”€â”€
@@ -277,6 +305,7 @@ function startMockBackend({ port = 3000, captureUploadsDir = null } = {}) {
         url: `http://localhost:${port}`,
         state,
         setMode: (m) => { state.mode = m; state.counters.clear(); },
+        gatewayOutage,
         close: () => new Promise(r => server.close(r)),
       });
     });
