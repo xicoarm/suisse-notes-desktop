@@ -640,6 +640,92 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
     expect(health().status).toBe('ok');
   });
 
+  describe('Windows: one audio controller groups the mic with its loopbacks', () => {
+    const ARRAY = { kind: 'audioinput', deviceId: 'arr', groupId: 'rtk', label: 'Microphone Array (Realtek(R) Audio)' };
+    const STEREO_MIX = { kind: 'audioinput', deviceId: 'smix', groupId: 'rtk', label: 'Stereo Mix (Realtek(R) Audio)' };
+
+    it('never falls back onto a loopback that shares the lost mic\'s group', async () => {
+      world.inputs = [ARRAY, STEREO_MIX];
+      const store = createStore();
+      const { micTrack } = await startRecording(store, { deviceId: 'arr' });
+      await vi.advanceTimersByTimeAsync(2000);
+
+      world.inputs = [STEREO_MIX]; // privacy switch: the mic endpoint disappears
+      micTrack.readyState = 'ended';
+      micTrack.onended();
+      await vi.advanceTimersByTimeAsync(6000);
+
+      expect(world.opened).not.toContain('smix');
+      expect(health().reasonCode).toBe('track_ended');
+    });
+
+    it('prefers the user\'s own mic by id when it returns, not a same-group sibling', async () => {
+      world.inputs = [ARRAY, STEREO_MIX, USB];
+      ctrl.deviceAmplitude = { usb: 0 };
+      const store = createStore();
+      const { micTrack } = await startRecording(store, { deviceId: 'arr' });
+      await vi.advanceTimersByTimeAsync(2000);
+
+      world.inputs = [STEREO_MIX, USB];
+      micTrack.readyState = 'ended';
+      micTrack.onended();
+      await vi.advanceTimersByTimeAsync(7000); // silent USB fallback
+      expect(health().trackLabel).toBe('USB Mic (USB)');
+
+      world.inputs = [STEREO_MIX, ARRAY, USB];
+      const pass = fireDeviceChange();
+      await vi.advanceTimersByTimeAsync(2000);
+      await pass;
+      expect(world.opened).not.toContain('smix');
+      expect(events.autoSwitched.map(e => e.deviceId)).toEqual(['arr']);
+      expect(health().status).toBe('ok');
+    });
+
+    it('tries the user\'s mic first when it returns while a same-group input is the silent fallback', async () => {
+      const LINE_IN = { kind: 'audioinput', deviceId: 'line', groupId: 'rtk', label: 'Line In (Realtek(R) Audio)' };
+      world.inputs = [ARRAY, LINE_IN];
+      ctrl.deviceAmplitude = { line: 0 }; // nothing plugged in
+      const store = createStore();
+      const { micTrack } = await startRecording(store, { deviceId: 'arr' });
+      await vi.advanceTimersByTimeAsync(2000);
+
+      world.inputs = [LINE_IN];
+      micTrack.readyState = 'ended';
+      micTrack.onended();
+      await vi.advanceTimersByTimeAsync(7000); // Line In: opened, silent, kept as the fallback
+      expect(health().trackLabel).toBe('Line In (Realtek(R) Audio)');
+
+      world.inputs = [LINE_IN, USB, ARRAY]; // the user's mic and a USB mic both return
+      const pass = fireDeviceChange();
+      await vi.advanceTimersByTimeAsync(2000);
+      await pass;
+      expect(events.autoSwitched.map(e => e.deviceId)).toEqual(['arr']);
+      expect(health().trackLabel).toBe('Microphone Array (Realtek(R) Audio)');
+    });
+  });
+
+  it('keeps recovering when a device the user picks mid-pass fails to open', async () => {
+    const headset = { kind: 'audioinput', deviceId: 'headset', groupId: 'grp-headset', label: 'Jabra Evolve2 (Bluetooth)' };
+    const micA = { kind: 'audioinput', deviceId: 'a', groupId: 'grp-a', label: 'Mic A (USB)' };
+    const micB = { kind: 'audioinput', deviceId: 'b', groupId: 'grp-b', label: 'Mic B (USB)' };
+    world.inputs = [headset, micA, micB];
+    ctrl.deviceAmplitude = { a: 0 };
+    const store = createStore();
+    const { micTrack } = await startRecording(store, { deviceId: 'headset' });
+    await vi.advanceTimersByTimeAsync(2000);
+
+    world.unopenable = new Set(['headset']); // lost: still listed, cannot be opened
+    micTrack.readyState = 'ended';
+    micTrack.onended();
+    await vi.advanceTimersByTimeAsync(1000); // the pass probes Mic A (silent)
+    const retry = recordingService.switchMicrophoneStream('headset'); // user re-selects the lost headset
+    await vi.advanceTimersByTimeAsync(9000);
+    expect((await retry).success).toBe(false);
+
+    expect(events.autoSwitched.map(e => e.deviceId)).toEqual(['b']);
+    expect(health().status).toBe('ok');
+  });
+
   it('abandons a switch probe that cannot measure for two minutes instead of latching recovery', async () => {
     world.inputs = [MBP, USB];
     const store = createStore();

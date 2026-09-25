@@ -114,7 +114,11 @@ let micRecoverySignatureBypass = false; // one pass after a wake even if the set
 // Recovery prefers it when it returns, and it is never a "silent fallback" —
 // the zero-signal rule protects it (it may be hardware-muted on purpose).
 let userMic = { requestedId: null, deviceId: null, groupId: null };
-let manualSwitchGeneration = 0;
+// Manual switches: the one in flight, and a count of those that installed.
+// A recovery pass never starts a candidate over an in-flight pick and stands
+// down once a pick installed; a pick that fails leaves the pass running.
+let manualSwitchPromise = null;
+let manualSwitchInstalls = 0;
 let micSwitchGeneration = 0;
 
 // INT-2: audio-session interruption auto-recovery (Nyberg incident 2026-06-25).
@@ -386,18 +390,21 @@ function rememberUserMic(requestedId, micStream) {
   };
 }
 
-// The user's own microphone: their concrete request, the physical device it
-// resolved to, or an alias that currently points at that device's group.
+// The user's own microphone: their concrete request or the physical device it
+// resolved to — by exact id. A groupId is not an identity: on Windows it is
+// the audio controller, shared by "Microphone Array", "Stereo Mix" and
+// "Line In".
 function isUserMicDevice(device) {
-  if (!device) return false;
-  if (!isAliasDeviceId(device.deviceId) &&
-      (device.deviceId === userMic.deviceId || device.deviceId === userMic.requestedId)) return true;
-  return Boolean(userMic.groupId && device.groupId === userMic.groupId);
+  if (!device || isAliasDeviceId(device.deviceId)) return false;
+  return device.deviceId === userMic.deviceId || device.deviceId === userMic.requestedId;
 }
 
 function currentMicIsUserDevice() {
   const settings = stream?.getAudioTracks?.()[0]?.getSettings?.() || {};
-  return isUserMicDevice({ deviceId: settings.deviceId, groupId: settings.groupId });
+  if (settings.deviceId && !isAliasDeviceId(settings.deviceId)) return isUserMicDevice(settings);
+  // Opened through an alias: only the group can tell, and when in doubt the
+  // device keeps the protection a user's own microphone gets.
+  return !userMic.groupId || !settings.groupId || settings.groupId === userMic.groupId;
 }
 
 // A device may serve as an automatic fallback microphone unless it is a
@@ -1199,6 +1206,18 @@ function concreteMicrophoneDeviceId(micStream) {
 }
 
 export async function switchMicrophoneStream(newDeviceId, opts = {}) {
+  if ((opts.verifyContext || 'manual-switch') !== 'manual-switch') return switchMicrophoneStreamNow(newDeviceId, opts);
+  // The user's pick: a recovery pass waits for it before its next candidate.
+  const pending = switchMicrophoneStreamNow(newDeviceId, opts);
+  manualSwitchPromise = pending;
+  try {
+    return await pending;
+  } finally {
+    if (manualSwitchPromise === pending) manualSwitchPromise = null;
+  }
+}
+
+async function switchMicrophoneStreamNow(newDeviceId, opts = {}) {
   const verifyContext = opts.verifyContext || 'manual-switch';
   if (!mixingContext || !mixingDest) {
     return { success: false, superseded: true, error: 'No active recording to switch microphone in' };
@@ -1212,9 +1231,6 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
     return { success: false, error: 'Cannot verify the original microphone identity for same-device recovery' };
   }
 
-  // The user is picking a device: a running recovery pass must stand down
-  // (it checks this counter), whether or not the pick then opens.
-  if (verifyContext === 'manual-switch') manualSwitchGeneration++;
 
   const switchId = ++micSwitchGeneration;
   const generation = recorderGeneration;
@@ -1313,6 +1329,7 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
       // Installed: the pick is the user's microphone from here on.
       rememberUserMic(newDeviceId, newStream);
       micOnSilentFallback = false;
+      manualSwitchInstalls++;
     }
 
     // Step 5: Set up track.onended listener for new stream
@@ -1477,7 +1494,13 @@ async function handleMicDeviceChange() {
   if (!navigator.mediaDevices?.enumerateDevices) return;
   micAutoRecovering = true;
   micRecoveryRerun = false;
-  const manualGeneration = manualSwitchGeneration;
+  const installsAtStart = manualSwitchInstalls;
+  // Let an in-flight pick settle first; true once the user installed a pick
+  // during this pass (their switch then owns the microphone).
+  const userTookOver = async () => {
+    while (manualSwitchPromise) await manualSwitchPromise.catch(() => null);
+    return manualSwitchInstalls !== installsAtStart;
+  };
   let recovered = false;
   let superseded = false;
   try {
@@ -1499,8 +1522,8 @@ async function handleMicDeviceChange() {
     // remaining inputs. Every candidate must PROVE it delivers signal (a
     // still-enumerated phantom endpoint opens fine and records silence) —
     // up to 3 candidates, ~5s probe each.
-    const preferred = inputs.find(d => !isAliasDeviceId(d.deviceId) && isUserMicDevice(d)) ||
-      inputs.find(d => d.deviceId === lastRequestedDeviceId);
+    const userDevice = inputs.find(d => !isAliasDeviceId(d.deviceId) && isUserMicDevice(d));
+    const preferred = userDevice || inputs.find(d => d.deviceId === lastRequestedDeviceId);
     // The lost microphone often stays enumerated (wedged endpoint, or not yet
     // removed) and the 'default' alias keeps pointing at it. Probing it first
     // cost 5s of silence and an empty archive epoch (ELECTRON-62/66). Probe
@@ -1523,7 +1546,12 @@ async function handleMicDeviceChange() {
       seenGroups.add(d.groupId);
       return true;
     });
-    const candidates = [...unique.filter(d => !isLost(d)), ...unique.filter(isLost)].slice(0, 3);
+    const ordered = [...unique.filter(d => !isLost(d)), ...unique.filter(isLost)];
+    // The user's own microphone goes first whenever it is not the very device
+    // that was just lost — e.g. it returned while a same-group sibling (Line
+    // In on the same Windows controller) served as a silent fallback.
+    const userFirst = userDevice && unique.includes(userDevice) && userDevice.deviceId !== lostDeviceId;
+    const candidates = (userFirst ? [userDevice, ...ordered.filter(d => d !== userDevice)] : ordered).slice(0, 3);
     if (candidates.length === 0) {
       // Keep TRACK_ENDED: the next device change (the lid opening, a headset
       // reconnecting) retries instead of stranding the recording on silence.
@@ -1533,16 +1561,17 @@ async function handleMicDeviceChange() {
     const fromLabel = micHealthState.trackLabel || '';
     let opened = 0;
     for (const candidate of candidates) {
-      // The user started picking a device: their switch owns the microphone.
-      if (manualSwitchGeneration !== manualGeneration) {
+      // Never start a candidate over the user's pick: wait for an in-flight
+      // one, and stand down once one installed. A pick that failed to open
+      // leaves the rest of the candidates to try.
+      if (await userTookOver()) {
         superseded = true;
         return;
       }
+      if (!recordingStoreRef?.isRecording) return;
       const result = await switchMicrophoneStream(candidate.deviceId, { verifyContext: 'auto-recovery' });
       if (!result.success) {
-        // The user picked a device meanwhile (or the recording ended): never
-        // replace their pick with the next candidate.
-        if (result.superseded && (manualSwitchGeneration !== manualGeneration || !recordingStoreRef?.isRecording)) {
+        if (result.superseded && (!recordingStoreRef?.isRecording || await userTookOver())) {
           superseded = true;
           return;
         }
@@ -1580,9 +1609,12 @@ async function handleMicDeviceChange() {
     // Still on a live device this pass (or an earlier one) fell back to, and it
     // never proved signal: the next change of the input set looks again. Never
     // the user's own microphone (re-opened last, it may be muted on purpose)
-    // and never once the user started picking a device during this pass.
-    micOnSilentFallback = manualSwitchGeneration === manualGeneration && currentMicTrackLive() &&
-      !currentMicIsUserDevice() && (opened > 0 || micOnSilentFallback);
+    // and never once the user installed a pick during this pass.
+    if (await userTookOver()) {
+      superseded = true;
+      return;
+    }
+    micOnSilentFallback = currentMicTrackLive() && !currentMicIsUserDevice() && (opened > 0 || micOnSilentFallback);
   } catch (e) {
     console.warn('Mic auto-recovery on devicechange failed:', e);
   } finally {
