@@ -97,6 +97,10 @@ const micGraceTimeouts = new Set();
 let lastRequestedDeviceId = null;
 let micDeviceChangeHandler = null;
 let micAutoRecovering = false;
+// A device-list change that lands while a recovery pass is still probing must
+// not be dropped: the device the pass needs may be exactly the one that just
+// reappeared (the built-in mic coming back when the lid opens).
+let micRecoveryRerun = false;
 let micSwitchGeneration = 0;
 
 // INT-2: audio-session interruption auto-recovery (Nyberg incident 2026-06-25).
@@ -289,6 +293,63 @@ let lowLevelReported = false;
 let lastLowLevelEvalAt = 0;
 let lowLevelMeasuredDb = null;     // active-speech P90 that triggered LOW_LEVEL
 let micSignalFloatBuf = null;
+
+// SLEEP: system sleep and macOS dark wakes (ELECTRON-6G…6S, 2026-09-25). A
+// MacBook lid closed mid-recording froze every renderer timer for 16 minutes;
+// dark wakes then ran them for a few seconds at a time with audio I/O still
+// powered down, and the powerMonitor 'resume' IPC (full wakes only) never
+// came. Every wall-clock detector read the frozen time as a fault — "zero
+// signal for 989s", "no chunk persisted for 997s", a 5s switch probe judged
+// across the whole sleep — and acted on it.
+// - A heartbeat gap between our own ≤5s timers means the renderer was frozen
+//   (backgroundThrottling is off, so a hidden window alone never causes one):
+//   episode clocks restart instead of aging through the gap.
+// - An AudioContext whose currentTime stands still renders nothing, and its
+//   analyser keeps returning the last pre-sleep buffer: signal measurements
+//   wait for a running audio clock.
+const TIMER_GAP_SUSPEND_MS = 9000;       // > the slowest heartbeat (5s) plus jitter
+const AUDIO_CLOCK_STALL_MS = 1000;
+const SUSPEND_EVIDENCE_WINDOW_MS = 10 * 60 * 1000;
+let lastTimerHeartbeatAt = 0;
+let lastSuspendEvidenceAt = 0;
+// Chunk-watchdog baseline after a freeze. Never fake lastSuccessfulChunkAt for
+// this: a fake chunk time makes a running capture recovery report "RECOVERED".
+let stallClockBaseAt = 0;
+
+function createAudioClockProbe() {
+  let observed = null;
+  let value = 0;
+  let advancedAt = 0;
+  return (ctx, now = Date.now()) => {
+    const time = ctx?.currentTime;
+    if (typeof time !== 'number' || !Number.isFinite(time)) return true; // no clock to judge by
+    if (ctx !== observed || time > value) {
+      observed = ctx;
+      value = time;
+      advancedAt = now;
+      return true;
+    }
+    return now - advancedAt < AUDIO_CLOCK_STALL_MS;
+  };
+}
+const micHealthClockRunning = createAudioClockProbe();
+const captureRecoveryClockRunning = createAudioClockProbe();
+
+function hasRecentSuspendEvidence(now = Date.now()) {
+  return lastSuspendEvidenceAt > 0 && now - lastSuspendEvidenceAt < SUSPEND_EVIDENCE_WINDOW_MS;
+}
+
+// Virtual and loopback inputs are never a replacement room microphone:
+// meeting-app audio drivers deliver digital silence unless their app is
+// sharing sound, and loopbacks carry the far end, not the user. Chromium on
+// macOS labels them "(Virtual)"/"(Aggregate)"; the names cover Windows.
+// Auto-recovery only uses one the user explicitly chose (ELECTRON-6G/6R: a
+// lid close moved a recording onto "Microsoft Teams Audio Device (Virtual)").
+const VIRTUAL_INPUT_LABEL = /\((?:virtual|aggregate)\)\s*$|microsoft teams audio|zoomaudiodevice|zoom audio device|blackhole|soundflower|loopback|vb-audio|voicemeeter|cable output|stereo ?mix|what u hear|wave out mix/i;
+
+export function isLikelyVirtualInput(device) {
+  return VIRTUAL_INPUT_LABEL.test(device?.label || '');
+}
 
 // Dev/test-only env-var override helper. Honored ONLY in non-production builds
 // (Vite sets import.meta.env.PROD=true at production build time). Production
@@ -556,13 +617,18 @@ function resetMicHealthState() {
 
 /**
  * MSIG: clear the transient signal-forensics episode state. Called on fresh
- * start, teardown, pause (measurement is gated while paused, so a stale
- * wall-clock episode must not "age" through the pause), and on wake from
- * system sleep (same reason).
+ * start, teardown and pause (measurement is gated while paused, so a stale
+ * wall-clock episode must not "age" through the pause). Wake from system
+ * sleep uses restartMicSignalClocks() instead, which keeps a pending probe.
  * Deliberately does NOT touch levelBaselineDb — the session speech reference
  * survives episodes so a post-switch loudness drop can still be compared.
  */
 function resetMicSignalState() {
+  clearMicSignalEpisodes();
+  resolveMicVerification(null);
+}
+
+function clearMicSignalEpisodes() {
   zeroSignalSince = null;
   zeroEpisodeReported = false;
   zeroEpisodeReacquired = false;
@@ -572,7 +638,6 @@ function resetMicSignalState() {
   micTickHistory = [];
   lastLowLevelEvalAt = 0;
   switchLevelWatch = null;
-  resolveMicVerification(null);
 }
 
 /**
@@ -594,6 +659,49 @@ function resolveMicVerification(verdict) {
   for (const fn of v.resolvers) {
     try { fn(verdict); } catch (e) { /* consumer error must not break the loop */ }
   }
+}
+
+/**
+ * SLEEP: after timers were frozen (system sleep, app backgrounded) the
+ * wall-clock episodes restart — nothing was measured meanwhile, so a
+ * zero-signal run or a quiet-input window must not age across the gap. A
+ * pending switch probe gets a fresh window instead of a verdict on the sleep;
+ * aborting it made auto-recovery stand down on an unverified device.
+ */
+function restartMicSignalClocks(now = Date.now()) {
+  clearMicSignalEpisodes();
+  if (micVerify) {
+    micVerify.since = now;
+    micVerify.deadline = now + SWITCH_VERIFY_MS;
+  }
+}
+
+/**
+ * SLEEP: every recording timer calls this first. On the first tick after the
+ * renderer was frozen it rebases every wall-clock episode and returns true.
+ * Whichever timer fires first after a wake handles the gap for all of them.
+ */
+function noteTimerHeartbeat(now = Date.now()) {
+  const gapMs = lastTimerHeartbeatAt ? now - lastTimerHeartbeatAt : 0;
+  lastTimerHeartbeatAt = now;
+  if (gapMs < TIMER_GAP_SUSPEND_MS) return false;
+  lastSuspendEvidenceAt = now;
+  console.info(`recording: timers resumed after ${Math.round(gapMs / 1000)}s frozen (system sleep) — watchdog and mic-health clocks rebased`);
+  if (lastSuccessfulChunkAt) stallClockBaseAt = now;
+  // Capture recovery counts awake time only: its give-up window and its
+  // wedged-recorder evidence must not include the sleep.
+  if (captureRecoveryTimer && captureRecoveryStartedAt) captureRecoveryStartedAt += gapMs;
+  captureRecoveryHealthyTicks = 0;
+  restartMicSignalClocks(now);
+  // A microphone lost before the sleep may be back (lid opened, headset
+  // reconnected while the renderer was frozen): look again.
+  if (micHealthState.reasonCode === MIC_HEALTH_REASON.TRACK_ENDED) handleMicDeviceChange();
+  return true;
+}
+
+function currentMicTrackLive() {
+  const track = stream?.getAudioTracks?.()[0];
+  return Boolean(track) && track.readyState === 'live';
 }
 
 function updateMicHealthTrackDetails(micStream, requestedDeviceId) {
@@ -1131,6 +1239,9 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
         registerMicGraceTimeout(() => {
           if (!recordingStoreRef?.isRecording) return;
           if (micHealthState.status === MIC_HEALTH_STATUS.OK) return;
+          // A replacement is live and owns the health verdict (this timer can
+          // fire long after a switch when the system slept in between).
+          if (currentMicTrackLive()) return;
           updateMicHealthState(MIC_HEALTH_STATUS.CRITICAL, MIC_HEALTH_REASON.TRACK_ENDED, null, {
             micActive: false, systemAudioActive
           });
@@ -1266,9 +1377,17 @@ async function handleMicDeviceChange() {
   }
 
   if (micHealthState.reasonCode !== MIC_HEALTH_REASON.TRACK_ENDED) return;
-  if (micAutoRecovering) return;
+  // A device the user just picked keeps TRACK_ENDED until its probe decides;
+  // a device-list change must not switch away from it while it is live.
+  if (micVerify && micVerify.context !== 'auto-recovery' && currentMicTrackLive()) return;
+  if (micAutoRecovering) {
+    micRecoveryRerun = true;
+    return;
+  }
   if (!navigator.mediaDevices?.enumerateDevices) return;
   micAutoRecovering = true;
+  micRecoveryRerun = false;
+  let recovered = false;
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
     const allInputs = devices.filter(d => d.kind === 'audioinput' && d.deviceId);
@@ -1291,11 +1410,15 @@ async function handleMicDeviceChange() {
       stream?.getAudioTracks?.()[0]?.getSettings?.()?.groupId || null;
     const isLost = d => (lostDeviceId && d.deviceId === lostDeviceId) || (lostGroupId && d.groupId === lostGroupId);
     const isAlias = d => d.deviceId === 'default';
+    // Virtual inputs only when the user picked that exact device. The
+    // 'default' alias is never an explicit pick: once the real microphone
+    // vanishes the OS may point it at a virtual device.
+    const eligible = inputs.filter(d => (d === preferred && !isAlias(d)) || !isLikelyVirtualInput(d));
     const seenGroups = new Set();
     const unique = [
-      ...(preferred ? [preferred] : []),
-      ...inputs.filter(d => d !== preferred && !isAlias(d)),
-      ...inputs.filter(d => d !== preferred && isAlias(d))
+      ...(preferred && eligible.includes(preferred) ? [preferred] : []),
+      ...eligible.filter(d => d !== preferred && !isAlias(d)),
+      ...eligible.filter(d => d !== preferred && isAlias(d))
     ].filter(d => {
       if (!d.groupId) return true;
       if (seenGroups.has(d.groupId)) return false;
@@ -1303,12 +1426,21 @@ async function handleMicDeviceChange() {
       return true;
     });
     const candidates = [...unique.filter(d => !isLost(d)), ...unique.filter(isLost)].slice(0, 3);
+    if (candidates.length === 0) {
+      // Keep TRACK_ENDED: the next device change (the lid opening, a headset
+      // reconnecting) retries instead of stranding the recording on silence.
+      captureMessage(`mic-health: auto-recovery found no physical microphone (${inputs.length - eligible.length} virtual input(s) skipped) — waiting for a device`, 'warning');
+      return;
+    }
     const fromLabel = micHealthState.trackLabel || '';
+    let opened = 0;
     for (const candidate of candidates) {
       const result = await switchMicrophoneStream(candidate.deviceId, { verifyContext: 'auto-recovery' });
       if (!result.success) continue;
+      opened++;
       const verdict = await result.verified;
       if (verdict === 'signal') {
+        recovered = true;
         clearMicGraceTimeouts(); // device is live again — do not escalate to CRITICAL
         emit('micRecovered', { deviceId: candidate.deviceId });
         emit('micAutoSwitched', {
@@ -1325,11 +1457,22 @@ async function handleMicDeviceChange() {
     // Every candidate was silent: the last one stays active and the health
     // state already shows the precise ZERO_SIGNAL after-switch message.
     // Individual silent probes are warnings; only exhausting them is an error.
-    captureMessage(`mic-health: auto-recovery found no microphone with signal after ${candidates.length} candidate(s)`, 'error');
+    // Candidates that could not even be opened mean no microphone is present
+    // (lid closed, device unplugged) — a state, not a fault; TRACK_ENDED stays
+    // and the next device change retries.
+    if (opened > 0) {
+      captureMessage(`mic-health: auto-recovery found no microphone with signal after ${candidates.length} candidate(s)`, 'error');
+    } else {
+      captureMessage(`mic-health: auto-recovery could not open any of ${candidates.length} candidate microphone(s) — waiting for a device`, 'warning');
+    }
   } catch (e) {
     console.warn('Mic auto-recovery on devicechange failed:', e);
   } finally {
     micAutoRecovering = false;
+    if (micRecoveryRerun && !recovered) {
+      micRecoveryRerun = false;
+      handleMicDeviceChange();
+    }
   }
 }
 
@@ -1400,6 +1543,7 @@ function stopCaptureRecovery() {
  */
 async function attemptCaptureRecovery() {
   if (captureRecoveryBusy) return;
+  noteTimerHeartbeat(); // may be the first timer to run after a wake
   const recoveryGeneration = captureRecoveryGeneration;
   const generation = recorderGeneration;
   const recoveryRecorder = mediaRecorder;
@@ -1468,7 +1612,16 @@ async function attemptCaptureRecovery() {
         if (!isCurrent()) return;
         const inputs = devices.filter(d => d.kind === 'audioinput' && d.deviceId);
         if (inputs.length > 0) {
-          targetDeviceId = (inputs.find(d => d.deviceId === lastRequestedDeviceId) || inputs[0]).deviceId;
+          // Never a virtual input the user did not choose: this re-acquire
+          // skips verification, so health would call it OK while it records
+          // silence (the lid-close case, where 'default' is Teams' driver).
+          const target = inputs.find(d => d.deviceId === lastRequestedDeviceId) ||
+            inputs.find(d => !isLikelyVirtualInput(d));
+          if (!target) {
+            captureRecoveryHealthyTicks = 0;
+            return; // no physical microphone right now — next tick
+          }
+          targetDeviceId = target.deviceId;
         }
       } catch (e) { /* fall through with lastRequestedDeviceId */ }
       if (!isCurrent()) return;
@@ -1498,6 +1651,15 @@ async function attemptCaptureRecovery() {
     //    silent partial transcription), so the safe path is the proven
     //    emergency stop-with-save: everything captured so far is finalized,
     //    and the user immediately gets a working fresh session.
+    //    SLEEP: through a dark wake the context reports 'running' while its
+    //    clock stands still — nothing renders, so missing chunks say nothing
+    //    about the recorder. Desktop only, and only near a detected sleep:
+    //    the native archive keeps the raw microphone meanwhile, while
+    //    WKWebView's post-interruption wedge keeps its 30s escalation.
+    if (isElectron() && hasRecentSuspendEvidence() && !captureRecoveryClockRunning(mixingContext)) {
+      captureRecoveryHealthyTicks = 0;
+      return;
+    }
     captureRecoveryHealthyTicks++;
     if (captureRecoveryHealthyTicks >= CAPTURE_RECOVERY_WEDGED_TICKS) {
       captureMessage(`recording: capture recovery FAILED — recorder wedged with healthy pipeline for ${captureRecoveryHealthyTicks} ticks (reason=${captureRecoveryReason}, savedChunks=${savedChunkCount})`, 'error');
@@ -1710,6 +1872,7 @@ function startMicHealthMonitoring(micStream, recordingStore) {
 
     micHealthInterval = setInterval(() => {
       if (!micHealthAnalyser) return;
+      noteTimerHeartbeat();
       persistMicrophoneWarning(null); // Retry earlier evidence even after current input becomes healthy.
       if (!recordingStore.isRecording) {
         // Paused/stopped: measurement is gated, so wall-clock episode state
@@ -1781,6 +1944,9 @@ function startMicHealthMonitoring(micStream, recordingStore) {
         rmsDb = toDbfs(Math.sqrt(sumSq / micSignalFloatBuf.length));
         peakDb = toDbfs(peak);
       }
+      // SLEEP: no audio rendered since the last reading (dark wake) — the
+      // analyser holds the last pre-sleep buffer, so nothing below is true.
+      const clockRunning = micHealthClockRunning(micHealthAudioContext);
 
       // ── MSIG: pending post-switch verification owns the verdict ──
       if (micVerify) {
@@ -1797,6 +1963,11 @@ function startMicHealthMonitoring(micStream, recordingStore) {
           // Measurement context suspended (autoplay policy / interruption):
           // nothing truthful can be read — postpone the verdict rather than
           // judging a healthy device on synthesized silence.
+          micVerify.deadline = Date.now() + SWITCH_VERIFY_MS;
+        } else if (!clockRunning) {
+          // Stale buffer: neither "signal" nor "silent" can be read from it.
+          // The probe window restarts once audio renders again.
+          micVerify.since = Date.now();
           micVerify.deadline = Date.now() + SWITCH_VERIFY_MS;
         } else if (peakDb > SWITCH_VERIFY_SIGNAL_DBFS) {
           // The new device demonstrably delivers signal.
@@ -1840,6 +2011,13 @@ function startMicHealthMonitoring(micStream, recordingStore) {
         return; // while verifying, the regular detectors stand down
       }
 
+      if (!clockRunning) {
+        // Measure nothing on a stale buffer; frozen time never counts toward
+        // a zero-signal run (the episode itself is kept).
+        zeroSignalSince = null;
+        return;
+      }
+
       // ── MSIG: zero-signal episode tracking (wall-clock, sleep-safe) ──
       // Gated to contexts where zeros are meaningful: measurement context
       // running, no INT-2 interruption episode (that machinery owns muted/
@@ -1870,7 +2048,9 @@ function startMicHealthMonitoring(micStream, recordingStore) {
             setSilenceWarning(micHealthState.message);
             micAnomalyCounter++;
             micRecoveryCounter = 0;
-            if (!zeroEpisodeReacquired && !zeroReacquireInFlight) {
+            // Never while auto-recovery is walking candidates: re-opening the
+            // candidate it just rejected superseded its next probe (ELECTRON-6J).
+            if (!zeroEpisodeReacquired && !zeroReacquireInFlight && !micAutoRecovering) {
               zeroEpisodeReacquired = true;
               attemptSameDeviceReacquire();
             }
@@ -2133,13 +2313,17 @@ function checkChunkProgress(recordingStore, isAutoSplitting) {
   if (isAutoSplitting?.value) return;
   if (!mediaRecorder || mediaRecorder.state !== 'recording') return; // 'inactive' is handled by verifyRecordingState
   if (!lastSuccessfulChunkAt) return;
-  const gapMs = Date.now() - lastSuccessfulChunkAt;
+  const gapMs = Date.now() - Math.max(lastSuccessfulChunkAt, stallClockBaseAt);
   const threshold = savedChunkCount === 0 ? FIRST_CHUNK_WARN_MS : STALL_WARN_MS;
   if (gapMs >= threshold && !stallWarned) {
     stallWarned = true;
     const secs = Math.round(gapMs / 1000);
     const diagnostics = { secondsSinceLastChunk: secs, ...captureProgressSnapshot() };
-    captureMessage(`recording: capture STALLED — no chunk persisted for ${secs}s ${JSON.stringify(diagnostics)}`, 'error');
+    // Near a detected sleep this is almost always a dark wake with audio
+    // powered down: still handled, but not reported as an app fault.
+    const afterSleep = hasRecentSuspendEvidence();
+    if (afterSleep) diagnostics.secondsSinceSystemSleep = Math.round((Date.now() - lastSuspendEvidenceAt) / 1000);
+    captureMessage(`recording: capture STALLED${afterSleep ? ' after system sleep' : ''} — no chunk persisted for ${secs}s ${JSON.stringify(diagnostics)}`, afterSleep ? 'warning' : 'error');
     console.error('Recording capture stalled:', JSON.stringify(diagnostics));
     // A later successful chunk proves that saving resumed, not that this gap
     // was recovered. Keep the warning with the sources through finalization.
@@ -2181,8 +2365,12 @@ function startDurationTracking(recordingStore, isAutoSplitting, maxSeconds = nul
   savedChunkCount = 0;
   stallWarned = false;
   lastWallClockSec = 0;
+  stallClockBaseAt = 0;
+  lastTimerHeartbeatAt = 0;
+  lastSuspendEvidenceAt = 0;
 
   durationInterval = setInterval(async () => {
+    noteTimerHeartbeat();
     if (recordingStore.isRecording) {
       const elapsed = Math.floor(nativeArchive ? getActiveRecordingOffsetMs() / 1000 : (performance.now() - startTime) / 1000);
       lastWallClockSec = elapsed;
@@ -2285,12 +2473,17 @@ export function getSavedChunkCount() {
  */
 export function notifyForegrounded() {
   if (durationInterval) {
-    lastSuccessfulChunkAt = Date.now();
-    stallWarned = false;
+    // Rebase, never fake a saved chunk: a fake chunk time made a running
+    // capture-recovery episode report "RECOVERED" on every wake.
+    stallClockBaseAt = Date.now();
+    if (!captureRecoveryTimer) stallWarned = false;
     // MSIG: JS timers were frozen while suspended — wall-clock zero-signal /
     // low-level episode state would otherwise "age" through the sleep and
-    // fire spuriously on the first post-wake ticks.
-    resetMicSignalState();
+    // fire spuriously on the first post-wake ticks. A pending switch probe
+    // restarts instead of being aborted (abort = auto-recovery gives up).
+    restartMicSignalClocks();
+    // The lost microphone may have returned while we were suspended.
+    if (micHealthState.reasonCode === MIC_HEALTH_REASON.TRACK_ENDED) handleMicDeviceChange();
   }
 }
 
@@ -2893,6 +3086,10 @@ async function startRecordingInternal(options) {
             if (!recordingStore.isRecording) return;
             // If health recovered (e.g., statechange listener resumed context), skip
             if (micHealthState.status === MIC_HEALTH_STATUS.OK) return;
+            // Auto-recovery already switched to a live device whose own probe
+            // owns the verdict. Across a sleep this timer fires minutes late
+            // and used to overwrite that verdict (ELECTRON-61).
+            if (currentMicTrackLive()) return;
 
             console.warn('Mic track still dead after grace period — declaring critical');
             updateMicHealthState(
@@ -2927,6 +3124,7 @@ async function startRecordingInternal(options) {
 
     // Start state verification (every 5s)
     stateVerificationInterval = setInterval(() => {
+      noteTimerHeartbeat(); // may be the first timer to run after a wake
       verifyRecordingState(recordingStore);
       checkChunkProgress(recordingStore, isAutoSplitting);
     }, 5000);
@@ -3155,6 +3353,7 @@ export async function resumeRecording(recordingStore, isAutoSplitting, maxRecord
     }
 
     durationInterval = setInterval(async () => {
+      noteTimerHeartbeat();
       if (recordingStore.isRecording) {
         const elapsed = Math.floor((performance.now() - resumeTime) / 1000);
         const newDuration = nativeArchive ? Math.floor(getActiveRecordingOffsetMs() / 1000) : currentDuration + elapsed;
