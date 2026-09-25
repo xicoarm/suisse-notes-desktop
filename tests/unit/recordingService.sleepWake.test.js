@@ -31,11 +31,13 @@ const ctrl = {
   frozenAt: 0,
   clockLostS: 0, // audio time that never rendered (frozen spans)
   chunksFlow: true,
-  deviceAmplitude: {} // per physical device; others use `amplitude`
+  deviceAmplitude: {}, // per physical device; others use `amplitude`
+  chromiumAlias: false // a track opened through 'default' reports deviceId 'default'
 };
 
 function amplitudeFor(stream) {
-  const id = stream?.getAudioTracks?.()[0]?.getSettings?.().deviceId;
+  const track = stream?.getAudioTracks?.()[0];
+  const id = track?.physicalId ?? track?.getSettings?.().deviceId;
   return id in ctrl.deviceAmplitude ? ctrl.deviceAmplitude[id] : ctrl.amplitude;
 }
 
@@ -100,10 +102,10 @@ class MockMediaStream {
   getTracks() { return this._tracks; }
 }
 
-function createTrack({ deviceId, groupId, label }) {
+function createTrack({ deviceId, groupId, label }, reportedId = deviceId) {
   return {
     kind: 'audio', enabled: true, muted: false, readyState: 'live', stop: vi.fn(),
-    getSettings: () => ({ deviceId, groupId }), label,
+    getSettings: () => ({ deviceId: reportedId, groupId }), label, physicalId: deviceId,
     onended: null, onmute: null, onunmute: null
   };
 }
@@ -134,7 +136,7 @@ function installDevices() {
     const physical = id === 'default'
       ? world.inputs.find(d => d.deviceId !== 'default' && d.groupId === device.groupId)
       : device;
-    const track = createTrack(physical);
+    const track = createTrack(physical, id === 'default' && ctrl.chromiumAlias ? 'default' : physical.deviceId);
     world.tracks.push(track);
     return new MockMediaStream([track]);
   });
@@ -213,7 +215,7 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
-    Object.assign(ctrl, { amplitude: 0.1, byteVal: 50, clockFrozen: false, frozenAt: 0, clockLostS: 0, chunksFlow: true, deviceAmplitude: {} });
+    Object.assign(ctrl, { amplitude: 0.1, byteVal: 50, clockFrozen: false, frozenAt: 0, clockLostS: 0, chunksFlow: true, deviceAmplitude: {}, chromiumAlias: false });
     sentry.messages = [];
     MockMediaRecorder.last = null;
     global.MediaRecorder = MockMediaRecorder;
@@ -253,6 +255,7 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
   // The Record page preselects the first enumerated input, i.e. Chromium's
   // 'default' alias; null is the plain system default.
   it.each([null, 'default'])('replays the lid-close incident (mic %s): nothing judges the sleep, no virtual input, the built-in mic returns on wake', async deviceId => {
+    ctrl.chromiumAlias = deviceId === 'default';
     const store = createStore();
     const { micTrack } = await startRecording(store, { deviceId }); // resolves to the built-in mic
     await vi.advanceTimersByTimeAsync(10000);
@@ -409,6 +412,7 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
   });
 
   it.each([null, 'default'])('keeps the capture-recovery re-acquire off virtual inputs through a long dark wake (mic %s)', async deviceId => {
+    ctrl.chromiumAlias = deviceId === 'default';
     const store = createStore();
     const { micTrack } = await startRecording(store, { deviceId });
     await vi.advanceTimersByTimeAsync(5000);
@@ -701,6 +705,57 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
       await pass;
       expect(events.autoSwitched.map(e => e.deviceId)).toEqual(['arr']);
       expect(health().trackLabel).toBe('Microphone Array (Realtek(R) Audio)');
+    });
+  });
+
+  describe('user mic chosen through the default selection (Chromium reports the alias id)', () => {
+    const HEADSET = { kind: 'audioinput', deviceId: 'headset', groupId: 'grp-headset', label: 'Jabra Evolve2 (Bluetooth)' };
+    const DEFAULT_HEADSET = { kind: 'audioinput', deviceId: 'default', groupId: 'grp-headset', label: 'Default - Jabra Evolve2 (Bluetooth)' };
+    const DEFAULT_USB = { kind: 'audioinput', deviceId: 'default', groupId: 'grp-usb', label: 'Default - USB Mic (USB)' };
+
+    beforeEach(() => { ctrl.chromiumAlias = true; });
+
+    it('goes back to the user\'s headset when it returns, even with another mic listed first', async () => {
+      world.inputs = [DEFAULT_HEADSET, HEADSET, USB];
+      ctrl.deviceAmplitude = { usb: 0 };
+      const store = createStore();
+      const { micTrack } = await startRecording(store, { deviceId: 'default' });
+      await vi.advanceTimersByTimeAsync(2000);
+
+      world.inputs = [DEFAULT_USB, USB]; // headset gone; the OS repoints 'default'
+      micTrack.readyState = 'ended';
+      micTrack.onended();
+      await vi.advanceTimersByTimeAsync(7000); // silent USB fallback
+      expect(health().trackLabel).toBe('USB Mic (USB)');
+
+      world.inputs = [MBP, DEFAULT_USB, USB, HEADSET];
+      const pass = fireDeviceChange();
+      await vi.advanceTimersByTimeAsync(2000);
+      await pass;
+      expect(events.autoSwitched.map(e => e.deviceId)).toEqual(['headset']);
+      expect(health().trackLabel).toBe('Jabra Evolve2 (Bluetooth)');
+    });
+
+    it('keeps a muted user headset that dropped and was re-opened, however the list changes', async () => {
+      world.inputs = [DEFAULT_HEADSET, HEADSET, TEAMS];
+      const store = createStore();
+      const { micTrack } = await startRecording(store, { deviceId: 'default' });
+      await vi.advanceTimersByTimeAsync(2000);
+
+      ctrl.deviceAmplitude = { headset: 0 }; // hardware-muted on purpose
+      world.inputs = [DEFAULT_TEAMS, HEADSET, TEAMS]; // it drops; 'default' now points at Teams
+      micTrack.readyState = 'ended';
+      micTrack.onended();
+      await vi.advanceTimersByTimeAsync(7000);
+      expect(world.opened).toEqual(['default', 'headset']);
+
+      world.inputs = [DEFAULT_TEAMS, HEADSET, TEAMS, MBP];
+      const pass = fireDeviceChange();
+      await vi.advanceTimersByTimeAsync(7000);
+      await pass;
+      expect(world.opened).not.toContain('mbp');
+      expect(events.autoSwitched).toEqual([]);
+      expect(health().trackLabel).toBe('Jabra Evolve2 (Bluetooth)');
     });
   });
 

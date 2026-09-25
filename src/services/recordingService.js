@@ -388,6 +388,31 @@ function rememberUserMic(requestedId, micStream) {
     deviceId: concreteMicrophoneDeviceId(micStream),
     groupId: typeof settings.groupId === 'string' && settings.groupId ? settings.groupId : null
   };
+  if (!userMic.deviceId) resolveUserMicDevice(micStream);
+}
+
+// Chromium reports deviceId 'default' for a track opened through the alias —
+// the Record page preselects it — so the user's physical microphone must be
+// looked up: the concrete input in the alias's group whose label the alias
+// label ends with ("Default - X" → "X"; the prefix is localized).
+async function resolveUserMicDevice(micStream) {
+  const expected = userMic;
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  const track = micStream?.getAudioTracks?.()[0];
+  const settings = track?.getSettings?.() || {};
+  let devices;
+  try { devices = await navigator.mediaDevices.enumerateDevices(); } catch (_) { return; }
+  if (userMic !== expected || stream !== micStream) return; // a newer pick or switch took over
+  const inputs = devices.filter(d => d.kind === 'audioinput' && d.deviceId);
+  const aliasId = isAliasDeviceId(settings.deviceId) ? settings.deviceId : 'default';
+  const alias = inputs.find(d => d.deviceId === aliasId);
+  const groupId = expected.groupId || alias?.groupId || null;
+  const labels = [alias?.label, track?.label].filter(label => typeof label === 'string' && label);
+  let matches = inputs.filter(d => !isAliasDeviceId(d.deviceId) && (!groupId || d.groupId === groupId));
+  if (matches.length > 1) {
+    matches = matches.filter(d => d.label && labels.some(label => label === d.label || label.endsWith(` ${d.label}`)));
+  }
+  if (matches.length === 1) userMic = { ...expected, deviceId: matches[0].deviceId, groupId: matches[0].groupId || groupId };
 }
 
 // The user's own microphone: their concrete request or the physical device it
@@ -1530,9 +1555,15 @@ async function handleMicDeviceChange() {
     // each physical device (groupId) once, concrete IDs before aliases, and
     // the lost device last.
     const lostDeviceId = micHealthState.actualDeviceId || null;
-    const lostGroupId = allInputs.find(d => d.deviceId === lostDeviceId)?.groupId ||
-      stream?.getAudioTracks?.()[0]?.getSettings?.()?.groupId || null;
-    const isLost = d => (lostDeviceId && d.deviceId === lostDeviceId) || (lostGroupId && d.groupId === lostGroupId);
+    // The lost track's own group, its enumerated entry's group and — for a
+    // track opened through the alias (the OS may already have repointed that
+    // entry) — the user's resolved microphone when that is what was lost.
+    const lostGroupIds = new Set([
+      stream?.getAudioTracks?.()[0]?.getSettings?.()?.groupId,
+      allInputs.find(d => d.deviceId === lostDeviceId)?.groupId,
+      isAliasDeviceId(lostDeviceId) && currentMicIsUserDevice() ? userMic.groupId : null
+    ].filter(Boolean));
+    const isLost = d => (lostDeviceId && d.deviceId === lostDeviceId) || lostGroupIds.has(d.groupId);
     const isAlias = d => d.deviceId === 'default';
     const eligible = inputs.filter(isEligibleFallbackInput);
     const seenGroups = new Set();
@@ -1550,7 +1581,9 @@ async function handleMicDeviceChange() {
     // The user's own microphone goes first whenever it is not the very device
     // that was just lost — e.g. it returned while a same-group sibling (Line
     // In on the same Windows controller) served as a silent fallback.
-    const userFirst = userDevice && unique.includes(userDevice) && userDevice.deviceId !== lostDeviceId;
+    const lostIsUserMic = lostDeviceId === userDevice?.deviceId ||
+      (isAliasDeviceId(lostDeviceId) && currentMicIsUserDevice()); // lost track was opened through the alias
+    const userFirst = userDevice && unique.includes(userDevice) && !lostIsUserMic;
     const candidates = (userFirst ? [userDevice, ...ordered.filter(d => d !== userDevice)] : ordered).slice(0, 3);
     if (candidates.length === 0) {
       // Keep TRACK_ENDED: the next device change (the lid opening, a headset
