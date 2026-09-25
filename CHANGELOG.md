@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.10](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.9...v4.7.10) (2026-09-25)
+
+
+### Bug Fixes
+
+* **record:** close the gaps an adversarial review found in sleep handling ([e08821e](https://github.com/xicoarm/suisse-notes-desktop/commit/e08821e49ce28190441be6ad58a75607db3e3f5e))
+* **record:** identify the user's mic by id and let failed picks resume recovery ([d88befa](https://github.com/xicoarm/suisse-notes-desktop/commit/d88befae4d5b29061b066e85553bcbe13f4a78ed))
+* **record:** judge mic and capture health on awake audio only (ELECTRON-6R) ([41e4b1a](https://github.com/xicoarm/suisse-notes-desktop/commit/41e4b1a81f8a8bdaf7a8781584b092b164f65948))
+* **record:** keep the user's own mic protected during device recovery ([5646372](https://github.com/xicoarm/suisse-notes-desktop/commit/5646372674180ab4f7aae9a481d3fa483ee9e350))
+* **record:** never prefer the default alias during device-loss recovery ([587844e](https://github.com/xicoarm/suisse-notes-desktop/commit/587844ec375c65b7841daafdbb77b4c35b373f72))
+* **record:** resolve the user's mic behind the default selection ([e2f6808](https://github.com/xicoarm/suisse-notes-desktop/commit/e2f6808a29ead1a39357b11004e0a88c59762ae4))
+
 ### [4.7.9](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.8...v4.7.9) (2026-09-24)
 
 
