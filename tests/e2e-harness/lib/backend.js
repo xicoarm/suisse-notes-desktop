@@ -15,9 +15,22 @@ const { execFileSync } = require('child_process');
 
 const API = 'https://app.suisse-notes.ch';
 const E2E_EMAIL = 'desktop-e2e@suisse-notes.test';
-const E2E_PASSWORD = process.env.E2E_PASSWORD || 'SuisseE2E!test123';
 const SSH_HOST = 'suisse-notes';
-const DB_PASSWORD = 'cSHQgme3yjpARlkR8uXqNYUPbsF0JX';
+
+// This repository is PUBLIC. Credentials for the live backend and its database
+// must never be literals here — supply them per run:
+//   E2E_PASSWORD=…  E2E_DB_PASSWORD=…  node tests/e2e-harness/...
+function fromEnv(name, what) {
+  const v = process.env[name];
+  if (!v) {
+    throw new Error(
+      `${name} is not set. ${what} is required for the live-backend E2E run and ` +
+      `must come from the environment (this repo is public, so no credential may be hard-coded).`
+    );
+  }
+  return v;
+}
+const E2E_PASSWORD = process.env.E2E_PASSWORD || '';
 
 function req(method, path, { token, body } = {}) {
   return new Promise((resolve, reject) => {
@@ -45,7 +58,8 @@ function req(method, path, { token, body } = {}) {
 }
 
 async function loginLive() {
-  const res = await req('POST', '/api/auth/desktop', { body: { email: E2E_EMAIL, password: E2E_PASSWORD } });
+  const password = fromEnv('E2E_PASSWORD', 'the E2E account password');
+  const res = await req('POST', '/api/auth/desktop', { body: { email: E2E_EMAIL, password } });
   if (!res.json?.token) throw new Error(`Live login failed (${res.status}): ${res.raw?.slice(0, 200)}`);
   return res.json.token;
 }
@@ -65,7 +79,8 @@ async function pollUploadStatus(token, audioFileId, timeoutMs = 240_000) {
 
 /** Run a read-only SQL query on the production DB via ssh; returns rows as arrays. */
 function dbQuery(sql) {
-  const remote = `PGPASSWORD='${DB_PASSWORD}' psql -h localhost -U postgres -d suisse_notes -tA -F '|' -c "${sql.replace(/"/g, '\\"')}"`;
+  const dbPassword = fromEnv('E2E_DB_PASSWORD', 'the production database password');
+  const remote = `PGPASSWORD='${dbPassword}' psql -h localhost -U postgres -d suisse_notes -tA -F '|' -c "${sql.replace(/"/g, '\\"')}"`;
   const out = execFileSync('ssh', [SSH_HOST, remote], { encoding: 'utf8', timeout: 30_000 });
   return out.trim().split('\n').filter(Boolean).map(l => l.split('|'));
 }
