@@ -403,7 +403,9 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
     expect(stale).toEqual([]);
     expect(health().reasonCode).toBe('zero_signal');
     expect(health().afterSwitch).toBe(true);
-    expect(world.opened).toEqual(['mbp', 'usb']); // no re-acquire racing the recovery pass
+    // No same-device re-acquire raced the pass; at most the one post-wake
+    // re-check re-opened the silent fallback after the pass had ended.
+    expect(world.opened.filter(id => id === 'usb').length).toBeLessThanOrEqual(2);
   });
 
   it.each([null, 'default'])('keeps the capture-recovery re-acquire off virtual inputs through a long dark wake (mic %s)', async deviceId => {
@@ -544,6 +546,97 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
 
     expect(world.opened).not.toContain('b');
     expect(health().trackLabel).toBe('User Pick (USB)');
+    expect(health().status).toBe('ok');
+  });
+
+  it('never treats the user’s own microphone as a silent fallback (a muted headset stays put)', async () => {
+    const headset = { kind: 'audioinput', deviceId: 'headset', groupId: 'grp-headset', label: 'Jabra Evolve2 (Bluetooth)' };
+    world.inputs = [headset];
+    ctrl.deviceAmplitude = { headset: 0 }; // hardware-muted on purpose
+    const store = createStore();
+    const { micTrack } = await startRecording(store, { deviceId: 'headset' });
+    await vi.advanceTimersByTimeAsync(2000);
+
+    micTrack.readyState = 'ended'; // a Bluetooth glitch ends the track; the pass re-opens it (silent)
+    micTrack.onended();
+    await vi.advanceTimersByTimeAsync(7000);
+    expect(world.opened).toEqual(['headset', 'headset']);
+
+    world.inputs = [headset, MBP]; // the laptop mic appears: must not replace the muted headset
+    const pass = fireDeviceChange();
+    await vi.advanceTimersByTimeAsync(7000);
+    await pass;
+    expect(world.opened).not.toContain('mbp');
+    expect(events.autoSwitched).toEqual([]);
+    expect(health().trackLabel).toBe('Jabra Evolve2 (Bluetooth)');
+  });
+
+  it('keeps a device the user picks while a pass ends, and never marks it a fallback', async () => {
+    const pick = { kind: 'audioinput', deviceId: 'pick', groupId: 'grp-pick', label: 'User Pick (USB)' };
+    world.inputs = [MBP, USB, pick];
+    ctrl.deviceAmplitude = { usb: 0, pick: 0 }; // the pick is muted on purpose
+    const store = createStore();
+    const { micTrack } = await startRecording(store, { deviceId: 'mbp' });
+    await vi.advanceTimersByTimeAsync(2000);
+
+    world.inputs = [USB, pick];
+    micTrack.readyState = 'ended';
+    micTrack.onended();
+    await vi.advanceTimersByTimeAsync(300); // the pass probes USB (silent) and would try the pick next
+    world.slowOpenMs = { pick: 2000 };
+    await vi.advanceTimersByTimeAsync(4200);
+    const picking = recordingService.switchMicrophoneStream('pick'); // opens while the pass ends
+    await vi.advanceTimersByTimeAsync(9000);
+    expect((await picking).success).toBe(true);
+    expect(health().trackLabel).toBe('User Pick (USB)');
+
+    world.inputs = [USB, pick, MBP]; // the laptop mic returns: the user's pick stays
+    const pass = fireDeviceChange();
+    await vi.advanceTimersByTimeAsync(7000);
+    await pass;
+    expect(health().trackLabel).toBe('User Pick (USB)');
+    expect(events.autoSwitched).toEqual([]);
+  });
+
+  it('does not let the capture-recovery re-acquire cut short a device-loss pass', async () => {
+    const headset = { kind: 'audioinput', deviceId: 'headset', groupId: 'grp-headset', label: 'Phantom Headset (Bluetooth)' };
+    world.inputs = [headset, MBP];
+    ctrl.deviceAmplitude = { headset: 0 }; // still listed, opens, delivers nothing
+    const store = createStore();
+    const { micTrack } = await startRecording(store, { deviceId: 'headset' });
+    ctrl.deviceAmplitude = { headset: 0 };
+    await vi.advanceTimersByTimeAsync(2000);
+
+    world.slowOpenMs = { mbp: 3000 };
+    micTrack.readyState = 'ended';
+    micTrack.onended(); // the pass starts opening the laptop mic (slow)
+    await vi.advanceTimersByTimeAsync(100);
+    micTrack.onmute(); // and an interruption episode starts capture recovery meanwhile
+    await vi.advanceTimersByTimeAsync(9000);
+
+    expect(events.autoSwitched.map(e => e.deviceId)).toEqual(['mbp']);
+    expect(health().status).toBe('ok');
+    expect(health().trackLabel).toBe('MacBook Pro Microphone (Built-in)');
+  });
+
+  it('retries once after a wake when a listed device became usable without the list changing', async () => {
+    world.inputs = [MBP, USB];
+    ctrl.deviceAmplitude = { usb: 0 };
+    const store = createStore();
+    const { micTrack } = await startRecording(store, { deviceId: 'mbp' });
+    await vi.advanceTimersByTimeAsync(2000);
+
+    world.unopenable = new Set(['mbp']); // lid closed: still listed, cannot be opened
+    micTrack.readyState = 'ended';
+    micTrack.onended();
+    await vi.advanceTimersByTimeAsync(7000); // lands on the silent USB fallback
+    expect(health().trackLabel).toBe('USB Mic (USB)');
+
+    sleepFor(600000);
+    world.unopenable = new Set(); // the lid opens; the device list is unchanged
+    wake();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(events.autoSwitched.map(e => e.deviceId)).toEqual(['mbp']);
     expect(health().status).toBe('ok');
   });
 
