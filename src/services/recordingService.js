@@ -101,6 +101,12 @@ let micAutoRecovering = false;
 // not be dropped: the device the pass needs may be exactly the one that just
 // reappeared (the built-in mic coming back when the lid opens).
 let micRecoveryRerun = false;
+// The current microphone is a device a recovery pass fell back to after the
+// user's device was lost, and it never delivered signal. It is not the user's
+// pick, so the zero-signal rule (never move a silent user device) does not
+// protect it: a changed device set is probed again.
+let micOnSilentFallback = false;
+let micRecoveryInputSignature = null; // input set the last recovery pass saw
 let micSwitchGeneration = 0;
 
 // INT-2: audio-session interruption auto-recovery (Nyberg incident 2026-06-25).
@@ -123,6 +129,9 @@ let captureRecoveryReason = null;
 let captureRecoveryBusy = false;
 let captureRecoveryHealthyTicks = 0;
 let captureRecoveryGeneration = 0;
+// Suspended time inside the current episode: excluded from the give-up
+// window, but still part of the gap reported to the user.
+let captureRecoverySuspendedMs = 0;
 
 // Flush synchronization: resolved when ondataavailable saves the chunk after a flush request
 let flushResolvers = [];
@@ -301,8 +310,9 @@ let micSignalFloatBuf = null;
 // came. Every wall-clock detector read the frozen time as a fault — "zero
 // signal for 989s", "no chunk persisted for 997s", a 5s switch probe judged
 // across the whole sleep — and acted on it.
-// - A heartbeat gap between our own ≤5s timers means the renderer was frozen
-//   (backgroundThrottling is off, so a hidden window alone never causes one):
+// - A heartbeat gap between our own ≤5s timers, while the mixing clock stood
+//   still, means the process was suspended (backgroundThrottling is off, and
+//   a throttled-but-running mobile WebView keeps its audio clock moving):
 //   episode clocks restart instead of aging through the gap.
 // - An AudioContext whose currentTime stands still renders nothing, and its
 //   analyser keeps returning the last pre-sleep buffer: signal measurements
@@ -310,7 +320,11 @@ let micSignalFloatBuf = null;
 const TIMER_GAP_SUSPEND_MS = 9000;       // > the slowest heartbeat (5s) plus jitter
 const AUDIO_CLOCK_STALL_MS = 1000;
 const SUSPEND_EVIDENCE_WINDOW_MS = 10 * 60 * 1000;
+// A switch probe that cannot measure (context not running, clock frozen) is
+// abandoned after this much awake time, so auto-recovery cannot stay latched.
+const SWITCH_VERIFY_POSTPONE_LIMIT_MS = 120000;
 let lastTimerHeartbeatAt = 0;
+let lastHeartbeatAudioTime = null;       // mixing-context clock at that heartbeat
 let lastSuspendEvidenceAt = 0;
 // Chunk-watchdog baseline after a freeze. Never fake lastSuccessfulChunkAt for
 // this: a fake chunk time makes a running capture recovery report "RECOVERED".
@@ -343,12 +357,23 @@ function hasRecentSuspendEvidence(now = Date.now()) {
 // meeting-app audio drivers deliver digital silence unless their app is
 // sharing sound, and loopbacks carry the far end, not the user. Chromium on
 // macOS labels them "(Virtual)"/"(Aggregate)"; the names cover Windows.
-// Auto-recovery only uses one the user explicitly chose (ELECTRON-6G/6R: a
-// lid close moved a recording onto "Microsoft Teams Audio Device (Virtual)").
-const VIRTUAL_INPUT_LABEL = /\((?:virtual|aggregate)\)\s*$|microsoft teams audio|zoomaudiodevice|zoom audio device|blackhole|soundflower|loopback|vb-audio|voicemeeter|cable output|stereo ?mix|what u hear|wave out mix/i;
+// ("Virtual" alone is not enough: "HyperX Virtual Surround Sound" is a real
+// USB headset.) Auto-recovery only uses one the user explicitly chose
+// (ELECTRON-6G/6R: a lid close moved a recording onto "Microsoft Teams Audio
+// Device (Virtual)").
+const VIRTUAL_INPUT_LABEL = /\((?:virtual|aggregate)\)\s*$|\bvirtual (?:audio|cable|device|mic)|microsoft teams audio|zoomaudiodevice|zoom audio device|blackhole|soundflower|loopback|vb-audio|voicemeeter|cable output|steam streaming|voicemod|\bstereo ?mix\b|what u hear|wave out mix/i;
 
 export function isLikelyVirtualInput(device) {
   return VIRTUAL_INPUT_LABEL.test(device?.label || '');
+}
+
+// A device may serve as an automatic fallback microphone unless it is a
+// virtual/loopback input. The user's own pick is exempt, but never through
+// the 'default'/'communications' alias: the OS repoints it at whatever input
+// is left once the real microphone vanishes (the Teams driver, lid closed).
+function isEligibleFallbackInput(device) {
+  const alias = device.deviceId === 'default' || device.deviceId === 'communications';
+  return (!alias && device.deviceId === lastRequestedDeviceId) || !isLikelyVirtualInput(device);
 }
 
 // Dev/test-only env-var override helper. Honored ONLY in non-production builds
@@ -673,29 +698,43 @@ function restartMicSignalClocks(now = Date.now()) {
   if (micVerify) {
     micVerify.since = now;
     micVerify.deadline = now + SWITCH_VERIFY_MS;
+    micVerify.postponedMs = 0;
   }
 }
 
 /**
  * SLEEP: every recording timer calls this first. On the first tick after the
- * renderer was frozen it rebases every wall-clock episode and returns true.
+ * process was suspended it rebases every wall-clock episode and returns true.
  * Whichever timer fires first after a wake handles the gap for all of them.
  */
 function noteTimerHeartbeat(now = Date.now()) {
-  const gapMs = lastTimerHeartbeatAt ? now - lastTimerHeartbeatAt : 0;
+  const gapStartedAt = lastTimerHeartbeatAt;
+  const gapMs = gapStartedAt ? now - gapStartedAt : 0;
   lastTimerHeartbeatAt = now;
+  const audioTime = Number.isFinite(mixingContext?.currentTime) ? mixingContext.currentTime : null;
+  const audioAdvancedMs = audioTime !== null && lastHeartbeatAudioTime !== null
+    ? (audioTime - lastHeartbeatAudioTime) * 1000
+    : null;
+  lastHeartbeatAudioTime = audioTime;
   if (gapMs < TIMER_GAP_SUSPEND_MS) return false;
+  // Throttled timers while audio kept rendering (a hidden mobile WebView) are
+  // not a suspension: capture ran on, so its watchdogs must keep counting.
+  if (audioAdvancedMs !== null && audioAdvancedMs > gapMs / 2) return false;
   lastSuspendEvidenceAt = now;
   console.info(`recording: timers resumed after ${Math.round(gapMs / 1000)}s frozen (system sleep) — watchdog and mic-health clocks rebased`);
   if (lastSuccessfulChunkAt) stallClockBaseAt = now;
-  // Capture recovery counts awake time only: its give-up window and its
-  // wedged-recorder evidence must not include the sleep.
-  if (captureRecoveryTimer && captureRecoveryStartedAt) captureRecoveryStartedAt += gapMs;
+  // Capture recovery gives up after awake time only, and needs fresh evidence
+  // of a wedged recorder. An episode that began after the gap (an event ran
+  // before any timer) contains none of it.
+  if (captureRecoveryTimer && captureRecoveryStartedAt && captureRecoveryStartedAt <= gapStartedAt) {
+    captureRecoverySuspendedMs += gapMs;
+  }
   captureRecoveryHealthyTicks = 0;
+  if (systemAudioSilentSince) systemAudioSilentSince = now;
   restartMicSignalClocks(now);
   // A microphone lost before the sleep may be back (lid opened, headset
   // reconnected while the renderer was frozen): look again.
-  if (micHealthState.reasonCode === MIC_HEALTH_REASON.TRACK_ENDED) handleMicDeviceChange();
+  if (micHealthState.reasonCode === MIC_HEALTH_REASON.TRACK_ENDED || micOnSilentFallback) handleMicDeviceChange();
   return true;
 }
 
@@ -859,6 +898,7 @@ function startSystemAudioSilenceMonitor() {
 
     systemAudioSilenceInterval = setInterval(() => {
       if (!systemAudioAnalyser || !systemAudioFloatBuf) return;
+      noteTimerHeartbeat(); // a sleep must not age the silence episode either
       // Only count time while actually recording — a long pause must not age
       // the episode into a false warning.
       if (!recordingStoreRef?.isRecording) {
@@ -1127,7 +1167,7 @@ function concreteMicrophoneDeviceId(micStream) {
 export async function switchMicrophoneStream(newDeviceId, opts = {}) {
   const verifyContext = opts.verifyContext || 'manual-switch';
   if (!mixingContext || !mixingDest) {
-    return { success: false, error: 'No active recording to switch microphone in' };
+    return { success: false, superseded: true, error: 'No active recording to switch microphone in' };
   }
   // Automatic zero-signal recovery needs a concrete identity. Ambiguous OS
   // aliases deliberately retain the old source and warning; an explicit user
@@ -1138,9 +1178,17 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
     return { success: false, error: 'Cannot verify the original microphone identity for same-device recovery' };
   }
 
+  // The user picked a device: whatever auto-recovery fell back to is theirs
+  // to replace, and their pick gets the zero-signal protection from here on.
+  if (verifyContext === 'manual-switch') micOnSilentFallback = false;
+
   const switchId = ++micSwitchGeneration;
   const generation = recorderGeneration;
   const targetContext = mixingContext;
+  // A newer switch or the end of the recording took over: callers walking a
+  // candidate list must stand down rather than replace it.
+  const superseded = () => generation !== recorderGeneration || switchId !== micSwitchGeneration ||
+    mixingContext !== targetContext || !mixingDest;
   let newStream = null;
   let replacementNode = null;
   try {
@@ -1160,6 +1208,7 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
       ];
 
     for (const constraints of constraintLadder) {
+      if (superseded()) break;
       try {
         newStream = await acquireReplacementMicrophone({ audio: constraints });
         break;
@@ -1168,13 +1217,12 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
       }
     }
 
+    if (superseded()) {
+      newStream?.getTracks().forEach(track => track.stop());
+      return { success: false, superseded: true, error: 'Microphone switch superseded or recording stopped' };
+    }
     if (!newStream) {
       return { success: false, error: 'Could not access the selected microphone' };
-    }
-
-    if (generation !== recorderGeneration || switchId !== micSwitchGeneration || mixingContext !== targetContext || !mixingDest) {
-      newStream.getTracks().forEach(track => track.stop());
-      return { success: false, error: 'Microphone switch superseded or recording stopped' };
     }
     const liveTrack = newStream.getAudioTracks()[0];
     if (!liveTrack || liveTrack.readyState === 'ended') throw new Error('The selected microphone disconnected while opening');
@@ -1327,7 +1375,7 @@ export async function switchMicrophoneStream(newDeviceId, opts = {}) {
       else if (generation === recorderGeneration && switchId === micSwitchGeneration) nativeFailure({ error: e.message });
     }
     console.error('Error switching microphone:', e);
-    return { success: false, error: e.message };
+    return { success: false, error: e.message, ...(superseded() ? { superseded: true } : {}) };
   }
 }
 
@@ -1364,30 +1412,34 @@ function registerMicGraceTimeout(fn, delayMs) {
  */
 async function handleMicDeviceChange() {
   if (!recordingStoreRef?.isRecording) return;
-
-  // MSIG: a device-set change during a zero-signal episode is a fresh chance —
-  // the wedged endpoint may have been re-registered by the OS (e.g. the BT
-  // device was power-cycled). Re-arm the one-per-episode same-device
-  // re-acquire; the health loop performs it on its next escalated tick.
-  // Still same-device only: sustained zeros can mean a hardware-muted mic,
-  // and a muted user must never be silently moved onto another microphone.
-  if (micHealthState.reasonCode === MIC_HEALTH_REASON.ZERO_SIGNAL && zeroSignalSince && !zeroReacquireInFlight) {
-    zeroEpisodeReacquired = false;
-    return;
-  }
-
-  if (micHealthState.reasonCode !== MIC_HEALTH_REASON.TRACK_ENDED) return;
-  // A device the user just picked keeps TRACK_ENDED until its probe decides;
-  // a device-list change must not switch away from it while it is live.
-  if (micVerify && micVerify.context !== 'auto-recovery' && currentMicTrackLive()) return;
+  // A pass is probing: note the change; the pass runs again when it ends.
   if (micAutoRecovering) {
     micRecoveryRerun = true;
     return;
+  }
+
+  if (!micOnSilentFallback) {
+    // MSIG: a device-set change during a zero-signal episode is a fresh chance —
+    // the wedged endpoint may have been re-registered by the OS (e.g. the BT
+    // device was power-cycled). Re-arm the one-per-episode same-device
+    // re-acquire; the health loop performs it on its next escalated tick.
+    // Still same-device only: sustained zeros can mean a hardware-muted mic,
+    // and a muted user must never be silently moved onto another microphone.
+    if (micHealthState.reasonCode === MIC_HEALTH_REASON.ZERO_SIGNAL && zeroSignalSince && !zeroReacquireInFlight) {
+      zeroEpisodeReacquired = false;
+      return;
+    }
+
+    if (micHealthState.reasonCode !== MIC_HEALTH_REASON.TRACK_ENDED) return;
+    // A device the user just picked keeps TRACK_ENDED until its probe decides;
+    // a device-list change must not switch away from it while it is live.
+    if (micVerify && micVerify.context !== 'auto-recovery' && currentMicTrackLive()) return;
   }
   if (!navigator.mediaDevices?.enumerateDevices) return;
   micAutoRecovering = true;
   micRecoveryRerun = false;
   let recovered = false;
+  let superseded = false;
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
     const allInputs = devices.filter(d => d.kind === 'audioinput' && d.deviceId);
@@ -1395,6 +1447,12 @@ async function handleMicDeviceChange() {
     // semantics — skip it so it cannot burn a candidate slot.
     const inputs = allInputs.filter(d => d.deviceId !== 'communications');
     if (inputs.length === 0) return;
+    // On a silent fallback only a changed input set is worth another pass.
+    // Re-probing the same inputs would cycle: opening a Bluetooth mic flips its
+    // profile, which itself fires devicechange.
+    const signature = inputs.map(d => `${d.deviceId}|${d.groupId || ''}|${d.label || ''}`).sort().join('\n');
+    if (micOnSilentFallback && signature === micRecoveryInputSignature) return;
+    micRecoveryInputSignature = signature;
     // Prefer the originally-requested device if it reappeared, then walk the
     // remaining inputs. Every candidate must PROVE it delivers signal (a
     // still-enumerated phantom endpoint opens fine and records silence) —
@@ -1410,10 +1468,7 @@ async function handleMicDeviceChange() {
       stream?.getAudioTracks?.()[0]?.getSettings?.()?.groupId || null;
     const isLost = d => (lostDeviceId && d.deviceId === lostDeviceId) || (lostGroupId && d.groupId === lostGroupId);
     const isAlias = d => d.deviceId === 'default';
-    // Virtual inputs only when the user picked that exact device. The
-    // 'default' alias is never an explicit pick: once the real microphone
-    // vanishes the OS may point it at a virtual device.
-    const eligible = inputs.filter(d => (d === preferred && !isAlias(d)) || !isLikelyVirtualInput(d));
+    const eligible = inputs.filter(isEligibleFallbackInput);
     const seenGroups = new Set();
     const unique = [
       ...(preferred && eligible.includes(preferred) ? [preferred] : []),
@@ -1436,11 +1491,20 @@ async function handleMicDeviceChange() {
     let opened = 0;
     for (const candidate of candidates) {
       const result = await switchMicrophoneStream(candidate.deviceId, { verifyContext: 'auto-recovery' });
-      if (!result.success) continue;
+      if (!result.success) {
+        // The user picked a device meanwhile (or the recording ended): never
+        // replace their pick with the next candidate.
+        if (result.superseded) {
+          superseded = true;
+          return;
+        }
+        continue;
+      }
       opened++;
       const verdict = await result.verified;
       if (verdict === 'signal') {
         recovered = true;
+        micOnSilentFallback = false;
         clearMicGraceTimeouts(); // device is live again — do not escalate to CRITICAL
         emit('micRecovered', { deviceId: candidate.deviceId });
         emit('micAutoSwitched', {
@@ -1465,11 +1529,14 @@ async function handleMicDeviceChange() {
     } else {
       captureMessage(`mic-health: auto-recovery could not open any of ${candidates.length} candidate microphone(s) — waiting for a device`, 'warning');
     }
+    // Still on a live device this pass (or an earlier one) fell back to, and it
+    // never proved signal: the next change of the input set looks again.
+    micOnSilentFallback = currentMicTrackLive() && (opened > 0 || micOnSilentFallback);
   } catch (e) {
     console.warn('Mic auto-recovery on devicechange failed:', e);
   } finally {
     micAutoRecovering = false;
-    if (micRecoveryRerun && !recovered) {
+    if (micRecoveryRerun && !recovered && !superseded) {
       micRecoveryRerun = false;
       handleMicDeviceChange();
     }
@@ -1509,6 +1576,7 @@ function scheduleCaptureRecovery(reason) {
   if (captureRecoveryTimer) return; // episode already running
   captureRecoveryGeneration++;
   captureRecoveryStartedAt = Date.now();
+  captureRecoverySuspendedMs = 0;
   captureRecoveryReason = reason;
   captureRecoveryHealthyTicks = 0;
   captureMessage(`recording: capture recovery started (reason=${reason}, savedChunks=${savedChunkCount})`, 'warning');
@@ -1580,7 +1648,7 @@ async function attemptCaptureRecovery() {
     // toast), instead of sitting "recording" nothing with a stall banner that may
     // no longer be mounted if the user navigated away (reliability audit GAP-3).
     // Every chunk before the interruption is safely persisted either way.
-    if (Date.now() - captureRecoveryStartedAt > CAPTURE_RECOVERY_GIVE_UP_MS) {
+    if (Date.now() - captureRecoveryStartedAt - captureRecoverySuspendedMs > CAPTURE_RECOVERY_GIVE_UP_MS) {
       const stalledForSeconds = Math.round((Date.now() - captureRecoveryStartedAt) / 1000);
       captureMessage(`recording: capture recovery GAVE UP after ${Math.round(CAPTURE_RECOVERY_GIVE_UP_MS / 60000)}min (reason=${captureRecoveryReason})`, 'error');
       emit('captureRecoveryFailed', { stalledForSeconds, reason: captureRecoveryReason, gaveUp: true });
@@ -1614,9 +1682,9 @@ async function attemptCaptureRecovery() {
         if (inputs.length > 0) {
           // Never a virtual input the user did not choose: this re-acquire
           // skips verification, so health would call it OK while it records
-          // silence (the lid-close case, where 'default' is Teams' driver).
-          const target = inputs.find(d => d.deviceId === lastRequestedDeviceId) ||
-            inputs.find(d => !isLikelyVirtualInput(d));
+          // silence (lid closed: the 'default' alias points at Teams' driver).
+          const eligible = inputs.filter(isEligibleFallbackInput);
+          const target = eligible.find(d => d.deviceId === lastRequestedDeviceId) || eligible[0];
           if (!target) {
             captureRecoveryHealthyTicks = 0;
             return; // no physical microphone right now — next tick
@@ -1628,7 +1696,7 @@ async function attemptCaptureRecovery() {
       // MSIG: skipVerify — INT-2's success metric is chunk flow (checked at
       // the top of every tick), and running a signal probe during an OS
       // audio-session interruption would false-positive "silent".
-      const result = await switchMicrophoneStream(targetDeviceId || 'default', { skipVerify: true });
+      const result = await switchMicrophoneStream(targetDeviceId || 'default', { skipVerify: true, verifyContext: 'capture-recovery' });
       if (!isCurrent()) return;
       if (!result.success) {
         captureRecoveryHealthyTicks = 0;
@@ -1959,20 +2027,28 @@ function startMicHealthMonitoring(micStream, recordingStore) {
           });
           clearSilenceWarning();
           emit('micSwitchVerified', { ok: true, unverified: true, context: v.context, label: v.label, deviceId: v.deviceId });
-        } else if (micHealthAudioContext?.state !== 'running') {
-          // Measurement context suspended (autoplay policy / interruption):
-          // nothing truthful can be read — postpone the verdict rather than
-          // judging a healthy device on synthesized silence.
-          micVerify.deadline = Date.now() + SWITCH_VERIFY_MS;
-        } else if (!clockRunning) {
-          // Stale buffer: neither "signal" nor "silent" can be read from it.
-          // The probe window restarts once audio renders again.
-          micVerify.since = Date.now();
-          micVerify.deadline = Date.now() + SWITCH_VERIFY_MS;
+        } else if (micHealthAudioContext?.state !== 'running' || !clockRunning) {
+          // Measurement context suspended (autoplay policy / interruption), or
+          // 'running' with its clock standing still (dark wake: the analyser
+          // holds a stale buffer). Nothing truthful can be read — postpone the
+          // verdict rather than judge a device on synthesized silence. Not
+          // forever: a caller (auto-recovery) waits on this probe.
+          micVerify.postponedMs = (micVerify.postponedMs || 0) + HEALTH_SAMPLE_INTERVAL_MS;
+          if (micVerify.postponedMs >= SWITCH_VERIFY_POSTPONE_LIMIT_MS) {
+            const v = micVerify;
+            resolveMicVerification(null);
+            captureMessage(`mic-health: switch to "${v.label || v.deviceId || 'default'}" could not be measured for ${SWITCH_VERIFY_POSTPONE_LIMIT_MS / 1000}s (${v.context}) — probe abandoned`, 'warning');
+          } else {
+            // A stale buffer restarts the window; a suspended context keeps
+            // the switch as the start of any silence.
+            if (micHealthAudioContext?.state === 'running') micVerify.since = Date.now();
+            micVerify.deadline = Date.now() + SWITCH_VERIFY_MS;
+          }
         } else if (peakDb > SWITCH_VERIFY_SIGNAL_DBFS) {
           // The new device demonstrably delivers signal.
           const v = micVerify;
           resolveMicVerification('signal');
+          micOnSilentFallback = false;
           zeroSignalSince = null;
           zeroEpisodeReported = false;
           zeroEpisodeReacquired = false;
@@ -2017,6 +2093,8 @@ function startMicHealthMonitoring(micStream, recordingStore) {
         zeroSignalSince = null;
         return;
       }
+      // A fallback that delivers signal is simply a working microphone now.
+      if (micOnSilentFallback && peakDb > SWITCH_VERIFY_SIGNAL_DBFS) micOnSilentFallback = false;
 
       // ── MSIG: zero-signal episode tracking (wall-clock, sleep-safe) ──
       // Gated to contexts where zeros are meaningful: measurement context
@@ -2367,6 +2445,7 @@ function startDurationTracking(recordingStore, isAutoSplitting, maxSeconds = nul
   lastWallClockSec = 0;
   stallClockBaseAt = 0;
   lastTimerHeartbeatAt = 0;
+  lastHeartbeatAudioTime = null;
   lastSuspendEvidenceAt = 0;
 
   durationInterval = setInterval(async () => {
@@ -2483,7 +2562,7 @@ export function notifyForegrounded() {
     // restarts instead of being aborted (abort = auto-recovery gives up).
     restartMicSignalClocks();
     // The lost microphone may have returned while we were suspended.
-    if (micHealthState.reasonCode === MIC_HEALTH_REASON.TRACK_ENDED) handleMicDeviceChange();
+    if (micHealthState.reasonCode === MIC_HEALTH_REASON.TRACK_ENDED || micOnSilentFallback) handleMicDeviceChange();
   }
 }
 
@@ -2750,6 +2829,9 @@ async function startRecordingInternal(options) {
   isAutoSplittingRef = isAutoSplitting || null;
   // DREC-3: remember the requested device and start fresh recovery state.
   lastRequestedDeviceId = deviceId || null;
+  micOnSilentFallback = false;
+  micRecoveryInputSignature = null;
+  micRecoveryRerun = false;
   clearMicGraceTimeouts();
 
   let sysStream = null;

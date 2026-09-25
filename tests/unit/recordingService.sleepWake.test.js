@@ -29,23 +29,47 @@ const ctrl = {
   byteVal: 50,
   clockFrozen: false,
   frozenAt: 0,
-  chunksFlow: true
+  clockLostS: 0, // audio time that never rendered (frozen spans)
+  chunksFlow: true,
+  deviceAmplitude: {} // per physical device; others use `amplitude`
 };
 
+function amplitudeFor(stream) {
+  const id = stream?.getAudioTracks?.()[0]?.getSettings?.().deviceId;
+  return id in ctrl.deviceAmplitude ? ctrl.deviceAmplitude[id] : ctrl.amplitude;
+}
+
+// The audio clock renders with the monotonic clock, stands still while audio
+// I/O is powered down and resumes where it stopped (it never jumps ahead).
+const audioNow = () => performance.now() / 1000 - ctrl.clockLostS;
+function freezeAudioClock() {
+  if (ctrl.clockFrozen) return;
+  ctrl.frozenAt = audioNow();
+  ctrl.clockFrozen = true;
+}
+function resumeAudioClock() {
+  if (!ctrl.clockFrozen) return;
+  ctrl.clockLostS = performance.now() / 1000 - ctrl.frozenAt;
+  ctrl.clockFrozen = false;
+}
+
 class MockAnalyser {
-  constructor() { this.fftSize = 256; this.frequencyBinCount = 128; }
-  getByteFrequencyData(array) { array.fill(ctrl.byteVal); }
+  constructor() { this.fftSize = 256; this.frequencyBinCount = 128; this.source = null; }
+  getByteFrequencyData(array) { array.fill(amplitudeFor(this.source) > 0 ? ctrl.byteVal : 0); }
   getFloatTimeDomainData(buf) {
-    for (let i = 0; i < buf.length; i++) buf[i] = ctrl.amplitude * Math.sin(i * 0.3);
+    const amplitude = amplitudeFor(this.source);
+    for (let i = 0; i < buf.length; i++) buf[i] = amplitude * Math.sin(i * 0.3);
   }
 }
 
 class MockAudioContext {
   constructor() { this.state = 'running'; }
   // Advances with the monotonic clock unless audio I/O is powered down.
-  get currentTime() { return ctrl.clockFrozen ? ctrl.frozenAt : performance.now() / 1000; }
+  get currentTime() { return ctrl.clockFrozen ? ctrl.frozenAt : audioNow(); }
   createAnalyser() { return new MockAnalyser(); }
-  createMediaStreamSource() { return { connect: () => {}, disconnect: () => {} }; }
+  createMediaStreamSource(stream) {
+    return { connect: node => { if (node instanceof MockAnalyser) node.source = stream; }, disconnect: () => {} };
+  }
   createMediaStreamDestination() { return { stream: new MockMediaStream([]) }; }
   close() { this.state = 'closed'; return Promise.resolve(); }
   resume() { this.state = 'running'; return Promise.resolve(); }
@@ -106,6 +130,7 @@ function installDevices() {
       await new Promise(resolve => setTimeout(resolve, delay));
       throw new DOMException('Device busy', 'NotReadableError');
     }
+    if (world.slowOpenMs[id]) await new Promise(resolve => setTimeout(resolve, world.slowOpenMs[id]));
     const physical = id === 'default'
       ? world.inputs.find(d => d.deviceId !== 'default' && d.groupId === device.groupId)
       : device;
@@ -162,16 +187,13 @@ async function startRecording(store, { deviceId = null } = {}) {
 /** Lid closed / system asleep: audio stops, then the renderer is frozen for `ms`. */
 function sleepFor(ms) {
   ctrl.chunksFlow = false;
-  if (!ctrl.clockFrozen) {
-    ctrl.clockFrozen = true;
-    ctrl.frozenAt = performance.now() / 1000;
-  }
+  freezeAudioClock();
   vi.setSystemTime(Date.now() + ms);
 }
 
 /** Full wake: audio I/O is powered again. */
 function wake() {
-  ctrl.clockFrozen = false;
+  resumeAudioClock();
   ctrl.chunksFlow = true;
 }
 
@@ -191,7 +213,7 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
-    Object.assign(ctrl, { amplitude: 0.1, byteVal: 50, clockFrozen: false, frozenAt: 0, chunksFlow: true });
+    Object.assign(ctrl, { amplitude: 0.1, byteVal: 50, clockFrozen: false, frozenAt: 0, clockLostS: 0, chunksFlow: true, deviceAmplitude: {} });
     sentry.messages = [];
     MockMediaRecorder.last = null;
     global.MediaRecorder = MockMediaRecorder;
@@ -204,7 +226,7 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
       addEventListener: vi.fn(),
       removeEventListener: vi.fn()
     };
-    world = { inputs: [DEFAULT_MBP, MBP, TEAMS], unopenable: new Set(), openDelayMs: {}, opened: [], tracks: [] };
+    world = { inputs: [DEFAULT_MBP, MBP, TEAMS], unopenable: new Set(), openDelayMs: {}, slowOpenMs: {}, opened: [], tracks: [] };
     installDevices();
 
     events = { stalled: [], recovered: [], recoveryFailed: [], autoSwitched: [], health: [] };
@@ -228,9 +250,11 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
     delete window.electronAPI;
   });
 
-  it('replays the lid-close incident: nothing judges the sleep, no virtual input, the built-in mic returns on wake', async () => {
+  // The Record page preselects the first enumerated input, i.e. Chromium's
+  // 'default' alias; null is the plain system default.
+  it.each([null, 'default'])('replays the lid-close incident (mic %s): nothing judges the sleep, no virtual input, the built-in mic returns on wake', async deviceId => {
     const store = createStore();
-    const { micTrack } = await startRecording(store); // system default = built-in mic
+    const { micTrack } = await startRecording(store, { deviceId }); // resolves to the built-in mic
     await vi.advanceTimersByTimeAsync(10000);
     expect(health().status).toBe('ok');
 
@@ -253,7 +277,7 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
     await vi.advanceTimersByTimeAsync(7000);
 
     expect(world.opened).not.toContain('teams');
-    expect(world.opened.filter(id => id === 'default')).toEqual(['default']); // only the initial start
+    expect(world.opened.filter(id => id === 'default')).toHaveLength(1); // only the initial start
     expect(events.stalled).toEqual([]);
     expect(events.recoveryFailed).toEqual([]);
     expect(health().reasonCode).toBe('track_ended');
@@ -265,7 +289,7 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
     wake();
     await vi.advanceTimersByTimeAsync(1000);
 
-    expect(events.autoSwitched.map(e => e.deviceId)).toEqual(['mbp']);
+    expect(events.autoSwitched).toHaveLength(1);
     expect(health().status).toBe('ok');
     expect(health().trackLabel).toBe('MacBook Pro Microphone (Built-in)');
     expect(world.opened).not.toContain('teams');
@@ -330,7 +354,7 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
     expect(events.stalled).toEqual([]);
 
     // Awake with a running audio clock, but the recorder produces nothing.
-    ctrl.clockFrozen = false;
+    resumeAudioClock();
     await vi.advanceTimersByTimeAsync(31000);
     expect(events.stalled).toHaveLength(1);
     expect(events.stalled[0].secondsSinceLastChunk).toBeLessThan(40);
@@ -382,9 +406,9 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
     expect(world.opened).toEqual(['mbp', 'usb']); // no re-acquire racing the recovery pass
   });
 
-  it('keeps the capture-recovery re-acquire off virtual inputs through a long dark wake with the lid closed', async () => {
+  it.each([null, 'default'])('keeps the capture-recovery re-acquire off virtual inputs through a long dark wake (mic %s)', async deviceId => {
     const store = createStore();
-    const { micTrack } = await startRecording(store);
+    const { micTrack } = await startRecording(store, { deviceId });
     await vi.advanceTimersByTimeAsync(5000);
 
     ctrl.chunksFlow = false;
@@ -397,16 +421,153 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
     await vi.advanceTimersByTimeAsync(75000); // long enough for the stall watchdog and INT-2 to run
     expect(sentry.messages.some(m => /capture recovery started/.test(m.message))).toBe(true);
     expect(world.opened).not.toContain('teams');
-    expect(world.opened.filter(id => id === 'default')).toEqual(['default']);
+    expect(world.opened.filter(id => id === 'default')).toHaveLength(1);
     expect(health().reasonCode).toBe('track_ended');
 
     world.inputs = [DEFAULT_MBP, MBP, TEAMS];
     sleepFor(60000);
     wake();
     await vi.advanceTimersByTimeAsync(2000);
+    expect(events.autoSwitched).toHaveLength(1);
+    expect(health().status).toBe('ok');
+    expect(health().trackLabel).toBe('MacBook Pro Microphone (Built-in)');
+  });
+
+  it('does not push a recovery episode that starts right after a wake into the future', async () => {
+    const store = createStore();
+    const { micTrack } = await startRecording(store);
+    await vi.advanceTimersByTimeAsync(10000);
+
+    sleepFor(600000);
+    wake();
+    micTrack.onmute(); // the first task after the freeze is a track event, not one of our timers
+    await vi.advanceTimersByTimeAsync(40000);
+
+    expect(events.recoveryFailed).toEqual([]);
+    expect(sentry.messages.some(m => /capture RECOVERED/.test(m.message))).toBe(true);
+    expect(sentry.messages.filter(m => m.level === 'error')).toEqual([]);
+  });
+
+  it('tells the user the real gap, sleep included, when capture comes back after a wake', async () => {
+    const store = createStore();
+    await startRecording(store);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    ctrl.chunksFlow = false; // a real stall while awake
+    await vi.advanceTimersByTimeAsync(41000);
+    expect(events.stalled).toHaveLength(1);
+
+    sleepFor(600000);
+    wake();
+    await vi.advanceTimersByTimeAsync(12000);
+    const recovered = events.recovered.find(e => e.gapSeconds !== undefined);
+    expect(recovered.gapSeconds).toBeGreaterThanOrEqual(600);
+    expect(events.recoveryFailed).toEqual([]);
+  });
+
+  it('keeps counting a stall while throttled timers run with audio still rendering (hidden mobile WebView)', async () => {
+    const store = createStore();
+    await startRecording(store);
+    await vi.advanceTimersByTimeAsync(10000);
+
+    ctrl.chunksFlow = false; // capture really stalls; the audio clock keeps running
+    for (let i = 0; i < 3; i++) {
+      vi.setSystemTime(Date.now() + 55000); // timers throttled to about once a minute...
+      ctrl.clockLostS -= 55; // ...while that audio kept rendering
+      await vi.advanceTimersByTimeAsync(5000);
+    }
+    expect(events.stalled).toHaveLength(1);
+    expect(sentry.messages.find(m => /capture STALLED/.test(m.message)).level).toBe('error');
+  });
+
+  it('moves off a silent fallback when the input set changes during the pass', async () => {
+    world.inputs = [MBP, USB];
+    ctrl.deviceAmplitude = { usb: 0 }; // the only other input delivers nothing
+    const store = createStore();
+    const { micTrack } = await startRecording(store, { deviceId: 'mbp' });
+    await vi.advanceTimersByTimeAsync(2000);
+
+    world.inputs = [USB];
+    micTrack.readyState = 'ended';
+    micTrack.onended();
+    await vi.advanceTimersByTimeAsync(1000); // USB probe pending
+    world.inputs = [USB, MBP]; // the built-in mic comes back mid-pass
+    await fireDeviceChange();
+    await vi.advanceTimersByTimeAsync(8000);
+
     expect(events.autoSwitched.map(e => e.deviceId)).toEqual(['mbp']);
     expect(health().status).toBe('ok');
+    expect(health().trackLabel).toBe('MacBook Pro Microphone (Built-in)');
   });
+
+  it('does not re-probe the same silent inputs on device changes that bring nothing new', async () => {
+    world.inputs = [MBP, USB];
+    ctrl.deviceAmplitude = { usb: 0 };
+    const store = createStore();
+    const { micTrack } = await startRecording(store, { deviceId: 'mbp' });
+    await vi.advanceTimersByTimeAsync(2000);
+
+    world.inputs = [USB];
+    micTrack.readyState = 'ended';
+    micTrack.onended();
+    // USB judged silent (5s), the recording stays on it, and the zero-signal
+    // episode spends its one same-device re-acquire (15s + 5s probe).
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(world.opened).toEqual(['mbp', 'usb', 'usb']);
+    const opens = world.opened.length;
+
+    for (let i = 0; i < 3; i++) { // e.g. Bluetooth profile flips on the output side
+      await fireDeviceChange();
+      await vi.advanceTimersByTimeAsync(6000);
+    }
+    expect(world.opened).toHaveLength(opens);
+    expect(health().reasonCode).toBe('zero_signal');
+  });
+
+  it('never replaces a device the user picks while auto-recovery is still opening a candidate', async () => {
+    const micA = { kind: 'audioinput', deviceId: 'a', groupId: 'grp-a', label: 'Mic A (USB)' };
+    const micB = { kind: 'audioinput', deviceId: 'b', groupId: 'grp-b', label: 'Mic B (USB)' };
+    const pick = { kind: 'audioinput', deviceId: 'pick', groupId: 'grp-pick', label: 'User Pick (USB)' };
+    world.inputs = [MBP, micA, micB, pick];
+    const store = createStore();
+    const { micTrack } = await startRecording(store, { deviceId: 'mbp' });
+    await vi.advanceTimersByTimeAsync(2000);
+
+    world.inputs = [micA, micB, pick];
+    world.slowOpenMs = { a: 2000 };
+    micTrack.readyState = 'ended';
+    micTrack.onended();
+    await vi.advanceTimersByTimeAsync(500); // auto-recovery waits for Mic A to open
+    const picked = await recordingService.switchMicrophoneStream('pick');
+    expect(picked.success).toBe(true);
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(world.opened).not.toContain('b');
+    expect(health().trackLabel).toBe('User Pick (USB)');
+    expect(health().status).toBe('ok');
+  });
+
+  it('abandons a switch probe that cannot measure for two minutes instead of latching recovery', async () => {
+    world.inputs = [MBP, USB];
+    const store = createStore();
+    const { micTrack } = await startRecording(store, { deviceId: 'mbp' });
+    await vi.advanceTimersByTimeAsync(2000);
+
+    world.inputs = [USB];
+    ctrl.deviceAmplitude = { usb: 0 }; // a context that never rendered reads zeros
+    freezeAudioClock(); // awake, but audio does not render (no timer gap)
+    micTrack.readyState = 'ended';
+    micTrack.onended();
+    await vi.advanceTimersByTimeAsync(125000);
+    expect(sentry.messages.some(m => /could not be measured/.test(m.message))).toBe(true);
+
+    resumeAudioClock();
+    world.inputs = [USB, MBP];
+    const pass = fireDeviceChange(); // a new pass can run: nothing stayed latched
+    await vi.advanceTimersByTimeAsync(1000);
+    await pass;
+    expect(events.autoSwitched).toHaveLength(1);
+  }, 30000);
 
   it('still recovers when a device the user just picked is unplugged during its probe', async () => {
     world.inputs = [MBP, USB];
@@ -517,7 +678,11 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
       'Aggregate Device (Aggregate)',
       'CABLE Output (VB-Audio Virtual Cable)',
       'Stereo Mix (Realtek(R) Audio)',
-      'Loopback Audio'
+      'Stereomix (Realtek(R) Audio)',
+      'Loopback Audio',
+      'Line 1 (Virtual Audio Cable)',
+      'Voicemod Virtual Audio Device (WDM)',
+      'Steam Streaming Microphone'
     ]) expect(recordingService.isLikelyVirtualInput({ label })).toBe(true);
     for (const label of [
       'MacBook Pro Microphone (Built-in)',
@@ -527,6 +692,8 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
       'Headset (Jabra Evolve2 65)',
       'Microphone Array (Intel® Smart Sound Technology for Digital Microphones)',
       'Jabra Speak 750 MS Teams',
+      'Microphone (HyperX Virtual Surround Sound)',
+      'Behringer Stereo Mixer',
       ''
     ]) expect(recordingService.isLikelyVirtualInput({ label })).toBe(false);
   });

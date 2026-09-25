@@ -220,6 +220,20 @@ describe('recordingService — system-audio silence watchdog (SASIG)', () => {
     expect(silentEvents.filter(Boolean)).toHaveLength(1);
   });
 
+  it('does not age the silence timer through a system sleep', async () => {
+    const store = createMockRecordingStore();
+    await startWithSystemAudio(store);
+
+    ctrl.systemAmplitude = 0; // a quiet passage just before the lid closes
+    await vi.advanceTimersByTimeAsync(30_000);
+    vi.setSystemTime(Date.now() + 20 * 60_000); // renderer frozen, wall clock jumps
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(silentEvents).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(90_000); // still silent while awake: real
+    expect(silentEvents.filter(Boolean)).toHaveLength(1);
+  });
+
   it('does not arm at all when system audio is off', async () => {
     const store = createMockRecordingStore();
     global.navigator.mediaDevices.getUserMedia.mockResolvedValue(
