@@ -706,6 +706,31 @@ describe('recording across system sleep and dark wakes (ELECTRON-6G…6S)', () =
       expect(events.autoSwitched.map(e => e.deviceId)).toEqual(['arr']);
       expect(health().trackLabel).toBe('Microphone Array (Realtek(R) Audio)');
     });
+
+    it('does not mistake Line In behind a repointed default for the user\'s mic', async () => {
+      ctrl.chromiumAlias = true; // the Record page's preselected 'default'
+      const LINE_IN = { kind: 'audioinput', deviceId: 'line', groupId: 'rtk', label: 'Line In (Realtek(R) Audio)' };
+      const DEFAULT_ARRAY = { kind: 'audioinput', deviceId: 'default', groupId: 'rtk', label: 'Default - Microphone Array (Realtek(R) Audio)' };
+      const DEFAULT_LINE = { kind: 'audioinput', deviceId: 'default', groupId: 'rtk', label: 'Default - Line In (Realtek(R) Audio)' };
+      world.inputs = [DEFAULT_ARRAY, ARRAY, LINE_IN];
+      ctrl.deviceAmplitude = { line: 0 }; // nothing plugged in
+      const store = createStore();
+      const { micTrack } = await startRecording(store, { deviceId: 'default' });
+      await vi.advanceTimersByTimeAsync(2000);
+
+      world.inputs = [DEFAULT_LINE, LINE_IN]; // the array endpoint vanishes; Windows repoints 'default'
+      micTrack.readyState = 'ended';
+      micTrack.onended();
+      await vi.advanceTimersByTimeAsync(7000);
+      expect(health().trackLabel).toBe('Line In (Realtek(R) Audio)');
+
+      world.inputs = [DEFAULT_LINE, LINE_IN, ARRAY, USB]; // the array and a USB mic come back
+      const pass = fireDeviceChange();
+      await vi.advanceTimersByTimeAsync(2000);
+      await pass;
+      expect(events.autoSwitched.map(e => e.deviceId)).toEqual(['arr']);
+      expect(health().status).toBe('ok');
+    });
   });
 
   describe('user mic chosen through the default selection (Chromium reports the alias id)', () => {

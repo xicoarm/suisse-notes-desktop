@@ -1548,7 +1548,11 @@ async function handleMicDeviceChange() {
     // still-enumerated phantom endpoint opens fine and records silence) —
     // up to 3 candidates, ~5s probe each.
     const userDevice = inputs.find(d => !isAliasDeviceId(d.deviceId) && isUserMicDevice(d));
-    const preferred = userDevice || inputs.find(d => d.deviceId === lastRequestedDeviceId);
+    // Never the alias itself: once the real mic is gone the OS repoints it
+    // (Windows: at Line In on the same controller), and a device opened
+    // through it cannot be judged by identity. Its concrete entry is tried.
+    const preferred = userDevice ||
+      inputs.find(d => d.deviceId === lastRequestedDeviceId && !isAliasDeviceId(d.deviceId));
     // The lost microphone often stays enumerated (wedged endpoint, or not yet
     // removed) and the 'default' alias keeps pointing at it. Probing it first
     // cost 5s of silence and an empty archive epoch (ELECTRON-62/66). Probe
