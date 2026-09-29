@@ -7,6 +7,7 @@ const path = require('path');
 const { createHash } = require('crypto');
 
 const PACKET_CACHE_BYTES = 1024 * 1024;
+const CONTENT_HASH_BLOCK_BYTES = 1024 * 1024;
 // This is a bounded final-output inspection constraint, not an RFC maximum:
 // arbitrarily padded Opus packets can be larger. Unsupported output is retained.
 const MAX_PACKET_BYTES = 65536;
@@ -63,13 +64,22 @@ function opusPacketSamples(packet) {
   return frames * frameSamples;
 }
 
+// dev/ino/size change only when the file is replaced or resized. Timestamps do
+// not identify content: security software, backup agents and indexers clear
+// the archive bit, set ACLs, object IDs, alternate data streams or restore
+// access times on fresh files. That moves ctime (and mtime for a stream)
+// without touching one byte of audio, and it failed five saves in a row on
+// one customer PC (ELECTRON-6V). Content is compared by SHA-256 instead; the
+// times stay as evidence of what else happened to the file meanwhile.
 function fileIdentity(stat) {
   if (!stat.isFile() || stat.size <= 0n || stat.size > BigInt(Number.MAX_SAFE_INTEGER)) throw invalid('invalid encoded file');
-  return { dev: String(stat.dev), ino: String(stat.ino), size: Number(stat.size),
-    mtime: String(stat.mtimeNs), ctime: String(stat.ctimeNs) };
+  return { dev: String(stat.dev), ino: String(stat.ino), size: Number(stat.size) };
+}
+function fileTimes(stat) {
+  return { mtime: String(stat.mtimeNs), ctime: String(stat.ctimeNs) };
 }
 function sameFile(left, right) {
-  if (JSON.stringify(left) !== JSON.stringify(right)) throw invalid('encoded file identity or length changed');
+  if (JSON.stringify(left) !== JSON.stringify(right)) throw invalid('encoded file identity or length changed', { before: left, after: right });
 }
 
 // FFprobe's Matroska packet.pos is the Block binary payload position: a
@@ -79,12 +89,38 @@ function sameFile(left, right) {
 // https://github.com/FFmpeg/FFmpeg/blob/e64a1d2953/libavformat/matroskadec.c
 function createPacketFileReader(file, { deadline = Infinity } = {}) {
   if (typeof file !== 'string' || !path.isAbsolute(file)) throw invalid('absolute encoded file path required');
-  const before = fileIdentity(fs.lstatSync(file, { bigint: true }));
+  const opened = fs.lstatSync(file, { bigint: true });
+  const before = fileIdentity(opened), beforeTimes = fileTimes(opened);
   let fd = fs.openSync(file, 'r');
   let cache;
   try { sameFile(before, fileIdentity(fs.fstatSync(fd, { bigint: true }))); cache = Buffer.allocUnsafe(PACKET_CACHE_BYTES); }
   catch (error) { fs.closeSync(fd); throw error; }
   let cacheStart = -1, cacheLength = 0, previousEnd = -1, track = null, readCalls = 0, bytesRead = 0, packets = 0;
+  let contentBefore = null, contentBytesHashed = 0, metadataChanged = [];
+  const assertOpen = () => { if (fd === null) throw invalid('encoded file closed before verification'); };
+  const assertSameFile = () => {
+    assertOpen();
+    sameFile(before, fileIdentity(fs.fstatSync(fd, { bigint: true })));
+    const current = fs.lstatSync(file, { bigint: true });
+    sameFile(before, fileIdentity(current));
+    return current;
+  };
+  // Positional reads through the inspected handle: the same bytes the packet
+  // reads use, read asynchronously so a multi-hour output never blocks main.
+  const contentDigest = async () => {
+    const hash = createHash('sha256'), block = Buffer.allocUnsafe(CONTENT_HASH_BLOCK_BYTES);
+    for (let position = 0; position < before.size;) {
+      assertOpen();
+      if (performance.now() >= deadline) throw invalid('packet inspection timed out');
+      const length = Math.min(block.length, before.size - position);
+      const count = await new Promise((resolve, reject) => fs.read(fd, block, 0, length, position,
+        (error, bytes) => error ? reject(error) : resolve(bytes)));
+      if (!count) throw invalid('encoded file read was truncated');
+      hash.update(block.subarray(0, count));
+      position += count; contentBytesHashed += count;
+    }
+    return hash.digest('hex');
+  };
   const integer = (value, label, minimum = 0) => {
     if (typeof value !== 'string' || !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < minimum) throw invalid(`invalid packet ${label}`);
     return Number(value);
@@ -124,12 +160,26 @@ function createPacketFileReader(file, { deadline = Infinity } = {}) {
       previousEnd = position + width + 3 + size; packets++;
       return payload;
     },
-    verifyUnchanged() {
-      if (fd === null) throw invalid('encoded file closed before verification');
-      sameFile(before, fileIdentity(fs.fstatSync(fd, { bigint: true })));
-      sameFile(before, fileIdentity(fs.lstatSync(file, { bigint: true })));
+    // Before the probes read the file: the content they must still describe.
+    async captureContent() {
+      assertSameFile();
+      contentBefore = await contentDigest();
     },
-    stats() { return { method: 'sha256-bound-webm-opus-framing', cacheBytes: PACKET_CACHE_BYTES, readCalls, bytesRead, packets }; },
+    // After the probes: still the same file object at the same path with the
+    // same length before AND after re-reading it, and byte-identical content.
+    async verifyUnchanged() {
+      assertOpen();
+      if (contentBefore === null) throw invalid('encoded content was not captured before inspection');
+      assertSameFile();
+      const digest = await contentDigest();
+      const times = fileTimes(assertSameFile());
+      if (digest !== contentBefore) throw invalid('encoded file content changed during inspection');
+      metadataChanged = Object.keys(times).filter(key => times[key] !== beforeTimes[key]);
+    },
+    stats() {
+      return { method: 'sha256-bound-webm-opus-framing', cacheBytes: PACKET_CACHE_BYTES, readCalls, bytesRead, packets,
+        contentSha256: contentBefore, contentBytesHashed, metadataChanged };
+    },
     close() { if (fd !== null) { const handle = fd; fd = null; fs.closeSync(handle); } },
   };
 }
@@ -378,6 +428,7 @@ async function inspectEncodedOpus(file, { ffprobePath, timeoutMs = 300000 } = {}
   const prefix = ['-v', 'error', '-select_streams', 'a'];
   try {
     packetFile = createPacketFileReader(file, { deadline });
+    await packetFile.captureContent();
     // Keep -show_data out of the full packet scan: older probes construct packet
     // hex dumps even when those payload fields are subsequently filtered out.
     await probeLines(ffprobePath, [...prefix, '-show_streams', '-show_data', '-show_entries',
@@ -392,7 +443,7 @@ async function inspectEncodedOpus(file, { ffprobePath, timeoutMs = 300000 } = {}
       'packet=pts,duration,pos,size,data_hash:packet_side_data_list', '-of', 'default=noprint_wrappers=0', file], remaining, line => reader.consume(line));
     reader.finish();
     const result = accounting.result();
-    packetFile.verifyUnchanged();
+    await packetFile.verifyUnchanged();
     return { ...result, codedSampleEvidence: packetFile.stats() };
   } catch (error) {
     error.evidence = { ...error.evidence, probeMetadata: accounting.metadataEvidence() };
