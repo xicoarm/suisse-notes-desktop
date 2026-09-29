@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const { createUpdateChecks, UPDATE_CHECK_INTERVAL_MS, UPDATE_CHECK_AFTER_WAKE_MS, UPDATE_CHECK_MIN_GAP_MS,
+const { createUpdateChecks, isPersistentDownloadError, UPDATE_CHECK_INTERVAL_MS, UPDATE_CHECK_AFTER_WAKE_MS, UPDATE_CHECK_MIN_GAP_MS,
   UPDATE_RETRY_AFTER_FAILED_DOWNLOAD_MS } = require('../../src-electron/update-checks');
 
 function setup({ enabled = true, downloaded = false, check = vi.fn(async () => ({})) } = {}) {
@@ -82,6 +82,22 @@ describe('when the app looks for updates', () => {
     checks.downloadSucceeded();
     state.time += 60 * 60 * 1000;
     expect(checks.request('interval')).toBe(true);
+  });
+
+  it('waits 4 hours only for failures the same download will hit again', () => {
+    const persistent = [
+      new Error('New version 4.7.12 is not signed by the application owner: publisherNames: Suisse IT GmbH'),
+      new Error('sha512 checksum mismatch, expected abc, got def'),
+      Object.assign(new Error('no space left on device'), { code: 'ENOSPC' }),
+      Object.assign(new Error('operation not permitted'), { code: 'EPERM' }),
+    ];
+    const transient = [
+      new Error('net::ERR_INTERNET_DISCONNECTED'), new Error('net::ERR_NETWORK_CHANGED'),
+      Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }), new Error('Request timed out'),
+      new Error('HttpError: 503 Service Unavailable'), new Error('aborted'), 'socket hang up',
+    ];
+    for (const error of persistent) expect(isPersistentDownloadError(error)).toBe(true);
+    for (const error of transient) expect(isPersistentDownloadError(error)).toBe(false);
   });
 });
 

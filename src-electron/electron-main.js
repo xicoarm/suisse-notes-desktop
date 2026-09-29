@@ -19,7 +19,7 @@ const Store = require('electron-store');
 const ffmpeg = require('fluent-ffmpeg');
 const { Upload } = require('tus-js-client');
 const { autoUpdater } = require('electron-updater');
-const { createUpdateChecks, UPDATE_CHECK_INTERVAL_MS, UPDATE_CHECK_AFTER_WAKE_MS, UPDATE_CHECK_MIN_GAP_MS } = require('./update-checks');
+const { createUpdateChecks, isPersistentDownloadError, UPDATE_CHECK_INTERVAL_MS, UPDATE_CHECK_AFTER_WAKE_MS, UPDATE_CHECK_MIN_GAP_MS } = require('./update-checks');
 const log = require('electron-log');
 const Sentry = require('@sentry/electron/main');
 const { machineIdSync } = require('node-machine-id');
@@ -1876,8 +1876,9 @@ let pendingUpdateInfo = null;
 // only logged by the error handler below.
 function handleUpdateDownloadFailure(error) {
   if (!updateDownload) return; // already handled for this download
-  log.warn(`Update ${updateDownload.version} download failed: ${error?.message || error}`);
-  updateChecks.downloadFailed();
+  const persistent = isPersistentDownloadError(error);
+  log.warn(`Update ${updateDownload.version} download failed (${persistent ? 'retry in 4 h' : 'retry at next check'}): ${error?.message || error}`);
+  if (persistent) updateChecks.downloadFailed();
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:failed', { version: updateDownload.version });
   updateDownload = null;
 }
@@ -1940,13 +1941,6 @@ ipcMain.handle('updater:quitAndInstall', () => {
 
 autoUpdater.on('error', (err) => {
   log.error('Auto-update error:', err);
-
-  // macOS: an error after the download means Squirrel could not stage it.
-  // Forget it, so the next hourly check downloads and stages it again.
-  if (pendingUpdateInfo && process.platform === 'darwin') {
-    pendingUpdateInfo = null;
-    autoUpdater.autoDownload = true;
-  }
 
   // Detect signature verification failure (common when app is not code-signed)
   const errMsg = err.message || err.toString();

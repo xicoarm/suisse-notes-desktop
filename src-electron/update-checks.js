@@ -7,12 +7,21 @@
 // 4-hour timer and found updates right when a recording started). Once an
 // update is downloaded, checking stops: it installs from the prompt or on
 // quit, and another check would only re-validate it (Windows) or stage it with
-// Squirrel a second time (macOS). A download that fails (signature, disk) is
-// retried at the old 4-hour pace, not every hour.
+// Squirrel a second time (macOS). A download that fails for a reason that will
+// not go away (signature, checksum, disk) is retried at the old 4-hour pace.
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const UPDATE_CHECK_AFTER_WAKE_MS = [20 * 1000, 3 * 60 * 1000]; // Wi-Fi/VPN may take a while
 const UPDATE_CHECK_MIN_GAP_MS = 30 * 60 * 1000;                // wake-ups in a row check once
 const UPDATE_RETRY_AFTER_FAILED_DOWNLOAD_MS = 4 * 60 * 60 * 1000;
+
+// Failures that the same download will hit again: a signature or checksum
+// that does not verify, a full disk, missing permissions. Only these wait 4
+// hours; a download cut by sleep or a dropped network retries at the next
+// wake-up or hourly check, because that is the case the early checks are for.
+function isPersistentDownloadError(error) {
+  const text = `${error?.code || ''} ${error?.message || error || ''}`;
+  return /not signed|signature|publisherName|sha512|checksum|ENOSPC|EACCES|EPERM|EROFS|read-only/i.test(text);
+}
 
 function createUpdateChecks({ check, isEnabled, isDownloaded, now = Date.now, log = null }) {
   let lastCheckAt = null;
@@ -37,4 +46,5 @@ function createUpdateChecks({ check, isEnabled, isDownloaded, now = Date.now, lo
   };
 }
 
-module.exports = { createUpdateChecks, UPDATE_CHECK_INTERVAL_MS, UPDATE_CHECK_AFTER_WAKE_MS, UPDATE_CHECK_MIN_GAP_MS, UPDATE_RETRY_AFTER_FAILED_DOWNLOAD_MS };
+module.exports = { createUpdateChecks, isPersistentDownloadError, UPDATE_CHECK_INTERVAL_MS, UPDATE_CHECK_AFTER_WAKE_MS, UPDATE_CHECK_MIN_GAP_MS,
+  UPDATE_RETRY_AFTER_FAILED_DOWNLOAD_MS };
