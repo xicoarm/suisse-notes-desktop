@@ -1032,6 +1032,9 @@ describe('recordingService mic signal forensics (MSIG)', () => {
     expect(reports.map(report => report.context?.tags?.mic_health)).toEqual(expect.arrayContaining(
       ['switch-silent', 'zero-signal', 'zero-signal-reacquire', 'reacquire-verdict']));
     expect(reports.filter(report => report.level === 'error')).toEqual([]);
+    expect(reports.find(report => report.context.tags.mic_health === 'reacquire-verdict')).toMatchObject({ context: {
+      fingerprint: ['mic-health', 'reacquire-verdict', 'silent'],
+      tags: { mic_verdict: 'silent', mic_device: 'Microsoft Teams Audio Device (Virtual)' } } });
     const manual = reports.find(report => report.context.tags.mic_context === 'manual-switch');
     expect(manual).toMatchObject({ level: 'warning', context: {
       fingerprint: ['mic-health', 'switch-silent', 'manual-switch'],

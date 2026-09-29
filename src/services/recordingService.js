@@ -322,10 +322,10 @@ let micSignalFloatBuf = null;
 // of verdict; the device name is a tag, not part of the grouping. Grouped by
 // title, every new device name opened a new high-priority issue and an alert
 // email (ELECTRON-6W: a manual switch to "Microsoft Teams Audio Device").
-function reportMicHealth(kind, message, level, { device, context } = {}) {
+function reportMicHealth(kind, message, level, { device, context, verdict } = {}) {
   captureMessage(message, level, {
-    fingerprint: ['mic-health', kind, context || '-'],
-    tags: { mic_health: kind, ...(context ? { mic_context: context } : {}),
+    fingerprint: ['mic-health', kind, context || verdict || '-'],
+    tags: { mic_health: kind, ...(context ? { mic_context: context } : {}), ...(verdict ? { mic_verdict: verdict } : {}),
       ...(device ? { mic_device: String(device).slice(0, 200) } : {}) },
   });
 }
@@ -2020,7 +2020,7 @@ async function attemptSameDeviceReacquire() {
     }
     const verdict = await result.verified;
     reportMicHealth('reacquire-verdict', `mic-health: same-device re-acquire verdict: ${verdict || 'aborted'}`, 'warning',
-      { context: verdict || 'aborted' });
+      { device: micHealthState.trackLabel, verdict: verdict || 'aborted' });
   } catch (e) {
     console.warn('Same-device re-acquire failed:', e);
   } finally {

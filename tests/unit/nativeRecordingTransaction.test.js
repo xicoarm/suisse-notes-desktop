@@ -147,6 +147,28 @@ describe('native recording publication and upload transaction', () => {
     expect(await eligibility()).toMatchObject({ allowed: true });
   });
 
+  it('lists at most 20 timestamp-changed files, then how many more', async () => {
+    for (let index = 1; index <= 25; index++) await fs.promises.writeFile(path.join(recordPath, `chunks/chunk_${index}.webm`), 'live mix');
+    const build = nativeBuild.getMockImplementation();
+    nativeBuild.mockImplementationOnce(async (...args) => {
+      const result = await build(...args);
+      for (let index = 0; index <= 25; index++) touch(path.join(recordPath, `chunks/chunk_${index}.webm`));
+      return result;
+    });
+    const result = await persistence.finalize(recordPath);
+    expect(result.sourceTimestampChanges).toHaveLength(21);
+    expect(result.sourceTimestampChanges[20]).toBe('6 more');
+  });
+
+  it('refuses to publish output whose bytes differ from the inspected digest', async () => {
+    const build = nativeBuild.getMockImplementation();
+    nativeBuild.mockImplementationOnce(async (...args) => ({ ...await build(...args),
+      plan: { validation: { encodedPacketEvidence: { codedSampleEvidence: { contentSha256: 'f'.repeat(64) } } } } }));
+    await expect(persistence.finalize(recordPath)).rejects.toThrow('changed after its inspection');
+    expect(fs.existsSync(path.join(recordPath, 'audio.webm'))).toBe(false);
+    expect(await eligibility()).toMatchObject({ allowed: false });
+  });
+
   it('withholds publication and names the files when their timestamps keep changing', async () => {
     const chunk = native.inspectNativeSources(recordPath)[0].chunkPaths[0];
     const build = nativeBuild.getMockImplementation();

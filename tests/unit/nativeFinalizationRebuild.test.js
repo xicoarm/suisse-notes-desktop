@@ -81,6 +81,11 @@ describe('native finalization while other software touches fresh source chunks',
     const receipt = JSON.parse(fs.readFileSync(path.join(root, 'finalized.json'), 'utf8'));
     expect(receipt).toMatchObject({ version: 3, sourceMode: 'native' });
     expect(await readFinalizedRecording(root)).toMatchObject({ success: true, outputPath: path.join(root, 'audio.webm') });
+    // The superseded assembly is gone; the published one keeps its evidence.
+    const assemblies = fs.readdirSync(root).filter(name => name.startsWith('native-finalization-'));
+    expect(assemblies).toEqual([path.basename(result.scratchDirectory)]);
+    expect(JSON.parse(fs.readFileSync(path.join(result.scratchDirectory, 'plan.json'), 'utf8')).validation.status).toBe('passed');
+    expect(result.plan.validation.encodedPacketEvidence.codedSampleEvidence.contentSha256).toBe(receipt.sha256);
   }, 120000);
 
   it('refuses publication when the chunks keep changing, keeping every original', async () => {
@@ -91,5 +96,7 @@ describe('native finalization while other software touches fresh source chunks',
     expect(fs.existsSync(path.join(root, 'audio.webm'))).toBe(false);
     expect(inspectNativeSources(root)[0]).toMatchObject({ chunkCount: 2, complete: true });
     expect(await readFinalizedRecording(root)).toBeNull();
+    // Only the refused (second) assembly is kept for diagnosis.
+    expect(fs.readdirSync(root).filter(name => name.startsWith('native-finalization-'))).toHaveLength(1);
   }, 120000);
 });

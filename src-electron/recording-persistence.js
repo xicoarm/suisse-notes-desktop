@@ -98,12 +98,21 @@ function createRecordingPersistence({ prepareRaw, remux, concatSessions, merge, 
       const duration = result.duration;
       if (!Number.isFinite(duration) || duration <= 0) throw new Error('Native audio duration could not be verified');
       const sha256 = await checksum(buildingPath);
+      // The inspection hashed the encoded output before and after reading its
+      // packets; the receipt must bind exactly those bytes.
+      const inspected = result.plan?.validation?.encodedPacketEvidence?.codedSampleEvidence?.contentSha256;
+      if (inspected && inspected !== sha256) throw new Error('Native audio changed after its inspection; originals retained for retry');
       const size = fs.statSync(buildingPath).size;
       const current = nativeRecordingEvidence(recordPath);
       if (fingerprintOfEvidence(current) !== fingerprint) {
         const change = describeSourceChange(evidence, current);
         if (change.timestampsOnly && !settledAfter) {
-          settledAfter = change.changes;
+          settledAfter = change.changes.length > 20
+            ? [...change.changes.slice(0, 20), `${change.changes.length - 20} more`] : change.changes;
+          // The superseded assembly never became audio.webm; its scratch holds
+          // copies of sources that are still on disk. Free it before the
+          // rebuild's own space check, leaving one assembly per recording.
+          await removeSupersededScratch(recordPath, result.scratchDirectory);
           continue;
         }
         throw new Error(`Native recording sources changed during finalization (${describeChanges(change.changes)}); originals retained for retry`);
@@ -266,6 +275,14 @@ function describeSourceChange(before, after) {
 
 function describeChanges(changes) {
   return changes.slice(0, 4).join(', ') + (changes.length > 4 ? ` and ${changes.length - 4} more` : '');
+}
+
+// Only a native-finalization-* directory directly inside this recording.
+async function removeSupersededScratch(recordPath, directory) {
+  if (typeof directory !== 'string') return;
+  const resolved = path.resolve(directory);
+  if (path.dirname(resolved) !== path.resolve(recordPath) || !path.basename(resolved).startsWith('native-finalization-')) return;
+  await fs.promises.rm(resolved, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {});
 }
 
 function assertNativeSourceCoverage(recordPath, result) {
