@@ -160,6 +160,30 @@ describe('native recording publication and upload transaction', () => {
     expect(result.sourceTimestampChanges[20]).toBe('6 more');
   });
 
+  it('removes the superseded assembly before the rebuild, and names it if a scanner keeps it locked', async () => {
+    const chunk = native.inspectNativeSources(recordPath)[0].chunkPaths[0];
+    const build = nativeBuild.getMockImplementation();
+    const scratch = [];
+    nativeBuild.mockImplementation(async (directory, ...rest) => {
+      const scratchDirectory = await fs.promises.mkdtemp(path.join(directory, 'native-finalization-'));
+      await fs.promises.writeFile(path.join(scratchDirectory, 'plan.json'), '{}');
+      scratch.push(scratchDirectory);
+      const result = { ...await build(directory, ...rest), scratchDirectory };
+      if (scratch.length === 1) touch(chunk);
+      return result;
+    });
+    const removed = await persistence.finalize(recordPath);
+    expect(fs.existsSync(scratch[0])).toBe(false);
+    expect(fs.existsSync(scratch[1])).toBe(true);
+    expect(removed).not.toHaveProperty('supersededScratchLeft');
+
+    scratch.length = 0;
+    vi.spyOn(fs.promises, 'rm').mockRejectedValueOnce(Object.assign(new Error('locked'), { code: 'EBUSY' }));
+    const kept = await persistence.finalize(recordPath);
+    expect(kept.supersededScratchLeft).toBe(path.resolve(scratch[0]));
+    expect(await eligibility()).toMatchObject({ allowed: true });
+  });
+
   it('refuses to publish output whose bytes differ from the inspected digest', async () => {
     const build = nativeBuild.getMockImplementation();
     nativeBuild.mockImplementationOnce(async (...args) => ({ ...await build(...args),

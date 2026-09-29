@@ -3537,10 +3537,11 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
           level: 'info',
           fingerprint: ['finalization-timestamp-only-change'],
           tags: { operation: 'finalization', rebuilt: String(!!result.sourceTimestampChanges?.length) },
-          extra: { recordId, encodedTimestampChanges, sourceTimestampChanges: (result.sourceTimestampChanges || []).slice(0, 20) },
+          extra: { recordId, encodedTimestampChanges, sourceTimestampChanges: result.sourceTimestampChanges || [] },
         });
       } catch (_) { /* telemetry never breaks saving */ }
     }
+    if (result.supersededScratchLeft) log.warn(`Superseded finalization scratch could not be removed for ${recordId}: ${result.supersededScratchLeft}`);
     for (const warning of result.warnings || []) {
       recordCaptureWarning(recordId, typeof warning === 'string' ? warning : warning.kind || warning.code || 'native-source-recovery');
     }

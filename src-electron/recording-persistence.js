@@ -81,7 +81,7 @@ function createRecordingPersistence({ prepareRaw, remux, concatSessions, merge, 
     // that fresh while this build reads them. Rebuild ONCE against the settled
     // files, so the receipt still binds exactly what was read. A new chunk, a
     // different size or rewritten source metadata withholds publication at once.
-    let settledAfter = null;
+    let settledAfter = null, supersededScratchLeft = null;
     for (;;) {
       const evidence = nativeRecordingEvidence(recordPath);
       const fingerprint = fingerprintOfEvidence(evidence);
@@ -112,7 +112,7 @@ function createRecordingPersistence({ prepareRaw, remux, concatSessions, merge, 
           // The superseded assembly never became audio.webm; its scratch holds
           // copies of sources that are still on disk. Free it before the
           // rebuild's own space check, leaving one assembly per recording.
-          await removeSupersededScratch(recordPath, result.scratchDirectory);
+          supersededScratchLeft = await removeSupersededScratch(recordPath, result.scratchDirectory);
           continue;
         }
         throw new Error(`Native recording sources changed during finalization (${describeChanges(change.changes)}); originals retained for retry`);
@@ -127,7 +127,7 @@ function createRecordingPersistence({ prepareRaw, remux, concatSessions, merge, 
       // Keep originals and failed scratch for diagnosis. Generated scratch cleanup
       // is deliberately separate from the durable publication transaction.
       return { ...result, outputPath, filename: receipt.filename, duration, fileSize: size, fileSizeMb: (size / 1048576).toFixed(2),
-        ...(settledAfter ? { sourceTimestampChanges: settledAfter } : {}) };
+        ...(settledAfter ? { sourceTimestampChanges: settledAfter } : {}), ...(supersededScratchLeft ? { supersededScratchLeft } : {}) };
     }
   }
 
@@ -278,11 +278,14 @@ function describeChanges(changes) {
 }
 
 // Only a native-finalization-* directory directly inside this recording.
+// Returns the directory if it could not be removed (a scanner holding a file),
+// so the caller can say so; the save itself never depends on it.
 async function removeSupersededScratch(recordPath, directory) {
-  if (typeof directory !== 'string') return;
+  if (typeof directory !== 'string') return null;
   const resolved = path.resolve(directory);
-  if (path.dirname(resolved) !== path.resolve(recordPath) || !path.basename(resolved).startsWith('native-finalization-')) return;
-  await fs.promises.rm(resolved, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {});
+  if (path.dirname(resolved) !== path.resolve(recordPath) || !path.basename(resolved).startsWith('native-finalization-')) return null;
+  return fs.promises.rm(resolved, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    .then(() => null, () => resolved);
 }
 
 function assertNativeSourceCoverage(recordPath, result) {
