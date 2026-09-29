@@ -103,7 +103,61 @@ describe('native recording publication and upload transaction', () => {
       return result;
     });
     await expect(persistence.finalize(recordPath)).rejects.toThrow('changed during finalization');
+    expect(nativeBuild).toHaveBeenCalledTimes(2); // the structural change is refused at once, never rebuilt
     expect(fs.readFileSync(path.join(recordPath, 'audio.webm'))).toEqual(old);
+    expect(await eligibility()).toMatchObject({ allowed: false });
+  });
+
+  // ELECTRON-6V: other software (virus scanner, backup agent, indexer) changed
+  // timestamps/attributes of fresh files while they were being read.
+  const touch = file => {
+    fs.utimesSync(file, new Date(), new Date(Date.now() + 10000));
+    fs.chmodSync(file, 0o444); // read-only attribute on Windows, mode on POSIX: ctime only
+    fs.chmodSync(file, 0o644);
+  };
+
+  it('rebuilds once when only the timestamps of recorded files change during finalization', async () => {
+    const chunk = native.inspectNativeSources(recordPath)[0].chunkPaths[0];
+    const build = nativeBuild.getMockImplementation();
+    nativeBuild.mockImplementationOnce(async (...args) => {
+      const result = await build(...args);
+      touch(chunk);
+      touch(path.join(recordPath, 'chunks/chunk_0.webm'));
+      return result;
+    });
+    const result = await persistence.finalize(recordPath);
+    expect(nativeBuild).toHaveBeenCalledTimes(2);
+    expect(result.sourceTimestampChanges).toEqual(expect.arrayContaining([
+      expect.stringMatching(/chunks[\\/]chunk_0\.webm mtime\+ctime$/), expect.stringMatching(/^chunks[\\/]chunk_0\.webm mtime$/)]));
+    expect(fs.readFileSync(result.outputPath, 'utf8')).toBe('native preserved content');
+    expect(await eligibility()).toMatchObject({ allowed: true });
+  });
+
+  it('rebuilds a same-size rewrite from the rewritten bytes, never publishing what was read before it', async () => {
+    const chunk = native.inspectNativeSources(recordPath)[0].chunkPaths[0];
+    const build = nativeBuild.getMockImplementation();
+    nativeBuild.mockImplementationOnce(async (...args) => {
+      const result = await build(...args);
+      fs.writeFileSync(chunk, 'native REWRITTEN content'); // same length as 'native preserved content'
+      return result;
+    });
+    const result = await persistence.finalize(recordPath);
+    expect(nativeBuild).toHaveBeenCalledTimes(2);
+    expect(fs.readFileSync(result.outputPath, 'utf8')).toBe('native REWRITTEN content');
+    expect(await eligibility()).toMatchObject({ allowed: true });
+  });
+
+  it('withholds publication and names the files when their timestamps keep changing', async () => {
+    const chunk = native.inspectNativeSources(recordPath)[0].chunkPaths[0];
+    const build = nativeBuild.getMockImplementation();
+    nativeBuild.mockImplementation(async (...args) => {
+      const result = await build(...args);
+      touch(chunk);
+      return result;
+    });
+    await expect(persistence.finalize(recordPath)).rejects.toThrow(/changed during finalization \(native-sources[\\/].+chunk_0\.webm mtime\+ctime\); originals retained/);
+    expect(nativeBuild).toHaveBeenCalledTimes(2);
+    expect(fs.existsSync(path.join(recordPath, 'audio.webm'))).toBe(false);
     expect(await eligibility()).toMatchObject({ allowed: false });
   });
 
