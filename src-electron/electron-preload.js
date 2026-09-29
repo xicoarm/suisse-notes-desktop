@@ -242,6 +242,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const handler = (event, info) => callback(info);
       ipcRenderer.on('update:downloaded', handler);
       return () => ipcRenderer.removeListener('update:downloaded', handler);
+    },
+    // Found and still downloading: { version } / { version, percent } / { version }.
+    onUpdateAvailable: (callback) => {
+      const handler = (event, info) => callback(info);
+      ipcRenderer.on('update:available', handler);
+      return () => ipcRenderer.removeListener('update:available', handler);
+    },
+    onUpdateProgress: (callback) => {
+      const handler = (event, info) => callback(info);
+      ipcRenderer.on('update:progress', handler);
+      return () => ipcRenderer.removeListener('update:progress', handler);
+    },
+    onUpdateFailed: (callback) => {
+      const handler = (event, info) => callback(info);
+      ipcRenderer.on('update:failed', handler);
+      return () => ipcRenderer.removeListener('update:failed', handler);
     }
   },
 

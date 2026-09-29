@@ -19,6 +19,7 @@ const Store = require('electron-store');
 const ffmpeg = require('fluent-ffmpeg');
 const { Upload } = require('tus-js-client');
 const { autoUpdater } = require('electron-updater');
+const { createUpdateChecks, UPDATE_CHECK_INTERVAL_MS, UPDATE_CHECK_AFTER_WAKE_MS, UPDATE_CHECK_MIN_GAP_MS } = require('./update-checks');
 const log = require('electron-log');
 const Sentry = require('@sentry/electron/main');
 const { machineIdSync } = require('node-machine-id');
@@ -1778,19 +1779,13 @@ app.whenReady().then(() => {
   // Also skip during E2E runs — a test build must not self-update to a newer
   // release mid-run (it downloads + quitAndInstalls and kills the test app).
   if (app.isPackaged && !skipAutoUpdate && process.env.SUISSE_E2E_HOOKS !== '1') {
-    // Check for updates on startup (silent - no notification)
-    autoUpdater.checkForUpdates().catch(err => {
-      log.error('Auto-update check failed:', err);
+    // At launch, every hour, and shortly after the computer wakes (see
+    // update-checks.js): the prompt can only appear once the download is done.
+    updateChecks.request('startup');
+    setInterval(() => updateChecks.request('interval'), UPDATE_CHECK_INTERVAL_MS);
+    powerMonitor.on('resume', () => {
+      setTimeout(() => updateChecks.request('wake', { minGapMs: UPDATE_CHECK_MIN_GAP_MS }), UPDATE_CHECK_AFTER_WAKE_MS);
     });
-
-    // Re-check every 4 hours while app is running
-    setInterval(() => {
-      if (!skipAutoUpdate) {
-        autoUpdater.checkForUpdates().catch(err => {
-          log.error('Periodic auto-update check failed:', err);
-        });
-      }
-    }, 4 * 60 * 60 * 1000);
   }
 
   // === Recover Orphaned Recordings ===
@@ -1839,11 +1834,18 @@ autoUpdater.on('checking-for-update', () => {
   log.info('Checking for updates...');
 });
 
+// An update that is still downloading. The renderer shows "update loading
+// (NN %), install it before recording" from the moment it is found, instead of
+// staying silent until the whole installer has arrived.
+let updateDownload = null;
+let availableUpdateVersion = null;
+
 autoUpdater.on('update-available', (info) => {
   log.info('Update available:', info.version);
-  // Notify renderer (optional - for UI feedback)
+  availableUpdateVersion = info.version;
+  if (!pendingUpdateInfo) updateDownload = { version: info.version, percent: updateDownload?.version === info.version ? updateDownload.percent : 0 };
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update:available', info);
+    mainWindow.webContents.send('update:available', { version: info.version });
   }
 });
 
@@ -1853,9 +1855,10 @@ autoUpdater.on('update-not-available', (info) => {
 
 autoUpdater.on('download-progress', (progressObj) => {
   log.info(`Download progress: ${progressObj.percent.toFixed(1)}%`);
-  // Notify renderer (optional - for UI feedback)
+  // Also after a failed hourly check: that error does not stop this download.
+  if (!pendingUpdateInfo && availableUpdateVersion) updateDownload = { version: availableUpdateVersion, percent: progressObj.percent };
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update:progress', progressObj);
+    mainWindow.webContents.send('update:progress', { version: updateDownload?.version || null, percent: progressObj.percent });
   }
 });
 
@@ -1865,9 +1868,17 @@ autoUpdater.on('download-progress', (progressObj) => {
 // translated "update now?" dialog; "update now" calls updater:quitAndInstall.
 let pendingUpdateInfo = null;
 
+const updateChecks = createUpdateChecks({
+  check: () => autoUpdater.checkForUpdates(),
+  isEnabled: () => app.isPackaged && !skipAutoUpdate && process.env.SUISSE_E2E_HOOKS !== '1',
+  isDownloaded: () => Boolean(pendingUpdateInfo),
+  log,
+});
+
 autoUpdater.on('update-downloaded', (info) => {
   log.info('Update downloaded:', info.version);
   pendingUpdateInfo = info;
+  updateDownload = null;
   // Will auto-install on app quit due to autoInstallOnAppQuit = true
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('update:downloaded', { version: info.version });
@@ -1877,6 +1888,7 @@ autoUpdater.on('update-downloaded', (info) => {
 ipcMain.handle('updater:getStatus', () => ({
   updateDownloaded: Boolean(pendingUpdateInfo),
   version: pendingUpdateInfo?.version || null,
+  downloading: updateDownload ? { ...updateDownload } : null,
   currentVersion: app.getVersion()
 }));
 
@@ -1906,6 +1918,8 @@ ipcMain.handle('updater:quitAndInstall', () => {
 
 autoUpdater.on('error', (err) => {
   log.error('Auto-update error:', err);
+  if (updateDownload && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:failed', { version: updateDownload.version });
+  updateDownload = null;
 
   // Detect signature verification failure (common when app is not code-signed)
   const errMsg = err.message || err.toString();

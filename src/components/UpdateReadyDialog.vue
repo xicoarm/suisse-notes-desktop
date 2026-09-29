@@ -52,6 +52,7 @@ import { useI18n } from 'vue-i18n';
 import { useQuasar } from 'quasar';
 import { useRecordingStore } from '../stores/recording';
 import { isElectron } from '../utils/platform';
+import { useUpdateDownloadNotice } from '../composables/useUpdateDownloadNotice';
 
 const { t } = useI18n();
 const $q = useQuasar();
@@ -68,7 +69,10 @@ const dismissedVersions = new Set();
 // dialog and show it as soon as the app is idle again.
 const pendingVersion = ref(null);
 
-let removeListener = null;
+let removeListeners = [];
+const downloadNotice = useUpdateDownloadNotice({
+  notify: options => $q.notify(options), t, isBlocking: () => recordingStore.isBlocking
+});
 
 const maybeShow = (version) => {
   if (!version || dismissedVersions.has(version)) return;
@@ -82,6 +86,7 @@ const maybeShow = (version) => {
 };
 
 watch(() => recordingStore.isBlocking, (blocking) => {
+  downloadNotice.refresh();
   if (!blocking && pendingVersion.value) {
     const v = pendingVersion.value;
     pendingVersion.value = null;
@@ -117,17 +122,25 @@ const installNow = async () => {
 onMounted(async () => {
   if (!isElectron() || !window.electronAPI?.updater) return;
 
+  const updater = window.electronAPI.updater;
   // Live event for updates downloaded while the app is running.
-  removeListener = window.electronAPI.updater.onUpdateDownloaded((info) => {
+  removeListeners.push(updater.onUpdateDownloaded((info) => {
+    downloadNotice.done();
     maybeShow(info?.version);
-  });
+  }));
+  // Found and still downloading: say so right away (older preloads lack these).
+  if (updater.onUpdateAvailable) removeListeners.push(updater.onUpdateAvailable(info => downloadNotice.downloading(info?.version)));
+  if (updater.onUpdateProgress) removeListeners.push(updater.onUpdateProgress(info => downloadNotice.downloading(info?.version, info?.percent)));
+  if (updater.onUpdateFailed) removeListeners.push(updater.onUpdateFailed(() => downloadNotice.done()));
 
   // Pull on launch — the update usually finishes downloading before the
   // renderer (or the user's login) is ready, so the event alone is not enough.
   try {
-    const status = await window.electronAPI.updater.getStatus();
+    const status = await updater.getStatus();
     if (status?.updateDownloaded) {
       maybeShow(status.version);
+    } else if (status?.downloading) {
+      downloadNotice.downloading(status.downloading.version, status.downloading.percent);
     }
   } catch (e) {
     console.warn('updater.getStatus failed:', e);
@@ -135,7 +148,8 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  if (removeListener) removeListener();
+  for (const remove of removeListeners.splice(0)) remove?.();
+  downloadNotice.done();
 });
 </script>
 
