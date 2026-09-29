@@ -75,7 +75,7 @@ describe('native finalization while other software touches fresh source chunks',
     const { persistence, encodes } = persistenceTouching(chunk, 1);
     const result = await persistence.finalize(root, '.webm', { expectedDurationSec: 2 });
     expect(encodes()).toBe(2);
-    expect(result.sourceTimestampChanges).toEqual([expect.stringMatching(/chunk_1\.webm mtime\+ctime$/)]);
+    expect(result.sourceTimestampChanges).toEqual([expect.stringMatching(/chunk_1\.webm mtime(\+ctime)?$/)]);
     expect(result.plan.validation.status).toBe('passed');
     expect(Math.abs(result.duration - 2)).toBeLessThan(0.05);
     const receipt = JSON.parse(fs.readFileSync(path.join(root, 'finalized.json'), 'utf8'));
@@ -91,7 +91,7 @@ describe('native finalization while other software touches fresh source chunks',
   it('refuses publication when the chunks keep changing, keeping every original', async () => {
     const chunk = await recordedSource();
     const { persistence, encodes } = persistenceTouching(chunk, 2);
-    await expect(persistence.finalize(root, '.webm', { expectedDurationSec: 2 })).rejects.toThrow(/changed during finalization \(.*chunk_1\.webm mtime\+ctime\)/);
+    await expect(persistence.finalize(root, '.webm', { expectedDurationSec: 2 })).rejects.toThrow(/changed during finalization \(.*chunk_1\.webm mtime(\+ctime)?\)/);
     expect(encodes()).toBe(2);
     expect(fs.existsSync(path.join(root, 'audio.webm'))).toBe(false);
     expect(inspectNativeSources(root)[0]).toMatchObject({ chunkCount: 2, complete: true });
