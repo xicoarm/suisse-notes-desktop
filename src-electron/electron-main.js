@@ -1784,7 +1784,9 @@ app.whenReady().then(() => {
     updateChecks.request('startup');
     setInterval(() => updateChecks.request('interval'), UPDATE_CHECK_INTERVAL_MS);
     powerMonitor.on('resume', () => {
-      setTimeout(() => updateChecks.request('wake', { minGapMs: UPDATE_CHECK_MIN_GAP_MS }), UPDATE_CHECK_AFTER_WAKE_MS);
+      for (const delay of UPDATE_CHECK_AFTER_WAKE_MS) {
+        setTimeout(() => updateChecks.request('wake', { minGapMs: UPDATE_CHECK_MIN_GAP_MS }), delay);
+      }
     });
   }
 
@@ -1835,17 +1837,19 @@ autoUpdater.on('checking-for-update', () => {
 });
 
 // An update that is still downloading. The renderer shows "update loading
-// (NN %), install it before recording" from the moment it is found, instead of
-// staying silent until the whole installer has arrived.
+// (NN %)" from the moment it is found, instead of staying silent until the
+// whole installer has arrived.
 let updateDownload = null;
-let availableUpdateVersion = null;
+let signatureDialogShown = false;
 
 autoUpdater.on('update-available', (info) => {
   log.info('Update available:', info.version);
-  availableUpdateVersion = info.version;
-  if (!pendingUpdateInfo) updateDownload = { version: info.version, percent: updateDownload?.version === info.version ? updateDownload.percent : 0 };
+  // A check that straddled the end of the download: the update is already here.
+  if (pendingUpdateInfo) return;
+  // A newer release found mid-download does not relabel the running download.
+  if (!updateDownload) updateDownload = { version: info.version, percent: 0 };
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update:available', { version: info.version });
+    mainWindow.webContents.send('update:available', { version: updateDownload.version });
   }
 });
 
@@ -1855,8 +1859,7 @@ autoUpdater.on('update-not-available', (info) => {
 
 autoUpdater.on('download-progress', (progressObj) => {
   log.info(`Download progress: ${progressObj.percent.toFixed(1)}%`);
-  // Also after a failed hourly check: that error does not stop this download.
-  if (!pendingUpdateInfo && availableUpdateVersion) updateDownload = { version: availableUpdateVersion, percent: progressObj.percent };
+  if (!pendingUpdateInfo && updateDownload) updateDownload.percent = progressObj.percent;
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('update:progress', { version: updateDownload?.version || null, percent: progressObj.percent });
   }
@@ -1868,8 +1871,23 @@ autoUpdater.on('download-progress', (progressObj) => {
 // translated "update now?" dialog; "update now" calls updater:quitAndInstall.
 let pendingUpdateInfo = null;
 
+// A failed download (signature, disk, network) rejects the check's download
+// promise; a failed check during a running download does not stop it and is
+// only logged by the error handler below.
+function handleUpdateDownloadFailure(error) {
+  if (!updateDownload) return; // already handled for this download
+  log.warn(`Update ${updateDownload.version} download failed: ${error?.message || error}`);
+  updateChecks.downloadFailed();
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:failed', { version: updateDownload.version });
+  updateDownload = null;
+}
+
 const updateChecks = createUpdateChecks({
-  check: () => autoUpdater.checkForUpdates(),
+  check: async () => {
+    const result = await autoUpdater.checkForUpdates();
+    result?.downloadPromise?.catch(handleUpdateDownloadFailure);
+    return result;
+  },
   isEnabled: () => app.isPackaged && !skipAutoUpdate && process.env.SUISSE_E2E_HOOKS !== '1',
   isDownloaded: () => Boolean(pendingUpdateInfo),
   log,
@@ -1879,6 +1897,10 @@ autoUpdater.on('update-downloaded', (info) => {
   log.info('Update downloaded:', info.version);
   pendingUpdateInfo = info;
   updateDownload = null;
+  updateChecks.downloadSucceeded();
+  // A check still in flight must not start a second download or a second
+  // Squirrel staging (macOS) of the update that is already here.
+  autoUpdater.autoDownload = false;
   // Will auto-install on app quit due to autoInstallOnAppQuit = true
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('update:downloaded', { version: info.version });
@@ -1918,16 +1940,23 @@ ipcMain.handle('updater:quitAndInstall', () => {
 
 autoUpdater.on('error', (err) => {
   log.error('Auto-update error:', err);
-  if (updateDownload && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:failed', { version: updateDownload.version });
-  updateDownload = null;
+
+  // macOS: an error after the download means Squirrel could not stage it.
+  // Forget it, so the next hourly check downloads and stages it again.
+  if (pendingUpdateInfo && process.platform === 'darwin') {
+    pendingUpdateInfo = null;
+    autoUpdater.autoDownload = true;
+  }
 
   // Detect signature verification failure (common when app is not code-signed)
   const errMsg = err.message || err.toString();
   if (errMsg.includes('not signed') || errMsg.includes('signature') || errMsg.includes('publisherNames')) {
     log.warn('Update failed due to signature verification. App needs code signing or manual reinstall.');
 
-    // Show dialog to user explaining they need to manually update
-    if (mainWindow && !mainWindow.isDestroyed()) {
+    // Show dialog to user explaining they need to manually update (once per
+    // session: the failed download is retried, and the dialog is modal)
+    if (mainWindow && !mainWindow.isDestroyed() && !signatureDialogShown) {
+      signatureDialogShown = true;
       dialog.showMessageBox(mainWindow, {
         type: 'info',
         title: 'Update Available',
