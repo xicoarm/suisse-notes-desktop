@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { sourceFingerprint: nativeSourceFingerprint, inspectNativeSources } = require('./native-source-persistence');
+const { sourceRecords: nativeSourceRecords, inspectNativeSources } = require('./native-source-persistence');
 const { usesNativeSources, NATIVE_CAPTURE_MARKER, readNativeCaptureMarker } = require('./native-recording-session');
 const { inspectPcmCaptureEvidence, pcmEvidenceFingerprint } = require('./pcm-capture-evidence');
 const {
@@ -73,34 +73,62 @@ function createRecordingPersistence({ prepareRaw, remux, concatSessions, merge, 
     if (!pcmEvidence.canFinalize) {
       throw Object.assign(new Error('System audio did not finish saving. Retry saving to recover the available audio; original sources are retained.'), { code: 'PCM_CAPTURE_RECOVERY_REQUIRED' });
     }
-    const fingerprint = nativeRecordingFingerprint(recordPath);
     const buildingPath = path.join(recordPath, `audio_native_building${ext}`);
     const outputPath = path.join(recordPath, `audio${ext}`);
-    await writeFileAtomic(path.join(recordPath, 'finalization-plan.json'), JSON.stringify({
-      version: 2, sourceMode: 'native', sourceFingerprint: fingerprint,
-    }));
-    const result = await nativeBuild(recordPath, buildingPath, options);
-    if (result?.success !== true || result.outputPath !== buildingPath) throw new Error('Native audio was not finalized');
-    assertNativeSourceCoverage(recordPath, result);
-    result.warnings = [...(result.warnings || []), ...pcmEvidence.warnings.map(warning => ({ ...warning, kind: `system-audio-${warning.kind}` }))];
-    await assertValid(buildingPath);
-    // Native finalization measures decoded Opus samples after pre-skip/discard
-    // padding. The nominal container duration includes codec padding.
-    const duration = result.duration;
-    if (!Number.isFinite(duration) || duration <= 0) throw new Error('Native audio duration could not be verified');
-    const sha256 = await checksum(buildingPath);
-    const size = fs.statSync(buildingPath).size;
-    if (nativeRecordingFingerprint(recordPath) !== fingerprint) throw new Error('Native recording sources changed during finalization; originals retained for retry');
-    await publishFile(buildingPath, outputPath);
-    const receipt = { version: 3, sourceMode: 'native', sourceFingerprint: fingerprint,
-      filename: path.basename(outputPath), size, sha256, duration,
-      sourceIds: result.sourceIds, systemPcmIncluded: result.systemPcmIncluded === true,
-      recovered: options.recovery === true, warnings: result.warnings || [],
-      completedAt: new Date().toISOString() };
-    await writeFileAtomic(path.join(recordPath, 'finalized.json'), JSON.stringify(receipt));
-    // Keep originals and failed scratch for diagnosis. Generated scratch cleanup
-    // is deliberately separate from the durable publication transaction.
-    return { ...result, outputPath, filename: receipt.filename, duration, fileSize: size, fileSizeMb: (size / 1048576).toFixed(2) };
+    // Virus scanners, backup agents and indexers set attributes, ACLs, streams
+    // or restored access times on fresh files: their ctime/mtime move, their
+    // bytes do not (ELECTRON-6V). The chunks written just before a stop are
+    // that fresh while this build reads them. Rebuild ONCE against the settled
+    // files, so the receipt still binds exactly what was read. A new chunk, a
+    // different size or rewritten source metadata withholds publication at once.
+    let settledAfter = null, supersededScratchLeft = null;
+    for (;;) {
+      const evidence = nativeRecordingEvidence(recordPath);
+      const fingerprint = fingerprintOfEvidence(evidence);
+      await writeFileAtomic(path.join(recordPath, 'finalization-plan.json'), JSON.stringify({
+        version: 2, sourceMode: 'native', sourceFingerprint: fingerprint,
+      }));
+      const result = await nativeBuild(recordPath, buildingPath, options);
+      if (result?.success !== true || result.outputPath !== buildingPath) throw new Error('Native audio was not finalized');
+      assertNativeSourceCoverage(recordPath, result);
+      result.warnings = [...(result.warnings || []), ...pcmEvidence.warnings.map(warning => ({ ...warning, kind: `system-audio-${warning.kind}` }))];
+      await assertValid(buildingPath);
+      // Native finalization measures decoded Opus samples after pre-skip/discard
+      // padding. The nominal container duration includes codec padding.
+      const duration = result.duration;
+      if (!Number.isFinite(duration) || duration <= 0) throw new Error('Native audio duration could not be verified');
+      const sha256 = await checksum(buildingPath);
+      // The inspection hashed the encoded output before and after reading its
+      // packets; the receipt must bind exactly those bytes.
+      const inspected = result.plan?.validation?.encodedPacketEvidence?.codedSampleEvidence?.contentSha256;
+      if (inspected && inspected !== sha256) throw new Error('Native audio changed after its inspection; originals retained for retry');
+      const size = fs.statSync(buildingPath).size;
+      const current = nativeRecordingEvidence(recordPath);
+      if (fingerprintOfEvidence(current) !== fingerprint) {
+        const change = describeSourceChange(evidence, current);
+        if (change.timestampsOnly && !settledAfter) {
+          settledAfter = change.changes.length > 20
+            ? [...change.changes.slice(0, 20), `${change.changes.length - 20} more`] : change.changes;
+          // The superseded assembly never became audio.webm; its scratch holds
+          // copies of sources that are still on disk. Free it before the
+          // rebuild's own space check, leaving one assembly per recording.
+          supersededScratchLeft = await removeSupersededScratch(recordPath, result.scratchDirectory);
+          continue;
+        }
+        throw new Error(`Native recording sources changed during finalization (${describeChanges(change.changes)}); originals retained for retry`);
+      }
+      await publishFile(buildingPath, outputPath);
+      const receipt = { version: 3, sourceMode: 'native', sourceFingerprint: fingerprint,
+        filename: path.basename(outputPath), size, sha256, duration,
+        sourceIds: result.sourceIds, systemPcmIncluded: result.systemPcmIncluded === true,
+        recovered: options.recovery === true, warnings: result.warnings || [],
+        completedAt: new Date().toISOString() };
+      await writeFileAtomic(path.join(recordPath, 'finalized.json'), JSON.stringify(receipt));
+      // Keep originals and failed scratch for diagnosis. Generated scratch cleanup
+      // is deliberately separate from the durable publication transaction.
+      return { ...result, outputPath, filename: receipt.filename, duration, fileSize: size, fileSizeMb: (size / 1048576).toFixed(2),
+        ...(settledAfter ? { sourceTimestampChanges: settledAfter } : {}), ...(supersededScratchLeft ? { supersededScratchLeft } : {}) };
+    }
   }
 
   async function finalize(recordPath, ext = '.webm', options = {}) {
@@ -155,7 +183,7 @@ function createRecordingPersistence({ prepareRaw, remux, concatSessions, merge, 
   return { createSessions, finalize };
 }
 
-function sourceFingerprint(recordPath) {
+function sourceEntries(recordPath) {
   const batches = listChunkBatches(recordPath);
   const batchIds = new Set(batches.map(batch => batch.id));
   const files = [];
@@ -166,10 +194,16 @@ function sourceFingerprint(recordPath) {
   files.push(...listSessions(recordPath).filter(file => !batchIds.has(path.basename(file).split('_')[1].split('.')[0])));
   const pcm = path.join(recordPath, 'system_audio.raw');
   if (fs.existsSync(pcm)) files.push(pcm);
-  return crypto.createHash('sha256').update(JSON.stringify(files.sort().map(file => {
+  return files.sort().map(file => {
     const stat = fs.statSync(file);
     return [path.relative(recordPath, file), stat.size, stat.mtimeMs];
-  }))).digest('hex');
+  });
+}
+
+const sha256Json = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+function sourceFingerprint(recordPath) {
+  return sha256Json(sourceEntries(recordPath));
 }
 
 async function readFinalizedRecording(recordPath) {
@@ -195,11 +229,63 @@ async function readFinalizedRecording(recordPath) {
   } catch (_) { return null; }
 }
 
-function nativeRecordingFingerprint(recordPath) {
+// Everything a native receipt binds, before hashing: the session marker, each
+// native source (metadata and chunk path/size/mtime/ctime), the system-audio
+// capture evidence and the retained live mix (path/size/mtime).
+function nativeRecordingEvidence(recordPath) {
   const marker = fs.existsSync(path.join(recordPath, NATIVE_CAPTURE_MARKER)) ? readNativeCaptureMarker(recordPath) : null;
-  return crypto.createHash('sha256').update(JSON.stringify({
-    marker, native: nativeSourceFingerprint(recordPath), pcmEvidence: pcmEvidenceFingerprint(recordPath), retained: sourceFingerprint(recordPath),
-  })).digest('hex');
+  return { marker, native: nativeSourceRecords(recordPath), pcmEvidence: pcmEvidenceFingerprint(recordPath), retained: sourceEntries(recordPath) };
+}
+
+function fingerprintOfEvidence(evidence) {
+  return sha256Json({ marker: evidence.marker, native: sha256Json(evidence.native), pcmEvidence: evidence.pcmEvidence,
+    retained: sha256Json(evidence.retained) });
+}
+
+function nativeRecordingFingerprint(recordPath) {
+  return fingerprintOfEvidence(nativeRecordingEvidence(recordPath));
+}
+
+// Which recorded files changed between two evidence snapshots, and whether
+// only their timestamps did: same files, same sizes, same source metadata.
+function describeSourceChange(before, after) {
+  const files = evidence => {
+    const entries = new Map();
+    for (const source of evidence.native) {
+      for (const [file, size, mtime, ctime] of source.chunks) entries.set(file, { size, mtime, ctime });
+    }
+    for (const [file, size, mtime] of evidence.retained) entries.set(file, { size, mtime });
+    return entries;
+  };
+  const withoutTimes = evidence => JSON.stringify({ marker: evidence.marker, pcmEvidence: evidence.pcmEvidence,
+    native: evidence.native.map(source => ({ ...source, chunks: source.chunks.map(([file, size]) => [file, size]) })),
+    retained: evidence.retained.map(([file, size]) => [file, size]) });
+  const previous = files(before), current = files(after), changes = [];
+  for (const [file, stat] of current) {
+    const old = previous.get(file);
+    const fields = old ? Object.keys(stat).filter(key => stat[key] !== old[key]) : ['added'];
+    if (fields.length) changes.push(`${file} ${fields.join('+')}`);
+  }
+  for (const file of previous.keys()) if (!current.has(file)) changes.push(`${file} removed`);
+  const metadata = evidence => JSON.stringify({ marker: evidence.marker, pcmEvidence: evidence.pcmEvidence,
+    native: evidence.native.map(({ chunks, ...source }) => source) });
+  if (metadata(before) !== metadata(after)) changes.push('source metadata');
+  return { timestampsOnly: withoutTimes(before) === withoutTimes(after), changes };
+}
+
+function describeChanges(changes) {
+  return changes.slice(0, 4).join(', ') + (changes.length > 4 ? ` and ${changes.length - 4} more` : '');
+}
+
+// Only a native-finalization-* directory directly inside this recording.
+// Returns the directory if it could not be removed (a scanner holding a file),
+// so the caller can say so; the save itself never depends on it.
+async function removeSupersededScratch(recordPath, directory) {
+  if (typeof directory !== 'string') return null;
+  const resolved = path.resolve(directory);
+  if (path.dirname(resolved) !== path.resolve(recordPath) || !path.basename(resolved).startsWith('native-finalization-')) return null;
+  return fs.promises.rm(resolved, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    .then(() => null, () => resolved);
 }
 
 function assertNativeSourceCoverage(recordPath, result) {

@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.11](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.10...v4.7.11) (2026-09-29)
+
+
+### Bug Fixes
+
+* **audio:** judge the encoded output by its bytes, not its timestamps (ELECTRON-6V) ([4fb11dc](https://github.com/xicoarm/suisse-notes-desktop/commit/4fb11dcbd7bc46f132bfe24f55a579f33f002d72))
+* **audio:** name a superseded assembly that could not be removed ([a72bc5f](https://github.com/xicoarm/suisse-notes-desktop/commit/a72bc5f7ff51c5ef61fd51b386147a2e3fed6a20))
+* **audio:** rebuild once when only source timestamps move while saving ([7246f9d](https://github.com/xicoarm/suisse-notes-desktop/commit/7246f9d1cd901fe2a65d5de24b9a15abd1889840))
+* **audio:** tidy the rebuild path and bind the receipt to the inspected bytes ([6f520fb](https://github.com/xicoarm/suisse-notes-desktop/commit/6f520fb9a026b0dcd5f69ee1898ce905ca04ecb5))
+* **sentry:** no error event when no microphone is connected (ELECTRON-6Z) ([81da541](https://github.com/xicoarm/suisse-notes-desktop/commit/81da5412e41e478a097f060babdcec3064256db2))
+* **sentry:** report mic-health verdicts as grouped warnings (ELECTRON-6W) ([dd01574](https://github.com/xicoarm/suisse-notes-desktop/commit/dd01574d8a3c124798257d1ec665556691337b7a))
+
 ### [4.7.10](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.9...v4.7.10) (2026-09-25)
 
 

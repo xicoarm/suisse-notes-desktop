@@ -322,15 +322,19 @@ async function endSource(recordPath, sourceId, options) {
     endOffsetMs: terminal.endOffsetMs, duplicate: !!metadata.terminal };
 }
 
-function sourceFingerprint(recordPath) {
-  const descriptions = inspectNativeSources(recordPath);
-  const records = descriptions.map(source => ({
+// The completion fingerprint's inputs before hashing. Chunk timestamps stay in
+// it: a same-size rewrite of recorded audio must invalidate a receipt.
+function sourceRecords(recordPath) {
+  return inspectNativeSources(recordPath).map(source => ({
     manifest: readJson(source.manifestPath), started: source.startedPath ? readJson(source.startedPath) : null,
     end: source.endPath ? readJson(source.endPath) : null,
     chunks: source.chunks.map(chunk => [path.relative(recordPath, chunk.path), chunk.size, chunk.mtimeMs, chunk.ctimeMs]),
     gaps: source.gaps, terminalMismatch: source.terminalMismatch,
   }));
-  return crypto.createHash('sha256').update(JSON.stringify(records)).digest('hex');
 }
 
-module.exports = { beginSource, markSourceStarted, saveSourceChunk, endSource, inspectNativeSources, sourceFingerprint };
+function sourceFingerprint(recordPath) {
+  return crypto.createHash('sha256').update(JSON.stringify(sourceRecords(recordPath))).digest('hex');
+}
+
+module.exports = { beginSource, markSourceStarted, saveSourceChunk, endSource, inspectNativeSources, sourceRecords, sourceFingerprint };

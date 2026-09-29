@@ -258,27 +258,34 @@ function fixture(bytes, options) {
   const reader = createPacketFileReader(file, options); readers.push(reader);
   return { reader, file };
 }
+// The inspection captures the content digest before the probes read the file.
+async function captured(bytes, options) {
+  const result = fixture(bytes, options);
+  await result.reader.captureContent();
+  return result;
+}
 function record(position, payload) {
   return { pos: String(position), size: String(payload.length), data_hash: 'SHA256:' + createHash('sha256').update(payload).digest('hex') };
 }
 
 describe('bounded hash-bound finalized WebM packet reads', () => {
-  it.each([[0x81], [0xff], [0x40, 0x7f], [1, 0, 0, 0, 0, 0, 0, 1]])('parses TrackNumber VINT %j without fixed +4 assumptions', (...track) => {
-    const payload = Buffer.from([0xfc, 7]);
-    const { reader } = fixture(block(payload, { track: Buffer.from(track) }));
+  it.each([[0x81], [0xff], [0x40, 0x7f], [1, 0, 0, 0, 0, 0, 0, 1]])('parses TrackNumber VINT %j without fixed +4 assumptions', async (...track) => {
+    const payload = Buffer.from([0xfc, 7]), bytes = block(payload, { track: Buffer.from(track) });
+    const { reader } = await captured(bytes);
     expect(reader.readPacket(record(0, payload))).toEqual(payload);
-    reader.verifyUnchanged();
-    expect(reader.stats()).toMatchObject({ packets: 1, readCalls: 1, cacheBytes: 1048576 });
+    await reader.verifyUnchanged();
+    expect(reader.stats()).toMatchObject({ packets: 1, readCalls: 1, cacheBytes: 1048576, metadataChanged: [],
+      contentSha256: createHash('sha256').update(bytes).digest('hex'), contentBytesHashed: 2 * bytes.length });
   });
 
-  it('handles a block header across a fixed-cache boundary with bounded reads', () => {
+  it('handles a block header across a fixed-cache boundary with bounded reads', async () => {
     const payload = Buffer.from([0xfc, 7]), first = block(payload), position = 1048574;
     const bytes = Buffer.concat([first, Buffer.alloc(position - first.length), block(payload)]);
-    const { reader } = fixture(bytes);
+    const { reader } = await captured(bytes);
     expect(reader.readPacket(record(0, payload))).toEqual(payload);
     expect(reader.readPacket(record(position, payload))).toEqual(payload);
-    reader.verifyUnchanged();
-    expect(reader.stats()).toMatchObject({ packets: 2, readCalls: 2 });
+    await reader.verifyUnchanged();
+    expect(reader.stats()).toMatchObject({ packets: 2, readCalls: 2, contentBytesHashed: 2 * bytes.length });
   });
 
   it('rejects overlap, backwards/repeated positions, and a changed track', () => {
@@ -306,26 +313,57 @@ describe('bounded hash-bound finalized WebM packet reads', () => {
     }
   });
 
-  it('detects modified or replaced files and bounds the read deadline', () => {
+  // ELECTRON-6V: security software, backup agents and indexers changed the
+  // fresh output's timestamps/attributes during inspection; its audio bytes
+  // never changed. Such changes are recorded as evidence, not failures.
+  it('tolerates timestamp and attribute changes that leave the bytes identical, and records them', async () => {
     const payload = Buffer.from([0xfc, 7]);
-    const changed = fixture(block(payload)); changed.reader.readPacket(record(0, payload));
-    fs.utimesSync(changed.file, new Date(), new Date(Date.now() + 10000));
-    expect(() => changed.reader.verifyUnchanged()).toThrow('changed');
-    const replaced = fixture(block(payload));
-    fs.renameSync(replaced.file, path.join(path.dirname(replaced.file), 'original.webm'));
-    fs.writeFileSync(replaced.file, block(payload));
-    expect(() => replaced.reader.verifyUnchanged()).toThrow('changed');
-    const expired = fixture(block(payload), { deadline: 0 });
-    expect(() => expired.reader.readPacket(record(0, payload))).toThrow('timed out');
-    expired.reader.close(); expired.reader.close();
-    expect(() => expired.reader.verifyUnchanged()).toThrow('closed');
+    const { reader, file } = await captured(block(payload));
+    reader.readPacket(record(0, payload));
+    fs.utimesSync(file, new Date(), new Date(Date.now() + 10000));
+    fs.chmodSync(file, 0o444); // Windows: read-only attribute; POSIX: mode. Both move ctime only.
+    try {
+      await reader.verifyUnchanged();
+    } finally { fs.chmodSync(file, 0o644); }
+    expect(reader.stats().metadataChanged).toEqual(expect.arrayContaining(['mtime', 'ctime']));
   });
 
-  it('rejects a short read when the already-open file is truncated before its first cache fill', () => {
+  it('detects a same-length content change even when the modification time is restored', async () => {
     const payload = Buffer.from([0xfc, 7]);
-    const { reader, file } = fixture(block(payload));
+    const { reader, file } = await captured(block(payload));
+    reader.readPacket(record(0, payload));
+    const { mtime, atime } = fs.statSync(file);
+    const fd = fs.openSync(file, 'r+');
+    try { fs.writeSync(fd, Buffer.from([0xfd]), 0, 1, 4); } finally { fs.closeSync(fd); }
+    fs.utimesSync(file, atime, mtime);
+    await expect(reader.verifyUnchanged()).rejects.toThrow('encoded file content changed during inspection');
+  });
+
+  it('detects replaced files and requires the content baseline before verification', async () => {
+    const payload = Buffer.from([0xfc, 7]);
+    const replaced = await captured(block(payload));
+    fs.renameSync(replaced.file, path.join(path.dirname(replaced.file), 'original.webm'));
+    fs.writeFileSync(replaced.file, block(payload));
+    await expect(replaced.reader.verifyUnchanged()).rejects.toThrow('identity or length changed');
+    const unanchored = fixture(block(payload));
+    await expect(unanchored.reader.verifyUnchanged()).rejects.toThrow('not captured');
+  });
+
+  it('bounds every read by the inspection deadline and refuses a closed file', async () => {
+    const payload = Buffer.from([0xfc, 7]);
+    const expired = fixture(block(payload), { deadline: 0 });
+    expect(() => expired.reader.readPacket(record(0, payload))).toThrow('timed out');
+    await expect(expired.reader.captureContent()).rejects.toThrow('timed out');
+    expired.reader.close(); expired.reader.close();
+    await expect(expired.reader.verifyUnchanged()).rejects.toThrow('closed');
+    await expect(expired.reader.captureContent()).rejects.toThrow('closed');
+  });
+
+  it('rejects a short read when the already-open file is truncated before its first cache fill', async () => {
+    const payload = Buffer.from([0xfc, 7]);
+    const { reader, file } = await captured(block(payload));
     fs.truncateSync(file, 4);
     expect(() => reader.readPacket(record(0, payload))).toThrow('read was truncated');
-    expect(() => reader.verifyUnchanged()).toThrow('changed');
+    await expect(reader.verifyUnchanged()).rejects.toThrow('identity or length changed');
   });
 });

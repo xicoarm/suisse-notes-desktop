@@ -3526,6 +3526,22 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
       probe: async outputPath => Number((await getAudioMetadata(outputPath))?.format?.duration) || 0,
     });
     const result = await persistence.finalize(recordPath, ext, { ...options, expectedDurationSec: Number(expectedDurationSec) || 0 });
+    // Other software changed timestamps of fresh recording files while they
+    // were read; the bytes were verified unchanged (ELECTRON-6V). Info only:
+    // field evidence for which timestamps move, never an alert.
+    const encodedTimestampChanges = result.plan?.validation?.encodedPacketEvidence?.codedSampleEvidence?.metadataChanged || [];
+    if (encodedTimestampChanges.length || result.sourceTimestampChanges?.length) {
+      log.info(`Finalization tolerated timestamp-only changes for ${recordId}: output [${encodedTimestampChanges.join(', ')}], sources [${(result.sourceTimestampChanges || []).join(', ')}]`);
+      try {
+        Sentry.captureMessage('finalization: timestamps of fresh recording files changed while saving (bytes unchanged, tolerated)', {
+          level: 'info',
+          fingerprint: ['finalization-timestamp-only-change'],
+          tags: { operation: 'finalization', rebuilt: String(!!result.sourceTimestampChanges?.length) },
+          extra: { recordId, encodedTimestampChanges, sourceTimestampChanges: result.sourceTimestampChanges || [] },
+        });
+      } catch (_) { /* telemetry never breaks saving */ }
+    }
+    if (result.supersededScratchLeft) log.warn(`Superseded finalization scratch could not be removed for ${recordId}: ${result.supersededScratchLeft}`);
     for (const warning of result.warnings || []) {
       recordCaptureWarning(recordId, typeof warning === 'string' ? warning : warning.kind || warning.code || 'native-source-recovery');
     }

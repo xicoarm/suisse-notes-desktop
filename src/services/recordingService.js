@@ -315,6 +315,21 @@ let lastLowLevelEvalAt = 0;
 let lowLevelMeasuredDb = null;     // active-speech P90 that triggered LOW_LEVEL
 let micSignalFloatBuf = null;
 
+// Mic-health verdicts describe the user's device (muted headset, silent
+// virtual input, dead Bluetooth profile), and the user sees each one on
+// screen. They are warnings: 'error' is kept for the one case where the
+// app's own automatic recovery ran out of options. One Sentry issue per kind
+// of verdict; the device name is a tag, not part of the grouping. Grouped by
+// title, every new device name opened a new high-priority issue and an alert
+// email (ELECTRON-6W: a manual switch to "Microsoft Teams Audio Device").
+function reportMicHealth(kind, message, level, { device, context, verdict } = {}) {
+  captureMessage(message, level, {
+    fingerprint: ['mic-health', kind, context || verdict || '-'],
+    tags: { mic_health: kind, ...(context ? { mic_context: context } : {}), ...(verdict ? { mic_verdict: verdict } : {}),
+      ...(device ? { mic_device: String(device).slice(0, 200) } : {}) },
+  });
+}
+
 // SLEEP: system sleep and macOS dark wakes (ELECTRON-6G…6S, 2026-09-25). A
 // MacBook lid closed mid-recording froze every renderer timer for 16 minutes;
 // dark wakes then ran them for a few seconds at a time with audio I/O still
@@ -1592,7 +1607,7 @@ async function handleMicDeviceChange() {
     if (candidates.length === 0) {
       // Keep TRACK_ENDED: the next device change (the lid opening, a headset
       // reconnecting) retries instead of stranding the recording on silence.
-      captureMessage(`mic-health: auto-recovery found no physical microphone (${inputs.length - eligible.length} virtual input(s) skipped) — waiting for a device`, 'warning');
+      reportMicHealth('auto-recovery-no-physical', `mic-health: auto-recovery found no physical microphone (${inputs.length - eligible.length} virtual input(s) skipped) — waiting for a device`, 'warning');
       return;
     }
     const fromLabel = micHealthState.trackLabel || '';
@@ -1626,11 +1641,13 @@ async function handleMicDeviceChange() {
           toLabel: result.label || candidate.label || '',
           deviceId: candidate.deviceId
         });
-        captureMessage(`mic-health: auto-recovered onto "${result.label || candidate.deviceId}" after device loss (signal verified)`, 'warning');
+        reportMicHealth('auto-recovered', `mic-health: auto-recovered onto "${result.label || candidate.deviceId}" after device loss (signal verified)`, 'warning',
+          { device: result.label || candidate.deviceId });
         return;
       }
       if (verdict === null) return; // probe aborted (stop/pause/teardown) — stand down
-      captureMessage(`mic-health: auto-recovery candidate "${result.label || candidate.deviceId}" delivered no signal — trying next`, 'warning');
+      reportMicHealth('auto-recovery-candidate-silent', `mic-health: auto-recovery candidate "${result.label || candidate.deviceId}" delivered no signal — trying next`, 'warning',
+        { device: result.label || candidate.deviceId });
     }
     // Every candidate was silent: the last one stays active and the health
     // state already shows the precise ZERO_SIGNAL after-switch message.
@@ -1639,9 +1656,9 @@ async function handleMicDeviceChange() {
     // (lid closed, device unplugged) — a state, not a fault; TRACK_ENDED stays
     // and the next device change retries.
     if (opened > 0) {
-      captureMessage(`mic-health: auto-recovery found no microphone with signal after ${candidates.length} candidate(s)`, 'error');
+      reportMicHealth('auto-recovery-exhausted', `mic-health: auto-recovery found no microphone with signal after ${candidates.length} candidate(s)`, 'error');
     } else {
-      captureMessage(`mic-health: auto-recovery could not open any of ${candidates.length} candidate microphone(s) — waiting for a device`, 'warning');
+      reportMicHealth('auto-recovery-unopenable', `mic-health: auto-recovery could not open any of ${candidates.length} candidate microphone(s) — waiting for a device`, 'warning');
     }
     // Still on a live device this pass (or an earlier one) fell back to, and it
     // never proved signal: the next change of the input set looks again. Never
@@ -1990,18 +2007,20 @@ async function attemptSameDeviceReacquire() {
   try {
     const originalDeviceId = concreteMicrophoneDeviceId(stream);
     if (!originalDeviceId) {
-      captureMessage('mic-health: same-device re-acquire skipped — original microphone identity is unavailable', 'warning');
+      reportMicHealth('reacquire-skipped', 'mic-health: same-device re-acquire skipped — original microphone identity is unavailable', 'warning');
       return;
     }
     const sinceSec = zeroSignalSince ? Math.round((Date.now() - zeroSignalSince) / 1000) : 0;
-    captureMessage(`mic-health: zero-signal for ${sinceSec}s on "${micHealthState.trackLabel || 'unknown mic'}" — re-acquiring the same device`, 'warning');
+    reportMicHealth('zero-signal-reacquire', `mic-health: zero-signal for ${sinceSec}s on "${micHealthState.trackLabel || 'unknown mic'}" — re-acquiring the same device`, 'warning',
+      { device: micHealthState.trackLabel });
     const result = await switchMicrophoneStream(originalDeviceId, { verifyContext: 'reacquire' });
     if (!result.success) {
-      captureMessage(`mic-health: same-device re-acquire could not open a stream (${result.error})`, 'warning');
+      reportMicHealth('reacquire-unopenable', `mic-health: same-device re-acquire could not open a stream (${result.error})`, 'warning');
       return;
     }
     const verdict = await result.verified;
-    captureMessage(`mic-health: same-device re-acquire verdict: ${verdict || 'aborted'}`, verdict === 'signal' ? 'warning' : 'error');
+    reportMicHealth('reacquire-verdict', `mic-health: same-device re-acquire verdict: ${verdict || 'aborted'}`, 'warning',
+      { device: micHealthState.trackLabel, verdict: verdict || 'aborted' });
   } catch (e) {
     console.warn('Same-device re-acquire failed:', e);
   } finally {
@@ -2030,7 +2049,8 @@ function evaluateLowLevel() {
     lowLevelMeasuredDb = Math.round(p90);
     if (!lowLevelReported) {
       lowLevelReported = true;
-      captureMessage(`mic-health: LOW LEVEL — active-speech P90 ${Math.round(p90)}dBFS over ${Math.round(activeMs / 1000)}s (device "${micHealthState.trackLabel || 'unknown'}")`, 'warning');
+      reportMicHealth('low-level', `mic-health: LOW LEVEL — active-speech P90 ${Math.round(p90)}dBFS over ${Math.round(activeMs / 1000)}s (device "${micHealthState.trackLabel || 'unknown'}")`, 'warning',
+        { device: micHealthState.trackLabel });
     }
   } else if (lowLevelActive) {
     if (p90 > LOW_LEVEL_CLEAR_P90_DBFS) {
@@ -2163,7 +2183,8 @@ function startMicHealthMonitoring(micStream, recordingStore) {
           if (micVerify.postponedMs >= SWITCH_VERIFY_POSTPONE_LIMIT_MS) {
             const v = micVerify;
             resolveMicVerification(null);
-            captureMessage(`mic-health: switch to "${v.label || v.deviceId || 'default'}" could not be measured for ${SWITCH_VERIFY_POSTPONE_LIMIT_MS / 1000}s (${v.context}) — probe abandoned`, 'warning');
+            reportMicHealth('switch-unmeasured', `mic-health: switch to "${v.label || v.deviceId || 'default'}" could not be measured for ${SWITCH_VERIFY_POSTPONE_LIMIT_MS / 1000}s (${v.context}) — probe abandoned`, 'warning',
+              { device: v.label || v.deviceId, context: v.context });
           } else {
             // A stale buffer restarts the window; a suspended context keeps
             // the switch as the start of any silence.
@@ -2184,7 +2205,8 @@ function startMicHealthMonitoring(micStream, recordingStore) {
             micActive: true, systemAudioActive, verifying: false
           });
           clearSilenceWarning();
-          captureMessage(`mic-health: switch to "${v.label || v.deviceId || 'default'}" verified — signal present (${v.context})`, 'info');
+          reportMicHealth('switch-verified', `mic-health: switch to "${v.label || v.deviceId || 'default'}" verified — signal present (${v.context})`, 'info',
+            { device: v.label || v.deviceId, context: v.context });
           emit('micSwitchVerified', { ok: true, context: v.context, label: v.label, deviceId: v.deviceId });
           // Watch the first 30s of active audio on the new device against the
           // pre-switch speech baseline (catches "works but 30dB too quiet").
@@ -2206,8 +2228,8 @@ function startMicHealthMonitoring(micStream, recordingStore) {
             afterSwitch: true, silenceSince: v.since
           });
           setSilenceWarning(micHealthState.message);
-          captureMessage(`mic-health: switch to "${v.label || v.deviceId || 'default'}" delivered NO signal within ${SWITCH_VERIFY_MS / 1000}s (${v.context})`,
-            v.context === 'auto-recovery' ? 'warning' : 'error');
+          reportMicHealth('switch-silent', `mic-health: switch to "${v.label || v.deviceId || 'default'}" delivered NO signal within ${SWITCH_VERIFY_MS / 1000}s (${v.context})`,
+            'warning', { device: v.label || v.deviceId, context: v.context });
           emit('micSwitchVerified', { ok: false, context: v.context, label: v.label, deviceId: v.deviceId });
         }
         return; // while verifying, the regular detectors stand down
@@ -2243,7 +2265,8 @@ function startMicHealthMonitoring(micStream, recordingStore) {
             zeroEscalated = true;
             if (!zeroEpisodeReported) {
               zeroEpisodeReported = true;
-              captureMessage(`mic-health: ZERO SIGNAL episode — "${micHealthState.trackLabel || 'unknown mic'}" live but delivering digital silence for ${Math.round(zeroMs / 1000)}s`, 'error');
+              reportMicHealth('zero-signal', `mic-health: ZERO SIGNAL episode — "${micHealthState.trackLabel || 'unknown mic'}" live but delivering digital silence for ${Math.round(zeroMs / 1000)}s`, 'warning',
+                { device: micHealthState.trackLabel });
             }
             const status = zeroMs >= critMs ? MIC_HEALTH_STATUS.CRITICAL : MIC_HEALTH_STATUS.DEGRADED;
             updateMicHealthState(status, MIC_HEALTH_REASON.ZERO_SIGNAL, null, {
@@ -2263,7 +2286,8 @@ function startMicHealthMonitoring(micStream, recordingStore) {
           // Signal returned (or a gate closed — INT-2 / split owns the state
           // now). End the episode; the recovery counters below produce the OK.
           if (!isZero && micHealthState.reasonCode === MIC_HEALTH_REASON.ZERO_SIGNAL) {
-            captureMessage(`mic-health: zero-signal episode ended after ${Math.round((Date.now() - zeroSignalSince) / 1000)}s — signal returned`, 'warning');
+            reportMicHealth('zero-signal-ended', `mic-health: zero-signal episode ended after ${Math.round((Date.now() - zeroSignalSince) / 1000)}s — signal returned`, 'warning',
+              { device: micHealthState.trackLabel });
           }
           zeroSignalSince = null;
           zeroEpisodeReported = false;
@@ -2290,7 +2314,8 @@ function startMicHealthMonitoring(micStream, recordingStore) {
               if (p90 != null && p90 <= base - SWITCH_BASELINE_DROP_DB && p90 <= LOW_LEVEL_CLEAR_P90_DBFS) {
                 lowLevelActive = true;
                 lowLevelMeasuredDb = Math.round(p90);
-                captureMessage(`mic-health: post-switch level drop — active P90 ${Math.round(p90)}dBFS vs session baseline ${Math.round(base)}dBFS`, 'warning');
+                reportMicHealth('post-switch-level-drop', `mic-health: post-switch level drop — active P90 ${Math.round(p90)}dBFS vs session baseline ${Math.round(base)}dBFS`, 'warning',
+                  { device: micHealthState.trackLabel });
               }
             }
           }

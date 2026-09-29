@@ -138,7 +138,15 @@ export function useRecorder() {
         _systemAudioRef.checkOutputRouting().catch(() => {});
       }
     } catch (error) {
-      console.error('Error loading microphones:', error);
+      // NotFoundError: no audio input exists at this moment (headset or dock
+      // unplugged, internal mic disabled). A state of the computer, not an app
+      // failure, so a breadcrumb instead of an error event (ELECTRON-6Z). The
+      // list keeps its last state; the next devicechange reloads it.
+      if (error?.name === 'NotFoundError') {
+        console.info('No microphone connected right now:', error.message);
+      } else {
+        console.error('Error loading microphones:', error);
+      }
     } finally {
       loadingMicrophones.value = false;
     }
