@@ -14,6 +14,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as recordingService from '../../src/services/recordingService';
 
+// Every Sentry report the service makes, with its level and grouping.
+const sentry = vi.hoisted(() => ({ reports: [] }));
+vi.mock('../../src/boot/sentry', async importOriginal => ({
+  ...(await importOriginal()),
+  captureMessage: (message, level = 'info', context = null) => { sentry.reports.push({ message, level, context }); },
+}));
+const micHealthReports = () => sentry.reports.filter(report => report.message.startsWith('mic-health:'));
+
 // Shared signal control — every analyser instance (fresh ones are created on
 // each mic switch) reads from here.
 const ctrl = {
@@ -167,6 +175,7 @@ describe('recordingService mic signal forensics (MSIG)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    sentry.reports = [];
     vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
 
     ctrl.amplitude = 0.1;
@@ -1003,6 +1012,36 @@ describe('recordingService mic signal forensics (MSIG)', () => {
     expect(events.verified.some(e => e.ok === true && e.context === 'manual-switch')).toBe(true);
   });
 
+  // ELECTRON-6W: the user picked the Teams virtual input by hand. The app said
+  // so on screen and the user switched back; that is not an app fault, and a
+  // new device name must not open a new Sentry issue.
+  it('reports a silent manual pick and its follow-up verdicts as grouped warnings, never errors', async () => {
+    const store = createMockRecordingStore();
+    await startHealthyRecording(store, { produceChunks: true });
+    await vi.advanceTimersByTimeAsync(1000);
+    const virtualTrack = createTrack({ deviceId: 'teams-virtual', label: 'Microsoft Teams Audio Device (Virtual)' });
+    global.navigator.mediaDevices.getUserMedia.mockResolvedValue(new MockMediaStream([virtualTrack]));
+    const result = await recordingService.switchMicrophoneStream('teams-virtual');
+    ctrl.amplitude = 0;
+    ctrl.byteVal = 0;
+    await vi.advanceTimersByTimeAsync(5500);
+    expect(await result.verified).toBe('silent');
+    await vi.advanceTimersByTimeAsync(20000); // zero-signal episode, same-device re-acquire, its verdict
+
+    const reports = micHealthReports();
+    expect(reports.map(report => report.context?.tags?.mic_health)).toEqual(expect.arrayContaining(
+      ['switch-silent', 'zero-signal', 'zero-signal-reacquire', 'reacquire-verdict']));
+    expect(reports.filter(report => report.level === 'error')).toEqual([]);
+    const manual = reports.find(report => report.context.tags.mic_context === 'manual-switch');
+    expect(manual).toMatchObject({ level: 'warning', context: {
+      fingerprint: ['mic-health', 'switch-silent', 'manual-switch'],
+      tags: { mic_device: 'Microsoft Teams Audio Device (Virtual)' } } });
+    for (const report of reports) {
+      expect(report.context.fingerprint[0]).toBe('mic-health');
+      expect(report.context.fingerprint.join('|')).not.toContain('Teams');
+    }
+  });
+
   it('modulated but whisper-level speech triggers LOW_LEVEL (degraded, never critical)', async () => {
     const store = createMockRecordingStore();
     await startHealthyRecording(store);
@@ -1132,6 +1171,8 @@ describe('recordingService mic signal forensics (MSIG)', () => {
     expect(healthNow().status).toBe('ok');
     // The silent candidate was probed and rejected, not announced.
     expect(events.verified.some(e => e.ok === false && e.context === 'auto-recovery')).toBe(true);
+    expect(micHealthReports().find(report => report.context.tags.mic_health === 'auto-recovered')).toMatchObject({
+      level: 'warning', context: { fingerprint: ['mic-health', 'auto-recovered', '-'], tags: { mic_device: 'Laptop Mic' } } });
   });
 
   it('probes the lost device and its Default alias last during auto-recovery (ELECTRON-62)', async () => {
