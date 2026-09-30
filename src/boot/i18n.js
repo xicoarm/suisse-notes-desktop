@@ -509,6 +509,8 @@ const messages = {
     updateReadyLaterHint: 'If you choose Later, the update installs automatically the next time you quit the app.',
     updateReadyNow: 'Update now',
     updateReadyLater: 'Later',
+    updateDownloadingTitle: 'Downloading an update',
+    updateDownloadingMessage: 'Version {version} is downloading ({percent}%). When it is ready you can install it with one click – ideally before your next recording.',
 
     // Mobile reliability audit 2026-09
     recordingGapsWarning: 'Parts of this recording could not be saved: {missing} of {total} audio segments are missing. The file has been kept and will be uploaded, but the transcript may have gaps.',
@@ -1058,6 +1060,8 @@ const messages = {
     updateReadyLaterHint: 'Bei „Später“ wird das Update automatisch beim nächsten Beenden der App installiert.',
     updateReadyNow: 'Jetzt aktualisieren',
     updateReadyLater: 'Später',
+    updateDownloadingTitle: 'Update wird geladen',
+    updateDownloadingMessage: 'Version {version} wird geladen ({percent}\u00A0%). Sobald sie bereit ist, installieren Sie sie mit einem Klick – idealerweise vor der nächsten Aufnahme.',
 
     // Mobile reliability audit 2026-09
     recordingGapsWarning: 'Teile dieser Aufnahme konnten nicht gespeichert werden: {missing} von {total} Audio-Segmenten fehlen. Die Datei wurde behalten und wird hochgeladen, das Transkript kann aber Lücken haben.',
@@ -1607,6 +1611,8 @@ const messages = {
     updateReadyLaterHint: 'Si vous choisissez « Plus tard », la mise à jour s\'installera automatiquement à la prochaine fermeture de l\'application.',
     updateReadyNow: 'Mettre à jour',
     updateReadyLater: 'Plus tard',
+    updateDownloadingTitle: 'Téléchargement d\'une mise à jour',
+    updateDownloadingMessage: 'La version {version} est en cours de téléchargement ({percent}\u00A0%). Dès qu\'elle est prête, vous pourrez l\'installer en un clic – idéalement avant votre prochain enregistrement.',
 
     // Mobile reliability audit 2026-09
     recordingGapsWarning: "Certaines parties de cet enregistrement n'ont pas pu être sauvegardées : {missing} segments audio sur {total} manquent. Le fichier a été conservé et sera téléversé, mais la transcription peut comporter des lacunes.",
@@ -2156,6 +2162,8 @@ const messages = {
     updateReadyLaterHint: 'Se scegli "Più tardi", l\'aggiornamento verrà installato automaticamente alla prossima chiusura dell\'app.',
     updateReadyNow: 'Aggiorna ora',
     updateReadyLater: 'Più tardi',
+    updateDownloadingTitle: 'Download di un aggiornamento',
+    updateDownloadingMessage: 'La versione {version} è in download ({percent}%). Quando è pronta puoi installarla con un clic – idealmente prima della prossima registrazione.',
 
     // Mobile reliability audit 2026-09
     recordingGapsWarning: 'Alcune parti di questa registrazione non sono state salvate: mancano {missing} segmenti audio su {total}. Il file è stato conservato e verrà caricato, ma la trascrizione potrebbe avere delle lacune.',

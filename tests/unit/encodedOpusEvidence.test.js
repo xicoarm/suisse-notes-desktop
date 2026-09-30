@@ -325,7 +325,9 @@ describe('bounded hash-bound finalized WebM packet reads', () => {
     try {
       await reader.verifyUnchanged();
     } finally { fs.chmodSync(file, 0o644); }
-    expect(reader.stats().metadataChanged).toEqual(expect.arrayContaining(['mtime', 'ctime']));
+    // mtime always moves (set explicitly); ctime moves unless the whole test ran
+    // within one Windows clock tick (~15.6 ms), which fast CI runners do.
+    expect(reader.stats().metadataChanged).toEqual(expect.arrayContaining(['mtime']));
   });
 
   it('detects a same-length content change even when the modification time is restored', async () => {

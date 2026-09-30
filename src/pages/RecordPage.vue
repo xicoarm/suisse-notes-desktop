@@ -934,6 +934,7 @@ const {
   isMicMuted,
   setSystemAudioEnabled,
   loadMicrophones,
+  microphonesLoaded,
   loadSystemAudioState,
   startRecording,
   pauseRecording,
@@ -1582,6 +1583,15 @@ const handleStartClickInternal = async () => {
       });
       return;
     }
+  }
+
+  // An empty list may only mean that the page has just opened and the list
+  // is still being read, that no input existed the last time it was read, or
+  // that a device change was missed: wait for the running read (or read once
+  // more) before refusing to record. Never a second microphone open while a
+  // read is in flight. (Android re-probes with its permission flow above.)
+  if (!isAndroid() && availableMicrophones.value.length === 0) {
+    await microphonesLoaded();
   }
 
   // Check if no microphone and no system audio — cannot record

@@ -19,6 +19,7 @@ const Store = require('electron-store');
 const ffmpeg = require('fluent-ffmpeg');
 const { Upload } = require('tus-js-client');
 const { autoUpdater } = require('electron-updater');
+const { createUpdateChecks, isPersistentDownloadError, UPDATE_CHECK_INTERVAL_MS, UPDATE_CHECK_AFTER_WAKE_MS, UPDATE_CHECK_MIN_GAP_MS } = require('./update-checks');
 const log = require('electron-log');
 const Sentry = require('@sentry/electron/main');
 const { machineIdSync } = require('node-machine-id');
@@ -1778,19 +1779,15 @@ app.whenReady().then(() => {
   // Also skip during E2E runs — a test build must not self-update to a newer
   // release mid-run (it downloads + quitAndInstalls and kills the test app).
   if (app.isPackaged && !skipAutoUpdate && process.env.SUISSE_E2E_HOOKS !== '1') {
-    // Check for updates on startup (silent - no notification)
-    autoUpdater.checkForUpdates().catch(err => {
-      log.error('Auto-update check failed:', err);
-    });
-
-    // Re-check every 4 hours while app is running
-    setInterval(() => {
-      if (!skipAutoUpdate) {
-        autoUpdater.checkForUpdates().catch(err => {
-          log.error('Periodic auto-update check failed:', err);
-        });
+    // At launch, every hour, and shortly after the computer wakes (see
+    // update-checks.js): the prompt can only appear once the download is done.
+    updateChecks.request('startup');
+    setInterval(() => updateChecks.request('interval'), UPDATE_CHECK_INTERVAL_MS);
+    powerMonitor.on('resume', () => {
+      for (const delay of UPDATE_CHECK_AFTER_WAKE_MS) {
+        setTimeout(() => updateChecks.request('wake', { minGapMs: UPDATE_CHECK_MIN_GAP_MS }), delay);
       }
-    }, 4 * 60 * 60 * 1000);
+    });
   }
 
   // === Recover Orphaned Recordings ===
@@ -1839,11 +1836,20 @@ autoUpdater.on('checking-for-update', () => {
   log.info('Checking for updates...');
 });
 
+// An update that is still downloading. The renderer shows "update loading
+// (NN %)" from the moment it is found, instead of staying silent until the
+// whole installer has arrived.
+let updateDownload = null;
+let signatureDialogShown = false;
+
 autoUpdater.on('update-available', (info) => {
   log.info('Update available:', info.version);
-  // Notify renderer (optional - for UI feedback)
+  // A check that straddled the end of the download: the update is already here.
+  if (pendingUpdateInfo) return;
+  // A newer release found mid-download does not relabel the running download.
+  if (!updateDownload) updateDownload = { version: info.version, percent: 0 };
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update:available', info);
+    mainWindow.webContents.send('update:available', { version: updateDownload.version });
   }
 });
 
@@ -1853,9 +1859,9 @@ autoUpdater.on('update-not-available', (info) => {
 
 autoUpdater.on('download-progress', (progressObj) => {
   log.info(`Download progress: ${progressObj.percent.toFixed(1)}%`);
-  // Notify renderer (optional - for UI feedback)
+  if (!pendingUpdateInfo && updateDownload) updateDownload.percent = progressObj.percent;
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update:progress', progressObj);
+    mainWindow.webContents.send('update:progress', { version: updateDownload?.version || null, percent: progressObj.percent });
   }
 });
 
@@ -1865,9 +1871,37 @@ autoUpdater.on('download-progress', (progressObj) => {
 // translated "update now?" dialog; "update now" calls updater:quitAndInstall.
 let pendingUpdateInfo = null;
 
+// A failed download (signature, disk, network) rejects the check's download
+// promise; a failed check during a running download does not stop it and is
+// only logged by the error handler below.
+function handleUpdateDownloadFailure(error) {
+  if (!updateDownload) return; // already handled for this download
+  const persistent = isPersistentDownloadError(error);
+  log.warn(`Update ${updateDownload.version} download failed (${persistent ? 'retry in 4 h' : 'retry at next check'}): ${error?.message || error}`);
+  if (persistent) updateChecks.downloadFailed();
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:failed', { version: updateDownload.version });
+  updateDownload = null;
+}
+
+const updateChecks = createUpdateChecks({
+  check: async () => {
+    const result = await autoUpdater.checkForUpdates();
+    result?.downloadPromise?.catch(handleUpdateDownloadFailure);
+    return result;
+  },
+  isEnabled: () => app.isPackaged && !skipAutoUpdate && process.env.SUISSE_E2E_HOOKS !== '1',
+  isDownloaded: () => Boolean(pendingUpdateInfo),
+  log,
+});
+
 autoUpdater.on('update-downloaded', (info) => {
   log.info('Update downloaded:', info.version);
   pendingUpdateInfo = info;
+  updateDownload = null;
+  updateChecks.downloadSucceeded();
+  // A check still in flight must not start a second download or a second
+  // Squirrel staging (macOS) of the update that is already here.
+  autoUpdater.autoDownload = false;
   // Will auto-install on app quit due to autoInstallOnAppQuit = true
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('update:downloaded', { version: info.version });
@@ -1877,6 +1911,7 @@ autoUpdater.on('update-downloaded', (info) => {
 ipcMain.handle('updater:getStatus', () => ({
   updateDownloaded: Boolean(pendingUpdateInfo),
   version: pendingUpdateInfo?.version || null,
+  downloading: updateDownload ? { ...updateDownload } : null,
   currentVersion: app.getVersion()
 }));
 
@@ -1912,8 +1947,10 @@ autoUpdater.on('error', (err) => {
   if (errMsg.includes('not signed') || errMsg.includes('signature') || errMsg.includes('publisherNames')) {
     log.warn('Update failed due to signature verification. App needs code signing or manual reinstall.');
 
-    // Show dialog to user explaining they need to manually update
-    if (mainWindow && !mainWindow.isDestroyed()) {
+    // Show dialog to user explaining they need to manually update (once per
+    // session: the failed download is retried, and the dialog is modal)
+    if (mainWindow && !mainWindow.isDestroyed() && !signatureDialogShown) {
+      signatureDialogShown = true;
       dialog.showMessageBox(mainWindow, {
         type: 'info',
         title: 'Update Available',

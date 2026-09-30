@@ -128,7 +128,7 @@ describe('native recording publication and upload transaction', () => {
     const result = await persistence.finalize(recordPath);
     expect(nativeBuild).toHaveBeenCalledTimes(2);
     expect(result.sourceTimestampChanges).toEqual(expect.arrayContaining([
-      expect.stringMatching(/chunks[\\/]chunk_0\.webm mtime\+ctime$/), expect.stringMatching(/^chunks[\\/]chunk_0\.webm mtime$/)]));
+      expect.stringMatching(/^native-sources.+chunk_0\.webm mtime(\+ctime)?$/), expect.stringMatching(/^chunks[\\/]chunk_0\.webm mtime$/)]));
     expect(fs.readFileSync(result.outputPath, 'utf8')).toBe('native preserved content');
     expect(await eligibility()).toMatchObject({ allowed: true });
   });
@@ -201,7 +201,7 @@ describe('native recording publication and upload transaction', () => {
       touch(chunk);
       return result;
     });
-    await expect(persistence.finalize(recordPath)).rejects.toThrow(/changed during finalization \(native-sources[\\/].+chunk_0\.webm mtime\+ctime\); originals retained/);
+    await expect(persistence.finalize(recordPath)).rejects.toThrow(/changed during finalization \(native-sources[\\/].+chunk_0\.webm mtime(\+ctime)?\); originals retained/);
     expect(nativeBuild).toHaveBeenCalledTimes(2);
     expect(fs.existsSync(path.join(recordPath, 'audio.webm'))).toBe(false);
     expect(await eligibility()).toMatchObject({ allowed: false });
