@@ -114,39 +114,55 @@ export function useRecorder() {
 
     loadingMicrophones.value = true;
     try {
-      await navigator.mediaDevices.getUserMedia({ audio: true })
-        .then(stream => stream.getTracks().forEach(track => track.stop()));
+      // Opening a stream asks for the permission (first use, mobile) and
+      // unlocks device names where the platform hides them until then.
+      let probeError = null;
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(track => track.stop());
+      } catch (error) {
+        probeError = error;
+      }
 
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      availableMicrophones.value = devices
-        .filter(device => device.kind === 'audioinput')
-        .map(device => ({
+      const inputs = (await navigator.mediaDevices.enumerateDevices())
+        .filter(device => device.kind === 'audioinput');
+      // A failed probe says nothing about the other inputs: the default one
+      // may be in use or reconnecting (NotReadableError), or no input exists
+      // (NotFoundError). The list stays true as long as the platform names the
+      // devices without a stream (the desktop app does). Without names, keep
+      // the previous list rather than replace it with placeholders.
+      if (!probeError || inputs.every(device => device.label)) {
+        availableMicrophones.value = inputs.map(device => ({
           id: device.deviceId,
           label: device.label || `Microphone ${device.deviceId.slice(0, 8)}...`
         }));
 
-      if (availableMicrophones.value.length > 0 && !selectedMicrophoneId.value) {
-        selectedMicrophoneId.value = availableMicrophones.value[0].id;
+        if (availableMicrophones.value.length > 0 && !selectedMicrophoneId.value) {
+          selectedMicrophoneId.value = availableMicrophones.value[0].id;
+        }
+
+        // SASIG: this runs on mount AND on every `devicechange`, with device
+        // labels available — the right moment to re-evaluate whether the
+        // Windows default output endpoint still matches the communication
+        // endpoint the loopback cannot see. Plugging in a headset mid-session
+        // is exactly what creates the split.
+        if (_systemAudioRef) {
+          _systemAudioRef.checkOutputRouting().catch(() => {});
+        }
       }
 
-      // SASIG: this runs on mount AND on every `devicechange`, with device
-      // labels unlocked by the getUserMedia above — the right moment to
-      // re-evaluate whether the Windows default output endpoint still matches
-      // the communication endpoint the loopback cannot see. Plugging in a
-      // headset mid-session is exactly what creates the split.
-      if (_systemAudioRef) {
-        _systemAudioRef.checkOutputRouting().catch(() => {});
+      // No input at this moment (headset or dock unplugged, internal mic
+      // disabled), or the default input cannot be opened right now (another
+      // app holds it, a device is reconnecting): states of the computer, not
+      // app failures. A breadcrumb, not an error event (ELECTRON-6Z,
+      // ELECTRON-70). Starting a recording reports its own failure.
+      if (probeError && ['NotFoundError', 'NotReadableError'].includes(probeError.name)) {
+        console.info('Microphone probe failed:', probeError.name, probeError.message);
+      } else if (probeError) {
+        console.error('Error loading microphones:', probeError);
       }
     } catch (error) {
-      // NotFoundError: no audio input exists at this moment (headset or dock
-      // unplugged, internal mic disabled). A state of the computer, not an app
-      // failure, so a breadcrumb instead of an error event (ELECTRON-6Z). The
-      // list keeps its last state; the next devicechange reloads it.
-      if (error?.name === 'NotFoundError') {
-        console.info('No microphone connected right now:', error.message);
-      } else {
-        console.error('Error loading microphones:', error);
-      }
+      console.error('Error loading microphones:', error);
     } finally {
       loadingMicrophones.value = false;
     }
