@@ -70,6 +70,24 @@ describe('loading the microphone list', () => {
     expect(state.console.error).not.toHaveBeenCalled();
   });
 
+  it('keeps the previous list when only some inputs are named', async () => {
+    const { load, state } = loadMicrophonesWith({
+      getUserMedia: failing('NotReadableError', 'Could not start audio source'),
+      enumerateDevices: async () => [input('a1', 'Named Mic'), input('b2', '')],
+    });
+    await load();
+    expect(state.availableMicrophones.value).toEqual([{ id: 'headset', label: 'Headset' }]);
+  });
+
+  it('reports a denied permission as an error and still lists the named inputs (desktop)', async () => {
+    const failure = domError('NotAllowedError', 'Permission denied');
+    const { load, state } = loadMicrophonesWith({ getUserMedia: async () => { throw failure; }, enumerateDevices: async () => [input('array', 'Microphone Array')] });
+    await load();
+    expect(state.console.error).toHaveBeenCalledWith('Error loading microphones:', failure);
+    expect(state.console.info).not.toHaveBeenCalled();
+    expect(state.availableMicrophones.value).toEqual([{ id: 'array', label: 'Microphone Array' }]);
+  });
+
   it.each(['NotAllowedError', 'AbortError', 'SecurityError'])('still reports %s as an error', async name => {
     const failure = domError(name, 'failed');
     const { load, state } = loadMicrophonesWith({ getUserMedia: async () => { throw failure; }, enumerateDevices: async () => [input('a1', '')] });

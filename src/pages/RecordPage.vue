@@ -1584,6 +1584,13 @@ const handleStartClickInternal = async () => {
     }
   }
 
+  // An empty list may only mean that no input existed the last time it was
+  // read, or that a device change was missed: read it once more before
+  // refusing to record. (Android re-probes with its permission flow above.)
+  if (!isAndroid() && availableMicrophones.value.length === 0) {
+    await loadMicrophones();
+  }
+
   // Check if no microphone and no system audio — cannot record
   if (availableMicrophones.value.length === 0 && !systemAudioEnabled.value) {
     $q.notify({
