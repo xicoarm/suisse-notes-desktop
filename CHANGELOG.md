@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.12](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.11...v4.7.12) (2026-09-30)
+
+
+### Features
+
+* **update:** find updates earlier and say so while they download ([91e6c38](https://github.com/xicoarm/suisse-notes-desktop/commit/91e6c38089fb961933b96aeeb7f1115516005f85))
+
+
+### Bug Fixes
+
+* **record:** keep the microphone list current when the probe cannot open a stream (ELECTRON-70) ([1ea165a](https://github.com/xicoarm/suisse-notes-desktop/commit/1ea165a637dd7771928f009e4bb5eb1fa2c27dae))
+* **record:** re-read the microphone list before refusing to start ([c18acab](https://github.com/xicoarm/suisse-notes-desktop/commit/c18acabe32f2ab61ac9f346d353056d49cb0744d))
+* **record:** wait for the microphone list in flight instead of probing again ([2e433df](https://github.com/xicoarm/suisse-notes-desktop/commit/2e433df289cee724934aba252211f74677605f62))
+* **update:** back off after failed downloads and never stage an update twice ([a0b4547](https://github.com/xicoarm/suisse-notes-desktop/commit/a0b45478613b578e32eedc6738e43981fe1d943f))
+* **update:** retry dropped downloads at the next check; no macOS re-staging ([324498b](https://github.com/xicoarm/suisse-notes-desktop/commit/324498bbdf72b73ace54d52752ec5bc84e54fa04))
+
 ### [4.7.11](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.10...v4.7.11) (2026-09-29)
 
 
