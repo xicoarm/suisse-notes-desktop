@@ -17,6 +17,7 @@ function startHandler({ microphones = [], afterReload = microphones, systemAudio
     navigator: { mediaDevices: { getUserMedia: vi.fn(async () => ({ getTracks: () => [] })) } }, openAndroidAppSettings: vi.fn(),
     availableMicrophones, systemAudioEnabled: { value: systemAudio },
     loadMicrophones: vi.fn(async () => { availableMicrophones.value = afterReload; }),
+    microphonesLoaded: vi.fn(async () => { availableMicrophones.value = afterReload; }),
     historyStore: { defaultStoragePreference: 'keep' }, currentStoragePreference: { value: null },
     doStartRecording: vi.fn(async () => {}), showStorageDialog: { value: false },
   };
@@ -27,10 +28,11 @@ function startHandler({ microphones = [], afterReload = microphones, systemAudio
 const mic = [{ id: 'usb', label: 'USB Mic' }];
 
 describe('record start gate: microphone list', () => {
-  it('reads the list once more before refusing, and records when a microphone is there now', async () => {
+  it('waits for the list before refusing, and records when a microphone is there now', async () => {
     const { handler, deps } = startHandler({ microphones: [], afterReload: mic });
     await handler();
-    expect(deps.loadMicrophones).toHaveBeenCalledTimes(1);
+    expect(deps.microphonesLoaded).toHaveBeenCalledTimes(1);
+    expect(deps.loadMicrophones).not.toHaveBeenCalled(); // never a second probe of its own
     expect(deps.doStartRecording).toHaveBeenCalledTimes(1);
     expect(deps.$q.notify).not.toHaveBeenCalled();
   });
@@ -38,7 +40,7 @@ describe('record start gate: microphone list', () => {
   it('refuses with a clear message when there is still no microphone and no system audio', async () => {
     const { handler, deps } = startHandler({ microphones: [] });
     await handler();
-    expect(deps.loadMicrophones).toHaveBeenCalledTimes(1);
+    expect(deps.microphonesLoaded).toHaveBeenCalledTimes(1);
     expect(deps.doStartRecording).not.toHaveBeenCalled();
     expect(deps.$q.notify).toHaveBeenCalledWith(expect.objectContaining({ message: 'noMicrophoneNoSystemAudio' }));
   });
@@ -52,12 +54,14 @@ describe('record start gate: microphone list', () => {
   it('does not re-read a list that has microphones, and leaves Android to its permission flow', async () => {
     const listed = startHandler({ microphones: mic });
     await listed.handler();
+    expect(listed.deps.microphonesLoaded).not.toHaveBeenCalled();
     expect(listed.deps.loadMicrophones).not.toHaveBeenCalled();
     expect(listed.deps.doStartRecording).toHaveBeenCalledTimes(1);
     const android = startHandler({ microphones: [], afterReload: mic, android: true });
     await android.handler();
     expect(android.deps.navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
     expect(android.deps.loadMicrophones).toHaveBeenCalledTimes(1); // from the Android flow only
+    expect(android.deps.microphonesLoaded).not.toHaveBeenCalled();
     expect(android.deps.doStartRecording).toHaveBeenCalledTimes(1);
   });
 });

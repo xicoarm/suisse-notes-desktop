@@ -6,7 +6,7 @@ import fs from 'node:fs';
 // same way recordingBackpressure.handlers.test.js exercises page handlers.
 function loadMicrophonesWith({ getUserMedia, enumerateDevices = async () => [], selected = 'headset' }) {
   const source = fs.readFileSync('src/composables/useRecorder.js', 'utf8').replace(/\r\n/g, '\n');
-  const first = source.indexOf('const loadMicrophones = async () => {');
+  const first = source.indexOf('const readMicrophones = async () => {');
   const last = source.indexOf('// Event handlers for service events', first);
   if (first < 0 || last < first) throw new Error('Missing loadMicrophones declaration');
   const state = {
@@ -18,9 +18,9 @@ function loadMicrophonesWith({ getUserMedia, enumerateDevices = async () => [], 
   };
   const navigator = { mediaDevices: { getUserMedia, enumerateDevices } };
   const load = new Function('navigator', 'availableMicrophones', 'selectedMicrophoneId', 'loadingMicrophones', '_systemAudioRef', 'console',
-    source.slice(first, last) + '\nreturn loadMicrophones;')(navigator, state.availableMicrophones, state.selectedMicrophoneId,
+    source.slice(first, last) + '\nreturn Object.assign(loadMicrophones, { microphonesLoaded });')(navigator, state.availableMicrophones, state.selectedMicrophoneId,
     state.loadingMicrophones, state.systemAudio, state.console);
-  return { load, state };
+  return { load, loaded: load.microphonesLoaded, state };
 }
 
 const domError = (name, message) => Object.assign(new Error(message), { name });
@@ -118,5 +118,38 @@ describe('loading the microphone list', () => {
     expect(state.systemAudio.checkOutputRouting).toHaveBeenCalledTimes(1);
     expect(state.console.error).not.toHaveBeenCalled();
     expect(state.console.info).not.toHaveBeenCalled();
+  });
+
+  // The Record page's start gate: a click while the list is still being read
+  // (the page has just opened) must wait for that read, not open the
+  // microphone again right before the recording opens it.
+  it('lets the start gate wait for the read in flight instead of probing a second time', async () => {
+    let release;
+    const getUserMedia = vi.fn(() => new Promise(resolve => { release = () => resolve({ getTracks: () => [] }); }));
+    const { load, loaded, state } = loadMicrophonesWith({ getUserMedia, enumerateDevices: async () => [input('usb', 'USB Mic')] });
+    state.availableMicrophones.value = [];
+    const mounting = load();
+    const gate = loaded();
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    release();
+    await Promise.all([mounting, gate]);
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(state.availableMicrophones.value).toEqual([{ id: 'usb', label: 'USB Mic' }]);
+  });
+
+  it('reads the list for the start gate when no read is running, and never waits longer than 5 s', async () => {
+    const quick = loadMicrophonesWith({ getUserMedia: vi.fn(async () => ({ getTracks: () => [] })), enumerateDevices: async () => [input('usb', 'USB Mic')] });
+    await quick.loaded();
+    expect(quick.state.availableMicrophones.value).toEqual([{ id: 'usb', label: 'USB Mic' }]);
+    vi.useFakeTimers();
+    try {
+      const stuck = loadMicrophonesWith({ getUserMedia: () => new Promise(() => {}) });
+      let settled = false;
+      stuck.loaded().then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(4900);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(settled).toBe(true);
+    } finally { vi.useRealTimers(); }
   });
 });

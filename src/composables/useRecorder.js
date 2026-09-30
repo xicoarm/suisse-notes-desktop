@@ -106,7 +106,7 @@ export function useRecorder() {
   const loadingMicrophones = ref(false);
 
   // Load available microphones
-  const loadMicrophones = async () => {
+  const readMicrophones = async () => {
     if (!navigator.mediaDevices) {
       console.warn('navigator.mediaDevices not available');
       return;
@@ -167,6 +167,24 @@ export function useRecorder() {
       loadingMicrophones.value = false;
     }
   };
+
+  // The read in flight, so the start gate can wait for it instead of opening
+  // the microphone a second time right before the recording opens it.
+  let microphonesReading = null;
+  const loadMicrophones = () => {
+    const reading = readMicrophones().finally(() => {
+      if (microphonesReading === reading) microphonesReading = null;
+    });
+    microphonesReading = reading;
+    return reading;
+  };
+
+  // The list as of the read in flight (the page has just opened), or a fresh
+  // read. Bounded: a microphone that never answers must not hold the start.
+  const microphonesLoaded = () => Promise.race([
+    microphonesReading || loadMicrophones(),
+    new Promise(resolve => setTimeout(resolve, 5000))
+  ]);
 
   // Event handlers for service events
   const handleLevelChange = (level) => {
@@ -673,6 +691,7 @@ export function useRecorder() {
     isMicMuted,
     setSystemAudioEnabled,
     loadMicrophones,
+    microphonesLoaded,
     loadSystemAudioState,
     startRecording,
     pauseRecording,
