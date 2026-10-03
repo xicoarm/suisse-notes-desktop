@@ -46,6 +46,8 @@ function makeToken() {
 // Port 3000 â€” the renderer's hardwired dev default (src/services/api.js
 // API_URLS.development). The main process is pointed here via API_BASE_URL.
 function startMockBackend({ port = 3000, captureUploadsDir = null } = {}) {
+  // Local runs only: another harness or a dev server may already hold 3000.
+  if (port === 3000 && Number(process.env.SUISSE_E2E_MOCK_PORT) > 0) port = Number(process.env.SUISSE_E2E_MOCK_PORT);
   const fs = require('fs');
   const path = require('path');
   if (captureUploadsDir) fs.mkdirSync(captureUploadsDir, { recursive: true });

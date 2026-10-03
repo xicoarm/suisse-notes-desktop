@@ -51,8 +51,8 @@ export function useSystemAudio() {
 
       systemAudioEnabled.value = await window.electronAPI.systemAudio.getEnabled();
 
-      // Surface the Windows default-vs-communication endpoint split up front, so
-      // the user can fix their sound settings BEFORE recording an hour of silence.
+      // Fallback capture only (no native helper): surface the Windows default-vs-
+      // communication endpoint split up front, before an hour of silence.
       await checkOutputRouting();
 
       if (support.platform === 'darwin') {
@@ -94,12 +94,19 @@ export function useSystemAudio() {
       const support = await window.electronAPI.systemAudio.isSupported();
 
       if (generation !== captureGeneration) return null;
-      if (support.platform === 'win32') {
-        // Windows: use desktopCapturer via renderer-side getUserMedia
+      if (support.platform === 'win32' && !support.nativeCapture) {
+        // Windows without the native helper: desktopCapturer via renderer-side
+        // getUserMedia, which only hears the default output device.
         return await startDesktopCapture(generation);
       }
 
-      // macOS: use AudioTee via main process
+      // Main process: AudioTee on macOS; on Windows the native helper, which
+      // records every app except ours on every output device — a meeting on
+      // the headset included.
+      // A failed start is NOT retried through desktopCapturer: main has already
+      // reserved this PCM attempt as required evidence, and a second system
+      // lane next to it would make finalization refuse "system audio twice".
+      // The failure surfaces like an AudioTee failure on macOS.
       const result = await window.electronAPI.systemAudio.start(recordId, offsetMs);
       if (generation !== captureGeneration) return null;
       if (!result.success) {
@@ -109,7 +116,7 @@ export function useSystemAudio() {
         }
         return null;
       }
-      console.log('System audio capture started via AudioTee');
+      console.log(`System audio capture started via ${support.platform === 'win32' ? 'the native helper' : 'AudioTee'}`);
       return true;
     } catch (e) {
       console.error('Error starting system audio capture:', e);
@@ -154,7 +161,12 @@ export function useSystemAudio() {
     try {
       if (!isElectron() || !navigator.mediaDevices?.enumerateDevices) return null;
       const support = await window.electronAPI.systemAudio.isSupported();
-      if (support.platform !== 'win32') return null; // macOS AudioTee taps the process graph
+      // macOS AudioTee taps the process graph; the Windows helper records every
+      // output device. Only the desktopCapturer fallback depends on the routing.
+      if (support.platform !== 'win32' || support.nativeCapture) {
+        outputRoutingMismatch.value = null;
+        return null;
+      }
 
       const outputs = (await navigator.mediaDevices.enumerateDevices())
         .filter(d => d.kind === 'audiooutput');

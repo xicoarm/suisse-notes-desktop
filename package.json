@@ -10,7 +10,7 @@
     "dev:ios": "quasar dev -m capacitor -T ios",
     "dev:android": "quasar dev -m capacitor -T android",
     "prepare:ffmpeg": "node scripts/prepare-ffmpeg.js",
-    "build": "node scripts/prepare-ffmpeg.js && quasar build -m electron",
+    "build": "node scripts/prepare-ffmpeg.js && node scripts/build-sysloopback.js && quasar build -m electron",
     "build:ios": "quasar build -m capacitor -T ios",
     "build:android": "quasar build -m capacitor -T android",
     "cap:sync": "cd src-capacitor && npx cap sync && node ../scripts/patch-capacitor-ios.cjs",

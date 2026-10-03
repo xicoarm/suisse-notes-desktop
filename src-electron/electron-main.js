@@ -10,6 +10,7 @@ const { assessRecordingUpload, FINALIZATION_PENDING_MARKER } = require('./record
 const { withCaptureWarnings, hydrateHistoryCaptureWarnings } = require('./recording-history-warnings');
 const { createRecordingExporter, repairRecoveredHistoryRecord, assertExportRecoveryReady } = require('./recording-export');
 const { createPcmCapture } = require('./pcm-capture');
+const { resolveSysLoopbackPath, sysLoopbackArgs, describeHelperEvent, parseDeviceSessions } = require('./windows-system-audio');
 const pcmCaptureEvidence = require('./pcm-capture-evidence');
 const { validateNativeMedia } = require('./native-media-validation');
 const { tokenUserId, canUploadForUser, verifiedUploadResult } = require('./upload-safety');
@@ -5069,7 +5070,7 @@ ipcMain.handle('dialog:getDroppedFilePath', async (event, filePath) => {
   }
 });
 
-// --- System Audio (AudioTee — macOS 14.2+ Core Audio Taps) ---
+// --- System Audio (AudioTee — macOS 14.2+ Core Audio Taps; sysloopback — Windows) ---
 
 let activeAudioTee = null; // { process, writeStream, filePath, recordId }
 // Set when AudioTee was stopped by the system-suspend handler; consumed by the
@@ -5084,8 +5085,29 @@ function getAudioTeeBinaryPath() {
   return path.join(__dirname, '..', 'resources', 'audiotee', 'audiotee');
 }
 
+// Windows: the native helper (every app except ours, on every output device).
+// Without it the renderer falls back to desktopCapturer, which only hears the
+// default output device.
+function getSysLoopbackBinaryPath() {
+  if (process.platform !== 'win32') return null;
+  return resolveSysLoopbackPath({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    startDirs: [__dirname, app.getAppPath(), process.cwd()],
+  });
+}
+
+// The capture runs in main (AudioTee/sysloopback → system_audio.raw) rather
+// than as a renderer MediaStream.
+function usesNativeSystemAudio() {
+  if (process.platform === 'darwin') return isSystemAudioSupported();
+  // Test builds only: s14 qualifies the desktopCapturer fallback on purpose.
+  if (process.env.SUISSE_E2E_HOOKS === '1' && process.env.SUISSE_E2E_SYSTEM_AUDIO_FALLBACK === '1') return false;
+  return process.platform === 'win32' && !!getSysLoopbackBinaryPath();
+}
+
 function isSystemAudioSupported() {
-  // Windows: desktopCapturer supports system audio capture
+  // Windows: the native helper, or desktopCapturer as the fallback
   if (process.platform === 'win32') return true;
   // macOS: Core Audio Taps requires macOS 14.2+
   if (process.platform === 'darwin') {
@@ -5101,7 +5123,8 @@ ipcMain.handle('systemAudio:isSupported', () => {
   return {
     supported: isSystemAudioSupported(),
     platform: process.platform,
-    macVersion: process.getSystemVersion?.() || 'unknown'
+    macVersion: process.getSystemVersion?.() || 'unknown',
+    nativeCapture: usesNativeSystemAudio()
   };
 });
 
@@ -5125,9 +5148,10 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
   try {
     validateRecordId(recordId);
     await stopSystemAudioInternal();
-    if (process.platform !== 'darwin' || !isSystemAudioSupported()) return { success: false, error: 'System audio requires macOS 14.2+' };
-    const binaryPath = getAudioTeeBinaryPath();
-    if (!fs.existsSync(binaryPath)) return { success: false, error: 'AudioTee binary not found' };
+    const windows = process.platform === 'win32';
+    if (!windows && (process.platform !== 'darwin' || !isSystemAudioSupported())) return { success: false, error: 'System audio requires macOS 14.2+' };
+    const binaryPath = windows ? getSysLoopbackBinaryPath() : getAudioTeeBinaryPath();
+    if (!binaryPath || !fs.existsSync(binaryPath)) return { success: false, error: windows ? 'System audio helper not found' : 'AudioTee binary not found' };
     const recordPath = getRecordingPath(recordId);
     fs.mkdirSync(recordPath, { recursive: true });
     const activeOffsetMs = Math.min(7 * 24 * 3600000, Math.max(0, Number(offsetMs) || 0));
@@ -5141,14 +5165,26 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
       if (!verdict) return;
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('system:capture-warning', {
         kind: verdict === 'warn' ? 'system-audio-silent' : 'system-audio-restored',
-        recordId, silentSeconds: monitor.state(Date.now()).silentSeconds,
+        recordId, silentSeconds: monitor.state(Date.now()).silentSeconds, platform: process.platform,
       });
     };
-    const proc = require('child_process').spawn(binaryPath, ['--sample-rate', '48000', '--chunk-duration', '0.2']);
+    const proc = windows
+      ? require('child_process').spawn(binaryPath, sysLoopbackArgs(process.pid), { windowsHide: true })
+      : require('child_process').spawn(binaryPath, ['--sample-rate', '48000', '--chunk-duration', '0.2']);
+    // A helper that already exited makes a stop line fail with EPIPE; that must
+    // never become an uncaught error in main.
+    proc.stdin?.on('error', () => {});
     const capture = createPcmCapture({
       process: proc,
       filePath: path.join(recordPath, 'system_audio.raw'),
       offsetMs: activeOffsetMs, requestStartedAt,
+      // The Windows helper ends on a "stop" line and flushes its last packet;
+      // TerminateProcess (what SIGTERM is on Windows) would drop it.
+      requestStop: windows ? () => proc.stdin.end('stop\n') : null,
+      onEvent: event => {
+        const line = describeHelperEvent(event);
+        if (line) log.info(`System audio helper: ${line}`);
+      },
       evidence: {
         event: (name, details) => pcmCaptureEvidence.markPcmEvent(recordPath, attemptId, {
           event: name, elapsedMs: details.elapsedMs, activeOffsetMs: details.activeOffsetMs,
@@ -5194,6 +5230,25 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
     return { success: false, error: error.message };
   }
 }));
+
+// Windows: which apps use each microphone and output device right now. The
+// Record page uses it to record the microphone the meeting app is using.
+// Best effort and quiet: info only, never a Sentry event.
+ipcMain.handle('systemAudio:deviceSessions', async () => {
+  const binaryPath = getSysLoopbackBinaryPath();
+  if (!binaryPath) return { success: false, devices: [] };
+  try {
+    const stdout = await new Promise((resolve, reject) => {
+      require('child_process').execFile(binaryPath, ['--sessions'],
+        { timeout: 4000, windowsHide: true, encoding: 'utf8', maxBuffer: 1024 * 1024 },
+        (error, out) => (error ? reject(error) : resolve(out)));
+    });
+    return { success: true, devices: parseDeviceSessions(stdout, { ownApp: path.parse(process.execPath).name }) };
+  } catch (error) {
+    log.info('Audio device sessions could not be read:', error.message);
+    return { success: false, devices: [] };
+  }
+});
 
 ipcMain.handle('systemAudio:setPaused', (event, paused) => {
   activeAudioTee?.setPaused(paused);

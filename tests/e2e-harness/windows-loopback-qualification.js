@@ -390,6 +390,7 @@ async function runSystemAudioQualification() {
     'Microphone requests use disabled timestamped all-zero MediaStreamTrackGenerator/AudioData tracks; no hardware microphone or microphone WebAudio graph is acquired.',
     'Silent generator probe zero-generator-vSDlwV on Electron 28.3.3 / Chromium 120.0.6099.291 produced exactly 12s of zero PCM with no timestamp overlaps/gaps. Each source uses 480 samples/10ms, a 120s sample budget, 250ms pacing and 1000ms write deadlines; current runtime features are recorded.',
     'Qualifies unchanged default Windows output through native Chromium desktop capture, recording, finalization and localhost upload.',
+    'Since 2026-10-03 that is the FALLBACK path: the native sysloopback helper (every app except ours, on every output device) is switched off for this run, because the fixture plays from inside the app and the helper deliberately excludes the app\'s own audio. s8-sysaudio covers the helper.',
     'Playout fixture uses strict PCM WAV parsing and createBuffer; earlier async decode preparation crashed before capture. This variant does not fix that runtime crash.',
     'Does not qualify physical USB/Bluetooth switching, the communications endpoint, or the 90-second silence warning lifecycle.',
   ] };
@@ -415,7 +416,7 @@ async function runSystemAudioQualification() {
     result.reference = reference.metaPath;
     mock = await startMockBackend();
     app = new PrivateLoopbackDriver({ name: NAME, apiUrl: mock.url, userDataDir: path.join(PRIVATE_ROOT, 'userdata', runId),
-      env: { SUISSE_E2E_HOOKS: '1', SUISSE_TEST_NETWORK_ISOLATION: '1', SUISSE_TEST_FAKE_AUDIO: '' } });
+      env: { SUISSE_E2E_HOOKS: '1', SUISSE_TEST_NETWORK_ISOLATION: '1', SUISSE_TEST_FAKE_AUDIO: '', SUISSE_E2E_SYSTEM_AUDIO_FALLBACK: '1' } });
     // Unique private profiles are never moved into the shared CI evidence tree.
     await app.launch({ freshProfile: false });
     if (await app.page.$('[data-test=record-start]')) throw new Error('Fresh private profile unexpectedly authenticated before mic interception');
@@ -432,6 +433,7 @@ async function runSystemAudioQualification() {
     if (!(await app.evalTimed(() => window.__windowsLoopbackQualification?.snapshot()))) throw new Error('Microphone interception was lost during login');
     result.systemAudioSupport = await app.evalTimed(() => window.electronAPI.systemAudio.isSupported());
     if (result.systemAudioSupport.platform !== 'win32' || !result.systemAudioSupport.supported) throw new Error('Native Windows system audio is not supported in this app');
+    if (result.systemAudioSupport.nativeCapture) throw new Error('The fallback switch did not take effect: the native helper would record instead of desktopCapturer');
     await app.evalTimed(async () => { await window.electronAPI.systemAudio.setEnabled(true); });
     // RecordPage renders record-start before its async microphone enumeration
     // and loadSystemAudioState complete. The toggle is gated by isSupported,
