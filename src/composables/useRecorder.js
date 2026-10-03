@@ -7,6 +7,7 @@ import { isElectron, isCapacitor } from '../utils/platform';
 import * as recordingService from '../services/recordingService';
 import { setRecordPageActive } from '../services/recordingSafetyNet';
 import { captureMessage } from '../boot/sentry';
+import { AUTO_MICROPHONE, chooseAutomaticMicrophone, readMicrophoneChoice, storeMicrophoneChoice, findChosenMicrophone } from '../services/microphoneChoice';
 
 /**
  * Platform-aware recorder composable
@@ -104,6 +105,82 @@ export function useRecorder() {
   const availableMicrophones = ref([]);
   const selectedMicrophoneId = ref('');
   const loadingMicrophones = ref(false);
+  // Desktop: the user's choice — automatic (the microphone the meeting uses,
+  // see microphoneChoice.js) or a device they picked, remembered across
+  // launches — and what automatic means right now. selectedMicrophoneId is
+  // always the concrete device recorded next (or now); the list holds real
+  // devices only, no 'default'/'communications' aliases.
+  const desktopMicrophones = isElectron();
+  const microphoneChoice = ref(desktopMicrophones ? readMicrophoneChoice() : { mode: AUTO_MICROPHONE });
+  const automaticMicrophone = ref(null);
+  const recordingActive = () => !!(recordingStore.isRecording || recordingStore.isPaused);
+
+  // Windows: which app uses which microphone (the system-audio helper). Best
+  // effort and bounded — without it, automatic means the communication device.
+  const readDeviceSessions = async (timeoutMs) => {
+    const read = window.electronAPI?.systemAudio?.deviceSessions;
+    if (typeof read !== 'function') return null;
+    let timer;
+    try {
+      const result = await Promise.race([
+        read(),
+        new Promise(resolve => { timer = setTimeout(() => resolve(null), timeoutMs); })
+      ]);
+      return result?.success ? result.devices : null;
+    } catch (_) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const applyMicrophoneChoice = () => {
+    const chosen = findChosenMicrophone(microphoneChoice.value, availableMicrophones.value);
+    selectedMicrophoneId.value = chosen?.id || automaticMicrophone.value?.deviceId ||
+      availableMicrophones.value[0]?.id || '';
+  };
+
+  const applyDesktopMicrophones = (inputs, sessions) => {
+    availableMicrophones.value = inputs
+      .filter(device => device.deviceId !== 'default' && device.deviceId !== 'communications')
+      .map(device => ({
+        id: device.deviceId,
+        label: device.label || `Microphone ${device.deviceId.slice(0, 8)}...`
+      }));
+    automaticMicrophone.value = chooseAutomaticMicrophone(inputs, sessions,
+      { isVirtual: recordingService.isLikelyVirtualInput });
+    // A running recording keeps its device; the list and the choice apply next time.
+    if (!recordingActive()) applyMicrophoneChoice();
+  };
+
+  // The picker: 'auto' or a device id. Remembered; a running recording keeps its device.
+  const setMicrophoneChoice = (value) => {
+    if (!desktopMicrophones) {
+      selectedMicrophoneId.value = value;
+      return;
+    }
+    const mic = value === AUTO_MICROPHONE ? null : availableMicrophones.value.find(m => m.id === value);
+    const choice = mic ? { mode: 'device', deviceId: mic.id, label: mic.label } : { mode: AUTO_MICROPHONE };
+    microphoneChoice.value = choice;
+    storeMicrophoneChoice(choice);
+    if (!recordingActive()) applyMicrophoneChoice();
+  };
+
+  // Re-read what automatic means (a call started since the page opened). No
+  // getUserMedia: the desktop names its devices without a stream.
+  const refreshAutomaticMicrophone = async (timeoutMs) => {
+    if (!desktopMicrophones || microphoneChoice.value.mode !== AUTO_MICROPHONE || recordingActive()) return;
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    try {
+      const [devices, sessions] = await Promise.all([
+        navigator.mediaDevices.enumerateDevices(),
+        readDeviceSessions(timeoutMs)
+      ]);
+      const inputs = devices.filter(device => device.kind === 'audioinput');
+      if (!inputs.length || !inputs.every(device => device.label) || recordingActive()) return;
+      applyDesktopMicrophones(inputs, sessions);
+    } catch (_) { /* keep the list we have */ }
+  };
 
   // Load available microphones
   const readMicrophones = async () => {
@@ -132,13 +209,17 @@ export function useRecorder() {
       // devices without a stream (the desktop app does). Without names, keep
       // the previous list rather than replace it with placeholders.
       if (!probeError || inputs.every(device => device.label)) {
-        availableMicrophones.value = inputs.map(device => ({
-          id: device.deviceId,
-          label: device.label || `Microphone ${device.deviceId.slice(0, 8)}...`
-        }));
+        if (desktopMicrophones) {
+          applyDesktopMicrophones(inputs, await readDeviceSessions(2000));
+        } else {
+          availableMicrophones.value = inputs.map(device => ({
+            id: device.deviceId,
+            label: device.label || `Microphone ${device.deviceId.slice(0, 8)}...`
+          }));
 
-        if (availableMicrophones.value.length > 0 && !selectedMicrophoneId.value) {
-          selectedMicrophoneId.value = availableMicrophones.value[0].id;
+          if (availableMicrophones.value.length > 0 && !selectedMicrophoneId.value) {
+            selectedMicrophoneId.value = availableMicrophones.value[0].id;
+          }
         }
 
         // SASIG: this runs on mount AND on every `devicechange`, with device
@@ -303,6 +384,13 @@ export function useRecorder() {
   // MSIG: the service auto-switched devices after the selected mic vanished.
   const handleMicAutoSwitched = (data) => {
     micAutoSwitchInfo.value = data || null;
+    // The picker shows the device actually recorded, not the one that vanished.
+    if (data?.deviceId) selectedMicrophoneId.value = data.deviceId;
+  };
+
+  // Back from the meeting app: what automatic means may have changed.
+  const handleWindowFocus = () => {
+    refreshAutomaticMicrophone(2000);
   };
 
   // Minutes limit event handlers
@@ -389,6 +477,13 @@ export function useRecorder() {
 
   // Start recording
   const startRecording = async (deviceId = null, maxRecordingSeconds = null) => {
+    if (!deviceId && desktopMicrophones && !recordingActive()) {
+      // Automatic: the meeting may have started (or moved to another
+      // microphone) since the list was read. A picked device: the last
+      // recording may have ended on an automatic replacement.
+      await refreshAutomaticMicrophone(1500);
+      applyMicrophoneChoice();
+    }
     const micId = deviceId || selectedMicrophoneId.value;
 
     // Reset limit tracking state
@@ -543,6 +638,8 @@ export function useRecorder() {
     const result = await recordingService.switchMicrophoneStream(newDeviceId);
     if (result.success) {
       selectedMicrophoneId.value = newDeviceId;
+      // A deliberate pick: remembered for the next recording too.
+      if (desktopMicrophones) setMicrophoneChoice(newDeviceId);
     }
     return result;
   };
@@ -591,12 +688,16 @@ export function useRecorder() {
     // Restore system audio toggle state from recording service when recording is active
     if (state.isActive || state.isRecording || state.isPaused) {
       systemAudioEnabled.value = state.systemAudioActive;
+      // ...and the microphone actually being recorded (the picker fell back to
+      // the first entry when the page came back mid-recording).
+      if (state.micDeviceId) selectedMicrophoneId.value = state.micDeviceId;
     }
 
     // Set up device change listener
     if (navigator.mediaDevices) {
       navigator.mediaDevices.addEventListener('devicechange', loadMicrophones);
     }
+    if (desktopMicrophones) window.addEventListener('focus', handleWindowFocus);
 
     // System suspend/resume handling moved to recordingSafetyNet (app-level,
     // survives navigation). Registering page-scoped copies here — and tearing
@@ -642,6 +743,7 @@ export function useRecorder() {
     if (navigator.mediaDevices) {
       navigator.mediaDevices.removeEventListener('devicechange', loadMicrophones);
     }
+    if (desktopMicrophones) window.removeEventListener('focus', handleWindowFocus);
 
     // NB: system suspend/resume listeners are owned by recordingSafetyNet and
     // must NOT be removed here — system.removeAllListeners() would strip the
@@ -659,6 +761,9 @@ export function useRecorder() {
     audioLevel,
     availableMicrophones,
     selectedMicrophoneId,
+    microphoneChoice,
+    automaticMicrophone,
+    setMicrophoneChoice,
     loadingMicrophones,
     systemAudioEnabled,
     systemAudioPermissionStatus: permissionStatus,

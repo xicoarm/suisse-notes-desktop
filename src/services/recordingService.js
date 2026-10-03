@@ -849,6 +849,9 @@ export function getState() {
     audioLevel: currentAudioLevel,
     silenceWarning: silenceError,
     hasStream: stream !== null,
+    // The physical microphone being recorded (null through an alias), so a
+    // page that comes back mid-recording shows the right device.
+    micDeviceId: concreteMicrophoneDeviceId(stream),
     systemAudioActive,
     micMuted,
     nativeSources: nativeArchive?.getState() || null,

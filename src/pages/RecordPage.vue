@@ -44,8 +44,8 @@
               <span>{{ $t('microphone') }}</span>
             </div>
             <q-select
-              v-model="selectedMicrophoneId"
-              :options="availableMicrophones"
+              :model-value="microphonePickerValue"
+              :options="microphoneOptions"
               option-value="id"
               option-label="label"
               emit-value
@@ -55,9 +55,10 @@
               :loading="loadingMicrophones"
               class="mic-select"
               popup-content-class="mic-dropdown"
+              @update:model-value="setMicrophoneChoice"
             >
-              <template #selected-item="scope">
-                <span class="mic-selected-text">{{ scope.opt?.label || $t('selectMicrophone') }}</span>
+              <template #selected-item>
+                <span class="mic-selected-text">{{ selectedMicrophoneLabel || $t('selectMicrophone') }}</span>
               </template>
               <template #append>
                 <q-btn
@@ -74,9 +75,15 @@
                 </q-btn>
               </template>
             </q-select>
+            <div
+              v-if="automaticMicrophoneHint"
+              class="mic-auto-hint"
+            >
+              {{ automaticMicrophoneHint }}
+            </div>
           </div>
 
-          <!-- System Audio Toggle - macOS 14.2+ via AudioTee -->
+          <!-- System Audio Toggle - macOS 14.2+ via AudioTee, Windows via the native helper -->
           <div
             v-if="isElectron() && isSystemAudioSupported"
             class="system-audio-section"
@@ -900,6 +907,9 @@ const {
   audioLevel,
   availableMicrophones,
   selectedMicrophoneId,
+  microphoneChoice,
+  automaticMicrophone,
+  setMicrophoneChoice,
   loadingMicrophones,
   systemAudioEnabled,
   systemAudioPermissionStatus,
@@ -945,6 +955,36 @@ const {
   toggleMicMute,
   switchMicrophoneDuringRecording
 } = useRecorder();
+
+// Microphone picker before a recording. Desktop: "Automatic" (the microphone
+// the meeting uses) first, then the real devices; the field always names the
+// device that will be recorded.
+// A remembered device that is not connected right now: automatic stands in
+// (and says so) until it is back.
+const chosenMicrophoneConnected = computed(() => {
+  const choice = microphoneChoice.value;
+  return choice?.mode === 'device' && availableMicrophones.value.some(mic =>
+    mic.id === choice.deviceId || (choice.label && mic.label === choice.label));
+});
+const microphonePickerValue = computed(() =>
+  isElectron() && !chosenMicrophoneConnected.value ? 'auto' : selectedMicrophoneId.value);
+const microphoneOptions = computed(() => {
+  if (!isElectron()) return availableMicrophones.value;
+  const auto = automaticMicrophone.value;
+  return [
+    { id: 'auto', label: auto ? `${t('micAutomatic')} – ${auto.label}` : t('micAutomatic') },
+    ...availableMicrophones.value
+  ];
+});
+const selectedMicrophoneLabel = computed(() =>
+  availableMicrophones.value.find(mic => mic.id === selectedMicrophoneId.value)?.label || '');
+const automaticMicrophoneHint = computed(() => {
+  const auto = automaticMicrophone.value;
+  if (!isElectron() || microphonePickerValue.value !== 'auto' || !auto) return '';
+  if (auto.reason === 'meeting') return t('micAutoMeeting', { app: auto.app });
+  if (auto.reason === 'communications') return t('micAutoCommunications');
+  return t('micAutoDefault');
+});
 
 // Mid-recording microphone switching
 const switchingMic = ref(false);
@@ -2468,6 +2508,12 @@ const removeSessionWord = (word) => {
   max-width: 300px;
   display: inline-block;
   font-size: 13px;
+}
+
+.mic-auto-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #64748b;
 }
 
 .system-audio-section {
