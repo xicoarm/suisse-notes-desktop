@@ -20,10 +20,9 @@ import { defineStore } from 'pinia';
 import { isElectron, isCapacitor } from '../utils/platform';
 import { getApiUrlSync, fetchWithTimeout, readJson, parseJsonSafe } from '../services/api';
 import { useAuthStore } from './auth';
-
-// Lazy accessor - resolved on first use so store definition order can't bite.
-let useRecordingStoreRef = null;
-import('./recording').then((m) => { useRecordingStoreRef = m.useRecordingStore; }).catch(() => {});
+// Static import: until 3.9.40 this was a lazy import, and until it resolved
+// the "hold the prompt while recording" gate was skipped.
+import { useRecordingStore } from './recording';
 
 // Capacitor Preferences (lazy loaded)
 let Preferences = null;
@@ -68,6 +67,18 @@ export function buildPrepFields({ contextText, templateId, prefill, files, secti
   return fields;
 }
 
+/**
+ * True while the user's own recording or file upload runs, or its result /
+ * error is still showing on the record or upload page. A Suisse Meets Pro
+ * prompt waits meanwhile: phone recordings get context and template before
+ * the start, never after the stop, so a prompt there reads as if it were
+ * about the phone recording.
+ */
+export function isOwnRecordingFlowOnScreen({ isBlocking, phase, routeName }) {
+  return !!isBlocking ||
+    (['uploaded', 'error'].includes(phase) && ['record', 'upload'].includes(routeName));
+}
+
 export const useMeetingPrepStore = defineStore('meeting-prep', {
   state: () => ({
     // --- per-session preparation (reset after each upload start) ---
@@ -100,6 +111,10 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
     // fileName -> pending promise: a re-synced file that minted a NEW recordId
     // reuses the already-open prompt instead of double-prompting.
     _deviceSyncPromiseByFile: {},
+    // True while the user's own recording or file upload, or its result
+    // screen, is showing (set by DeviceSyncPrepDialog from route + phase).
+    // Device prompts wait meanwhile.
+    phoneFlowActive: false,
 
     loaded: false,
     _loadedForUserId: null,
@@ -484,13 +499,22 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
       return this._deviceSyncInFlight.includes(recordId);
     },
 
+    /** Called by DeviceSyncPrepDialog when the user's own flow starts or ends. */
+    setPhoneFlowActive(active) {
+      this.phoneFlowActive = !!active;
+      if (!this.phoneFlowActive) this._maybeShowNextPrompt();
+    },
+
     _maybeShowNextPrompt() {
       if (this.deviceSyncPrompt || this._deviceSyncQueue.length === 0) return;
-      // Never pop a blocking modal while the user is actively recording in-app;
-      // the queue drains when the recording ends (dialog watches isBlocking).
+      // Never pop a device prompt into the user's own recording or upload:
+      // not while it runs and not over its result. Shown there, the prompt read
+      // as if it were about the recording just made (03.10.2026: a stranded
+      // Pro file from 22.09. popped up the moment a phone upload finished).
+      // The queue drains once the user has left that flow.
+      if (this.phoneFlowActive) return;
       try {
-        const recordingStore = useRecordingStoreRef ? useRecordingStoreRef() : null;
-        if (recordingStore && recordingStore.isBlocking) return;
+        if (useRecordingStore().isBlocking) return;
       } catch { /* recording store unavailable - show the prompt */ }
       const next = this._deviceSyncQueue.shift();
       this.deviceSyncPrompt = next.info;

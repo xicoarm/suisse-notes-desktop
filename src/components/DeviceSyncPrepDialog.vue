@@ -8,14 +8,19 @@
       <q-card-section class="dialog-header">
         <div class="dialog-title">
           <q-icon
-            name="auto_awesome"
+            name="bluetooth"
             size="20px"
             color="primary"
           />
           {{ $t('deviceSyncPrepTitle') }}
         </div>
-        <div class="dialog-subtitle">
-          {{ $t('deviceSyncPrepMessage', { title: prepStore.deviceSyncPrompt?.title || prepStore.deviceSyncPrompt?.fileName || '' }) }}
+        <div
+          class="dialog-subtitle"
+          data-test="prep-device-recording"
+        >
+          {{ promptDuration
+            ? $t('deviceSyncPrepMessage', { date: promptDate, duration: promptDuration })
+            : $t('deviceSyncPrepMessageNoDuration', { date: promptDate }) }}
         </div>
       </q-card-section>
 
@@ -184,9 +189,11 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useQuasar } from 'quasar';
 import { useI18n } from 'vue-i18n';
+import { useRoute } from 'vue-router';
 import {
   useMeetingPrepStore,
   buildPrepFields,
+  isOwnRecordingFlowOnScreen,
   MAX_CONTEXT_FILES,
   CONTEXT_FILE_EXTENSIONS
 } from '../stores/meeting-prep';
@@ -195,28 +202,49 @@ import { useRecordingStore } from '../stores/recording';
 
 const $q = useQuasar();
 const { t } = useI18n();
+const route = useRoute();
 const prepStore = useMeetingPrepStore();
 const recordingStore = useRecordingStore();
+const historyStore = useRecordingsHistoryStore();
 
-// Prompts are held while the user records in-app - drain when it ends.
-watch(
-  () => recordingStore.isBlocking,
-  (blocking) => {
-    if (!blocking) prepStore._maybeShowNextPrompt();
+// A device prompt waits while the user's own recording or upload, or its
+// result, is on screen (isOwnRecordingFlowOnScreen explains why).
+const phoneFlowActive = computed(() => isOwnRecordingFlowOnScreen({
+  isBlocking: recordingStore.isBlocking,
+  phase: recordingStore.phase,
+  routeName: route.name
+}));
+watch(phoneFlowActive, (active) => prepStore.setPhoneFlowActive(active), { immediate: true });
+
+// What the prompt is about: the device recording's date and length, from its
+// history record (every caller registers the record before it asks).
+const promptRecord = computed(() => {
+  const id = prepStore.deviceSyncPrompt?.recordId;
+  return id ? historyStore.recordings.find((r) => r.id === id) || null : null;
+});
+const promptDate = computed(() => {
+  const createdAt = promptRecord.value?.createdAt;
+  if (createdAt && !isNaN(new Date(createdAt).getTime())) {
+    return historyStore.formatDateData(createdAt).formatted;
   }
-);
+  return prepStore.deviceSyncPrompt?.title || prepStore.deviceSyncPrompt?.fileName || '';
+});
+const promptDuration = computed(() => {
+  const seconds = Math.round(Number(promptRecord.value?.duration) || 0);
+  return seconds > 0 ? historyStore.formatDuration(seconds) : '';
+});
 
 // --- Stranded-record scanner -------------------------------------------------
 // If the app was killed while a prompt was waiting, device records stay at
 // uploadStatus 'pending_prep' (excluded from every upload path). Re-prompt for
-// them here. Interval-based (not a watcher) so we never race the LIVE sync
+// them here (the prompt itself still waits while the user's own recording
+// flow is on screen, see phoneFlowActive). Interval-based (not a watcher) so we never race the LIVE sync
 // flow, which registers its recordId as in-flight in the same tick it flips
 // the status.
 let strandedTimer = null;
 
 const scanStrandedRecords = () => {
   try {
-    const historyStore = useRecordingsHistoryStore();
     for (const rec of historyStore.recordings) {
       if (rec.uploadStatus !== 'pending_prep') continue;
       if (prepStore.isDeviceSyncPrepPending(rec.id)) continue;
