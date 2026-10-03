@@ -14,8 +14,11 @@ const durableFiles = require('./durable-files');
 // original requestStartedAt so reservation/spawn latency stays in elapsedMs.
 // All observations approximate source placement; none identifies first sample
 // capture time. onClosed runs only after disk and evidence completion barriers.
+// requestStop lets a helper end itself (the Windows helper finishes its last
+// packet on a "stop" line); signals follow only if it has not closed in time.
 function createPcmCapture({ process: proc, filePath, offsetMs = 0, onData = () => {}, onFailure = () => {}, onClosed = () => {}, startupTimeoutMs = 10000, killTimeoutMs = 3000,
-  evidence = null, now = () => performance.now(), requestStartedAt = now(), activeOffsetMs = null }) {
+  evidence = null, now = () => performance.now(), requestStartedAt = now(), activeOffsetMs = null,
+  onEvent = () => {}, requestStop = null, requestStopTimeoutMs = 2000 }) {
   let paused = false;
   let stopping = false;
   let closed = false;
@@ -83,7 +86,9 @@ function createPcmCapture({ process: proc, filePath, offsetMs = 0, onData = () =
     file = handle;
     const size = (await file.stat()).size;
     const targetBytes = Math.max(0, Math.floor(offsetMs)) * 96; // 48kHz mono s16le
-    if (targetBytes > size) await file.truncate(targetBytes); // sparse zero padding
+    // Zero padding (sparse on macOS). By path: Windows refuses ftruncate on an
+    // append-only descriptor (EPERM), which failed every Windows start.
+    if (targetBytes > size) await fs.promises.truncate(filePath, targetBytes);
     return file;
   });
   // Attach a rejection observer immediately, even if the child never sends PCM.
@@ -142,6 +147,7 @@ function createPcmCapture({ process: proc, filePath, offsetMs = 0, onData = () =
       stderr = stderr.slice(newline + 1);
       try {
         const event = JSON.parse(line);
+        try { onEvent(event); } catch (_) { /* diagnostics never break capture */ }
         if (event.message_type === 'stream_start') {
           Promise.all([fileReady, observe('stream-start')]).then(() => {
             if (!failure) startResult({ success: true, filePath });
@@ -196,6 +202,12 @@ function createPcmCapture({ process: proc, filePath, offsetMs = 0, onData = () =
     clearTimeout(startupTimer);
     startResult({ success: false, error: 'System audio stopped before startup completed' });
     stopPromise = Promise.resolve().then(async () => {
+      if (!closed && requestStop) {
+        let graceTimer;
+        try { requestStop(); } catch (_) { /* the signals below still end it */ }
+        await Promise.race([childClosed, new Promise(resolve => { graceTimer = setTimeout(resolve, requestStopTimeoutMs); })]);
+        clearTimeout(graceTimer);
+      }
       if (!closed) {
         // killed only means a signal was SENT. It does not mean the process
         // exited. Always escalate if close has not arrived by the deadline.

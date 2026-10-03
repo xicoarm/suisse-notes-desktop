@@ -179,12 +179,15 @@ function handleCaptureWarning(data) {
   } else if (data.kind === 'system-audio-silent') {
     // macOS: AudioTee is running but delivering digital silence — almost always
     // because the meeting app renders to a device that is not the default
-    // output. Persistent (timeout 0): the whole point is that this failure was
+    // output. Windows: the helper hears every output device, so no app is
+    // playing at all (nobody else speaking, or the meeting muted).
+    // Persistent (timeout 0): the whole point is that this failure was
     // previously invisible for an entire meeting.
     recordingService.setSystemAudioActive(false);
     Notify.create({
       type: 'warning',
-      message: t('captureWarningSystemAudioSilent', { seconds: data.silentSeconds ?? 90 }),
+      message: t(data.platform === 'win32' ? 'captureWarningSystemAudioSilentWindows' : 'captureWarningSystemAudioSilent',
+        { seconds: data.silentSeconds ?? 90 }),
       icon: 'volume_off',
       timeout: 0,
       group: 'system-audio-silent',

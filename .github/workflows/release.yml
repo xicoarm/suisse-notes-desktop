@@ -96,6 +96,11 @@ jobs:
           "CODE_SIGN_TOOL_PATH=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "CodeSignTool $version ready at $dest"
 
+      # Rebuild the system-audio helper from its source in this commit, with the
+      # in-box .NET Framework compiler, so the shipped exe always matches it.
+      - name: Build the Windows system-audio helper
+        run: node scripts/build-sysloopback.js
+
       - name: Build and sign Electron app
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}

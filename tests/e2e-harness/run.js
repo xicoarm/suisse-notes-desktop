@@ -560,18 +560,23 @@ async function s7Endurance() {
  * makes the oracle clean — any tone in the output can only have arrived through
  * the system-audio capture.
  *
+ * Since 2026-10-03 Windows records through the native helper (every app except
+ * ours, on every output device), so both phases must end up in the recording:
  *   Phase A: tone to the default COMMUNICATION endpoint (headset). This is where
- *            Teams/Zoom render. The loopback must MISS it, and the app must say so.
- *   Phase B: tone to the default MULTIMEDIA endpoint. The loopback must CATCH it,
- *            and the warning must clear.
+ *            Teams/Zoom render, and what Chromium's loopback used to miss. No
+ *            output-device warning, no silence warning, the tone in the file.
+ *   Phase B: tone to the default MULTIMEDIA endpoint. Also in the file.
  *
  * Phase B's endpoint is typically muted at 0% on this machine — irrelevant, and
  * useful: WASAPI loopback taps the mix before endpoint volume, so phase B cannot
  * reach the microphone acoustically. Anything found at PHASE_B_FREQ is proof of
  * a genuine digital capture, not of a speaker bleeding into the mic.
  */
-const PHASE_A_FREQ = 1000;  // -> an endpoint the loopback CANNOT hear
-const PHASE_B_FREQ = 1500;  // -> the multimedia default (the loopback MUST hear it)
+const PHASE_A_FREQ = 1000;  // -> the communication endpoint (where meetings play)
+const PHASE_B_FREQ = 1500;  // -> the multimedia default
+// Quiet (-40 dBFS): loopback taps the mix before the endpoint volume, so the
+// capture needs no loudness, and nobody near the headset or speakers is startled.
+const TONE_GAIN = 0.01;
 
 /**
  * Read the machine's real endpoint layout via the native helper. The scenario
@@ -602,11 +607,11 @@ function readEndpoints() {
   return { devices, defaults };
 }
 
-function playTone({ device, freq, seconds }) {
+function playTone({ device, freq, seconds, gain }) {
   const electronExe = path.join(REPO_ROOT_E2E, 'node_modules', 'electron', 'dist', 'electron.exe');
   const child = spawn(electronExe, [
     path.join(__dirname, 'tone-player'),
-    '--device', device, '--freq', String(freq), '--seconds', String(seconds),
+    '--device', device, '--freq', String(freq), '--seconds', String(seconds), ...(gain ? ['--gain', String(gain)] : []),
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
   const out = [];
   child.stdout.on('data', d => out.push(d.toString()));
@@ -675,26 +680,26 @@ async function s8SysAudio() {
     console.log('s8-sysaudio: sysloopback helper unavailable — cannot read endpoint layout');
     return false;
   }
-  const mmDefault = eps.defaults.multimedia;      // what the loopback binds to
+  const mmDefault = eps.defaults.multimedia;      // what Chromium's loopback binds to
   const commsDefault = eps.defaults.communications;
-  const mismatchExpected = Boolean(mmDefault && commsDefault && mmDefault !== commsDefault);
-  // Phase A needs an endpoint the loopback CANNOT hear: any active endpoint that
+  const split = Boolean(mmDefault && commsDefault && mmDefault !== commsDefault);
+  // Phase A plays where Chromium's loopback CANNOT hear: any active endpoint that
   // is not the multimedia default. Prefer the comms default (the real incident).
-  const deafTarget = (commsDefault && commsDefault !== mmDefault)
+  const headsetTarget = (commsDefault && commsDefault !== mmDefault)
     ? commsDefault
     : eps.devices.find(d => d !== mmDefault);
 
-  console.log(`s8-sysaudio: multimedia=${mmDefault} | communications=${commsDefault} | mismatch=${mismatchExpected}`);
+  console.log(`s8-sysaudio: multimedia=${mmDefault} | communications=${commsDefault} | split=${split}`);
 
-  // Probe BEFORE launching the app: is the endpoint the loopback will bind to
-  // even alive? Decides whether phase B can prove anything.
+  // Probe BEFORE launching the app: is the multimedia default even alive?
+  // Decides whether phase B can prove anything.
   const mmAlive = await endpointCarriesAudio(mmDefault);
   console.log(`s8-sysaudio: multimedia endpoint carries audio: ${mmAlive === null ? 'unknown' : mmAlive.toFixed(1) + 'dB'}`);
 
-  return withApp('s8-sysaudio', null, { cdpPort: 9347 }, async (app, mock) => {
+  return withApp('s8-sysaudio', null, { cdpPort: 9347 }, async (app) => {
     const problems = [];
     const notes = [];
-    notes.push(`endpoints: multimedia="${mmDefault}" communications="${commsDefault}" mismatch=${mismatchExpected}`);
+    notes.push(`endpoints: multimedia="${mmDefault}" communications="${commsDefault}" split=${split}`);
 
     // The app must read back the persisted preference — the getter used to be
     // hard-coded to `false`, so the toggle silently reset OFF every launch.
@@ -705,6 +710,15 @@ async function s8SysAudio() {
     if (persisted !== true) problems.push(`systemAudio.getEnabled() returned ${persisted} right after setEnabled(true) — the config getter is still lying`);
     notes.push(`config getEnabled after setEnabled(true): ${persisted}`);
 
+    // 2026-10-03: the native helper records every app except ours on every
+    // output device. Without it the app silently falls back to Chromium's
+    // default-device loopback, so the scenario needs to know which one runs.
+    const support = await app.evalTimed(() => window.electronAPI.systemAudio.isSupported());
+    notes.push(`system audio support: ${JSON.stringify(support)}`);
+    if (!support?.nativeCapture) {
+      return { pass: false, problems: ['The native Windows helper is not available — the app would fall back to the default output device only'], notes };
+    }
+
     // "System audio will be captured" only renders while the toggle is truly on,
     // so it is the honest signal — a synthetic el.click() can leave the DOM
     // attribute stale without Quasar ever having flipped the model.
@@ -712,6 +726,7 @@ async function s8SysAudio() {
       toggleOn: !!document.querySelector('.system-audio-active'),
       routing: document.querySelector('[data-test=system-audio-routing-warning]')?.textContent?.trim() ?? null,
       silent: document.querySelector('[data-test=system-audio-silent-warning]')?.textContent?.trim() ?? null,
+      toasts: [...document.querySelectorAll('.q-notification')].map(n => n.textContent.trim()).join(' | '),
     }));
 
     // Turn the real toggle on the way a user does — a real mouse event, because
@@ -730,61 +745,40 @@ async function s8SysAudio() {
       // run proves nothing, so fail loudly instead of reporting phantom defects.
       return { pass: false, problems: ['System-audio toggle did not turn on — the rest of the scenario would be meaningless'], notes };
     }
-
-    // The warning must track reality in BOTH directions: shown when the machine
-    // really has a split, and — just as important — absent when it does not.
-    if (mismatchExpected && !beforeStart.routing) {
-      problems.push(`Endpoint split exists (multimedia="${mmDefault}" vs communications="${commsDefault}") but no warning was shown`);
-    } else if (!mismatchExpected && beforeStart.routing) {
-      problems.push(`FALSE ALARM: endpoint warning shown although both default roles are "${mmDefault}"`);
-    } else {
-      notes.push(mismatchExpected
-        ? `routing warning correctly shown: ${beforeStart.routing.slice(0, 140)}`
-        : 'no routing warning, and none expected (both default roles agree)');
-    }
+    // Nothing for the user to fix any more: the old "change your Windows output
+    // device" warning must stay away even with a split.
+    if (beforeStart.routing) problems.push(`Output-device warning shown although the helper records every device: ${beforeStart.routing.slice(0, 140)}`);
+    else notes.push(split ? 'no output-device warning despite the split (the helper hears every device)' : 'no output-device warning');
 
     await app.startRecording();
 
-    // ---- Phase A: play where the loopback CANNOT hear ------------------------
-    // This reproduces the incident: audio exists, the user hears it, the capture
-    // is live — and records nothing.
-    let silentSeenAfterS = null;
-    if (!deafTarget) {
-      notes.push('SKIPPED phase A: only one active render endpoint, so no endpoint is out of the loopback\'s reach');
+    // ---- Phase A: play where the meeting plays (the headset) ----------------
+    // Before 2026-10-03 the capture was live and recorded nothing here. Long
+    // enough (100 s) for the 90 s silence watchdog to fire if nothing arrived.
+    if (!headsetTarget) {
+      notes.push('SKIPPED phase A: only one active render endpoint');
     } else {
-      const toneA = playTone({ device: matchToken(deafTarget), freq: PHASE_A_FREQ, seconds: 130 });
-      for (let t = 0; t < 130; t += 5) {
+      const toneA = playTone({ device: matchToken(headsetTarget), freq: PHASE_A_FREQ, seconds: 100, gain: TONE_GAIN });
+      let silentAt = null;
+      for (let t = 0; t < 100; t += 5) {
         await sleep(5000);
         const u = await ui();
-        if (u.silent && silentSeenAfterS === null) { silentSeenAfterS = t + 5; break; }
+        if (silentAt === null && (u.silent || /system audio|systemaudio|audio système|audio di sistema/i.test(u.toasts) && /silen|stille|still/i.test(u.toasts))) silentAt = t + 5;
       }
-      toneA.stop();
       await toneA.done;
-      notes.push(`tone-player A -> "${deafTarget}": ${toneA.log.join('').trim()}`);
-
-      if (silentSeenAfterS === null) {
-        problems.push(`Silence watchdog never fired while the loopback listened to "${mmDefault}" and the audio played to "${deafTarget}" for >2 min`);
-      } else {
-        notes.push(`silence warning appeared after ~${silentSeenAfterS}s`);
-        if (silentSeenAfterS < 85) problems.push(`Silence warning fired after only ${silentSeenAfterS}s (threshold is 90s) — too trigger-happy`);
-      }
+      notes.push(`tone-player A -> "${headsetTarget}": ${toneA.log.join('').trim()}`);
+      if (silentAt !== null) problems.push(`A silence warning appeared after ~${silentAt}s although the meeting audio played on "${headsetTarget}"`);
+      else notes.push('no silence warning while the audio played on the headset endpoint');
     }
 
-    // ---- Phase B: play where the loopback actually listens -------------------
+    // ---- Phase B: play on the default output too ----------------------------
     let phaseBRan = false;
     if (mmAlive === null || mmAlive < -70) {
       notes.push(`SKIPPED phase B: the multimedia default "${mmDefault}" carries no capturable audio ` +
-                 `(native probe ${mmAlive === null ? 'unavailable' : mmAlive.toFixed(1) + 'dB'}) — a powered-off or ` +
-                 'sleeping Bluetooth endpoint cannot be captured by ANY method, so "the warning clears when audio ' +
-                 'arrives" is not testable in this audio configuration. Covered by the SASIG unit tests. ' +
-                 'To test it live, make a wired/active endpoint the Windows default output.');
+                 `(native probe ${mmAlive === null ? 'unavailable' : mmAlive.toFixed(1) + 'dB'}).`);
     } else {
       phaseBRan = true;
-      const toneB = playTone({ device: matchToken(mmDefault), freq: PHASE_B_FREQ, seconds: 45 });
-      await sleep(20_000);
-      const during = await ui();
-      if (during.silent) problems.push('Silence warning did NOT clear after real system audio arrived');
-      else notes.push('silence warning cleared once system audio arrived');
+      const toneB = playTone({ device: matchToken(mmDefault), freq: PHASE_B_FREQ, seconds: 30, gain: TONE_GAIN });
       await toneB.done;
       notes.push(`tone-player B: ${toneB.log.join('').trim()}`);
     }
@@ -799,13 +793,13 @@ async function s8SysAudio() {
     const pcm = decodeToPcm(out);
     const aDb = toneLevelDb(pcm, PHASE_A_FREQ);
     const bDb = toneLevelDb(pcm, PHASE_B_FREQ);
-    notes.push(`output ${(pcm.length / VSR).toFixed(1)}s | ${PHASE_A_FREQ}Hz (comms endpoint) ${aDb.toFixed(1)}dB | ${PHASE_B_FREQ}Hz (default endpoint) ${bDb.toFixed(1)}dB`);
+    notes.push(`output ${(pcm.length / VSR).toFixed(1)}s | ${PHASE_A_FREQ}Hz (headset endpoint) ${aDb.toFixed(1)}dB | ${PHASE_B_FREQ}Hz (default endpoint) ${bDb.toFixed(1)}dB`);
 
-    if (phaseBRan && bDb < -60) {
-      problems.push(`System audio played to the multimedia default "${mmDefault}" was not captured (${PHASE_B_FREQ}Hz at ${bDb.toFixed(1)}dB) — the capture path itself is broken`);
+    if (headsetTarget && aDb < -60) {
+      problems.push(`Audio played on "${headsetTarget}" (where meetings play) is missing from the recording (${PHASE_A_FREQ}Hz at ${aDb.toFixed(1)}dB)`);
     }
-    if (deafTarget && aDb > bDb - 20) {
-      notes.push(`NOTE: ${PHASE_A_FREQ}Hz is only ${(bDb - aDb).toFixed(1)}dB below ${PHASE_B_FREQ}Hz — most likely acoustic leakage into the room mic rather than loopback capture`);
+    if (phaseBRan && bDb < -60) {
+      problems.push(`Audio played on the default output "${mmDefault}" is missing from the recording (${PHASE_B_FREQ}Hz at ${bDb.toFixed(1)}dB)`);
     }
 
     return { pass: problems.length === 0, problems, notes };
