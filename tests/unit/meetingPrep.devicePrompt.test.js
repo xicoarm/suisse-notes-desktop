@@ -21,9 +21,16 @@ describe('isOwnRecordingFlowOnScreen', () => {
     }
   });
 
+  it('covers a recording start in progress, while the phase is still idle', () => {
+    expect(isOwnRecordingFlowOnScreen({ isBlocking: false, startRequested: true, phase: 'idle', routeName: 'record' })).toBe(true);
+  });
+
   it('covers the result and error screens only where they are shown', () => {
     expect(isOwnRecordingFlowOnScreen({ isBlocking: false, phase: 'uploaded', routeName: 'record' })).toBe(true);
-    expect(isOwnRecordingFlowOnScreen({ isBlocking: false, phase: 'error', routeName: 'upload' })).toBe(true);
+    expect(isOwnRecordingFlowOnScreen({ isBlocking: false, phase: 'uploaded', routeName: 'upload' })).toBe(true);
+    expect(isOwnRecordingFlowOnScreen({ isBlocking: false, phase: 'error', routeName: 'record' })).toBe(true);
+    // The upload page shows its own errors from local state, never this phase.
+    expect(isOwnRecordingFlowOnScreen({ isBlocking: false, phase: 'error', routeName: 'upload' })).toBe(false);
     // RecordPage resets 'uploaded' only when it mounts again, so the phase can
     // linger while the user is elsewhere - prompts must show there.
     expect(isOwnRecordingFlowOnScreen({ isBlocking: false, phase: 'uploaded', routeName: 'history' })).toBe(false);
@@ -67,6 +74,56 @@ describe('meeting prep store: Suisse Meets Pro prompt', () => {
     useRecordingStore().phase = 'uploading';
     prep.requestDeviceSyncPrep(PROMPT);
     expect(prep.deviceSyncPrompt).toBeNull();
+  });
+
+  it('a recording start in progress holds the prompt until the start is through', () => {
+    const prep = useMeetingPrepStore();
+    const recording = useRecordingStore();
+    recording.startRequested = true;
+    prep.requestDeviceSyncPrep(PROMPT);
+    expect(prep.deviceSyncPrompt).toBeNull();
+    recording.phase = 'recording';
+    recording.startRequested = false;
+    prep._maybeShowNextPrompt();
+    expect(prep.deviceSyncPrompt).toBeNull();
+  });
+
+  it('a run paused for a phone recording keeps "apply to all" for exactly the files it did not reach', async () => {
+    const prep = useMeetingPrepStore();
+    const answer = { contextText: 'Steering committee', templateId: 'tpl-1' };
+    prep.beginDeviceSyncRun();
+    prep.requestDeviceSyncPrep(PROMPT);
+    prep.answerDeviceSyncPrompt(answer, true);
+    prep.pauseDeviceSyncRun(['R2.opus', 'R3.opus']);
+    expect(prep.deviceSyncRunActive).toBe(false);
+
+    // A later run takes the left files without asking again ...
+    prep.beginDeviceSyncRun();
+    await expect(prep.requestDeviceSyncPrep({ recordId: 'pro-2', title: 't', fileName: 'R2.opus' })).resolves.toEqual(answer);
+    expect(prep.deviceSyncPrompt).toBeNull();
+    // ... but a file recorded since asks as usual.
+    prep.requestDeviceSyncPrep({ recordId: 'pro-4', title: 't', fileName: 'R4.opus' });
+    expect(prep.deviceSyncPrompt?.recordId).toBe('pro-4');
+    prep.answerDeviceSyncPrompt(null);
+    prep.endDeviceSyncRun();
+    await expect(prep.requestDeviceSyncPrep({ recordId: 'pro-3', title: 't', fileName: 'R3.opus' })).resolves.toEqual(answer);
+    expect(prep._carriedApplyToAll).toBeNull();
+  });
+
+  it('a paused run without "apply to all" carries nothing; forgetting the device drops a carried answer', () => {
+    const prep = useMeetingPrepStore();
+    prep.beginDeviceSyncRun();
+    prep.pauseDeviceSyncRun(['R2.opus']);
+    expect(prep._carriedApplyToAll).toBeNull();
+
+    prep.beginDeviceSyncRun();
+    prep.requestDeviceSyncPrep(PROMPT);
+    prep.answerDeviceSyncPrompt(null, true);  // "skip" for all
+    prep.pauseDeviceSyncRun(['R2.opus']);
+    expect(prep._carriedApplyToAll).toEqual({ answer: null, files: ['R2.opus'] });
+    prep.clearCarriedApplyToAll();
+    prep.requestDeviceSyncPrep({ recordId: 'pro-2', title: 't', fileName: 'R2.opus' });
+    expect(prep.deviceSyncPrompt?.recordId).toBe('pro-2');
   });
 
   it('shows at once when the user is not in their own recording flow', () => {

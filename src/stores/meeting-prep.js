@@ -68,15 +68,16 @@ export function buildPrepFields({ contextText, templateId, prefill, files, secti
 }
 
 /**
- * True while the user's own recording or file upload runs, or its result /
- * error is still showing on the record or upload page. A Suisse Meets Pro
- * prompt waits meanwhile: phone recordings get context and template before
- * the start, never after the stop, so a prompt there reads as if it were
- * about the phone recording.
+ * True while the user's own recording or file upload starts or runs, or its
+ * result is still showing (record or upload page; a recording error only
+ * shows on the record page). A Suisse Meets Pro prompt waits meanwhile:
+ * phone recordings get context and template before the start, never after
+ * the stop, so a prompt there reads as if it were about the phone recording.
  */
-export function isOwnRecordingFlowOnScreen({ isBlocking, phase, routeName }) {
-  return !!isBlocking ||
-    (['uploaded', 'error'].includes(phase) && ['record', 'upload'].includes(routeName));
+export function isOwnRecordingFlowOnScreen({ isBlocking, startRequested, phase, routeName }) {
+  return !!isBlocking || !!startRequested ||
+    (phase === 'uploaded' && ['record', 'upload'].includes(routeName)) ||
+    (phase === 'error' && routeName === 'record');
 }
 
 export const useMeetingPrepStore = defineStore('meeting-prep', {
@@ -108,6 +109,9 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
     // stale answer would silently apply to unrelated future recordings.
     deviceSyncApplyToAll: undefined,
     deviceSyncRunActive: false,
+    // A run that paused for a phone recording keeps its "apply to all" answer
+    // for exactly the files it had not reached: { answer, files: [fileName] }.
+    _carriedApplyToAll: null,
     // fileName -> pending promise: a re-synced file that minted a NEW recordId
     // reuses the already-open prompt instead of double-prompting.
     _deviceSyncPromiseByFile: {},
@@ -181,6 +185,7 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
         this.askOnDeviceSync = true;
         this.deviceSyncDefaultTemplateId = null;
         this.deviceSyncDefaultContext = '';
+        this._carriedApplyToAll = null;
         this.resetSession();
       }
       this.loaded = true;
@@ -455,6 +460,23 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
     },
 
     /**
+     * An automatic run stopped early because the user started a recording in
+     * the app. An "apply to all" answer given in it still covers the files
+     * the run had not reached - only those - when a later run takes them.
+     */
+    pauseDeviceSyncRun(remainingFileNames = []) {
+      if (this.deviceSyncRunActive && this.deviceSyncApplyToAll !== undefined && remainingFileNames.length > 0) {
+        this._carriedApplyToAll = { answer: this.deviceSyncApplyToAll, files: [...remainingFileNames] };
+      }
+      this.endDeviceSyncRun();
+    },
+
+    /** Drop a carried answer (device forgotten or disconnected, user switch). */
+    clearCarriedApplyToAll() {
+      this._carriedApplyToAll = null;
+    },
+
+    /**
      * Ask the user for prep fields for one device recording. Resolves with the
      * wire fields ({} / null = none) once answered. Resolves immediately when
      * prompting is disabled (defaults are applied automatically) or the user
@@ -464,6 +486,12 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
       if (!this.askOnDeviceSync) {
         const defaults = this.deviceSyncDefaultFields();
         return Promise.resolve(Object.keys(defaults).length > 0 ? defaults : null);
+      }
+      const carried = this._carriedApplyToAll;
+      if (carried && info.fileName && carried.files.includes(info.fileName)) {
+        carried.files = carried.files.filter((f) => f !== info.fileName);
+        if (carried.files.length === 0) this._carriedApplyToAll = null;
+        return Promise.resolve(carried.answer);
       }
       if (this.deviceSyncRunActive && this.deviceSyncApplyToAll !== undefined) {
         return Promise.resolve(this.deviceSyncApplyToAll);
@@ -514,7 +542,8 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
       // The queue drains once the user has left that flow.
       if (this.phoneFlowActive) return;
       try {
-        if (useRecordingStore().isBlocking) return;
+        const recordingStore = useRecordingStore();
+        if (recordingStore.isBlocking || recordingStore.startRequested) return;
       } catch { /* recording store unavailable - show the prompt */ }
       const next = this._deviceSyncQueue.shift();
       this.deviceSyncPrompt = next.info;

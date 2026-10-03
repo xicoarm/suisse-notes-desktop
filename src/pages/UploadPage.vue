@@ -1361,6 +1361,14 @@ const handleBeforeUnload = (event) => {
 
 // Load settings on mount
 onMounted(async () => {
+  // A phone recording's finished upload left behind by the Record page (its
+  // result card was showing when the user switched tabs) - this page never
+  // owns it, its own upload state is local. Reset like RecordPage does on
+  // mount, so nothing keeps treating the phone recording as on screen.
+  if (recordingStore.phase === 'uploaded') {
+    recordingStore.reset();
+  }
+
   await transcriptionStore.loadGlobalSettings();
 
   if (!historyStore.loaded) {

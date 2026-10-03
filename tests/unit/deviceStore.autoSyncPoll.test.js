@@ -35,8 +35,9 @@ const h = vi.hoisted(() => {
   return { recs, historyMock };
 });
 vi.mock('../../src/stores/recordings-history', () => ({ useRecordingsHistoryStore: () => h.historyMock }));
+const prepState = vi.hoisted(() => ({ paused: [] }));
 vi.mock('../../src/stores/meeting-prep', () => ({ useMeetingPrepStore: () => ({
-  async initialize() {}, beginDeviceSyncRun() {}, endDeviceSyncRun() {}, isDeviceSyncPrepPending() { return false; }, requestDeviceSyncPrep() { return Promise.resolve({}); }
+  async initialize() {}, beginDeviceSyncRun() {}, endDeviceSyncRun() {}, pauseDeviceSyncRun(names) { prepState.paused.push(names); }, clearCarriedApplyToAll() {}, isDeviceSyncPrepPending() { return false; }, requestDeviceSyncPrep() { return Promise.resolve({}); }
 }) }));
 const uploadState = vi.hoisted(() => { const s = { calls: [], result: null }; s.fn = (a) => { s.calls.push(a); return Promise.resolve(s.result); }; return s; });
 vi.mock('../../src/services/upload', () => ({ uploadWithVerification: uploadState.fn }));
@@ -218,6 +219,26 @@ describe('device store: no Bluetooth transfer while the user records in the app'
     uploadState.result = { success: true, transcriptionId: 't1', audioFileId: 'a1' };
     ble.downloadCalls.length = 0; ble.listResult = null; ble.listError = null; ble.connectError = null;
     fsState.existing.clear();
+    prepState.paused.length = 0;
+  });
+
+  it('the poll waits while a recording start is in progress (phase still idle)', async () => {
+    const store = useDeviceStore();
+    store.connectionState = 'connected';
+    const recording = useRecordingStore();
+    let listCalls = 0;
+    const getFileList = ble.manager.getFileList;
+    ble.manager.getFileList = async () => { listCalls++; return []; };
+    try {
+      recording.startRequested = true;
+      await store._autoSyncPoll();
+      expect(listCalls).toBe(0);
+      recording.startRequested = false;
+      await store._autoSyncPoll();
+      expect(listCalls).toBe(1);
+    } finally {
+      ble.manager.getFileList = getFileList;
+    }
   });
 
   it('the poll keeps the link alive but neither lists nor syncs during an in-app recording', async () => {
@@ -268,6 +289,8 @@ describe('device store: no Bluetooth transfer while the user records in the app'
     expect(store.syncedFiles).toEqual(['R20260910-090000.opus']);
     expect(store.syncState).toBe('idle');                         // no "complete" for files not synced
     expect(store._filesForAutoSync().map((f) => f.file)).toEqual(['R20260912-150000.opus', 'R20260911-100000.opus']);
+    // An "apply to all" answer of this run stays with exactly these files.
+    expect(prepState.paused).toEqual([['R20260911-100000.opus', 'R20260912-150000.opus']]);
   });
 
   it('a manual "Sync all" is not paused by an in-app recording', async () => {

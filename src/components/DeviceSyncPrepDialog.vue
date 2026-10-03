@@ -211,6 +211,7 @@ const historyStore = useRecordingsHistoryStore();
 // result, is on screen (isOwnRecordingFlowOnScreen explains why).
 const phoneFlowActive = computed(() => isOwnRecordingFlowOnScreen({
   isBlocking: recordingStore.isBlocking,
+  startRequested: recordingStore.startRequested,
   phase: recordingStore.phase,
   routeName: route.name
 }));
