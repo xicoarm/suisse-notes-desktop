@@ -3,6 +3,8 @@ name: Desktop audio reliability
 on:
   pull_request:
     branches: [main]
+  # release.yml runs the same qualification on the tagged source before it builds.
+  workflow_call:
   workflow_dispatch:
     inputs:
       run_endurance:
@@ -185,6 +187,78 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: audio-reliability-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tests/e2e-harness/work/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 1
+
+  # A Teams call, simulated: a Teams stand-in (tests/e2e-harness/teams-sim) plays two
+  # synthetic voices and holds a microphone; the app records with system audio and the
+  # automatic microphone; the verifier proves every sentence of both sides is in the
+  # finished file. Replaces the manual "record a real Teams call" check before releases.
+  teams-call:
+    if: ${{ github.event_name != 'workflow_dispatch' || (!inputs.run_endurance && !inputs.run_failure_diagnostics && !inputs.run_macos_packaged && !inputs.run_capture_clock) }}
+    name: Simulated Teams call / windows-x64
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      CI: 'true'
+      HUSKY: '0'
+      API_BASE_URL: http://127.0.0.1:3000
+      VITE_API_URL: http://127.0.0.1:3000
+      SUISSE_E2E_HOOKS: '1'
+      SUISSE_TEST_NETWORK_ISOLATION: '1'
+      SUISSE_E2E_APP_DIR: dist/electron/UnPackaged
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      SENTRY_AUTH_TOKEN: ''
+      GH_TOKEN: ''
+      GITHUB_TOKEN: ''
+
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install locked dependencies
+        timeout-minutes: 10
+        run: npm ci
+
+      - name: Prepare native FFmpeg and ffprobe
+        timeout-minutes: 2
+        run: node scripts/prepare-ffmpeg.js
+
+      - name: Build an unsigned Electron test bundle
+        id: build
+        timeout-minutes: 10
+        run: npx quasar build -m electron --skip-pkg
+
+      - name: Check the call verifier against known damage
+        timeout-minutes: 5
+        run: node tests/e2e-harness/ci/run-qualification.js teams-call-selftest
+
+      - name: Give the runner a virtual sound card
+        timeout-minutes: 5
+        shell: pwsh
+        run: ./tests/e2e-harness/ci/install-virtual-audio.ps1
+
+      - name: Record a simulated Teams call
+        timeout-minutes: 20
+        run: node tests/e2e-harness/ci/run-qualification.js s20-teams-call
+
+      - name: Preserve the call, profiles, and diagnostics
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: teams-call-${{ github.run_id }}-${{ github.run_attempt }}
           path: tests/e2e-harness/work/
           include-hidden-files: true
           if-no-files-found: warn

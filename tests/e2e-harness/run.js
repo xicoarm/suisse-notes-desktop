@@ -830,6 +830,16 @@ const SCENARIOS = {
   })),
   's16-capture-clock-diagnostic': async () => report('s16-capture-clock-diagnostic', await require('./capture-clock-diagnostic').runCaptureClockDiagnostic()),
   's17-finalizing-view': async () => report('s17-finalizing-view', await require('./finalizing-view-check').runFinalizingViewCheck()),
+  // Simulated Teams call (Teams stand-in + synthetic voices), see teams-call-qualification.js.
+  's20-teams-call': async () => report('s20-teams-call', await require('./teams-call-qualification').runTeamsCall()),
+  's20-teams-call-live': async () => report('s20-teams-call-live', await require('./teams-call-qualification').runTeamsCall({ live: true })),
+  's20-teams-call-control': async () => report('s20-teams-call-control', await require('./teams-call-qualification').runTeamsCallControl()),
+  'teams-call-selftest': async () => report('teams-call-selftest', await require('./teams-call-qualification').runTeamsCallSelftest()),
+  'teams-call-fixtures': async () => {
+    const manifest = require('./lib/teams-call').renderFixtures();
+    console.log(`Rendered ${manifest.utterances.length} sentences, ${manifest.seconds} s -> tests/e2e-harness/fixtures/teams-call`);
+    return true;
+  },
 };
 
 (async () => {

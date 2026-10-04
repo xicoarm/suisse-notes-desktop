@@ -11,13 +11,14 @@ const repository = path.resolve(__dirname, '../../..');
 const work = path.join(repository, 'tests/e2e-harness/work');
 const bundle = path.join(repository, 'dist/electron/UnPackaged');
 const scenario = process.argv[2] || 's11-capture-qualification';
-if (!['s11-capture-qualification', 's12-device-qualification', 's13-coded-endurance', 's15-main-crash-qualification', 's16-capture-clock-diagnostic', 's17-finalizing-view'].includes(scenario)) {
+if (!['s11-capture-qualification', 's12-device-qualification', 's13-coded-endurance', 's15-main-crash-qualification', 's16-capture-clock-diagnostic', 's17-finalizing-view', 's20-teams-call', 'teams-call-selftest'].includes(scenario)) {
   throw new Error('Unknown hosted qualification scenario');
 }
 const diagnostics = path.join(work, 'ci', scenario);
 const endurance = scenario === 's13-coded-endurance';
 const mainCrash = scenario === 's15-main-crash-qualification';
 const captureClock = scenario === 's16-capture-clock-diagnostic';
+const teamsCall = scenario === 's20-teams-call';
 // Hosted endurance captures 18,300 s (5h05) or 18,900 s (5h15). The supervisor
 // budget adds 40 minutes for startup, reference generation, finalization (about
 // 18 minutes on Intel runners), local upload and full decoded verification, and
@@ -96,6 +97,7 @@ function stopTree(pid) {
 async function main() {
   if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('This entry point is restricted to GitHub Actions; use the ordinary local harness instead');
   if (!['win32', 'darwin'].includes(process.platform)) throw new Error('Qualification requires a native Windows or macOS runner');
+  if (teamsCall && process.platform !== 'win32') throw new Error('The simulated Teams call is Windows-only');
   if (process.env.SUISSE_E2E_HOOKS !== '1' || process.env.SUISSE_TEST_NETWORK_ISOLATION !== '1') {
     throw new Error('Qualification requires explicit E2E and network-isolation flags');
   }
@@ -116,7 +118,9 @@ async function main() {
     platform: process.platform, architecture: process.arch, osRelease: os.release(),
     node: process.version, electron: require('electron/package.json').version,
     runnerImage: process.env.ImageOS || null, runnerImageVersion: process.env.ImageVersion || null,
-    scope: 'Generated microphone input through native Electron; local mock upload only. Hardware capture, AudioTee, TCC, and Bluetooth/USB are not qualified.',
+    scope: teamsCall
+      ? 'Simulated Teams call: a Teams stand-in plays two synthetic voices on a virtual Windows output and holds a virtual microphone; the app records with native system audio and the automatic microphone (synthetic voice); local mock upload only. Real Teams, physical headsets and Bluetooth are not qualified.'
+      : 'Generated microphone input through native Electron; local mock upload only. Hardware capture, AudioTee, TCC, and Bluetooth/USB are not qualified.',
     ...(captureClock ? { diagnosticOnly: true, secondsPerCase: 180, processingModes: ['default', 'disabled'],
       bufferTraceEnabled: process.env.SUISSE_CAPTURE_CLOCK_TRACE === '1',
       successMeaning: 'Measurements completed under valid controls; does not clear existing endurance or capture failures.' } : {}),

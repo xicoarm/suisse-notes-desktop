@@ -1,0 +1,145 @@
+{
+  "description": "Synthetic Teams call, German, three Windows OneCore voices. Rendered by `node tests/e2e-harness/run.js teams-call-fixtures`.",
+  "renderedAt": "2026-10-04T21:29:28.453Z",
+  "voices": {
+    "local": "Stefan",
+    "remote1": "Katja",
+    "remote2": "Hedda"
+  },
+  "rate": 24000,
+  "seconds": 56.7,
+  "files": {
+    "local": {
+      "file": "local.flac",
+      "sha256": "024e3eb464b3963dcb4f8455635b86ff2915efb9508b74794fbe964171adae7b"
+    },
+    "remote": {
+      "file": "remote.flac",
+      "sha256": "b82117b3ae57ffdbf3b00fac820a59cff3c88f573d740e986fc5f4c971bb9c81"
+    }
+  },
+  "utterances": [
+    {
+      "id": "u1",
+      "side": "local",
+      "speaker": "local",
+      "voice": "Stefan",
+      "text": "Guten Morgen zusammen, danke, dass ihr Zeit habt. Heute besprechen wir das Projekt Bergkristall.",
+      "keywords": [
+        "Bergkristall"
+      ],
+      "overlap": false,
+      "start": 2,
+      "end": 9.838
+    },
+    {
+      "id": "u2",
+      "side": "remote",
+      "speaker": "remote1",
+      "voice": "Katja",
+      "text": "Guten Morgen. Die Offerte für die Firma Alpenblick ist fertig, sie liegt bei achtzehntausend Franken.",
+      "keywords": [
+        "Alpenblick",
+        "Offerte"
+      ],
+      "overlap": false,
+      "start": 10.838,
+      "end": 17.693
+    },
+    {
+      "id": "u3",
+      "side": "remote",
+      "speaker": "remote2",
+      "voice": "Hedda",
+      "text": "Die Lieferung der Geräte ist für Donnerstag, den zwölften November, geplant.",
+      "keywords": [
+        "Lieferung",
+        "Donnerstag"
+      ],
+      "overlap": false,
+      "start": 18.693,
+      "end": 24.06
+    },
+    {
+      "id": "u4",
+      "side": "local",
+      "speaker": "local",
+      "voice": "Stefan",
+      "text": "Sehr gut. Wer übernimmt die Schulung der Mitarbeitenden in Luzern?",
+      "keywords": [
+        "Schulung",
+        "Luzern"
+      ],
+      "overlap": false,
+      "start": 25.06,
+      "end": 29.923
+    },
+    {
+      "id": "u5",
+      "side": "remote",
+      "speaker": "remote1",
+      "voice": "Katja",
+      "text": "Das übernehme ich. Ich brauche dafür zwei Tage und einen Beamer.",
+      "keywords": [
+        "Beamer"
+      ],
+      "overlap": false,
+      "start": 30.923,
+      "end": 35.376
+    },
+    {
+      "id": "u6",
+      "side": "remote",
+      "speaker": "remote2",
+      "voice": "Hedda",
+      "text": "Ich schicke euch die Unterlagen bis spätestens am Freitagmittag.",
+      "keywords": [
+        "Unterlagen",
+        "Freitag"
+      ],
+      "overlap": true,
+      "start": 36.376,
+      "end": 39.963
+    },
+    {
+      "id": "u7",
+      "side": "local",
+      "speaker": "local",
+      "voice": "Stefan",
+      "text": "Perfekt, vielen Dank.",
+      "keywords": [
+        "Perfekt"
+      ],
+      "overlap": true,
+      "start": 38.763,
+      "end": 40.694
+    },
+    {
+      "id": "u8",
+      "side": "local",
+      "speaker": "local",
+      "voice": "Stefan",
+      "text": "Dann halten wir fest: Offerte an Alpenblick, Lieferung im November und die Schulung in Luzern.",
+      "keywords": [
+        "Alpenblick",
+        "Luzern"
+      ],
+      "overlap": false,
+      "start": 41.963,
+      "end": 48.649
+    },
+    {
+      "id": "u9",
+      "side": "remote",
+      "speaker": "remote1",
+      "voice": "Katja",
+      "text": "Einverstanden. Bis nächste Woche, tschüss zusammen.",
+      "keywords": [
+        "Einverstanden"
+      ],
+      "overlap": false,
+      "start": 49.649,
+      "end": 53.7
+    }
+  ]
+}

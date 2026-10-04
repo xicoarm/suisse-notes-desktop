@@ -15,9 +15,10 @@ const { execFileSync } = require('child_process');
 
 const API = 'https://app.suisse-notes.ch';
 const E2E_EMAIL = 'desktop-e2e@suisse-notes.test';
-const E2E_PASSWORD = process.env.E2E_PASSWORD || 'SuisseE2E!test123';
+// Credentials come from the environment only - this repository is public.
+const E2E_PASSWORD = process.env.E2E_PASSWORD || '';
 const SSH_HOST = 'suisse-notes';
-const DB_PASSWORD = 'cSHQgme3yjpARlkR8uXqNYUPbsF0JX';
+const DB_PASSWORD = process.env.SUISSE_E2E_DB_PASSWORD || '';
 
 function req(method, path, { token, body } = {}) {
   return new Promise((resolve, reject) => {
@@ -45,6 +46,7 @@ function req(method, path, { token, body } = {}) {
 }
 
 async function loginLive() {
+  if (!E2E_PASSWORD) throw new Error('Set E2E_PASSWORD for the desktop-e2e account');
   const res = await req('POST', '/api/auth/desktop', { body: { email: E2E_EMAIL, password: E2E_PASSWORD } });
   if (!res.json?.token) throw new Error(`Live login failed (${res.status}): ${res.raw?.slice(0, 200)}`);
   return res.json.token;
@@ -65,7 +67,8 @@ async function pollUploadStatus(token, audioFileId, timeoutMs = 240_000) {
 
 /** Run a read-only SQL query on the production DB via ssh; returns rows as arrays. */
 function dbQuery(sql) {
-  const remote = `PGPASSWORD='${DB_PASSWORD}' psql -h localhost -U postgres -d suisse_notes -tA -F '|' -c "${sql.replace(/"/g, '\\"')}"`;
+  if (!DB_PASSWORD) throw new Error('Set SUISSE_E2E_DB_PASSWORD to query the production database');
+  const remote = `PGPASSWORD=${DB_PASSWORD} psql -h localhost -U postgres -d suisse_notes -tA -F '|' -c "${sql.replace(/"/g, '\\"')}"`;
   const out = execFileSync('ssh', [SSH_HOST, remote], { encoding: 'utf8', timeout: 30_000 });
   return out.trim().split('\n').filter(Boolean).map(l => l.split('|'));
 }
