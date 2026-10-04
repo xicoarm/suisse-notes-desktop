@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.13](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.12...v4.7.13) (2026-10-04)
+
+
+### Features
+
+* **microphone:** automatic microphone — the one the meeting uses 71bb44e
+
+
+### Bug Fixes
+
+* **system-audio:** record the meeting on every Windows output device 90421df
+
 ### [4.7.12](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.11...v4.7.12) (2026-09-30)
 
 
