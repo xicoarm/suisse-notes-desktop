@@ -186,6 +186,17 @@ node tests/e2e-harness/teams-real-call.js verify                        # newest
 node tests/e2e-harness/teams-real-call.js selftest                      # guest microphone, no Teams (also in CI)
 ```
 
+**The Teams bot** (`teams-real-call.js bot`, nightly in `teams-bot-canary.yml`):
+the test account invites the Suisse Meets bot by link into a Teams meeting whose
+options let everyone bypass the lobby, the two synthetic guests join and talk,
+the call can be held open (`SUISSE_BOT_TEST_HOLD_MINUTES`, 16 in the nightly run:
+past the 15-minute safety net behind the 03.10.2026 "failed" status), they talk
+again, the bot is asked to leave. The meeting must end `COMPLETED`, never pass
+through `FAILED`, and its transcript must hold at least 75 % of each guest's
+keywords under at least two speakers; it is then deleted. Secrets:
+`TEAMS_TEST_MEETING_LINK` and `E2E_PASSWORD` (the workflow only leaves a notice
+until both exist).
+
 `s20-teams-call-live` runs the same call against the real backend with the
 `desktop-e2e` test account (`E2E_PASSWORD` from the environment, never from the
 repository), waits for the transcript, requires the keywords of both sides and at

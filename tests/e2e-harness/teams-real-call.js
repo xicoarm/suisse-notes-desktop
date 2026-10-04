@@ -44,7 +44,8 @@ const GUESTS = [
   { speaker: 'remote1', name: 'Katja (Test)' },
   { speaker: 'remote2', name: 'Hedda (Test)' },
 ];
-const LOBBY_TIMEOUT_MS = 10 * 60_000;
+// A person admits the guests (join); an unattended bot test expects a lobby bypass and gives up sooner.
+const LOBBY_TIMEOUT_MS = Number(process.env.SUISSE_TEAMS_LOBBY_TIMEOUT_S || 600) * 1000;
 const INJECT_RATE = 24000;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -248,41 +249,188 @@ async function admitGuest(guest, link, pcmBase64) {
   return `not admitted within ${LOBBY_TIMEOUT_MS / 60_000} minutes`;
 }
 
-async function join(link) {
+function assertTeamsLink(link) {
   if (!/^https:\/\/(teams\.microsoft\.com|teams\.live\.com)\//i.test(link || '')) throw new Error('Pass a Teams meeting link (https://teams.microsoft.com/...)');
+}
+
+/**
+ * Brings both guests into the meeting, then hands control to `during(guests, talk)`;
+ * `talk()` makes them hold the exchange once (both start in the same instant, so they
+ * speak in turn as in the fixture) and resolves when it is over. Guests leave and the
+ * browsers close afterwards, whatever happens. Problems end up in `result.problems`.
+ */
+async function withGuests(link, result, during) {
   const call = tc.prepareCall();
   fs.mkdirSync(OUT, { recursive: true });
   const silenceWav = path.join(OUT, 'silence.wav');
   tc.writeWav16(silenceWav, new Float32Array(48000), 48000);
-  const startedAt = new Date();
-  const result = { link: link.replace(/\?.*$/, '?…'), startedAt: startedAt.toISOString(), guests: [], problems: [] };
   const guests = [];
+  const talk = async () => {
+    const go = Date.now();
+    await Promise.all(guests.map(g => Promise.all(g.page.frames().map(f =>
+      f.evaluate(() => window.__synthMic && window.__synthMic.tracksHandedOut() && window.__synthMic.start(0.3)).catch(() => false)))));
+    (result.dialogues = result.dialogues || []).push(new Date(go + 300).toISOString());
+    console.log(`  dialogue started; ${call.manifest.seconds.toFixed(0)} s`);
+    await sleep(call.manifest.seconds * 1000 + 4000);
+  };
   try {
     for (const guest of GUESTS) guests.push(await launchGuest(guest, silenceWav));
     const outcomes = await Promise.all(guests.map(g => admitGuest(g, link, speakerPcmBase64(call.speakerWavs[g.speaker]))));
     outcomes.forEach((problem, i) => { if (problem) result.problems.push(`${guests[i].name}: ${problem}`); });
     if (!result.problems.length) {
       await sleep(3000);
-      // Both start in the same instant, so they speak in turn as in the fixture.
-      const go = Date.now();
-      await Promise.all(guests.map(g => Promise.all(g.page.frames().map(f => f.evaluate(() => window.__synthMic && window.__synthMic.tracksHandedOut() && window.__synthMic.start(0.3)).catch(() => false)))));
-      result.dialogueStartedAt = new Date(go + 300).toISOString();
-      console.log(`  dialogue started ${result.dialogueStartedAt}; ${call.manifest.seconds.toFixed(0)} s`);
-      await sleep(call.manifest.seconds * 1000 + 4000);
-      for (const g of guests) await clickButton(g.page, /hang ?up|leave/);
-      await sleep(2000);
+      await during(guests, talk, call);
     }
   } finally {
     for (const g of guests) {
+      await clickButton(g.page, /hang ?up|leave/).catch(() => false);
       result.guests.push({ name: g.name, state: g.state, log: g.log });
+    }
+    await sleep(1500);
+    for (const g of guests) {
       await g.browser.close().catch(() => {});
       fs.rmSync(g.profile, { recursive: true, force: true });
     }
-    const file = path.join(OUT, `join_${startedAt.toISOString().replace(/[:.]/g, '-')}.json`);
-    fs.writeFileSync(file, JSON.stringify(result, null, 2));
-    console.log(`  log: ${file}`);
+  }
+  return call;
+}
+
+function writeLog(kind, startedAt, result) {
+  const file = path.join(OUT, `${kind}_${startedAt.toISOString().replace(/[:.]/g, '-')}.json`);
+  fs.writeFileSync(file, JSON.stringify(result, null, 2));
+  console.log(`  log: ${file}`);
+}
+
+async function join(link) {
+  assertTeamsLink(link);
+  const startedAt = new Date();
+  const result = { link: link.replace(/\?.*$/, '?…'), startedAt: startedAt.toISOString(), guests: [], problems: [] };
+  try {
+    await withGuests(link, result, async (guests, talk) => { await talk(); });
+  } finally {
+    writeLog('join', startedAt, result);
   }
   console.log(result.problems.length ? `FAIL\n  ${result.problems.join('\n  ')}` : 'Guests spoke and left. Stop the recording, then run: node tests/e2e-harness/teams-real-call.js verify');
+  return !result.problems.length;
+}
+
+// ---- the Teams bot in the same kind of call ---------------------------------------------
+
+const LIVE_API = process.env.SUISSE_LIVE_API_URL || 'https://app.suisse-meets.ch';
+
+async function api(method, route, { token, body } = {}) {
+  const response = await fetch(LIVE_API + route, {
+    method,
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let json = null;
+  try { json = await response.json(); } catch (_) { /* not JSON */ }
+  return { status: response.status, json };
+}
+
+/**
+ * The Suisse Meets Teams bot, end to end, with nobody in the meeting but the two
+ * synthetic guests: the test account invites the bot by link (the customer path of
+ * the 03.10.2026 "failed" status), the guests talk, the bot leaves, and the finished
+ * meeting must be COMPLETED - never FAILED on the way - with a transcript that holds
+ * both guests' words under two speakers. SUISSE_BOT_TEST_HOLD_MINUTES keeps the call
+ * open that long (16 = past the 15-minute safety net that caused the 03.10. status).
+ * The meeting must let everyone bypass the lobby (Teams meeting options).
+ * Credentials: E2E_EMAIL (default desktop-e2e@suisse-notes.test) and E2E_PASSWORD
+ * from the environment. On success the test meeting is deleted again.
+ */
+async function botCall(link) {
+  assertTeamsLink(link);
+  const email = process.env.E2E_EMAIL || 'desktop-e2e@suisse-notes.test';
+  const password = process.env.E2E_PASSWORD;
+  if (!password) throw new Error('Set E2E_PASSWORD (test account) in the environment');
+  const holdMinutes = Math.max(0, Number(process.env.SUISSE_BOT_TEST_HOLD_MINUTES || '0'));
+  const startedAt = new Date();
+  const result = { kind: 'bot', api: LIVE_API, startedAt: startedAt.toISOString(), holdMinutes, guests: [], problems: [], statuses: [] };
+  const login = await api('POST', '/api/auth/desktop', { body: { email, password } });
+  const token = login.json?.token;
+  if (!token) throw new Error(`Test account login failed (${login.status})`);
+
+  let meetingId = null;
+  const status = async () => {
+    const res = await api('GET', `/api/meetings/${meetingId}`, { token });
+    const meeting = res.json?.meeting;
+    const current = meeting?.status || `HTTP ${res.status}`;
+    const last = result.statuses[result.statuses.length - 1];
+    if (!last || last.status !== current) {
+      result.statuses.push({ at: new Date().toISOString(), status: current });
+      console.log(`  bot meeting: ${current}`);
+    }
+    if (/^(FAILED|TRANSCRIPTION_FAILED|CANCELLED)$/.test(current) && !result.problems.some(p => p.startsWith('Meeting status'))) {
+      result.problems.push(`Meeting status ${current}${meeting?.errorMessage ? ` (${String(meeting.errorMessage).slice(0, 120)})` : ''}`);
+    }
+    return { current, meeting };
+  };
+
+  try {
+    // The bot first: anonymous guests may not be allowed to start a meeting alone.
+    const invite = await api('POST', '/api/bot/join', { token, body: { meetingUrl: link, title: `Bot-Test synthetisch ${startedAt.toISOString().slice(0, 16)}` } });
+    meetingId = invite.json?.meetingId || null;
+    if (!meetingId) throw new Error(`Bot invite failed (${invite.status}): ${JSON.stringify(invite.json).slice(0, 200)}`);
+    result.meetingId = meetingId;
+    result.provider = invite.json?.provider || null;
+    console.log(`  bot invited: meeting ${meetingId} (${result.provider})`);
+    for (let i = 0; i < 24 && (await status()).current === 'BOT_JOINING'; i++) await sleep(5000);
+
+    await withGuests(link, result, async (guests, talk) => {
+      await sleep(10_000); // the bot hears both guests arrive
+      await talk();
+      const holdUntil = Date.now() + holdMinutes * 60_000;
+      while (Date.now() < holdUntil) {
+        await sleep(30_000);
+        await status();
+      }
+      if (holdMinutes > 0) await talk(); // talking again after the hold proves the recording kept running
+      const left = await api('POST', `/api/meetings/${meetingId}`, { token, body: { action: 'leave' } });
+      result.botLeave = left.status;
+    });
+
+    // Recording -> processing -> transcript.
+    let final = await status();
+    const deadline = Date.now() + 25 * 60_000;
+    while (!/^(COMPLETED|FAILED|TRANSCRIPTION_FAILED|CANCELLED)$/.test(final.current) && Date.now() < deadline) {
+      await sleep(15_000);
+      final = await status();
+    }
+    if (final.current !== 'COMPLETED') {
+      if (!result.problems.some(p => p.startsWith('Meeting status'))) result.problems.push(`Meeting did not complete (last status ${final.current})`);
+    } else {
+      const segments = (final.meeting?.transcript?.segments || []).filter(s => !s.speakerRemovedAt);
+      const norm = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9 ]+/g, ' ');
+      const text = norm(segments.map(s => s.text).join(' '));
+      const call = tc.prepareCall();
+      const perGuest = {};
+      for (const guest of GUESTS) {
+        const keywords = call.manifest.utterances.filter(u => u.speaker === guest.speaker).flatMap(u => u.keywords);
+        const missing = keywords.filter(k => !text.includes(norm(k).trim()));
+        perGuest[guest.name] = { found: keywords.length - missing.length, total: keywords.length, missing };
+        if ((keywords.length - missing.length) / keywords.length < 0.75) {
+          result.problems.push(`Transcript misses ${guest.name}: ${keywords.length - missing.length}/${keywords.length} keywords (missing ${missing.join(', ')})`);
+        }
+      }
+      const speakers = [...new Set(segments.map(s => s.speakerName || s.speakerLabel).filter(Boolean))];
+      result.transcript = { segments: segments.length, speakers, perGuest };
+      console.log(`  transcript: ${segments.length} segments, speakers ${speakers.join(', ')}`);
+      if (speakers.length < 2) result.problems.push(`Transcript has ${speakers.length} speaker(s); two guests spoke`);
+    }
+    if (result.statuses.some(s => s.status === 'FAILED') && final.current === 'COMPLETED') {
+      result.problems.push('Meeting showed FAILED while the bot was still recording (the 03.10.2026 status problem)');
+    }
+  } finally {
+    if (meetingId && !result.problems.length) {
+      const removed = await api('DELETE', `/api/meetings/${meetingId}`, { token }).catch(() => ({ status: 0 }));
+      result.deleted = removed.status < 300;
+    }
+    writeLog('bot', startedAt, result);
+  }
+  console.log(`${result.problems.length ? 'FAIL' : 'PASS'}  Teams bot with two synthetic guests${meetingId ? ` (meeting ${meetingId}${result.deleted ? ', deleted' : ', kept for inspection'})` : ''}`);
+  for (const p of result.problems) console.log(`  PROBLEM: ${p}`);
   return !result.problems.length;
 }
 
@@ -368,13 +516,15 @@ async function selftest() {
   }
 }
 
-module.exports = { join, verify, selftest, installSyntheticMicrophone };
+module.exports = { join, botCall, verify, selftest, installSyntheticMicrophone };
 
 if (require.main === module) {
   const [command, arg] = process.argv.slice(2);
-  const run = command === 'join' ? () => join(arg) : command === 'verify' ? async () => verify(arg) : command === 'selftest' ? selftest : null;
+  const link = arg || process.env.SUISSE_TEAMS_TEST_MEETING_LINK;
+  const run = command === 'join' ? () => join(link) : command === 'bot' ? () => botCall(link)
+    : command === 'verify' ? async () => verify(arg) : command === 'selftest' ? selftest : null;
   if (!run) {
-    console.log('Usage: node tests/e2e-harness/teams-real-call.js join "<Teams meeting link>" | verify [recording] | selftest');
+    console.log('Usage: node tests/e2e-harness/teams-real-call.js join "<Teams meeting link>" | bot "<link>" | verify [recording] | selftest');
     process.exit(2);
   }
   run().then(ok => process.exit(ok ? 0 : 1), error => { console.error(error); process.exit(1); });
