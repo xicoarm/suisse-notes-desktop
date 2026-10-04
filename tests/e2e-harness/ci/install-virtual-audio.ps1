@@ -1,0 +1,109 @@
+# Give a hosted Windows runner a sound card, for s20-teams-call only.
+#
+# GitHub's Windows runners have no audio device at all, so the Teams stand-in would
+# have nowhere to play and no microphone to hold. VB-CABLE (VB-Audio, donationware)
+# adds one virtual output ("CABLE Input") looped to one virtual input ("CABLE Output").
+# The output becomes Teams' speaker; the input, renamed to a headset name, becomes
+# Teams' microphone (the app ignores inputs called "CABLE Output" on purpose, they
+# carry the computer's own sound). Nothing here runs on a developer machine.
+#
+# Integrity: the driver catalog must carry a valid Authenticode signature from
+# VB-Audio or Microsoft's hardware publisher, or the job stops before installing.
+$ErrorActionPreference = 'Stop'
+if ($env:GITHUB_ACTIONS -ne 'true') { throw 'CI only: this installs a kernel audio driver' }
+
+$work = Join-Path $env:RUNNER_TEMP 'vbcable'
+New-Item -ItemType Directory -Force $work | Out-Null
+$zip = Join-Path $work 'VBCABLE_Driver_Pack45.zip'
+Invoke-WebRequest -Uri 'https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip' -OutFile $zip
+Write-Host ('VB-CABLE pack sha256 ' + (Get-FileHash $zip -Algorithm SHA256).Hash)
+Expand-Archive $zip -DestinationPath $work -Force
+
+$inf = Get-ChildItem $work -Recurse -Filter '*64_win10.inf' | Select-Object -First 1
+if (-not $inf) { $inf = Get-ChildItem $work -Recurse -Filter 'vbMmeCable64_win7.inf' | Select-Object -First 1 }
+if (-not $inf) { throw 'No 64-bit VB-CABLE INF in the pack' }
+$catName = (Select-String -Path $inf.FullName -Pattern '^\s*CatalogFile\s*=\s*(\S+)' | Select-Object -First 1).Matches[0].Groups[1].Value
+$cat = Join-Path $inf.DirectoryName $catName
+$signature = Get-AuthenticodeSignature $cat
+if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'VB-Audio|Microsoft Windows Hardware Compatibility Publisher') {
+  throw ('Driver catalog signature not trusted: ' + $signature.Status + ' ' + $signature.SignerCertificate.Subject)
+}
+Write-Host ('Driver signed by: ' + $signature.SignerCertificate.Subject)
+# A vendor-signed driver installs without a prompt only when its publisher is trusted.
+$cer = Join-Path $work 'publisher.cer'
+[IO.File]::WriteAllBytes($cer, $signature.SignerCertificate.Export('Cert'))
+Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+
+# The hardware id is the second field of the first device line in the x64 models
+# section named by [Manufacturer] (e.g. "%Desc%=Install, <hardware id>").
+$infLines = Get-Content $inf.FullName
+function Get-InfSection([string]$name) {
+  $inside = $false
+  foreach ($line in $infLines) {
+    $trimmed = $line.Trim()
+    if ($trimmed -match '^\[(.+)\]$') { $inside = ($Matches[1].Trim() -ieq $name); continue }
+    if ($inside -and $trimmed -and -not $trimmed.StartsWith(';') -and $trimmed.Contains('=')) { $trimmed }
+  }
+}
+$manufacturer = Get-InfSection 'Manufacturer' | Select-Object -First 1
+if (-not $manufacturer) { throw 'INF has no [Manufacturer] entry' }
+$modelParts = @(($manufacturer -split '=', 2)[1].Split(',') | ForEach-Object { $_.Trim() })
+$decoration = $modelParts | Select-Object -Skip 1 | Where-Object { $_ -imatch '^NTamd64' } | Select-Object -First 1
+$modelSection = if ($decoration) { $modelParts[0] + '.' + $decoration } else { $modelParts[0] }
+$deviceLine = Get-InfSection $modelSection | Select-Object -First 1
+if (-not $deviceLine) { throw "INF models section [$modelSection] is empty" }
+$hardwareId = (($deviceLine -split '=', 2)[1].Split(',')[1]).Trim()
+# "%HardwareId%" is a token defined in [Strings].
+if ($hardwareId -match '^%(.+)%$') {
+  $token = $Matches[1]
+  $definition = Get-InfSection 'Strings' | Where-Object { ($_ -split '=', 2)[0].Trim() -ieq $token } | Select-Object -First 1
+  if (-not $definition) { throw "INF [Strings] does not define $token" }
+  $hardwareId = ($definition -split '=', 2)[1].Trim().Trim('"')
+}
+Write-Host "INF $($inf.Name): [Manufacturer] $manufacturer; [$modelSection] $deviceLine; hardware id $hardwareId"
+if (-not $hardwareId) { throw 'No hardware id in the INF models section' }
+$devcon = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Tools' -Recurse -Filter devcon.exe -ErrorAction SilentlyContinue |
+  Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1
+if (-not $devcon) { throw 'devcon.exe (Windows Driver Kit) not found on this runner' }
+
+foreach ($service in 'AudioEndpointBuilder', 'Audiosrv') {
+  Set-Service -Name $service -StartupType Automatic
+  Start-Service -Name $service
+}
+# Windows Server denies desktop apps the microphone by default (E_ACCESSDENIED when the
+# Teams stand-in opens it). Allow it, as a user's "Let desktop apps access your microphone".
+foreach ($key in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone',
+                 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone',
+                 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged') {
+  New-Item -Path $key -Force | Out-Null
+  Set-ItemProperty -Path $key -Name Value -Value 'Allow' -Type String
+}
+Write-Host ("Installing $($inf.Name) as $hardwareId with $($devcon.FullName)")
+& $devcon.FullName install $inf.FullName $hardwareId
+if ($LASTEXITCODE -ne 0) { throw "devcon install failed ($LASTEXITCODE)" }
+
+# The stand-in lists what Windows offers; wait until the cable is there.
+node tests/e2e-harness/teams-sim/build.js | Out-Null
+$sim = 'tests\e2e-harness\work\teams-sim\ms-teams-sim.exe'
+$deadline = (Get-Date).AddSeconds(90)
+do {
+  Start-Sleep -Seconds 3
+  $devices = & $sim --list
+} until (($devices -match '"flow":"output"') -and ($devices -match '"flow":"input"') -or (Get-Date) -gt $deadline)
+if (-not ($devices -match '"flow":"output"')) { throw 'No audio output appeared after installing VB-CABLE' }
+
+& $sim --rename 'CABLE Output' --flow capture --to 'Headset-Mikrofon'
+if ($LASTEXITCODE -ne 0) { throw 'Could not give the virtual microphone a headset name' }
+
+# The 03.10.2026 topology: calls on the communication output (the headset), everything
+# else on another default output. VB-CABLE brings two outputs; the 16-channel one becomes
+# the default for media, "Speakers (VB-Audio Virtual Cable)" stays the call device.
+if (($devices -match '"flow":"output"').Count -ge 2 -and ($devices -match 'CABLE In 16 Ch')) {
+  foreach ($role in 'console', 'multimedia') {
+    & $sim --set-default 'CABLE In 16 Ch' --flow render --roles $role
+    if ($LASTEXITCODE -ne 0) { throw "Could not make the 16-channel cable the default $role output" }
+  }
+  & $sim --set-default 'Speakers (VB-Audio' --flow render --roles communications
+  if ($LASTEXITCODE -ne 0) { throw 'Could not make the cable speakers the communication output' }
+}
+& $sim --list

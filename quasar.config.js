@@ -231,7 +231,18 @@ export default function (ctx) {
           // the hook skips; the release job sets WINDOWS_SIGN_REQUIRED=1.
           sign: windowsSignHook,
           signingHashAlgorithms: ['sha256'],
-          signExts: ['.dll', '.node']
+          signExts: ['.dll', '.node'],
+          // Windows system-audio helper (resources/sysloopback/src/SysLoopback.cs):
+          // records every app except this one on every output device, so a
+          // meeting on the headset is recorded too. Windows only; as an extra
+          // resource it goes through the sign hook above like ffmpeg.
+          extraResources: [
+            {
+              from: 'resources/sysloopback/win-x64',
+              to: 'sysloopback',
+              filter: ['sysloopback.exe']
+            }
+          ]
         },
         nsis: {
           oneClick: true,  // Silent auto-updates (no wizard prompts)
@@ -289,11 +300,8 @@ export default function (ctx) {
             to: 'audiotee',
             filter: ['**/*']
           }
-          // NOTE: resources/sysloopback (the Windows loopback helper) is
-          // deliberately NOT bundled yet. It is built and hardware-verified but
-          // not wired into the recording pipeline, so shipping it would only add
-          // an unused binary to the installer and to the signing surface.
-          // Bundle it in the same change that starts spawning it.
+          // The Windows system-audio helper (resources/sysloopback) is a
+          // Windows-only extra resource: see win.extraResources above.
         ],
         // Extract icons from asar so they can be loaded natively for taskbar/tray
         asarUnpack: [

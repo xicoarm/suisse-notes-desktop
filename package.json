@@ -1,6 +1,6 @@
 {
   "name": "suisse-notes-desktop",
-  "version": "4.7.12",
+  "version": "4.7.13",
   "description": "Desktop app for recording and transcribing meetings",
   "productName": "Suisse Meets",
   "author": "Suisse IT GmbH",
@@ -10,7 +10,7 @@
     "dev:ios": "quasar dev -m capacitor -T ios",
     "dev:android": "quasar dev -m capacitor -T android",
     "prepare:ffmpeg": "node scripts/prepare-ffmpeg.js",
-    "build": "node scripts/prepare-ffmpeg.js && quasar build -m electron",
+    "build": "node scripts/prepare-ffmpeg.js && node scripts/build-sysloopback.js && quasar build -m electron",
     "build:ios": "quasar build -m capacitor -T ios",
     "build:android": "quasar build -m capacitor -T android",
     "cap:sync": "cd src-capacitor && npx cap sync && node ../scripts/patch-capacitor-ios.cjs",

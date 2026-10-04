@@ -129,6 +129,72 @@ mode tabs shown in a pipeline phase. It keeps a screenshot two seconds into the 
 and one after upload. On 4.7.0 it showed ~9 s of an empty page after stop. Pull
 requests run it on Windows, Intel Mac and Apple Silicon.
 
+## Simulated Teams call (`s20-teams-call`)
+
+Replaces the manual release check "record a real Teams call with a headset and
+listen whether both sides are in it". Windows only.
+
+- **Teams stand-in** (`teams-sim/TeamsSim.cs`, built on demand with the in-box
+  `csc.exe` into `work/teams-sim/ms-teams-sim.exe`): its process name starts with
+  `ms-teams`, so the app recognises it as Microsoft Teams. It plays the far end
+  through WASAPI on the Windows **communication** output — on a machine with a
+  headset that is not the default output, the topology of the 03.10.2026
+  failure — and holds the communication microphone open like Teams does.
+- **Synthetic voices** (`fixtures/teams-call`, committed FLAC + manifest): a
+  57-second German meeting, Stefan on the microphone side, Katja and Hedda on the
+  meeting side, one deliberate double-talk. Rendered once with the Windows OneCore
+  voices: `node tests/e2e-harness/run.js teams-call-fixtures`.
+- **The app** (compiled E2E bundle, isolated profile, mock backend) records with
+  system audio on and the microphone on "Automatisch". The local voice is
+  Chromium's fake capture device, listed under the name of the microphone the
+  stand-in holds, so the real helper (`--sessions`) and the real choice code must
+  find "the microphone Microsoft Teams is using".
+- **Verifier** (`lib/teams-call.js`): compares the 10 ms loudness contour of every
+  sentence with the finished file — no speech recognition needed. It fails on a
+  missing side, a missing sentence, a gap inside a sentence or a time jump in one
+  source; `teams-call-selftest` proves that on damaged synthetic recordings.
+  Also checked: no silence/routing warning during the call, upload = local file.
+
+```powershell
+$env:SUISSE_E2E_APP_DIR=(Resolve-Path dist/electron/UnPackaged).Path
+$env:SUISSE_TEAMS_SIM_VOLUME='0.15'   # optional: quieter in the room, same proof
+node tests/e2e-harness/run.js teams-call-selftest
+node tests/e2e-harness/run.js s20-teams-call
+```
+
+Where the communication output is not the default output, a witness
+(`sysloopback.exe --role console`) records the **default** output during the call —
+the only endpoint Chromium's loopback (the app up to 4.7.12) could hear. The result
+notes whether it carried the call; when it did not, the run shows both halves of
+the 03.10.2026 failure at once: a default-bound capture would have recorded
+silence, and the app recorded every sentence. `SUISSE_TEAMS_CALL_REQUIRE_SPLIT=1`
+(set in CI) fails a run that did not reproduce that topology. Forcing the old path
+inside the app (`SUISSE_E2E_SYSTEM_AUDIO_FALLBACK=1`) proves nothing here: with the
+fake microphone switches Chromium fakes the loopback stream too.
+
+**A real Teams call** (`teams-real-call.js`, run by hand): two browser guests,
+"Katja (Test)" and "Hedda (Test)", join a real Teams meeting as anonymous guests
+with a synthetic microphone (Web Audio, started together so they speak in turn),
+no camera, muted output, and a silent fallback file for any other capture. A
+person sits in the meeting with Teams and the real headset and records with the
+desktop app; afterwards `verify` scores every guest sentence in the newest
+recording. Never use it in a customer meeting. The guests stop at a CAPTCHA.
+
+```powershell
+node tests/e2e-harness/teams-real-call.js join "<Teams meeting link>"   # admit both from the lobby
+node tests/e2e-harness/teams-real-call.js verify                        # newest desktop recording
+node tests/e2e-harness/teams-real-call.js selftest                      # guest microphone, no Teams (also in CI)
+```
+
+`s20-teams-call-live` runs the same call against the real backend with the
+`desktop-e2e` test account (`E2E_PASSWORD` from the environment, never from the
+repository), waits for the transcript, requires the keywords of both sides and at
+least two speakers, and deletes the test meeting through the API afterwards.
+
+Hosted CI (`audio-reliability.yml`, job `teams-call`) first installs a virtual
+cable as the runner's sound card (`ci/install-virtual-audio.ps1`); `release.yml`
+builds nothing unless that workflow passes on the tagged source.
+
 Do not rebuild the active bundle, run competing captures, or run unrelated heavy
 tests during a baseline. Intentional contention should be a named fault case.
 Record the built revision separately if the working tree changes during a run.

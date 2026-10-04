@@ -371,3 +371,56 @@ describe('durable PCM capture lifecycle barriers', () => {
     expect(atClosed.attempts[0].end).toMatchObject({ success: true, childClosed: true, diskDrained: true, audioBytes: 8, pcmEndBytes: 8 });
   });
 });
+
+// The Windows helper (resources/sysloopback) speaks the same contract. Two
+// things differ: Windows refuses ftruncate on an append-only descriptor, which
+// failed every start (native mode always starts at an offset), and a
+// TerminateProcess (what SIGTERM is on Windows) would drop the last packet.
+describe('Windows system-audio helper supervision', () => {
+  it('pads a start at an offset with silence on every OS', async () => {
+    const proc = child();
+    const c = capture(proc, { offsetMs: 20 });
+    proc.stdout.write(Buffer.from([1, 2]));
+    expect(await c.started).toMatchObject({ success: true });
+    const stopped = c.stop(); proc.close();
+    expect(await stopped).toMatchObject({ success: true });
+    const bytes = fs.readFileSync(c.filePath);
+    expect(bytes.length).toBe(20 * 96 + 2);
+    expect(bytes.subarray(0, 20 * 96).every(byte => byte === 0)).toBe(true);
+    expect([...bytes.subarray(-2)]).toEqual([1, 2]);
+  });
+
+  it('lets the helper end itself on request, keeping its last packet, before any signal', async () => {
+    const proc = child();
+    const requestStop = vi.fn(() => {
+      proc.stdout.write(Buffer.from('tail'));
+      setTimeout(() => proc.close(), 5);
+    });
+    const c = capture(proc, { requestStop });
+    proc.stdout.write(Buffer.from('head'));
+    await c.started;
+    expect(await c.stop()).toMatchObject({ success: true });
+    expect(requestStop).toHaveBeenCalledOnce();
+    expect(proc.kill).not.toHaveBeenCalled();
+    expect(fs.readFileSync(c.filePath, 'utf8')).toBe('headtail');
+  });
+
+  it('signals a helper that does not end on request in time', async () => {
+    const proc = child();
+    proc.kill = vi.fn(() => { setTimeout(() => proc.close(), 1); return true; });
+    const c = capture(proc, { requestStop: () => {}, requestStopTimeoutMs: 20 });
+    proc.stdout.write(Buffer.from('audio!'));
+    await c.started;
+    expect(await c.stop()).toMatchObject({ success: true });
+    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  it('hands every helper event to the caller for the log', async () => {
+    const proc = child();
+    const onEvent = vi.fn(() => { throw new Error('logging failed'); });
+    const c = capture(proc, { onEvent });
+    proc.stderr.write('{"message_type":"info","event":"fallback"}\n{"message_type":"stream_start","event":"started"}\n');
+    expect(await c.started).toMatchObject({ success: true });
+    expect(onEvent.mock.calls.map(([event]) => event.event)).toEqual(['fallback', 'started']);
+  });
+});

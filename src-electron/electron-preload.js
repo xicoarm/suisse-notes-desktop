@@ -279,12 +279,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getDroppedFilePath: (filePath) => ipcRenderer.invoke('dialog:getDroppedFilePath', filePath)
   },
 
-  // System Audio (AudioTee — macOS 14.2+ Core Audio Taps)
+  // System Audio (AudioTee — macOS 14.2+ Core Audio Taps; Windows native helper)
   systemAudio: {
     isSupported: () => ipcRenderer.invoke('systemAudio:isSupported'),
     start: (recordId, offsetMs = 0) => ipcRenderer.invoke('systemAudio:start', recordId, offsetMs),
     stop: () => ipcRenderer.invoke('systemAudio:stop'),
     setPaused: (paused) => ipcRenderer.invoke('systemAudio:setPaused', paused),
+    // Windows: which apps use each microphone and output device right now
+    // ({ success, devices: [{ flow, device, defaultFor, sessions }] }).
+    deviceSessions: () => ipcRenderer.invoke('systemAudio:deviceSessions'),
     // Legacy (kept for backward compat)
     getSources: () => ipcRenderer.invoke('systemAudio:getSources'),
     diag: (level, message) => ipcRenderer.invoke('systemAudio:diag', level, message),

@@ -562,6 +562,11 @@ class AppDriver {
     const attempt = async () => {
       if (await this.page.$('[data-test=record-start]')) return true; // session restored
       await this.page.waitForSelector('input[type=email]', { timeout: 30_000 });
+      // Clear first: the retry below would otherwise append to the first attempt.
+      for (const field of ['input[type=email]', 'input[type=password]']) {
+        await this.page.click(field, { clickCount: 3 });
+        await this.page.keyboard.press('Backspace');
+      }
       await this.page.type('input[type=email]', email, { delay: 20 });
       await this.page.type('input[type=password]', password, { delay: 20 });
       await this.page.click('button[type=submit]');

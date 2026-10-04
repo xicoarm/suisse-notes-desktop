@@ -11,9 +11,21 @@ permissions:
 
 jobs:
   # =============================================================================
+  # Gate: nothing is built or published unless the tagged source passes the
+  # desktop audio qualification - the synthetic capture suite on Windows and both
+  # Macs, and the simulated Teams call (audio-reliability.yml, job teams-call).
+  # A failure stops the release; fix and tag again, or re-run the failed jobs
+  # when it was a known flake.
+  # =============================================================================
+  qualify:
+    name: Qualify audio before release
+    uses: ./.github/workflows/audio-reliability.yml
+
+  # =============================================================================
   # Windows Build - electron-builder auto-publishes to GitHub Releases
   # =============================================================================
   build-windows:
+    needs: qualify
     runs-on: windows-latest
 
     steps:
@@ -95,6 +107,11 @@ jobs:
           ) | Set-Content -Path (Join-Path $dest 'conf/code_sign_tool.properties') -Encoding ascii
           "CODE_SIGN_TOOL_PATH=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "CodeSignTool $version ready at $dest"
+
+      # Rebuild the system-audio helper from its source in this commit, with the
+      # in-box .NET Framework compiler, so the shipped exe always matches it.
+      - name: Build the Windows system-audio helper
+        run: node scripts/build-sysloopback.js
 
       - name: Build and sign Electron app
         env:
@@ -223,6 +240,7 @@ jobs:
   # macOS Build - sign, notarize, then upload to release
   # =============================================================================
   build-macos:
+    needs: qualify
     runs-on: macos-latest
 
     steps:
