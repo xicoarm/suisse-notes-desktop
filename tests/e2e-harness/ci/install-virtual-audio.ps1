@@ -34,7 +34,27 @@ $cer = Join-Path $work 'publisher.cer'
 [IO.File]::WriteAllBytes($cer, $signature.SignerCertificate.Export('Cert'))
 Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
 
-$hardwareId = (Select-String -Path $inf.FullName -Pattern ',\s*(VBAudio\w+)' | Select-Object -First 1).Matches[0].Groups[1].Value
+# The hardware id is the second field of the first device line in the x64 models
+# section named by [Manufacturer] (e.g. "%Desc%=Install, <hardware id>").
+$infLines = Get-Content $inf.FullName
+function Get-InfSection([string]$name) {
+  $inside = $false
+  foreach ($line in $infLines) {
+    $trimmed = $line.Trim()
+    if ($trimmed -match '^\[(.+)\]$') { $inside = ($Matches[1].Trim() -ieq $name); continue }
+    if ($inside -and $trimmed -and -not $trimmed.StartsWith(';') -and $trimmed.Contains('=')) { $trimmed }
+  }
+}
+$manufacturer = Get-InfSection 'Manufacturer' | Select-Object -First 1
+if (-not $manufacturer) { throw 'INF has no [Manufacturer] entry' }
+$modelParts = @(($manufacturer -split '=', 2)[1].Split(',') | ForEach-Object { $_.Trim() })
+$decoration = $modelParts | Select-Object -Skip 1 | Where-Object { $_ -imatch '^NTamd64' } | Select-Object -First 1
+$modelSection = if ($decoration) { $modelParts[0] + '.' + $decoration } else { $modelParts[0] }
+$deviceLine = Get-InfSection $modelSection | Select-Object -First 1
+if (-not $deviceLine) { throw "INF models section [$modelSection] is empty" }
+$hardwareId = (($deviceLine -split '=', 2)[1].Split(',')[1]).Trim()
+Write-Host "INF $($inf.Name): [Manufacturer] $manufacturer; [$modelSection] $deviceLine"
+if (-not $hardwareId) { throw 'No hardware id in the INF models section' }
 $devcon = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Tools' -Recurse -Filter devcon.exe -ErrorAction SilentlyContinue |
   Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1
 if (-not $devcon) { throw 'devcon.exe (Windows Driver Kit) not found on this runner' }
