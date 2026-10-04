@@ -53,7 +53,14 @@ $modelSection = if ($decoration) { $modelParts[0] + '.' + $decoration } else { $
 $deviceLine = Get-InfSection $modelSection | Select-Object -First 1
 if (-not $deviceLine) { throw "INF models section [$modelSection] is empty" }
 $hardwareId = (($deviceLine -split '=', 2)[1].Split(',')[1]).Trim()
-Write-Host "INF $($inf.Name): [Manufacturer] $manufacturer; [$modelSection] $deviceLine"
+# "%HardwareId%" is a token defined in [Strings].
+if ($hardwareId -match '^%(.+)%$') {
+  $token = $Matches[1]
+  $definition = Get-InfSection 'Strings' | Where-Object { ($_ -split '=', 2)[0].Trim() -ieq $token } | Select-Object -First 1
+  if (-not $definition) { throw "INF [Strings] does not define $token" }
+  $hardwareId = ($definition -split '=', 2)[1].Trim().Trim('"')
+}
+Write-Host "INF $($inf.Name): [Manufacturer] $manufacturer; [$modelSection] $deviceLine; hardware id $hardwareId"
 if (-not $hardwareId) { throw 'No hardware id in the INF models section' }
 $devcon = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Tools' -Recurse -Filter devcon.exe -ErrorAction SilentlyContinue |
   Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1
