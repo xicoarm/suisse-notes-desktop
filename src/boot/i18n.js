@@ -249,8 +249,8 @@ const messages = {
     cancelUploadConfirm: 'Are you sure you want to cancel this upload? The recording will be saved locally and can be uploaded later.',
     confirmCancelUpload: 'Yes, Cancel',
     openInSuisseNotes: 'Open in Suisse Meets',
-    transcriptReady: 'Your transcript is ready!',
-    transcriptCta: 'Click below to view your transcript, summaries, and action items',
+    transcriptReady: 'Uploaded – your transcript is being created',
+    transcriptCta: 'You can open the page now. It updates by itself as soon as the text is ready.',
 
     // Stop Recording Dialog
     stopRecordingTitle: 'Stop Recording?',
@@ -801,8 +801,8 @@ const messages = {
     cancelUploadConfirm: 'Möchten Sie den Upload wirklich abbrechen? Die Aufnahme wird lokal gespeichert und kann später hochgeladen werden.',
     confirmCancelUpload: 'Ja, abbrechen',
     openInSuisseNotes: 'In Suisse Meets öffnen',
-    transcriptReady: 'Ihr Transkript ist bereit!',
-    transcriptCta: 'Klicken Sie unten, um Ihr Transkript, Zusammenfassungen und Aktionspunkte anzuzeigen',
+    transcriptReady: 'Hochgeladen – Ihr Transkript wird erstellt',
+    transcriptCta: 'Sie können die Seite schon jetzt öffnen. Sie aktualisiert sich von selbst, sobald der Text bereitsteht.',
 
     // Stop Recording Dialog
     stopRecordingTitle: 'Aufnahme beenden?',
@@ -1353,8 +1353,8 @@ const messages = {
     cancelUploadConfirm: 'Êtes-vous sûr de vouloir annuler ce téléchargement? L\'enregistrement sera sauvegardé localement et pourra être téléchargé plus tard.',
     confirmCancelUpload: 'Oui, annuler',
     openInSuisseNotes: 'Ouvrir dans Suisse Meets',
-    transcriptReady: 'Votre transcription est prête!',
-    transcriptCta: 'Cliquez ci-dessous pour voir votre transcription, résumés et points d\'action',
+    transcriptReady: 'Téléversé – votre transcription est en cours de création',
+    transcriptCta: 'Vous pouvez déjà ouvrir la page. Elle se met à jour d’elle-même dès que le texte est prêt.',
 
     // Stop Recording Dialog
     stopRecordingTitle: "Arrêter l'enregistrement?",
@@ -1905,8 +1905,8 @@ const messages = {
     cancelUploadConfirm: 'Sei sicuro di voler annullare questo caricamento? La registrazione verrà salvata localmente e potrà essere caricata in seguito.',
     confirmCancelUpload: 'Sì, annulla',
     openInSuisseNotes: 'Apri in Suisse Meets',
-    transcriptReady: 'La tua trascrizione è pronta!',
-    transcriptCta: 'Clicca sotto per vedere la trascrizione, i riassunti e i punti d\'azione',
+    transcriptReady: 'Caricato – la trascrizione è in preparazione',
+    transcriptCta: 'Può già aprire la pagina. Si aggiorna da sola non appena il testo è pronto.',
 
     // Stop Recording Dialog
     stopRecordingTitle: 'Terminare la registrazione?',
