@@ -70,6 +70,14 @@ foreach ($service in 'AudioEndpointBuilder', 'Audiosrv') {
   Set-Service -Name $service -StartupType Automatic
   Start-Service -Name $service
 }
+# Windows Server denies desktop apps the microphone by default (E_ACCESSDENIED when the
+# Teams stand-in opens it). Allow it, as a user's "Let desktop apps access your microphone".
+foreach ($key in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone',
+                 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone',
+                 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged') {
+  New-Item -Path $key -Force | Out-Null
+  Set-ItemProperty -Path $key -Name Value -Value 'Allow' -Type String
+}
 Write-Host ("Installing $($inf.Name) as $hardwareId with $($devcon.FullName)")
 & $devcon.FullName install $inf.FullName $hardwareId
 if ($LASTEXITCODE -ne 0) { throw "devcon install failed ($LASTEXITCODE)" }
@@ -86,4 +94,16 @@ if (-not ($devices -match '"flow":"output"')) { throw 'No audio output appeared 
 
 & $sim --rename 'CABLE Output' --flow capture --to 'Headset-Mikrofon'
 if ($LASTEXITCODE -ne 0) { throw 'Could not give the virtual microphone a headset name' }
+
+# The 03.10.2026 topology: calls on the communication output (the headset), everything
+# else on another default output. VB-CABLE brings two outputs; the 16-channel one becomes
+# the default for media, "Speakers (VB-Audio Virtual Cable)" stays the call device.
+if (($devices -match '"flow":"output"').Count -ge 2 -and ($devices -match 'CABLE In 16 Ch')) {
+  foreach ($role in 'console', 'multimedia') {
+    & $sim --set-default 'CABLE In 16 Ch' --flow render --roles $role
+    if ($LASTEXITCODE -ne 0) { throw "Could not make the 16-channel cable the default $role output" }
+  }
+  & $sim --set-default 'Speakers (VB-Audio' --flow render --roles communications
+  if ($LASTEXITCODE -ne 0) { throw 'Could not make the cable speakers the communication output' }
+}
 & $sim --list

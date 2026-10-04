@@ -833,7 +833,6 @@ const SCENARIOS = {
   // Simulated Teams call (Teams stand-in + synthetic voices), see teams-call-qualification.js.
   's20-teams-call': async () => report('s20-teams-call', await require('./teams-call-qualification').runTeamsCall()),
   's20-teams-call-live': async () => report('s20-teams-call-live', await require('./teams-call-qualification').runTeamsCall({ live: true })),
-  's20-teams-call-control': async () => report('s20-teams-call-control', await require('./teams-call-qualification').runTeamsCallControl()),
   'teams-call-selftest': async () => report('teams-call-selftest', await require('./teams-call-qualification').runTeamsCallSelftest()),
   'teams-call-fixtures': async () => {
     const manifest = require('./lib/teams-call').renderFixtures();

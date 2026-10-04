@@ -160,13 +160,17 @@ $env:SUISSE_E2E_APP_DIR=(Resolve-Path dist/electron/UnPackaged).Path
 $env:SUISSE_TEAMS_SIM_VOLUME='0.15'   # optional: quieter in the room, same proof
 node tests/e2e-harness/run.js teams-call-selftest
 node tests/e2e-harness/run.js s20-teams-call
-node tests/e2e-harness/run.js s20-teams-call-control   # must catch the old loopback path
 ```
 
-`s20-teams-call-control` forces the pre-4.7.13 Chromium loopback
-(`SUISSE_E2E_SYSTEM_AUDIO_FALLBACK=1`) and passes only if the call's meeting side
-is then reported missing — proof the test catches the 03.10.2026 failure. It is
-only meaningful where the communication output is not the default output.
+Where the communication output is not the default output, a witness
+(`sysloopback.exe --role console`) records the **default** output during the call —
+the only endpoint Chromium's loopback (the app up to 4.7.12) could hear. The result
+notes whether it carried the call; when it did not, the run shows both halves of
+the 03.10.2026 failure at once: a default-bound capture would have recorded
+silence, and the app recorded every sentence. `SUISSE_TEAMS_CALL_REQUIRE_SPLIT=1`
+(set in CI) fails a run that did not reproduce that topology. Forcing the old path
+inside the app (`SUISSE_E2E_SYSTEM_AUDIO_FALLBACK=1`) proves nothing here: with the
+fake microphone switches Chromium fakes the loopback stream too.
 
 `s20-teams-call-live` runs the same call against the real backend with the
 `desktop-e2e` test account (`E2E_PASSWORD` from the environment, never from the

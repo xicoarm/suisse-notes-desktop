@@ -21,13 +21,19 @@
  *      file that every sentence of both sides is there, complete and in order.
  *   Also checked: no silence/routing warning during the call, the upload equals
  *   the local file, the picker said "the microphone Microsoft Teams is using".
+ *   4. Where the call output is not the default output, a witness records the
+ *      default output during the call (all that Chromium's loopback, the app up
+ *      to 4.7.12, could hear): it must carry none of the call. With
+ *      SUISSE_TEAMS_CALL_REQUIRE_SPLIT=1 (CI) a run without that topology fails.
  *
  * Runs on Windows with at least one audio output (hosted CI: a virtual cable, see
- * ci/README.md). It plays sound on the communication output; SUISSE_TEAMS_SIM_VOLUME
- * (0..1, default 1) lowers it for local runs without changing what the test proves.
+ * ci/install-virtual-audio.ps1). It plays sound on the communication output;
+ * SUISSE_TEAMS_SIM_VOLUME (0..1, default 1) lowers it for local runs without
+ * changing what the test proves.
  *
  *   node tests/e2e-harness/run.js teams-call-selftest   verifier sanity, no app
  *   node tests/e2e-harness/run.js s20-teams-call        the call (SUISSE_E2E_APP_DIR)
+ *   node tests/e2e-harness/run.js s20-teams-call-live   the call through the real backend
  */
 'use strict';
 
@@ -127,8 +133,15 @@ function startTeamsSim(exe, args) {
     waitFor(name, timeoutMs) {
       const found = events.find(e => e.event === name);
       if (found) return Promise.resolve(found);
+      // An error, or for the microphone a mic-error, ends the wait at once.
+      const failure = name === 'mic-open' ? ['error', 'mic-error', 'mic-missing'] : ['error'];
+      const early = events.find(e => failure.includes(e.event));
+      if (early) return Promise.reject(new Error(`Teams stand-in: ${early.event} ${early.message || early.match || ''}`.trim()));
       return new Promise((resolve, reject) => {
-        const waiter = { match: e => e.event === name || e.event === 'error', resolve: e => (e.event === 'error' ? reject(new Error(`Teams stand-in: ${e.message}`)) : resolve(e)) };
+        const waiter = {
+          match: e => e.event === name || failure.includes(e.event),
+          resolve: e => (failure.includes(e.event) ? reject(new Error(`Teams stand-in: ${e.event} ${e.message || e.match || ''}`.trim())) : resolve(e)),
+        };
         waiters.push(waiter);
         setTimeout(() => reject(new Error(`Teams stand-in: no "${name}" within ${timeoutMs} ms (${JSON.stringify(events.slice(-3))})`)), timeoutMs);
       });
@@ -329,6 +342,16 @@ async function runTeamsCall({ live = false } = {}) {
     await app.startRecording();
     mark('recording');
     const recordId = await app.getRecordId();
+    // Witness of the 03.10.2026 failure mode: record what the DEFAULT output carries
+    // during the call — that endpoint is all Chromium's loopback (the app up to
+    // 4.7.12) could hear. In the split topology it must carry none of the call.
+    const witnessFile = path.join(tc.OUT_DIR, 'default-output-witness.wav');
+    fs.rmSync(witnessFile, { force: true });
+    const witness = split
+      ? spawn(SYSLOOPBACK, ['--role', 'console', '--seconds', String(Math.ceil(call.manifest.seconds + 6)), '--out', witnessFile],
+        { stdio: 'ignore', windowsHide: true })
+      : null;
+    const witnessDone = witness ? new Promise(resolve => witness.on('exit', resolve)) : null;
     teams.send('go');
     const playing = await teams.waitFor('playing', 10_000);
     mark('teams-playing', { device: playing.device });
@@ -364,6 +387,26 @@ async function runTeamsCall({ live = false } = {}) {
     problems.push(...verdict.problems);
     notes.push(...verdict.notes);
 
+    // Did the call reach the default output too? If not, a capture bound to it (the
+    // pre-4.7.13 path) would have recorded the meeting side as silence — and this run
+    // proves the app records it anyway. CI requires that topology.
+    let defaultOutputHeardCall = null;
+    if (witnessDone) {
+      await Promise.race([witnessDone, sleep(20_000)]);
+      const witnessSeconds = fs.existsSync(witnessFile) ? tc.decodeMono(witnessFile).length / 16000 : 0;
+      if (witnessSeconds >= call.manifest.seconds - 2) {
+        defaultOutputHeardCall = tc.verifyCall(witnessFile, call).sides.remote.lagFrames !== null;
+        notes.push(defaultOutputHeardCall
+          ? `the default output "${consoleOut.name}" carried the call too — not the 03.10. situation`
+          : `the default output "${consoleOut.name}" carried none of the call: a capture bound to it (the app up to 4.7.12) would have recorded silence, as on 03.10.2026`);
+      } else {
+        notes.push(`default-output witness recorded only ${witnessSeconds.toFixed(1)} s (helper unavailable?)`);
+      }
+    }
+    if (process.env.SUISSE_TEAMS_CALL_REQUIRE_SPLIT === '1' && defaultOutputHeardCall !== false) {
+      problems.push('This run did not reproduce the 03.10.2026 topology (call on the communication output, absent from the default output)');
+    }
+
     let liveResult = null;
     if (live) {
       liveResult = await verifyLive(app, recordId, call, liveAccount);
@@ -381,7 +424,7 @@ async function runTeamsCall({ live = false } = {}) {
     await app.screenshot('s20-after-upload').catch(() => {});
     return {
       pass: problems.length === 0, problems, notes, timeline,
-      topology: { teamsOutput: commsOut.name, defaultOutput: consoleOut?.name || null, split, teamsMicrophone: commsIn?.name || null },
+      topology: { teamsOutput: commsOut.name, defaultOutput: consoleOut?.name || null, split, defaultOutputHeardCall, teamsMicrophone: commsIn?.name || null },
       sides: verdict.sides, utterances: verdict.utterances,
       ...(liveResult ? { live: { meetingId: liveResult.meetingId, transcriptText: liveResult.transcriptText } } : {}),
       teamsEvents: teams.events.filter(e => e.event !== 'position'),
@@ -396,28 +439,4 @@ async function runTeamsCall({ live = false } = {}) {
   }
 }
 
-/**
- * The control: with the app forced back onto Chromium's loopback (the code path
- * of 4.7.12 and before), the same call must FAIL on a machine where Teams plays on
- * a non-default output — proof that s20 would have caught the 03.10.2026 failure.
- * Not applicable where Teams' output is also the default output (hosted CI).
- */
-async function runTeamsCallControl() {
-  const outputs = listDevices(buildTeamsSim()).filter(d => d.flow === 'output');
-  const commsOut = outputs.find(d => d.defaultFor.includes('communications'));
-  const consoleOut = outputs.find(d => d.defaultFor.includes('console'));
-  if (!commsOut || !consoleOut || commsOut.id === consoleOut.id) {
-    return { pass: true, problems: [], notes: ['not applicable: Teams plays on the default output here, the old path hears it too'] };
-  }
-  process.env.SUISSE_E2E_SYSTEM_AUDIO_FALLBACK = '1';
-  const result = await runTeamsCall();
-  const caught = (result.problems || []).some(p => /Meeting \(system audio\) side missing/.test(p));
-  return {
-    pass: caught,
-    problems: caught ? [] : ['The control did not fail: s20 would not catch a return of the 03.10.2026 failure'],
-    notes: [`old loopback path: ${caught ? 'the meeting side is lost, as on 03.10.2026 — s20 catches it' : 'NOT caught'}`,
-      ...(result.problems || []).map(p => `control saw: ${p}`)],
-  };
-}
-
-module.exports = { runTeamsCall, runTeamsCallSelftest, runTeamsCallControl };
+module.exports = { runTeamsCall, runTeamsCallSelftest };
