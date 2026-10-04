@@ -263,6 +263,13 @@ jobs:
           SUISSE_TEAMS_CALL_REQUIRE_SPLIT: '1'
         run: node tests/e2e-harness/ci/run-qualification.js s20-teams-call
 
+      # The browser guests for a real Teams call (teams-real-call.js): their synthetic
+      # microphone must deliver every line and they must never get a camera.
+      - name: Check the synthetic Teams guests' microphone
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 5
+        run: node tests/e2e-harness/teams-real-call.js selftest
+
       - name: Preserve the call, profiles, and diagnostics
         if: always()
         timeout-minutes: 5

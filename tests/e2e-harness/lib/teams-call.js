@@ -42,6 +42,9 @@ const TAIL_S = 3.0;
 
 const VOICES = { local: 'Stefan', remote1: 'Katja', remote2: 'Hedda' };
 
+// How problems name a group of sentences (verifyCall groups by side, a real Teams call by speaker).
+const GROUP_LABELS = { local: 'Microphone', remote: 'Meeting (system audio)', remote1: 'Katja (Teams guest)', remote2: 'Hedda (Teams guest)' };
+
 // Keywords are what a transcript must contain (live check); everything else is
 // natural meeting talk. Swiss spelling (ss), no numbers spelled as digits.
 const CONVERSATION = [
@@ -203,7 +206,21 @@ function prepareCall() {
     wavs[side] = path.join(OUT_DIR, `${side}_${PLAY_RATE}.wav`);
     ff(['-i', flac, '-ac', '1', '-ar', String(PLAY_RATE), '-c:a', 'pcm_s16le', wavs[side]]);
   }
-  return { manifest, localWav: wavs.local, remoteWav: wavs.remote };
+  // One track per far-end speaker (same timeline), for a real Teams call in which
+  // each synthetic guest speaks only its own lines. The two never overlap.
+  const remote = decodeMono(wavs.remote, PLAY_RATE);
+  const speakerWavs = {};
+  for (const speaker of ['remote1', 'remote2']) {
+    const own = new Float32Array(remote.length);
+    for (const u of manifest.utterances.filter(x => x.speaker === speaker)) {
+      const from = Math.max(0, Math.floor((u.start - 0.05) * PLAY_RATE));
+      const to = Math.min(remote.length, Math.ceil((u.end + 0.05) * PLAY_RATE));
+      own.set(remote.subarray(from, to), from);
+    }
+    speakerWavs[speaker] = path.join(OUT_DIR, `${speaker}_${PLAY_RATE}.wav`);
+    writeWav16(speakerWavs[speaker], own, PLAY_RATE);
+  }
+  return { manifest, localWav: wavs.local, remoteWav: wavs.remote, speakerWavs };
 }
 
 // ---- proving the call is in the recording --------------------------------------------
@@ -249,27 +266,43 @@ function median(values) {
  * @returns {{ pass, problems, notes, sides, utterances }}
  */
 function verifyCall(recordingFile, call, { searchS = [-5, 40], minScore = 0.6, minOverlapScore = 0.4,
-  minCoverage = 0.9, maxJitterMs = 150 } = {}) {
+  minCoverage = 0.9, maxJitterMs = 150, tracks = null, groupOf = u => u.side } = {}) {
   const problems = [];
   const notes = [];
   const rec = contour(decodeMono(recordingFile));
-  const refs = { local: contour(decodeMono(call.localWav)), remote: contour(decodeMono(call.remoteWav)) };
+  // One reference track per group (default: microphone side and meeting side). A
+  // real Teams call groups by speaker instead: each guest reaches Teams on its own path.
+  const trackFiles = tracks || { local: call.localWav, remote: call.remoteWav };
+  const refs = Object.fromEntries(Object.entries(trackFiles).map(([group, file]) => [group, contour(decodeMono(file))]));
   const recordingS = rec.length * HOP_S;
   notes.push(`recording ${recordingS.toFixed(1)} s, conversation ${call.manifest.seconds.toFixed(1)} s`);
 
   const minLag = Math.round(searchS[0] / HOP_S);
   const maxLag = Math.round(searchS[1] / HOP_S);
-  const results = call.manifest.utterances.map(u => {
+  // Long searches (a real call recorded for an hour) look every 50 ms first and
+  // refine the most promising places; short ones look at every 10 ms frame.
+  const step = maxLag - minLag > 12_000 ? 5 : 1;
+  const results = call.manifest.utterances.filter(u => refs[groupOf(u)]).map(original => {
+    const u = { ...original, side: groupOf(original) };
     const ref = refs[u.side];
     const from = Math.max(0, Math.floor((u.start - 0.15) / HOP_S));
     const to = Math.min(ref.length, Math.ceil((u.end + 0.15) / HOP_S));
     const length = to - from;
-    let best = { lag: null, score: -1 };
-    for (let lag = minLag; lag <= maxLag; lag++) {
+    const scored = [];
+    for (let lag = minLag; lag <= maxLag; lag += step) {
       const at = from + lag;
       if (at < 0 || at + length > rec.length) continue;
-      const score = pearson(ref, from, rec, at, length);
-      if (score > best.score) best = { lag, score };
+      scored.push({ lag, score: pearson(ref, from, rec, at, length) });
+    }
+    let best = { lag: null, score: -1 };
+    const candidates = step === 1 ? scored : scored.sort((a, b) => b.score - a.score).slice(0, 8);
+    for (const candidate of candidates) {
+      for (let lag = candidate.lag - (step - 1); lag <= candidate.lag + (step - 1); lag++) {
+        const at = from + lag;
+        if (at < 0 || at + length > rec.length) continue;
+        const score = step === 1 ? candidate.score : pearson(ref, from, rec, at, length);
+        if (score > best.score) best = { lag, score };
+      }
     }
     return { u, from, length, best };
   });
@@ -279,7 +312,7 @@ function verifyCall(recordingFile, call, { searchS = [-5, 40], minScore = 0.6, m
   // elsewhere cannot move it; a side with no majority is missing.
   const sides = {};
   const jitterFrames = Math.round(maxJitterMs / 1000 / HOP_S);
-  for (const side of ['local', 'remote']) {
+  for (const side of Object.keys(refs)) {
     const mine = results.filter(r => r.u.side === side);
     const strong = mine.filter(r => r.best.lag !== null && r.best.score >= (r.u.overlap ? minOverlapScore : minScore));
     let lag = null;
@@ -297,7 +330,7 @@ function verifyCall(recordingFile, call, { searchS = [-5, 40], minScore = 0.6, m
     if (support < Math.ceil(mine.length / 2)) lag = null;
     sides[side] = { lagFrames: lag, offsetS: lag === null ? null : Number((lag * HOP_S).toFixed(3)), agreeingSentences: support, sentences: mine.length };
     if (lag === null) {
-      problems.push(`${side === 'local' ? 'Microphone' : 'Meeting (system audio)'} side missing: only ${support} of ${mine.length} of its sentences found in the recording`);
+      problems.push(`${GROUP_LABELS[side] || side} side missing: only ${support} of ${mine.length} of its sentences found in the recording`);
     }
   }
 
@@ -336,7 +369,7 @@ function verifyCall(recordingFile, call, { searchS = [-5, 40], minScore = 0.6, m
   });
 
   for (const u of utterances) {
-    const who = u.side === 'local' ? 'microphone' : 'meeting';
+    const who = (GROUP_LABELS[u.side] || u.side).toLowerCase();
     if (u.found === false && u.score === undefined) continue; // whole side missing, reported above
     if (u.score < (u.overlap ? minOverlapScore : minScore)) {
       problems.push(`AUDIO GAP: ${u.id} (${who}, ${u.voice}) not recognisable in the recording (match ${u.score}): "${u.text}"`);
@@ -348,11 +381,10 @@ function verifyCall(recordingFile, call, { searchS = [-5, 40], minScore = 0.6, m
     }
   }
 
-  if (sides.local.offsetS !== null && sides.remote.offsetS !== null) {
-    notes.push(`microphone track starts at ${sides.local.offsetS.toFixed(2)} s, meeting track at ${sides.remote.offsetS.toFixed(2)} s of the recording`);
-  }
+  const placed = Object.entries(sides).filter(([, v]) => v.offsetS !== null);
+  if (placed.length) notes.push(placed.map(([group, v]) => `${(GROUP_LABELS[group] || group).toLowerCase()} track starts at ${v.offsetS.toFixed(2)} s`).join(', ') + ' of the recording');
   const lastEnd = Math.max(...call.manifest.utterances.map(u => u.end));
-  for (const side of ['local', 'remote']) {
+  for (const side of Object.keys(sides)) {
     if (sides[side].offsetS !== null && sides[side].offsetS + lastEnd > recordingS + 0.5) {
       notes.push(`${side} track runs past the end of the recording (stopped early?)`);
     }
@@ -362,7 +394,7 @@ function verifyCall(recordingFile, call, { searchS = [-5, 40], minScore = 0.6, m
 
 /** Live check: every keyword of every sentence appears in the transcript text. */
 function transcriptRecall(transcriptText, manifest) {
-  const norm = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/ß/g, 'ss');
+  const norm = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss');
   const text = norm(transcriptText);
   const perSide = { local: { total: 0, found: 0, missing: [] }, remote: { total: 0, found: 0, missing: [] } };
   for (const u of manifest.utterances) {

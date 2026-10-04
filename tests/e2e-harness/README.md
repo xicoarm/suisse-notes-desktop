@@ -172,6 +172,20 @@ silence, and the app recorded every sentence. `SUISSE_TEAMS_CALL_REQUIRE_SPLIT=1
 inside the app (`SUISSE_E2E_SYSTEM_AUDIO_FALLBACK=1`) proves nothing here: with the
 fake microphone switches Chromium fakes the loopback stream too.
 
+**A real Teams call** (`teams-real-call.js`, run by hand): two browser guests,
+"Katja (Test)" and "Hedda (Test)", join a real Teams meeting as anonymous guests
+with a synthetic microphone (Web Audio, started together so they speak in turn),
+no camera, muted output, and a silent fallback file for any other capture. A
+person sits in the meeting with Teams and the real headset and records with the
+desktop app; afterwards `verify` scores every guest sentence in the newest
+recording. Never use it in a customer meeting. The guests stop at a CAPTCHA.
+
+```powershell
+node tests/e2e-harness/teams-real-call.js join "<Teams meeting link>"   # admit both from the lobby
+node tests/e2e-harness/teams-real-call.js verify                        # newest desktop recording
+node tests/e2e-harness/teams-real-call.js selftest                      # guest microphone, no Teams (also in CI)
+```
+
 `s20-teams-call-live` runs the same call against the real backend with the
 `desktop-e2e` test account (`E2E_PASSWORD` from the environment, never from the
 repository), waits for the transcript, requires the keywords of both sides and at
