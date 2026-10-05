@@ -11,7 +11,7 @@
  *   1. Areg starts a Teams meeting (e.g. "Meet now") with the Jabra, copies the link,
  *      starts the desktop app recording (system audio on, microphone "Automatisch").
  *   2. node tests/e2e-harness/teams-real-call.js join "<meeting link>"
- *      Two browser guests, "Katja (Test)" and "Hedda (Test)", join as anonymous guests;
+ *      Two browser guests, "Katja Test" and "Hedda Test", join as anonymous guests;
  *      Areg admits them from the lobby. Once both are in, they hold the 30-second
  *      exchange of the s20 fixture (lines u2/u3/u5/u6/u9), then leave.
  *      Areg may talk too (his voice is the microphone side); optionally he invites
@@ -41,8 +41,8 @@ const tc = require('./lib/teams-call');
 
 const OUT = path.join(WORK_DIR, 'teams-real-call');
 const GUESTS = [
-  { speaker: 'remote1', name: 'Katja (Test)' },
-  { speaker: 'remote2', name: 'Hedda (Test)' },
+  { speaker: 'remote1', name: 'Katja Test' },
+  { speaker: 'remote2', name: 'Hedda Test' },
 ];
 // A person admits the guests (join); an unattended bot test expects a lobby bypass and gives up sooner.
 const LOBBY_TIMEOUT_MS = Number(process.env.SUISSE_TEAMS_LOBBY_TIMEOUT_S || 600) * 1000;
@@ -201,7 +201,12 @@ async function typeName(page, name) {
       if (!input) continue;
       const current = await frame.evaluate(el => el.value, input);
       if (current === name) return true;
-      await input.click({ clickCount: 3 });
+      // Empty the field first (a triple click did not select Teams' text, every round appended the name).
+      await input.focus();
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyA');
+      await page.keyboard.up('Control');
+      await page.keyboard.press('Backspace');
       await input.type(name, { delay: 30 });
       return true;
     } catch (_) { /* frame navigating */ }
@@ -236,6 +241,8 @@ async function admitGuest(guest, link, pcmBase64) {
     }
 
     if (/hang ?up|leave/i.test(labels) && !/join now/i.test(labels)) { note('in meeting'); return null; }
+    // Anonymous guests wait until a signed-in person has started the meeting (a bot does not count).
+    if (/let you in when the meeting starts|when the meeting starts/i.test(text)) { note('waiting for the meeting to start'); await sleep(2000); continue; }
     if (/let you in soon|waiting for (someone|the organizer)|in the lobby|lobby/i.test(text)) { note('lobby - please admit'); await sleep(2000); continue; }
 
     if (await clickButton(guest.page, /continue on this browser|join on the web|use the web app instead|joinOnWeb/)) { note('browser join'); await sleep(3000); continue; }
@@ -246,8 +253,12 @@ async function admitGuest(guest, link, pcmBase64) {
     note('loading');
     await sleep(1500);
   }
+  if (guest.state === 'waiting for the meeting to start') return MEETING_NOT_STARTED;
   return `not admitted within ${LOBBY_TIMEOUT_MS / 60_000} minutes`;
 }
+
+/** admitGuest's answer when the guest only waited for a signed-in person to start the meeting. */
+const MEETING_NOT_STARTED = 'the meeting was not started by a signed-in person';
 
 function assertTeamsLink(link) {
   if (!/^https:\/\/(teams\.microsoft\.com|teams\.live\.com)\//i.test(link || '')) throw new Error('Pass a Teams meeting link (https://teams.microsoft.com/...)');
@@ -258,8 +269,11 @@ function assertTeamsLink(link) {
  * `talk()` makes them hold the exchange once (both start in the same instant, so they
  * speak in turn as in the fixture) and resolves when it is over. Guests leave and the
  * browsers close afterwards, whatever happens. Problems end up in `result.problems`.
+ * With `allowNotStarted`, guests that only wait for a signed-in person to start the
+ * meeting are no problem: `result.guestsNotStarted` is set and `during` still runs,
+ * with a `talk()` that does nothing (the unattended bot test checks the bot alone).
  */
-async function withGuests(link, result, during) {
+async function withGuests(link, result, during, { allowNotStarted = false } = {}) {
   const call = tc.prepareCall();
   fs.mkdirSync(OUT, { recursive: true });
   const silenceWav = path.join(OUT, 'silence.wav');
@@ -276,15 +290,30 @@ async function withGuests(link, result, during) {
   try {
     for (const guest of GUESTS) guests.push(await launchGuest(guest, silenceWav));
     const outcomes = await Promise.all(guests.map(g => admitGuest(g, link, speakerPcmBase64(call.speakerWavs[g.speaker]))));
-    outcomes.forEach((problem, i) => { if (problem) result.problems.push(`${guests[i].name}: ${problem}`); });
-    if (!result.problems.length) {
+    const notStarted = allowNotStarted && outcomes.every(problem => problem === MEETING_NOT_STARTED);
+    if (notStarted) result.guestsNotStarted = true;
+    else outcomes.forEach((problem, i) => { if (problem) result.problems.push(`${guests[i].name}: ${problem}`); });
+    // A guest that did not get in: what its page showed (screenshot and button labels, no page text).
+    for (const [i, problem] of outcomes.entries()) {
+      if (!problem) continue;
+      const g = guests[i];
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const shot = path.join(OUT, `guest_${g.speaker}_${stamp}.png`);
+      await g.page.screenshot({ path: shot }).catch(() => {});
+      const views = await lookAt(g.page).catch(() => []);
+      g.seen = { url: g.page.url().replace(/\?.*$/, '?…'), buttons: views.flatMap(v => v.buttons.map(b => b.label || b.tid)).filter(Boolean).slice(0, 30) };
+    }
+    if (notStarted) {
+      console.log('  guests wait for a signed-in person to start the meeting: the bot is checked alone');
+      await during(guests, async () => {}, call);
+    } else if (!result.problems.length) {
       await sleep(3000);
       await during(guests, talk, call);
     }
   } finally {
     for (const g of guests) {
       await clickButton(g.page, /hang ?up|leave/).catch(() => false);
-      result.guests.push({ name: g.name, state: g.state, log: g.log });
+      result.guests.push({ name: g.name, state: g.state, log: g.log, ...(g.seen ? { seen: g.seen } : {}) });
     }
     await sleep(1500);
     for (const g of guests) {
@@ -337,6 +366,8 @@ async function api(method, route, { token, body } = {}) {
  * both guests' words under two speakers. SUISSE_BOT_TEST_HOLD_MINUTES keeps the call
  * open that long (16 = past the 15-minute safety net that caused the 03.10. status).
  * The meeting must let everyone bypass the lobby (Teams meeting options).
+ * SUISSE_BOT_TEST_EXPECT_PROVIDER (mediabot | attendee) fails the run when the
+ * backend sent the other bot.
  * Credentials: E2E_EMAIL (default desktop-e2e@suisse-notes.test) and E2E_PASSWORD
  * from the environment. On success the test meeting is deleted again.
  */
@@ -376,6 +407,11 @@ async function botCall(link) {
     result.meetingId = meetingId;
     result.provider = invite.json?.provider || null;
     console.log(`  bot invited: meeting ${meetingId} (${result.provider})`);
+    // A silent fallback to the other bot must not pass as a test of this one.
+    const expectedProvider = process.env.SUISSE_BOT_TEST_EXPECT_PROVIDER;
+    if (expectedProvider && result.provider !== expectedProvider) {
+      result.problems.push(`Bot provider ${result.provider} - expected ${expectedProvider}`);
+    }
     for (let i = 0; i < 24 && (await status()).current === 'BOT_JOINING'; i++) await sleep(5000);
 
     await withGuests(link, result, async (guests, talk) => {
@@ -389,7 +425,7 @@ async function botCall(link) {
       if (holdMinutes > 0) await talk(); // talking again after the hold proves the recording kept running
       const left = await api('POST', `/api/meetings/${meetingId}`, { token, body: { action: 'leave' } });
       result.botLeave = left.status;
-    });
+    }, { allowNotStarted: true });
 
     // Recording -> processing -> transcript.
     let final = await status();
@@ -400,6 +436,11 @@ async function botCall(link) {
     }
     if (final.current !== 'COMPLETED') {
       if (!result.problems.some(p => p.startsWith('Meeting status'))) result.problems.push(`Meeting did not complete (last status ${final.current})`);
+    } else if (result.guestsNotStarted) {
+      // Nobody spoke: Teams let the anonymous guests in only after a signed-in person starts the
+      // meeting (Teams meeting policy). The bot part (join, never FAILED, COMPLETED) is checked.
+      result.notice = 'Guests waited for a signed-in person to start the meeting - transcript part skipped';
+      console.log(`  NOTICE: ${result.notice}`);
     } else {
       const segments = (final.meeting?.transcript?.segments || []).filter(s => !s.speakerRemovedAt);
       const norm = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9 ]+/g, ' ');
@@ -429,7 +470,8 @@ async function botCall(link) {
     }
     writeLog('bot', startedAt, result);
   }
-  console.log(`${result.problems.length ? 'FAIL' : 'PASS'}  Teams bot with two synthetic guests${meetingId ? ` (meeting ${meetingId}${result.deleted ? ', deleted' : ', kept for inspection'})` : ''}`);
+  console.log(`${result.problems.length ? 'FAIL' : 'PASS'}  Teams bot with two synthetic guests${result.guestsNotStarted ? ' (bot only: the guests could not start the meeting)' : ''}${meetingId ? ` (meeting ${meetingId}${result.deleted ? ', deleted' : ', kept for inspection'})` : ''}`);
+  if (result.notice && process.env.GITHUB_ACTIONS) console.log(`::notice title=Teams bot test::${result.notice}`);
   for (const p of result.problems) console.log(`  PROBLEM: ${p}`);
   return !result.problems.length;
 }
