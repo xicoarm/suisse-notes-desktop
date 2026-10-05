@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.15](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.14...v4.7.15) (2026-10-05)
+
+
+### Features
+
+* **record:** live meter for system audio - see that the other side of the call is heard cf8c575
+
 ### [4.7.14](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.13...v4.7.14) (2026-10-05)
 
 

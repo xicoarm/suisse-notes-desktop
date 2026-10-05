@@ -321,6 +321,8 @@ async function runTeamsCall({ live = false } = {}) {
       silent: document.querySelector('[data-test=system-audio-silent-warning]')?.textContent?.trim() || null,
       micHint: document.querySelector('.mic-auto-hint')?.textContent?.trim() || null,
       micLabel: document.querySelector('.mic-select')?.textContent?.trim() || null,
+      // The system-audio meter (since 4.7.15): what the capture hears, shown to the user.
+      systemMeter: parseFloat(document.querySelector('[data-test=system-audio-level] .level-bar')?.style?.width) || 0,
       toasts: [...document.querySelectorAll('.q-notification')].map(n => n.textContent.trim()).join(' | '),
     }));
     for (let attempt = 0; attempt < 3 && !(await ui()).toggleOn; attempt++) {
@@ -364,10 +366,12 @@ async function runTeamsCall({ live = false } = {}) {
     // The call: watch the warnings while it runs, like a user glancing at the app.
     const seconds = call.manifest.seconds;
     const warnings = [];
+    let systemMeterMax = 0;
     const callEnds = Date.now() + seconds * 1000;
     while (Date.now() < callEnds) {
       await sleep(5000);
       const u = await ui();
+      systemMeterMax = Math.max(systemMeterMax, u.systemMeter);
       if (u.silent) warnings.push(`silence warning: ${u.silent.slice(0, 120)}`);
       if (/stille|silen|kein ton|no sound|no audio/i.test(u.toasts)) warnings.push(`toast: ${u.toasts.slice(0, 160)}`);
     }
@@ -375,6 +379,8 @@ async function runTeamsCall({ live = false } = {}) {
     await sleep(2500); // the far end's last words leave the device buffers
     mark('teams-finished');
     if (warnings.length) problems.push(`The app warned during a healthy call: ${[...new Set(warnings)].join(' | ')}`);
+    notes.push(`system-audio meter during the call: up to ${systemMeterMax} %`);
+    if (systemMeterMax < 20) problems.push(`The system-audio meter stayed at ${systemMeterMax} % while the far end talked - the user cannot see that the call is heard`);
 
     const during = await ui();
     if (commsIn && !/Microsoft Teams/.test(during.micHint || before.micHint || '')) notes.push(`hint during the call: "${during.micHint}"`);
