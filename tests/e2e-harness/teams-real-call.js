@@ -277,6 +277,16 @@ async function withGuests(link, result, during) {
     for (const guest of GUESTS) guests.push(await launchGuest(guest, silenceWav));
     const outcomes = await Promise.all(guests.map(g => admitGuest(g, link, speakerPcmBase64(call.speakerWavs[g.speaker]))));
     outcomes.forEach((problem, i) => { if (problem) result.problems.push(`${guests[i].name}: ${problem}`); });
+    // A guest that did not get in: what its page showed (screenshot and button labels, no page text).
+    for (const [i, problem] of outcomes.entries()) {
+      if (!problem) continue;
+      const g = guests[i];
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const shot = path.join(OUT, `guest_${g.speaker}_${stamp}.png`);
+      await g.page.screenshot({ path: shot }).catch(() => {});
+      const views = await lookAt(g.page).catch(() => []);
+      g.seen = { url: g.page.url().replace(/\?.*$/, '?…'), buttons: views.flatMap(v => v.buttons.map(b => b.label || b.tid)).filter(Boolean).slice(0, 30) };
+    }
     if (!result.problems.length) {
       await sleep(3000);
       await during(guests, talk, call);
@@ -284,7 +294,7 @@ async function withGuests(link, result, during) {
   } finally {
     for (const g of guests) {
       await clickButton(g.page, /hang ?up|leave/).catch(() => false);
-      result.guests.push({ name: g.name, state: g.state, log: g.log });
+      result.guests.push({ name: g.name, state: g.state, log: g.log, ...(g.seen ? { seen: g.seen } : {}) });
     }
     await sleep(1500);
     for (const g of guests) {

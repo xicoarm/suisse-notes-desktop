@@ -84,12 +84,15 @@ jobs:
         timeout-minutes: 55
         run: node tests/e2e-harness/teams-real-call.js bot
 
-      # Statuses, speaker names and keyword counts only - no transcript text, no secrets.
+      # Statuses, speaker names and keyword counts only - no transcript text, no secrets; a
+      # screenshot of a guest page that did not get into the meeting.
       - name: Keep the run log
         if: failure() && steps.ready.outputs.ready == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: teams-bot-canary-${{ github.run_id }}
-          path: tests/e2e-harness/work/teams-real-call/bot_*.json
+          path: |
+            tests/e2e-harness/work/teams-real-call/bot_*.json
+            tests/e2e-harness/work/teams-real-call/guest_*.png
           if-no-files-found: ignore
           retention-days: 14
