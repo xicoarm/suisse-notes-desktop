@@ -1,0 +1,92 @@
+name: Teams bot canary
+
+# The Suisse Meets Teams bot in a real Teams meeting with two synthetic guests
+# (tests/e2e-harness/teams-real-call.js bot): the test account invites the bot by
+# link, the guests talk, and the meeting must end COMPLETED - never FAILED on the
+# way - with both guests' words in the transcript. Every morning before work and
+# on demand. Production only receives what a customer's invitation would send.
+#
+# Needs two repository secrets (until then the job only leaves a notice):
+#   TEAMS_TEST_MEETING_LINK  a Teams meeting link whose options let everyone bypass the lobby
+#   E2E_PASSWORD             the desktop-e2e test account's password
+on:
+  schedule:
+    # 04:15 UTC = 06:15 Zurich (summer): after the bot's night maintenance windows,
+    # before the first meetings of the day.
+    - cron: '15 4 * * *'
+  workflow_dispatch:
+    inputs:
+      hold_minutes:
+        description: Keep the call open this long between the two exchanges (16 = past the 15-minute safety net)
+        required: false
+        default: '16'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: teams-bot-canary
+  cancel-in-progress: false
+
+jobs:
+  bot:
+    if: ${{ github.repository == 'xicoarm/suisse-notes-desktop' }}
+    name: Teams bot with synthetic guests
+    runs-on: windows-2022
+    timeout-minutes: 75
+    env:
+      SUISSE_TEAMS_TEST_MEETING_LINK: ${{ secrets.TEAMS_TEST_MEETING_LINK }}
+      E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+      SUISSE_BOT_TEST_HOLD_MINUTES: ${{ inputs.hold_minutes || '16' }}
+      SUISSE_TEAMS_LOBBY_TIMEOUT_S: '180'
+      HUSKY: '0'
+
+    steps:
+      - name: Check the secrets
+        id: ready
+        shell: bash
+        run: |
+          if [ -z "$SUISSE_TEAMS_TEST_MEETING_LINK" ] || [ -z "$E2E_PASSWORD" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Set the secrets TEAMS_TEST_MEETING_LINK and E2E_PASSWORD to enable the Teams bot canary."
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out
+        if: steps.ready.outputs.ready == 'true'
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        if: steps.ready.outputs.ready == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install locked dependencies
+        if: steps.ready.outputs.ready == 'true'
+        timeout-minutes: 10
+        run: npm ci
+
+      - name: Check the synthetic guests' microphone
+        if: steps.ready.outputs.ready == 'true'
+        timeout-minutes: 5
+        run: node tests/e2e-harness/teams-real-call.js selftest
+
+      - name: Teams call with the bot and two synthetic guests
+        if: steps.ready.outputs.ready == 'true'
+        timeout-minutes: 55
+        run: node tests/e2e-harness/teams-real-call.js bot
+
+      # Statuses, speaker names and keyword counts only - no transcript text, no secrets.
+      - name: Keep the run log
+        if: failure() && steps.ready.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: teams-bot-canary-${{ github.run_id }}
+          path: tests/e2e-harness/work/teams-real-call/bot_*.json
+          if-no-files-found: ignore
+          retention-days: 14
