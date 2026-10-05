@@ -337,6 +337,8 @@ async function api(method, route, { token, body } = {}) {
  * both guests' words under two speakers. SUISSE_BOT_TEST_HOLD_MINUTES keeps the call
  * open that long (16 = past the 15-minute safety net that caused the 03.10. status).
  * The meeting must let everyone bypass the lobby (Teams meeting options).
+ * SUISSE_BOT_TEST_EXPECT_PROVIDER (mediabot | attendee) fails the run when the
+ * backend sent the other bot.
  * Credentials: E2E_EMAIL (default desktop-e2e@suisse-notes.test) and E2E_PASSWORD
  * from the environment. On success the test meeting is deleted again.
  */
@@ -376,6 +378,11 @@ async function botCall(link) {
     result.meetingId = meetingId;
     result.provider = invite.json?.provider || null;
     console.log(`  bot invited: meeting ${meetingId} (${result.provider})`);
+    // A silent fallback to the other bot must not pass as a test of this one.
+    const expectedProvider = process.env.SUISSE_BOT_TEST_EXPECT_PROVIDER;
+    if (expectedProvider && result.provider !== expectedProvider) {
+      result.problems.push(`Bot provider ${result.provider} - expected ${expectedProvider}`);
+    }
     for (let i = 0; i < 24 && (await status()).current === 'BOT_JOINING'; i++) await sleep(5000);
 
     await withGuests(link, result, async (guests, talk) => {

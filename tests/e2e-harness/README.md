@@ -197,7 +197,9 @@ again, the bot is asked to leave. The meeting must end `COMPLETED`, never pass
 through `FAILED`, and its transcript must hold at least 75 % of each guest's
 keywords under at least two speakers; it is then deleted. Secrets:
 `TEAMS_TEST_MEETING_LINK` and `E2E_PASSWORD` (the workflow only leaves a notice
-until both exist).
+until both exist). The test account belongs to the org whose Microsoft tenant
+hosts the test meeting, so the nightly run requires the real Teams bot
+(`SUISSE_BOT_TEST_EXPECT_PROVIDER=mediabot`); a fallback to the browser bot fails it.
 
 `s20-teams-call-live` runs the same call against the real backend with the
 `desktop-e2e` test account (`E2E_PASSWORD` from the environment, never from the
