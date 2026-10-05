@@ -241,6 +241,8 @@ async function admitGuest(guest, link, pcmBase64) {
     }
 
     if (/hang ?up|leave/i.test(labels) && !/join now/i.test(labels)) { note('in meeting'); return null; }
+    // Anonymous guests wait until a signed-in person has started the meeting (a bot does not count).
+    if (/let you in when the meeting starts|when the meeting starts/i.test(text)) { note('waiting for the meeting to start'); await sleep(2000); continue; }
     if (/let you in soon|waiting for (someone|the organizer)|in the lobby|lobby/i.test(text)) { note('lobby - please admit'); await sleep(2000); continue; }
 
     if (await clickButton(guest.page, /continue on this browser|join on the web|use the web app instead|joinOnWeb/)) { note('browser join'); await sleep(3000); continue; }
@@ -251,8 +253,12 @@ async function admitGuest(guest, link, pcmBase64) {
     note('loading');
     await sleep(1500);
   }
+  if (guest.state === 'waiting for the meeting to start') return MEETING_NOT_STARTED;
   return `not admitted within ${LOBBY_TIMEOUT_MS / 60_000} minutes`;
 }
+
+/** admitGuest's answer when the guest only waited for a signed-in person to start the meeting. */
+const MEETING_NOT_STARTED = 'the meeting was not started by a signed-in person';
 
 function assertTeamsLink(link) {
   if (!/^https:\/\/(teams\.microsoft\.com|teams\.live\.com)\//i.test(link || '')) throw new Error('Pass a Teams meeting link (https://teams.microsoft.com/...)');
@@ -263,8 +269,11 @@ function assertTeamsLink(link) {
  * `talk()` makes them hold the exchange once (both start in the same instant, so they
  * speak in turn as in the fixture) and resolves when it is over. Guests leave and the
  * browsers close afterwards, whatever happens. Problems end up in `result.problems`.
+ * With `allowNotStarted`, guests that only wait for a signed-in person to start the
+ * meeting are no problem: `result.guestsNotStarted` is set and `during` still runs,
+ * with a `talk()` that does nothing (the unattended bot test checks the bot alone).
  */
-async function withGuests(link, result, during) {
+async function withGuests(link, result, during, { allowNotStarted = false } = {}) {
   const call = tc.prepareCall();
   fs.mkdirSync(OUT, { recursive: true });
   const silenceWav = path.join(OUT, 'silence.wav');
@@ -281,7 +290,9 @@ async function withGuests(link, result, during) {
   try {
     for (const guest of GUESTS) guests.push(await launchGuest(guest, silenceWav));
     const outcomes = await Promise.all(guests.map(g => admitGuest(g, link, speakerPcmBase64(call.speakerWavs[g.speaker]))));
-    outcomes.forEach((problem, i) => { if (problem) result.problems.push(`${guests[i].name}: ${problem}`); });
+    const notStarted = allowNotStarted && outcomes.every(problem => problem === MEETING_NOT_STARTED);
+    if (notStarted) result.guestsNotStarted = true;
+    else outcomes.forEach((problem, i) => { if (problem) result.problems.push(`${guests[i].name}: ${problem}`); });
     // A guest that did not get in: what its page showed (screenshot and button labels, no page text).
     for (const [i, problem] of outcomes.entries()) {
       if (!problem) continue;
@@ -292,7 +303,10 @@ async function withGuests(link, result, during) {
       const views = await lookAt(g.page).catch(() => []);
       g.seen = { url: g.page.url().replace(/\?.*$/, '?…'), buttons: views.flatMap(v => v.buttons.map(b => b.label || b.tid)).filter(Boolean).slice(0, 30) };
     }
-    if (!result.problems.length) {
+    if (notStarted) {
+      console.log('  guests wait for a signed-in person to start the meeting: the bot is checked alone');
+      await during(guests, async () => {}, call);
+    } else if (!result.problems.length) {
       await sleep(3000);
       await during(guests, talk, call);
     }
@@ -411,7 +425,7 @@ async function botCall(link) {
       if (holdMinutes > 0) await talk(); // talking again after the hold proves the recording kept running
       const left = await api('POST', `/api/meetings/${meetingId}`, { token, body: { action: 'leave' } });
       result.botLeave = left.status;
-    });
+    }, { allowNotStarted: true });
 
     // Recording -> processing -> transcript.
     let final = await status();
@@ -422,6 +436,11 @@ async function botCall(link) {
     }
     if (final.current !== 'COMPLETED') {
       if (!result.problems.some(p => p.startsWith('Meeting status'))) result.problems.push(`Meeting did not complete (last status ${final.current})`);
+    } else if (result.guestsNotStarted) {
+      // Nobody spoke: Teams let the anonymous guests in only after a signed-in person starts the
+      // meeting (Teams meeting policy). The bot part (join, never FAILED, COMPLETED) is checked.
+      result.notice = 'Guests waited for a signed-in person to start the meeting - transcript part skipped';
+      console.log(`  NOTICE: ${result.notice}`);
     } else {
       const segments = (final.meeting?.transcript?.segments || []).filter(s => !s.speakerRemovedAt);
       const norm = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9 ]+/g, ' ');
@@ -451,7 +470,8 @@ async function botCall(link) {
     }
     writeLog('bot', startedAt, result);
   }
-  console.log(`${result.problems.length ? 'FAIL' : 'PASS'}  Teams bot with two synthetic guests${meetingId ? ` (meeting ${meetingId}${result.deleted ? ', deleted' : ', kept for inspection'})` : ''}`);
+  console.log(`${result.problems.length ? 'FAIL' : 'PASS'}  Teams bot with two synthetic guests${result.guestsNotStarted ? ' (bot only: the guests could not start the meeting)' : ''}${meetingId ? ` (meeting ${meetingId}${result.deleted ? ', deleted' : ', kept for inspection'})` : ''}`);
+  if (result.notice && process.env.GITHUB_ACTIONS) console.log(`::notice title=Teams bot test::${result.notice}`);
   for (const p of result.problems) console.log(`  PROBLEM: ${p}`);
   return !result.problems.length;
 }
