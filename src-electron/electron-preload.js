@@ -288,6 +288,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Windows: which apps use each microphone and output device right now
     // ({ success, devices: [{ flow, device, defaultFor, sessions }] }).
     deviceSessions: () => ipcRenderer.invoke('systemAudio:deviceSessions'),
+    // Live level of the native capture ({ recordId, percent 0..100 }, ~7 per second
+    // while it runs; percent 0 when it stops). Returns the unsubscribe function.
+    onLevel: (callback) => {
+      const handler = (event, data) => callback(data);
+      ipcRenderer.on('systemAudio:level', handler);
+      return () => ipcRenderer.removeListener('systemAudio:level', handler);
+    },
     // Legacy (kept for backward compat)
     getSources: () => ipcRenderer.invoke('systemAudio:getSources'),
     diag: (level, message) => ipcRenderer.invoke('systemAudio:diag', level, message),

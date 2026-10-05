@@ -462,7 +462,7 @@ const { canStartRecording, shouldForceStopRecording, canFinalizeRecording, getAv
 // Signal forensics for the macOS system-audio PCM stream (see pcm-signal.js):
 // AudioTee only captures audio going to the DEFAULT output device, so a capture
 // can be live and completely silent. Nothing measured it before.
-const { createSystemAudioMonitor } = require('./pcm-signal');
+const { createSystemAudioMonitor, createLevelMeter, meterPercent } = require('./pcm-signal');
 const { evaluateTruncation } = require('./recording-integrity');
 
 // Configuration store for persistent settings
@@ -5168,6 +5168,13 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
         recordId, silentSeconds: monitor.state(Date.now()).silentSeconds, platform: process.platform,
       });
     };
+    // The Record page's system-audio meter: what the capture really hears, live.
+    const sendLevel = level => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('systemAudio:level', { recordId, percent: meterPercent(level.rms) });
+      }
+    };
+    const levelMeter = createLevelMeter({ intervalMs: 150, onLevel: sendLevel });
     // Test builds only: hosted CI's virtual sound card cannot be looped back by device,
     // so the CI call is captured per process there (see windows-system-audio.js).
     const loopbackMode = process.env.SUISSE_E2E_HOOKS === '1' && process.env.SUISSE_E2E_SYSLOOPBACK_MODE === 'process'
@@ -5203,7 +5210,10 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
           endOffsetMs: details.endOffsetMs, elapsedMs: details.elapsedMs, reason: details.reason,
         }),
       },
-      onData: bytes => report(monitor.handleChunk(bytes, Date.now())),
+      onData: bytes => {
+        levelMeter.push(bytes, Date.now());
+        report(monitor.handleChunk(bytes, Date.now()));
+      },
       onFailure: error => {
         log.error('System audio capture failed:', error.message);
         recordCaptureWarning(recordId, 'system-audio-interrupted');
@@ -5212,6 +5222,7 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
       },
       onClosed: () => {
         clearInterval(capture.silenceTimer);
+        levelMeter.reset(Date.now());
         if (activeAudioTee === capture) activeAudioTee = null;
       },
     });

@@ -356,6 +356,16 @@
               :level="audioLevel"
               :label="$t('recordedSignal')"
             />
+            <!-- What the system-audio capture really hears (the other side of a call),
+                 measured on the recorded PCM in main: proof at a glance that Teams,
+                 Zoom etc. reach the recording, like the microphone meter above. -->
+            <AudioLevelMeter
+              v-if="isElectron() && systemAudioEnabled"
+              class="q-mt-md"
+              data-test="system-audio-level"
+              :level="systemAudioLevel"
+              :label="$t('systemAudioLevelLabel')"
+            />
           </div>
 
           <!-- Recording Controls -->
@@ -896,6 +906,29 @@ const router = useRouter();
 const $q = useQuasar();
 const { t } = useI18n();
 const recordingStore = useRecordingStore();
+
+// System-audio meter: the live level of the native capture (main measures the PCM it
+// writes and sends systemAudio:level ~7x per second). Empty when nothing arrives for
+// a second, so a stopped or stalled capture never shows a frozen level.
+const systemAudioLevel = ref(0);
+let systemAudioLevelAt = 0;
+let stopSystemAudioLevel = null;
+let systemAudioLevelDecay = null;
+onMounted(() => {
+  const subscribe = window.electronAPI?.systemAudio?.onLevel;
+  if (typeof subscribe !== 'function') return;
+  stopSystemAudioLevel = subscribe(({ percent } = {}) => {
+    systemAudioLevel.value = Number(percent) || 0;
+    systemAudioLevelAt = Date.now();
+  });
+  systemAudioLevelDecay = setInterval(() => {
+    if (systemAudioLevel.value && Date.now() - systemAudioLevelAt > 1000) systemAudioLevel.value = 0;
+  }, 500);
+});
+onUnmounted(() => {
+  if (stopSystemAudioLevel) stopSystemAudioLevel();
+  clearInterval(systemAudioLevelDecay);
+});
 const historyStore = useRecordingsHistoryStore();
 const transcriptionStore = useTranscriptionSettingsStore();
 const prepStore = useMeetingPrepStore();

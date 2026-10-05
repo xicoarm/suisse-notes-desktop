@@ -181,7 +181,62 @@ function createSystemAudioMonitor(opts = {}) {
   };
 }
 
+/**
+ * A live level for the Record page's "system audio" meter (Areg, 05.10.2026: "I
+ * don't see any volume when my system audio is running"). Accumulates the PCM
+ * chunks as they arrive and reports RMS and peak (0..1) at most every intervalMs,
+ * so the user sees that the other side of the call really reaches the recording.
+ */
+function createLevelMeter({ intervalMs = 150, onLevel } = {}) {
+  let sumSquares = 0;
+  let samples = 0;
+  let peak = 0;
+  let lastEmit = null;
+  const flush = (now) => {
+    const rms = samples ? Math.sqrt(sumSquares / samples) : 0;
+    onLevel?.({ rms, peak });
+    sumSquares = 0;
+    samples = 0;
+    peak = 0;
+    lastEmit = now;
+  };
+  return {
+    push(buffer, now) {
+      if (buffer && buffer.length >= 2) {
+        const usable = buffer.length - (buffer.length % 2);
+        for (let i = 0; i < usable; i += 2) {
+          let v = buffer[i] | (buffer[i + 1] << 8);
+          if (v & 0x8000) v -= 0x10000;
+          const x = v / 32768;
+          sumSquares += x * x;
+          const a = x < 0 ? -x : x;
+          if (a > peak) peak = a;
+        }
+        samples += usable / 2;
+      }
+      if (lastEmit === null) lastEmit = now;
+      if (now - lastEmit >= intervalMs) flush(now);
+    },
+    /** Silence on the meter, e.g. when the capture stops. */
+    reset(now) {
+      sumSquares = 0;
+      samples = 0;
+      peak = 0;
+      flush(now);
+    },
+  };
+}
+
+/** Meter position 0..100 for an RMS amplitude: -60 dBFS and below empty, 0 dBFS full. */
+function meterPercent(rms) {
+  if (!(rms > 0)) return 0;
+  const db = 20 * Math.log10(rms);
+  return Math.max(0, Math.min(100, Math.round(((db + 60) / 60) * 100)));
+}
+
 module.exports = {
+  createLevelMeter,
+  meterPercent,
   peakFromInt16LE,
   SystemAudioSilenceTracker,
   createSystemAudioMonitor,

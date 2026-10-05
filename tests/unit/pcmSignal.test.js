@@ -16,6 +16,8 @@ import {
   peakFromInt16LE,
   SystemAudioSilenceTracker,
   createSystemAudioMonitor,
+  createLevelMeter,
+  meterPercent,
 } from '../../src-electron/pcm-signal.js';
 
 /** Mono int16 LE buffer of a sine at the given peak amplitude (0..1). */
@@ -230,5 +232,38 @@ describe('createSystemAudioMonitor — the wiring, not just the arithmetic', () 
     m.reset(0);
     m.handleChunk(silence(CH), 200);
     expect(m.state(95_200).silentSeconds).toBeGreaterThanOrEqual(90);
+  });
+});
+
+describe('system-audio meter (Record page)', () => {
+  it('reports RMS and peak of what was captured, at most every interval', () => {
+    const levels = [];
+    const meter = createLevelMeter({ intervalMs: 150, onLevel: level => levels.push(level) });
+    meter.push(tone(4800, 0.5), 0);
+    meter.push(tone(4800, 0.5), 100);
+    expect(levels).toHaveLength(0);
+    meter.push(tone(4800, 0.5), 160);
+    expect(levels).toHaveLength(1);
+    expect(levels[0].peak).toBeCloseTo(0.5, 2);
+    expect(levels[0].rms).toBeCloseTo(0.5 / Math.SQRT2, 2);
+  });
+
+  it('shows silence as an empty meter and a stopped capture as zero', () => {
+    const levels = [];
+    const meter = createLevelMeter({ intervalMs: 150, onLevel: level => levels.push(level) });
+    meter.push(Buffer.alloc(9600), 0);
+    meter.push(Buffer.alloc(9600), 200);
+    expect(levels[0]).toEqual({ rms: 0, peak: 0 });
+    meter.push(tone(4800, 0.5), 250);
+    meter.reset(300);
+    expect(levels[levels.length - 1]).toEqual({ rms: 0, peak: 0 });
+  });
+
+  it('maps -60 dBFS and below to empty and 0 dBFS to full', () => {
+    expect(meterPercent(0)).toBe(0);
+    expect(meterPercent(10 ** (-70 / 20))).toBe(0);
+    expect(meterPercent(10 ** (-30 / 20))).toBe(50);
+    expect(meterPercent(10 ** (-22 / 20))).toBe(63); // a Teams call as recorded on Areg's Jabra
+    expect(meterPercent(1)).toBe(100);
   });
 });
