@@ -255,12 +255,25 @@ jobs:
         shell: pwsh
         run: ./tests/e2e-harness/ci/install-virtual-audio.ps1
 
+      # Evidence only: which capture paths hear an ordinary and a call (Communications)
+      # stream on the virtual cable. On 05.10.2026 device loopback heard neither (-inf)
+      # and process loopback only the ordinary one - unlike real headsets and speakers,
+      # where device loopback hears both (measured with real Teams on a Jabra).
+      - name: Probe how the virtual cable plays a call stream
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: pwsh
+        run: ./tests/e2e-harness/ci/probe-call-stream.ps1
+
       - name: Record a simulated Teams call
         timeout-minutes: 20
         env:
-          # The call plays on the communication output, the default output is another
-          # device: the 03.10.2026 topology. A run without it does not count.
-          SUISSE_TEAMS_CALL_REQUIRE_SPLIT: '1'
+          # The cable cannot be looped back by device, so here the app captures per
+          # process (test builds only) and the stand-in plays an ordinary stream. The
+          # app's real path - every device, Teams' call streams included - is checked
+          # on real hardware (s20 locally, real Teams call before release).
+          SUISSE_TEAMS_SIM_CATEGORY: none
+          SUISSE_E2E_SYSLOOPBACK_MODE: process
         run: node tests/e2e-harness/ci/run-qualification.js s20-teams-call
 
       # The browser guests for a real Teams call (teams-real-call.js): their synthetic

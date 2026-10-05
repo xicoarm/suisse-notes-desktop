@@ -27,8 +27,13 @@ describe('finding the Windows system-audio helper', () => {
     expect(resolveSysLoopbackPath({ isPackaged: false, startDirs: [null, path.resolve('C:/elsewhere')], exists })).toBeNull();
   });
 
-  it('records every app except the app itself, as 48 kHz PCM on stdout', () => {
-    expect(sysLoopbackArgs(4242)).toEqual(['--stdout', '--process-loopback', '--exclude-pid', '4242', '--sample-rate', '48000']);
+  it('records every output device - not process loopback, which cannot hear calls - as 48 kHz PCM on stdout', () => {
+    expect(sysLoopbackArgs(4242)).toEqual(['--stdout', '--all-endpoints', '--sample-rate', '48000']);
+    expect(sysLoopbackArgs(4242, 'devices')).toEqual(['--stdout', '--all-endpoints', '--sample-rate', '48000']);
+  });
+
+  it('captures per process only when a test build asks for it (hosted CI sound card)', () => {
+    expect(sysLoopbackArgs(4242, 'process')).toEqual(['--stdout', '--process-loopback', '--exclude-pid', '4242', '--sample-rate', '48000']);
   });
 });
 

@@ -5168,8 +5168,12 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
         recordId, silentSeconds: monitor.state(Date.now()).silentSeconds, platform: process.platform,
       });
     };
+    // Test builds only: hosted CI's virtual sound card cannot be looped back by device,
+    // so the CI call is captured per process there (see windows-system-audio.js).
+    const loopbackMode = process.env.SUISSE_E2E_HOOKS === '1' && process.env.SUISSE_E2E_SYSLOOPBACK_MODE === 'process'
+      ? 'process' : 'devices';
     const proc = windows
-      ? require('child_process').spawn(binaryPath, sysLoopbackArgs(process.pid), { windowsHide: true })
+      ? require('child_process').spawn(binaryPath, sysLoopbackArgs(process.pid, loopbackMode), { windowsHide: true })
       : require('child_process').spawn(binaryPath, ['--sample-rate', '48000', '--chunk-duration', '0.2']);
     // A helper that already exited makes a stop line fail with EPIPE; that must
     // never become an uncaught error in main.

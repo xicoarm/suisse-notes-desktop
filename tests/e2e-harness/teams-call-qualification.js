@@ -272,6 +272,11 @@ async function runTeamsCall({ live = false } = {}) {
   const volume = Math.min(1, Math.max(0, Number(process.env.SUISSE_TEAMS_SIM_VOLUME || '1')));
   const teams = startTeamsSim(sim, [
     '--play', call.remoteWav, '--role', 'communications', '--session-volume', String(volume), '--wait-go', '--linger', '2',
+    // Teams marks its call audio as Communications; Windows hides such streams from
+    // process loopback (the 4.7.13 failure, 05.10.2026). The stand-in does the same,
+    // except where the sound card routes Communications elsewhere (CI's virtual cable:
+    // SUISSE_TEAMS_SIM_CATEGORY=none, see ci/install-virtual-audio.ps1).
+    ...(process.env.SUISSE_TEAMS_SIM_CATEGORY === 'none' ? [] : ['--category', process.env.SUISSE_TEAMS_SIM_CATEGORY || 'communications']),
     ...(commsIn ? ['--hold-mic', '--mic-device', commsIn.id] : []),
   ]);
 

@@ -139,7 +139,9 @@ listen whether both sides are in it". Windows only.
   `ms-teams`, so the app recognises it as Microsoft Teams. It plays the far end
   through WASAPI on the Windows **communication** output — on a machine with a
   headset that is not the default output, the topology of the 03.10.2026
-  failure — and holds the communication microphone open like Teams does.
+  failure — and holds the communication microphone open like Teams does. Like
+  Teams it marks its call as a Communications stream, which Windows hides from
+  process loopback: 4.7.13 recorded real Teams as silence (05.10.2026).
 - **Synthetic voices** (`fixtures/teams-call`, committed FLAC + manifest): a
   57-second German meeting, Stefan on the microphone side, Katja and Hedda on the
   meeting side, one deliberate double-talk. Rendered once with the Windows OneCore
@@ -204,7 +206,13 @@ least two speakers, and deletes the test meeting through the API afterwards.
 
 Hosted CI (`audio-reliability.yml`, job `teams-call`) first installs a virtual
 cable as the runner's sound card (`ci/install-virtual-audio.ps1`); `release.yml`
-builds nothing unless that workflow passes on the tagged source.
+builds nothing unless that workflow passes on the tagged source. The cable cannot
+be looped back by device (`ci/probe-call-stream.ps1`: -inf even for ordinary
+streams), so CI runs the call with `SUISSE_E2E_SYSLOOPBACK_MODE=process` (test
+builds only) and an uncategorised stand-in: it checks everything around the
+capture. The capture itself - every device, Teams' call streams included - is
+checked on real hardware: `s20-teams-call` locally (stand-in marked as a call)
+and a real Teams call with `teams-real-call.js` before a release.
 
 Do not rebuild the active bundle, run competing captures, or run unrelated heavy
 tests during a baseline. Intentional contention should be a named fault case.
