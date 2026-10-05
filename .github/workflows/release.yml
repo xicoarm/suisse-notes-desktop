@@ -19,6 +19,12 @@ jobs:
   # =============================================================================
   qualify:
     name: Qualify audio before release
+    # A called workflow gets at most these permissions. audio-reliability.yml's
+    # failure-diagnostics job asks for actions: read (even when skipped); without
+    # it GitHub refuses to start the release at all (v4.7.13, 05.10.2026).
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/audio-reliability.yml
 
   # =============================================================================
