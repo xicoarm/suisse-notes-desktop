@@ -37,10 +37,16 @@ function resolveSysLoopbackPath({ isPackaged, resourcesPath, startDirs = [], exi
   return null;
 }
 
-// Every active output device, summed on one clock. The app plays nothing while it
-// records, so its own sound needs no exclusion (process loopback could exclude it,
-// but cannot hear Teams). The pid stays in the signature for the caller.
-function sysLoopbackArgs(_appPid) {
+// Every output device something plays on, summed on one clock. The app plays
+// nothing while it records, so its own sound needs no exclusion.
+// 'process' exists for E2E test builds only: hosted CI's virtual cable delivers
+// silence to device loopback even for ordinary streams (probe 05.10.2026), so the
+// CI call is captured per process there - excluding our own tree. It never hears
+// Teams' call streams and must never be used for real recordings.
+function sysLoopbackArgs(appPid, mode = 'devices') {
+  if (mode === 'process') {
+    return ['--stdout', '--process-loopback', '--exclude-pid', String(appPid), '--sample-rate', '48000'];
+  }
   return ['--stdout', '--all-endpoints', '--sample-rate', '48000'];
 }
 

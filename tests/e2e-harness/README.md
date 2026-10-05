@@ -206,7 +206,13 @@ least two speakers, and deletes the test meeting through the API afterwards.
 
 Hosted CI (`audio-reliability.yml`, job `teams-call`) first installs a virtual
 cable as the runner's sound card (`ci/install-virtual-audio.ps1`); `release.yml`
-builds nothing unless that workflow passes on the tagged source.
+builds nothing unless that workflow passes on the tagged source. The cable cannot
+be looped back by device (`ci/probe-call-stream.ps1`: -inf even for ordinary
+streams), so CI runs the call with `SUISSE_E2E_SYSLOOPBACK_MODE=process` (test
+builds only) and an uncategorised stand-in: it checks everything around the
+capture. The capture itself - every device, Teams' call streams included - is
+checked on real hardware: `s20-teams-call` locally (stand-in marked as a call)
+and a real Teams call with `teams-real-call.js` before a release.
 
 Do not rebuild the active bundle, run competing captures, or run unrelated heavy
 tests during a baseline. Intentional contention should be a named fault case.
