@@ -9,10 +9,9 @@
 // choose the endpoint, so this small native helper does what AudioTee does on macOS.
 //
 // Three ways to capture:
-//   --all-endpoints      THE APP'S WAY (since 05.10.2026): classic loopback of EVERY
-//                        active output device at once, each packet placed by its time
-//                        stamp on one clock and summed. Hears meeting apps on any
-//                        device, including Microsoft Teams (see below).
+//   --all-endpoints      THE APP'S WAY (since 05.10.2026): classic loopback of every
+//                        output device something plays on, summed on one clock. Hears
+//                        meeting apps on any device, including Microsoft Teams (below).
 //   --process-loopback   every app EXCEPT the given process tree, on every output device
 //                        (Windows 10 2004+). DOES NOT HEAR CALLS: Windows leaves every
 //                        stream marked AudioCategory_Communications out of process
@@ -621,11 +620,14 @@ internal static class SysLoopback
     private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
 
     // ---- every output device at once (the app's way since 05.10.2026) -----------
-    // Loops back every ACTIVE output device in its own thread and sums them on one
-    // clock. Each packet is placed by its QPC time stamp, so devices with different
-    // clocks, devices that only deliver while something plays, and devices that join
-    // later (a headset switched on mid-meeting) all line up; idle devices add
-    // nothing. An app plays a stream on one device at a time, so nothing doubles.
+    // Loops back every output device that something is PLAYING on, each in its own
+    // thread, and sums them on one clock (each device placed by the arrival of its
+    // audio, see LoopEndpointInto). A device is opened only while an app has an active
+    // audio session on it and released after 15 s without one: opening an idle device
+    // can block its sibling outputs (VB-CABLE's two outputs share one pin - the CI
+    // run of 05.10.2026 lost the call that way) or an app that wants exclusive use.
+    // A device that starts playing is picked up within a second. An app plays a
+    // stream on one device at a time, so nothing doubles.
     // Unlike process loopback this also records what the computer's other apps play
     // on those devices (notification sounds) and cannot leave out our own app; the
     // app plays nothing while it records.
@@ -685,18 +687,50 @@ internal static class SysLoopback
         }
     }
 
+    private sealed class EndpointRun
+    {
+        public Thread Thread;
+        public volatile bool Stop;
+        public long LastActiveMs;
+    }
+
+    /// True while some app (or the system sounds) is playing on the device. Our own
+    /// loopback client shows up as an active session too and does not count.
+    private static readonly uint OwnPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+
+    private static bool HasActiveSession(IMMDevice dev)
+    {
+        var iidManager = new Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
+        object managerObj;
+        if (dev.Activate(ref iidManager, 1, IntPtr.Zero, out managerObj) != 0 || managerObj == null) return true;
+        var manager = (IAudioSessionManager2)managerObj;
+        IAudioSessionEnumerator list;
+        int count;
+        if (manager.GetSessionEnumerator(out list) != 0 || list == null || list.GetCount(out count) != 0) return true;
+        for (int i = 0; i < count; i++)
+        {
+            IAudioSessionControl2 session;
+            int state;
+            uint pid;
+            if (list.GetSession(i, out session) != 0 || session == null) continue;
+            if (session.GetProcessId(out pid) == 0 && pid == OwnPid) continue; // our own loopback
+            if (session.GetState(out state) == 0 && state == 1) return true;
+        }
+        return false;
+    }
+
     private static int CaptureAllEndpoints(PcmSink sink)
     {
         sink.SetFormat(EndpointMix.Rate);
         var mix = new EndpointMix();
-        var running = new Dictionary<string, Thread>();
+        var running = new Dictionary<string, EndpointRun>();
         var retryAfter = new Dictionary<string, long>();
         var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
         var clock = System.Diagnostics.Stopwatch.StartNew();
         // Packets arrive some 10-30 ms after their time stamp; 400 ms of patience
         // keeps a briefly stalled device thread from losing audio.
         const int latency = EndpointMix.Rate * 4 / 10;
-        Emit("started", "all-endpoints rate=48000 (every active output device, placed by time stamp)");
+        Emit("started", "all-endpoints rate=48000 (every output device something plays on, one clock)");
         long lastScan = -10000;
         while (!_stop)
         {
@@ -705,9 +739,9 @@ internal static class SysLoopback
                 lastScan = clock.ElapsedMilliseconds;
                 foreach (var id in new List<string>(running.Keys))
                 {
-                    if (running[id].IsAlive) continue;
+                    if (running[id].Thread.IsAlive) continue;
+                    if (!running[id].Stop) retryAfter[id] = lastScan + 3000; // a device that just failed gets a pause
                     running.Remove(id);
-                    retryAfter[id] = lastScan + 3000; // a device that just failed gets a pause
                 }
                 IMMDeviceCollection col;
                 if (enumerator.EnumAudioEndpoints(RENDER, ACTIVE, out col) == 0 && col != null)
@@ -719,17 +753,26 @@ internal static class SysLoopback
                         IMMDevice dev;
                         string id;
                         if (col.Item(i, out dev) != 0 || dev == null || dev.GetId(out id) != 0 || id == null) continue;
-                        long notBefore;
-                        if (running.ContainsKey(id) || (retryAfter.TryGetValue(id, out notBefore) && lastScan < notBefore)) continue;
-                        string deviceId = id, name = NameOf(dev);
-                        var thread = new Thread(() =>
+                        bool playing = HasActiveSession(dev);
+                        EndpointRun current;
+                        if (running.TryGetValue(id, out current))
                         {
-                            try { LoopEndpointInto(deviceId, name, mix); }
+                            if (playing) current.LastActiveMs = lastScan;
+                            else if (lastScan - current.LastActiveMs > 15000) current.Stop = true; // idle: let go
+                            continue;
+                        }
+                        long notBefore;
+                        if (!playing || (retryAfter.TryGetValue(id, out notBefore) && lastScan < notBefore)) continue;
+                        string deviceId = id, name = NameOf(dev);
+                        var run = new EndpointRun { LastActiveMs = lastScan };
+                        run.Thread = new Thread(() =>
+                        {
+                            try { LoopEndpointInto(deviceId, name, mix, run); }
                             catch (Exception ex) { Emit("info", "endpoint " + name + " stopped: " + ex.GetType().Name + ": " + ex.Message); }
                         });
-                        thread.IsBackground = true;
-                        thread.Start();
-                        running[id] = thread;
+                        run.Thread.IsBackground = true;
+                        run.Thread.Start();
+                        running[id] = run;
                     }
                 }
             }
@@ -738,12 +781,12 @@ internal static class SysLoopback
         }
         Thread.Sleep(60); // the last words still in the device buffers
         mix.FlushTo(mix.NowFrame(), sink);
-        foreach (var thread in running.Values) thread.Join(500);
+        foreach (var run in running.Values) run.Thread.Join(500);
         if (mix.LateFrames > 0) Emit("info", "frames arriving too late and dropped=" + mix.LateFrames);
         return 0;
     }
 
-    private static void LoopEndpointInto(string deviceId, string name, EndpointMix mix)
+    private static void LoopEndpointInto(string deviceId, string name, EndpointMix mix, EndpointRun run)
     {
         var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
         IMMDevice dev;
@@ -786,7 +829,7 @@ internal static class SysLoopback
         const int tolerance = EndpointMix.Rate * 12 / 100;
         try
         {
-            while (!_stop)
+            while (!_stop && !run.Stop)
             {
                 uint packet;
                 hr = capture.GetNextPacketSize(out packet);
@@ -827,7 +870,7 @@ internal static class SysLoopback
         finally
         {
             try { client.Stop(); } catch { /* the device is gone */ }
-            Emit("info", "endpoint- " + name + (hr == AUDCLNT_E_DEVICE_INVALIDATED ? " (device gone)" : hr != 0 ? " hr=0x" + hr.ToString("x8") : ""));
+            Emit("info", "endpoint- " + name + (hr == AUDCLNT_E_DEVICE_INVALIDATED ? " (device gone)" : hr != 0 ? " hr=0x" + hr.ToString("x8") : run.Stop ? " (idle)" : ""));
         }
     }
 

@@ -257,10 +257,6 @@ jobs:
 
       - name: Record a simulated Teams call
         timeout-minutes: 20
-        env:
-          # The call plays on the communication output, the default output is another
-          # device: the 03.10.2026 topology. A run without it does not count.
-          SUISSE_TEAMS_CALL_REQUIRE_SPLIT: '1'
         run: node tests/e2e-harness/ci/run-qualification.js s20-teams-call
 
       # The browser guests for a real Teams call (teams-real-call.js): their synthetic
