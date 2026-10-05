@@ -1,9 +1,11 @@
 'use strict';
 
-// Windows system audio through resources/sysloopback (SysLoopback.cs): every app
-// except this one, on every output device. Chromium's loopback only hears the
-// default output device, so a meeting playing on a headset (the default
-// COMMUNICATION device) was recorded as silence (2026-08-14, 2026-10-03).
+// Windows system audio through resources/sysloopback (SysLoopback.cs): every
+// active output device at once (--all-endpoints). Chromium's loopback only hears
+// the default output device, so a meeting playing on a headset (the default
+// COMMUNICATION device) was recorded as silence (2026-08-14, 2026-10-03). Process
+// loopback (4.7.13) hears every device but not calls: Windows leaves streams
+// marked Communications out of it, and Teams plays its calls that way (2026-10-05).
 // The helper speaks AudioTee's contract, so main supervises it with the same
 // createPcmCapture as on macOS.
 
@@ -35,10 +37,11 @@ function resolveSysLoopbackPath({ isPackaged, resourcesPath, startDirs = [], exi
   return null;
 }
 
-// Exclude our own process tree: the app's renderer, GPU and audio service are
-// children of main, so nothing the app plays itself ends up in a recording.
-function sysLoopbackArgs(appPid) {
-  return ['--stdout', '--process-loopback', '--exclude-pid', String(appPid), '--sample-rate', '48000'];
+// Every active output device, summed on one clock. The app plays nothing while it
+// records, so its own sound needs no exclusion (process loopback could exclude it,
+// but cannot hear Teams). The pid stays in the signature for the caller.
+function sysLoopbackArgs(_appPid) {
+  return ['--stdout', '--all-endpoints', '--sample-rate', '48000'];
 }
 
 // The helper's own events (started, fallback, rebind, stopped) for main.log.

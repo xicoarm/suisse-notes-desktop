@@ -8,20 +8,28 @@
 // endpoint: live track, no error, a whole meeting of digital silence. No web API can
 // choose the endpoint, so this small native helper does what AudioTee does on macOS.
 //
-// Two ways to capture:
-//   --process-loopback   every app EXCEPT the given process tree, on EVERY output
-//                        device (Windows 10 2004+ process loopback). Microsoft: "the
-//                        capture is not tied to a specific audio endpoint". The app
-//                        passes its own pid, so nothing it plays itself is recorded.
+// Three ways to capture:
+//   --all-endpoints      THE APP'S WAY (since 05.10.2026): classic loopback of EVERY
+//                        active output device at once, each packet placed by its time
+//                        stamp on one clock and summed. Hears meeting apps on any
+//                        device, including Microsoft Teams (see below).
+//   --process-loopback   every app EXCEPT the given process tree, on every output device
+//                        (Windows 10 2004+). DOES NOT HEAR CALLS: Windows leaves every
+//                        stream marked AudioCategory_Communications out of process
+//                        loopback, and that is exactly how Teams (and other meeting
+//                        apps) play a call. 4.7.13 used it and recorded Teams as
+//                        silence (Areg's Jabra call, 05.10.2026; reproduced with the
+//                        E2E Teams stand-in: same stream, category set = -inf). Kept
+//                        for diagnostics only.
 //   --role / --device    one output endpoint (classic WASAPI loopback).
 //
 // Contract with the Electron main process (same as AudioTee, see pcm-capture.js):
-//   sysloopback.exe --stdout --process-loopback --exclude-pid <pid> --sample-rate 48000
+//   sysloopback.exe --stdout --all-endpoints --sample-rate 48000
 //   * raw PCM on stdout: 48 kHz, mono, signed 16-bit little endian
 //   * one JSON object per line on stderr: {"message_type":"stream_start"|"error"|"info"}
 //   * stops when stdin closes or a line "stop" arrives (the app can never be outlived)
-//   * if process loopback cannot start (older Windows), it falls back to the default
-//     communication endpoint — where meeting apps play — and says so on stderr
+//   * --process-loopback (diagnostics): if it cannot start (older Windows), it falls back
+//     to the default communication endpoint and says so on stderr
 // Diagnostics and the local s8 harness scenario:
 //   sysloopback.exe --role communications --out <file.wav> [--seconds N]
 //   * writes a WAV (endpoint's native rate, mono, 16-bit) and keeps the header
@@ -223,7 +231,7 @@ internal static class SysLoopback
     private const uint STREAMFLAGS_LOOPBACK = 0x00020000;
     private const uint STREAMFLAGS_EVENTCALLBACK = 0x00040000;
     private const uint STREAMFLAGS_AUTOCONVERTPCM = 0x80000000;
-    private const uint BUFFERFLAGS_SILENT = 0x2;
+    private const uint BUFFERFLAGS_SILENT = 0x2, BUFFERFLAGS_DATA_DISCONTINUITY = 0x1;
     private const int E_FAIL = unchecked((int)0x80004005);
     private const int AUDCLNT_E_DEVICE_INVALIDATED = unchecked((int)0x88890004);
     private const int PROCESS_LOOPBACK_UNAVAILABLE = unchecked((int)0x8889FFFF); // ours: activation impossible
@@ -289,7 +297,7 @@ internal static class SysLoopback
         try { Console.OutputEncoding = new System.Text.UTF8Encoding(false); } catch { /* redirected */ }
 
         string role = "communications", outPath = null, deviceId = null;
-        bool list = false, sessions = false, processLoopback = false, pcmOnStdout = false, include = false;
+        bool list = false, sessions = false, processLoopback = false, pcmOnStdout = false, include = false, allEndpoints = false;
         int seconds = 0; // 0 = run until stdin closes or "stop" (test affordance otherwise)
         int targetPid = 0, sampleRate = 48000;
         for (int i = 0; i < args.Length; i++)
@@ -302,6 +310,7 @@ internal static class SysLoopback
             else if (args[i] == "--include-pid" && i + 1 < args.Length) { int.TryParse(args[++i], out targetPid); include = true; }
             else if (args[i] == "--sample-rate" && i + 1 < args.Length) int.TryParse(args[++i], out sampleRate);
             else if (args[i] == "--process-loopback") processLoopback = true;
+            else if (args[i] == "--all-endpoints") allEndpoints = true;
             else if (args[i] == "--stdout") pcmOnStdout = true;
             else if (args[i] == "--list") list = true;
             else if (args[i] == "--sessions") sessions = true;
@@ -377,7 +386,11 @@ internal static class SysLoopback
             using (PcmSink sink = pcmOnStdout ? (PcmSink)new StdoutPcmWriter() : new WavWriter(outPath))
             {
                 int hr;
-                if (processLoopback)
+                if (allEndpoints)
+                {
+                    hr = CaptureAllEndpoints(sink);
+                }
+                else if (processLoopback)
                 {
                     hr = CaptureProcess(targetPid > 0 ? targetPid : System.Diagnostics.Process.GetCurrentProcess().Id,
                         include, sink);
@@ -607,6 +620,257 @@ internal static class SysLoopback
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
 
+    // ---- every output device at once (the app's way since 05.10.2026) -----------
+    // Loops back every ACTIVE output device in its own thread and sums them on one
+    // clock. Each packet is placed by its QPC time stamp, so devices with different
+    // clocks, devices that only deliver while something plays, and devices that join
+    // later (a headset switched on mid-meeting) all line up; idle devices add
+    // nothing. An app plays a stream on one device at a time, so nothing doubles.
+    // Unlike process loopback this also records what the computer's other apps play
+    // on those devices (notification sounds) and cannot leave out our own app; the
+    // app plays nothing while it records.
+    private sealed class EndpointMix
+    {
+        public const int Rate = 48000;
+        private readonly double[] _ring = new double[Rate * 30];
+        private readonly object _lock = new object();
+        private readonly double _t0 = Now100ns();
+        private long _flushed;
+        public long LateFrames;
+
+        /// QueryPerformanceCounter in 100-ns units, the unit of IAudioCaptureClient's qpcPosition.
+        public static double Now100ns()
+        {
+            return System.Diagnostics.Stopwatch.GetTimestamp() * 1e7 / System.Diagnostics.Stopwatch.Frequency;
+        }
+
+        public long FrameAt(double t100ns) { return (long)Math.Round((t100ns - _t0) * Rate / 1e7); }
+        public long NowFrame() { return FrameAt(Now100ns()); }
+
+        public void Add(long start, double[] samples, int count)
+        {
+            lock (_lock)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    long t = start + i;
+                    if (t < _flushed) { LateFrames++; continue; }
+                    if (t >= _flushed + _ring.Length) break; // a time stamp from nowhere
+                    _ring[t % _ring.Length] += samples[i];
+                }
+            }
+        }
+
+        /// Hands everything before `frame` to the sink: real time, silence included.
+        public void FlushTo(long frame, PcmSink sink)
+        {
+            double[] block;
+            int n;
+            lock (_lock)
+            {
+                long end = Math.Min(frame, _flushed + _ring.Length);
+                n = (int)Math.Max(0, end - _flushed);
+                if (n == 0) return;
+                block = new double[n];
+                for (int i = 0; i < n; i++)
+                {
+                    int at = (int)((_flushed + i) % _ring.Length);
+                    block[i] = _ring[at];
+                    _ring[at] = 0;
+                }
+                _flushed += n;
+            }
+            sink.WriteMono(block, n);
+            sink.Flush();
+        }
+    }
+
+    private static int CaptureAllEndpoints(PcmSink sink)
+    {
+        sink.SetFormat(EndpointMix.Rate);
+        var mix = new EndpointMix();
+        var running = new Dictionary<string, Thread>();
+        var retryAfter = new Dictionary<string, long>();
+        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        // Packets arrive some 10-30 ms after their time stamp; 400 ms of patience
+        // keeps a briefly stalled device thread from losing audio.
+        const int latency = EndpointMix.Rate * 4 / 10;
+        Emit("started", "all-endpoints rate=48000 (every active output device, placed by time stamp)");
+        long lastScan = -10000;
+        while (!_stop)
+        {
+            if (clock.ElapsedMilliseconds - lastScan >= 1000)
+            {
+                lastScan = clock.ElapsedMilliseconds;
+                foreach (var id in new List<string>(running.Keys))
+                {
+                    if (running[id].IsAlive) continue;
+                    running.Remove(id);
+                    retryAfter[id] = lastScan + 3000; // a device that just failed gets a pause
+                }
+                IMMDeviceCollection col;
+                if (enumerator.EnumAudioEndpoints(RENDER, ACTIVE, out col) == 0 && col != null)
+                {
+                    uint count;
+                    col.GetCount(out count);
+                    for (uint i = 0; i < count; i++)
+                    {
+                        IMMDevice dev;
+                        string id;
+                        if (col.Item(i, out dev) != 0 || dev == null || dev.GetId(out id) != 0 || id == null) continue;
+                        long notBefore;
+                        if (running.ContainsKey(id) || (retryAfter.TryGetValue(id, out notBefore) && lastScan < notBefore)) continue;
+                        string deviceId = id, name = NameOf(dev);
+                        var thread = new Thread(() =>
+                        {
+                            try { LoopEndpointInto(deviceId, name, mix); }
+                            catch (Exception ex) { Emit("info", "endpoint " + name + " stopped: " + ex.GetType().Name + ": " + ex.Message); }
+                        });
+                        thread.IsBackground = true;
+                        thread.Start();
+                        running[id] = thread;
+                    }
+                }
+            }
+            mix.FlushTo(mix.NowFrame() - latency, sink);
+            Thread.Sleep(20);
+        }
+        Thread.Sleep(60); // the last words still in the device buffers
+        mix.FlushTo(mix.NowFrame(), sink);
+        foreach (var thread in running.Values) thread.Join(500);
+        if (mix.LateFrames > 0) Emit("info", "frames arriving too late and dropped=" + mix.LateFrames);
+        return 0;
+    }
+
+    private static void LoopEndpointInto(string deviceId, string name, EndpointMix mix)
+    {
+        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+        IMMDevice dev;
+        if (enumerator.GetDevice(deviceId, out dev) != 0 || dev == null) return;
+        var iid = IID_IAudioClient;
+        object clientObj;
+        int hr = dev.Activate(ref iid, 1 /* CLSCTX_INPROC_SERVER */, IntPtr.Zero, out clientObj);
+        if (hr != 0) { Emit("info", "endpoint " + name + " activation failed hr=0x" + hr.ToString("x8")); return; }
+        var client = (IAudioClient)clientObj;
+        IntPtr pFormat;
+        hr = client.GetMixFormat(out pFormat);
+        if (hr != 0) { Emit("info", "endpoint " + name + " has no mix format hr=0x" + hr.ToString("x8")); return; }
+        var wfx = (WaveFormatEx)Marshal.PtrToStructure(pFormat, typeof(WaveFormatEx));
+        bool isFloat = wfx.wFormatTag == WAVE_FORMAT_IEEE_FLOAT;
+        if (wfx.wFormatTag == WAVE_FORMAT_EXTENSIBLE)
+        {
+            // SubFormat sits at byte 24 of WAVEFORMATEXTENSIBLE (see CaptureEndpointOnce).
+            var sub = (Guid)Marshal.PtrToStructure(new IntPtr(pFormat.ToInt64() + 24), typeof(Guid));
+            isFloat = sub == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+        }
+        int channels = wfx.nChannels, bits = wfx.wBitsPerSample, rate = (int)wfx.nSamplesPerSec;
+        hr = client.Initialize(SHARE_MODE_SHARED, STREAMFLAGS_LOOPBACK, 10000000L, 0, pFormat, IntPtr.Zero);
+        Marshal.FreeCoTaskMem(pFormat);
+        if (hr != 0) { Emit("info", "endpoint " + name + " refused loopback hr=0x" + hr.ToString("x8")); return; }
+        var iidCapture = IID_IAudioCaptureClient;
+        object captureObj;
+        hr = client.GetService(ref iidCapture, out captureObj);
+        if (hr != 0) return;
+        var capture = (IAudioCaptureClient)captureObj;
+        hr = client.Start();
+        if (hr != 0) { Emit("info", "endpoint " + name + " did not start hr=0x" + hr.ToString("x8")); return; }
+        Emit("info", "endpoint+ " + name + " rate=" + rate + " ch=" + channels + " bits=" + bits + " float=" + isFloat);
+        // Where this device's next packet goes on the shared clock. Anchored to the
+        // ARRIVAL of the audio, then continued packet by packet, so a burst of packets
+        // read at once still lies end to end. Device time stamps are not used: on
+        // Areg's Jabra (05.10.2026) they lay so far in the past that the whole call
+        // would have been dropped as late. A pause, a discontinuity or drift beyond
+        // 120 ms re-anchors.
+        long cursor = long.MinValue;
+        const int tolerance = EndpointMix.Rate * 12 / 100;
+        try
+        {
+            while (!_stop)
+            {
+                uint packet;
+                hr = capture.GetNextPacketSize(out packet);
+                if (hr != 0) break;
+                if (packet == 0) { Thread.Sleep(10); continue; }
+                while (packet != 0 && !_stop)
+                {
+                    IntPtr data;
+                    uint frames, flags;
+                    ulong devicePosition, qpcPosition;
+                    hr = capture.GetBuffer(out data, out frames, out flags, out devicePosition, out qpcPosition);
+                    if (hr != 0) break;
+                    if ((flags & BUFFERFLAGS_SILENT) == 0 && data != IntPtr.Zero && frames > 0)
+                    {
+                        int outCount;
+                        double[] at48 = To48k(MonoOf(data, (int)frames, channels, bits, isFloat), (int)frames, rate, out outCount);
+                        long arrival = mix.NowFrame() - outCount;
+                        if (cursor == long.MinValue || (flags & BUFFERFLAGS_DATA_DISCONTINUITY) != 0 ||
+                            Math.Abs(cursor - arrival) > tolerance)
+                        {
+                            cursor = arrival;
+                        }
+                        mix.Add(cursor, at48, outCount);
+                        cursor += outCount;
+                    }
+                    else if (frames > 0 && cursor != long.MinValue)
+                    {
+                        // A silent packet still takes its time on the device.
+                        cursor += (long)Math.Round(frames * (double)EndpointMix.Rate / rate);
+                    }
+                    capture.ReleaseBuffer(frames);
+                    hr = capture.GetNextPacketSize(out packet);
+                    if (hr != 0) break;
+                }
+                if (hr != 0) break;
+            }
+        }
+        finally
+        {
+            try { client.Stop(); } catch { /* the device is gone */ }
+            Emit("info", "endpoint- " + name + (hr == AUDCLNT_E_DEVICE_INVALIDATED ? " (device gone)" : hr != 0 ? " hr=0x" + hr.ToString("x8") : ""));
+        }
+    }
+
+    /// A packet resampled linearly to 48 kHz; speech needs nothing finer.
+    private static double[] To48k(double[] mono, int count, int rate, out int outCount)
+    {
+        if (rate == EndpointMix.Rate || rate <= 0) { outCount = count; return mono; }
+        outCount = (int)Math.Round((double)count * EndpointMix.Rate / rate);
+        var result = new double[outCount];
+        double step = (double)rate / EndpointMix.Rate;
+        for (int i = 0; i < outCount; i++)
+        {
+            double position = i * step;
+            int j = (int)position;
+            double a = mono[Math.Min(j, count - 1)], b = mono[Math.Min(j + 1, count - 1)];
+            result[i] = a + (b - a) * (position - j);
+        }
+        return result;
+    }
+
+    /// Interleaved device frames (16/32-bit PCM or 32-bit float) as mono samples.
+    private static unsafe double[] MonoOf(IntPtr data, int frames, int channels, int bits, bool isFloat)
+    {
+        var mono = new double[frames];
+        if (channels <= 0) return mono;
+        var src = (byte*)data.ToPointer();
+        for (int f = 0; f < frames; f++)
+        {
+            double sum = 0;
+            for (int c = 0; c < channels; c++)
+            {
+                if (isFloat && bits == 32)
+                    sum += *(float*)(src + ((f * channels + c) * 4));
+                else if (bits == 16)
+                    sum += *(short*)(src + ((f * channels + c) * 2)) / 32768.0;
+                else if (bits == 32)
+                    sum += *(int*)(src + ((f * channels + c) * 4)) / 2147483648.0;
+            }
+            mono[f] = sum / channels;
+        }
+        return mono;
+    }
+
     // ---- the capture loop shared by both ways --------------------------------
     private static int Pump(IAudioClient client, IntPtr evt, PcmSink sink, System.Diagnostics.Stopwatch clock,
         int rate, int channels, int bits, bool isFloat)
@@ -765,26 +1029,10 @@ internal static class SysLoopback
         public virtual void Flush() { }
         public abstract void Dispose();
 
-        public unsafe void WriteMixedDown(IntPtr data, int frames, int channels, int bits, bool isFloat)
+        public void WriteMixedDown(IntPtr data, int frames, int channels, int bits, bool isFloat)
         {
             if (frames <= 0 || channels <= 0) return;
-            var mono = new double[frames];
-            var src = (byte*)data.ToPointer();
-            for (int f = 0; f < frames; f++)
-            {
-                double sum = 0;
-                for (int c = 0; c < channels; c++)
-                {
-                    if (isFloat && bits == 32)
-                        sum += *(float*)(src + ((f * channels + c) * 4));
-                    else if (bits == 16)
-                        sum += *(short*)(src + ((f * channels + c) * 2)) / 32768.0;
-                    else if (bits == 32)
-                        sum += *(int*)(src + ((f * channels + c) * 4)) / 2147483648.0;
-                }
-                mono[f] = sum / channels;
-            }
-            WriteMono(mono, frames);
+            WriteMono(MonoOf(data, frames, channels, bits, isFloat), frames);
         }
 
         protected static short ToPcm16(double v)

@@ -22,6 +22,7 @@
 //       every active output and input device with its default roles
 //   ms-teams-sim.exe --play <file.wav> [--role communications|console|multimedia]
 //                    [--device <name part or id>] [--gain-db N] [--session-volume 0..1]
+//                    [--category communications|media|other]   (real Teams: communications)
 //                    [--hold-mic [--mic-role communications] [--mic-device <name part>]]
 //                    [--wait-go] [--linger <seconds>]
 //       --wait-go: open everything, print "ready", start on the stdin line "go"
@@ -127,6 +128,29 @@ internal static class TeamsSim
             out ulong devicePosition, out ulong qpcPosition);
         [PreserveSig] int ReleaseBuffer(uint numFramesRead);
         [PreserveSig] int GetNextPacketSize(out uint numFramesInNextPacket);
+    }
+
+    // IAudioClient2 = IAudioClient (12 methods, same order) + 3. SetClientProperties tags
+    // the stream with a category; real Teams renders its call as Communications.
+    [Guid("726778CD-F60A-4eda-82DE-E47610CD78AA"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IAudioClient2
+    {
+        [PreserveSig] int Initialize(int shareMode, uint streamFlags, long hnsBufferDuration,
+            long hnsPeriodicity, IntPtr format, IntPtr audioSessionGuid);
+        [PreserveSig] int GetBufferSize(out uint numBufferFrames);
+        [PreserveSig] int GetStreamLatency(out long latency);
+        [PreserveSig] int GetCurrentPadding(out uint numPaddingFrames);
+        [PreserveSig] int IsFormatSupported(int shareMode, IntPtr format, out IntPtr closestMatch);
+        [PreserveSig] int GetMixFormat(out IntPtr deviceFormat);
+        [PreserveSig] int GetDevicePeriod(out long defaultPeriod, out long minimumPeriod);
+        [PreserveSig] int Start();
+        [PreserveSig] int Stop();
+        [PreserveSig] int Reset();
+        [PreserveSig] int SetEventHandle(IntPtr handle);
+        [PreserveSig] int GetService(ref Guid riid, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
+        [PreserveSig] int IsOffloadCapable(int category, out int offloadCapable);
+        [PreserveSig] int SetClientProperties(IntPtr properties);
+        [PreserveSig] int GetBufferSizeLimits(IntPtr format, int eventDriven, out long minDuration, out long maxDuration);
     }
 
     [Guid("87CE5498-68D6-44E5-9215-6DA47EF883D8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -401,7 +425,7 @@ internal static class TeamsSim
     }
 
     private static int Play(IMMDeviceEnumerator en, string file, string role, string device, double gainDb,
-        float sessionVolume, double lingerSeconds, bool waitGo)
+        float sessionVolume, double lingerSeconds, bool waitGo, int category)
     {
         var wav = ReadWav(file);
         double gain = Math.Pow(10, gainDb / 20.0);
@@ -432,6 +456,18 @@ internal static class TeamsSim
                 wFormatTag = WAVE_FORMAT_PCM, nChannels = 1, nSamplesPerSec = (uint)wav.Rate,
                 wBitsPerSample = 16, nBlockAlign = 2, nAvgBytesPerSec = (uint)(wav.Rate * 2), cbSize = 0,
             };
+            if (category >= 0)
+            {
+                // AudioClientProperties { cbSize, bIsOffload, eCategory, Options } before Initialize.
+                IntPtr props = Marshal.AllocHGlobal(16);
+                Marshal.WriteInt32(props, 0, 16);
+                Marshal.WriteInt32(props, 4, 0);
+                Marshal.WriteInt32(props, 8, category);
+                Marshal.WriteInt32(props, 12, 0);
+                int chr = ((IAudioClient2)client).SetClientProperties(props);
+                Marshal.FreeHGlobal(props);
+                if (chr != 0) Emit("error", Field("message", "stream category refused hr=0x" + chr.ToString("x8")));
+            }
             IntPtr pFormat = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WaveFormatEx)));
             Marshal.StructureToPtr(wfx, pFormat, false);
             hr = client.Initialize(SHARE_MODE_SHARED, STREAMFLAGS_AUTOCONVERTPCM | STREAMFLAGS_SRC_DEFAULT_QUALITY,
@@ -606,6 +642,7 @@ internal static class TeamsSim
         bool list = false, holdMic = false, waitGo = false;
         double gainDb = 0, linger = 0;
         float sessionVolume = -1;
+        int category = -1; // AUDIO_STREAM_CATEGORY; 3 = Communications (real Teams)
         for (int i = 0; i < args.Length; i++)
         {
             string a = args[i];
@@ -615,6 +652,11 @@ internal static class TeamsSim
             else if (a == "--role" && hasValue) role = args[++i].ToLowerInvariant();
             else if (a == "--device" && hasValue) device = args[++i];
             else if (a == "--gain-db" && hasValue) double.TryParse(args[++i], NumberStyles.Float, CultureInfo.InvariantCulture, out gainDb);
+            else if (a == "--category" && hasValue)
+            {
+                string c = args[++i].ToLowerInvariant();
+                category = c == "communications" ? 3 : c == "media" ? 11 : c == "other" ? 0 : -1;
+            }
             else if (a == "--session-volume" && hasValue) float.TryParse(args[++i], NumberStyles.Float, CultureInfo.InvariantCulture, out sessionVolume);
             else if (a == "--linger" && hasValue) double.TryParse(args[++i], NumberStyles.Float, CultureInfo.InvariantCulture, out linger);
             else if (a == "--hold-mic") holdMic = true;
@@ -677,7 +719,7 @@ internal static class TeamsSim
             int code = 0;
             if (play != null)
             {
-                code = Play(en, play, role, device, gainDb, sessionVolume, linger, waitGo);
+                code = Play(en, play, role, device, gainDb, sessionVolume, linger, waitGo, category);
                 _stop = true;
             }
             else

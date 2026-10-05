@@ -139,7 +139,9 @@ listen whether both sides are in it". Windows only.
   `ms-teams`, so the app recognises it as Microsoft Teams. It plays the far end
   through WASAPI on the Windows **communication** output — on a machine with a
   headset that is not the default output, the topology of the 03.10.2026
-  failure — and holds the communication microphone open like Teams does.
+  failure — and holds the communication microphone open like Teams does. Like
+  Teams it marks its call as a Communications stream, which Windows hides from
+  process loopback: 4.7.13 recorded real Teams as silence (05.10.2026).
 - **Synthetic voices** (`fixtures/teams-call`, committed FLAC + manifest): a
   57-second German meeting, Stefan on the microphone side, Katja and Hedda on the
   meeting side, one deliberate double-talk. Rendered once with the Windows OneCore
