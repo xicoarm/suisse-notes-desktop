@@ -255,8 +255,19 @@ jobs:
         shell: pwsh
         run: ./tests/e2e-harness/ci/install-virtual-audio.ps1
 
+      # What the virtual cable does with a call (Communications) stream: which capture
+      # paths hear it. Evidence only - VB-CABLE routes such streams so that no loopback
+      # hears them, unlike the real headsets and speakers this was checked on.
+      - name: Probe how the virtual cable plays a call stream
+        continue-on-error: true
+        timeout-minutes: 3
+        shell: pwsh
+        run: ./tests/e2e-harness/ci/probe-call-stream.ps1
+
       - name: Record a simulated Teams call
         timeout-minutes: 20
+        env:
+          SUISSE_TEAMS_SIM_CATEGORY: none
         run: node tests/e2e-harness/ci/run-qualification.js s20-teams-call
 
       # The browser guests for a real Teams call (teams-real-call.js): their synthetic
