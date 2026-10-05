@@ -11,7 +11,7 @@
  *   1. Areg starts a Teams meeting (e.g. "Meet now") with the Jabra, copies the link,
  *      starts the desktop app recording (system audio on, microphone "Automatisch").
  *   2. node tests/e2e-harness/teams-real-call.js join "<meeting link>"
- *      Two browser guests, "Katja (Test)" and "Hedda (Test)", join as anonymous guests;
+ *      Two browser guests, "Katja Test" and "Hedda Test", join as anonymous guests;
  *      Areg admits them from the lobby. Once both are in, they hold the 30-second
  *      exchange of the s20 fixture (lines u2/u3/u5/u6/u9), then leave.
  *      Areg may talk too (his voice is the microphone side); optionally he invites
@@ -41,8 +41,8 @@ const tc = require('./lib/teams-call');
 
 const OUT = path.join(WORK_DIR, 'teams-real-call');
 const GUESTS = [
-  { speaker: 'remote1', name: 'Katja (Test)' },
-  { speaker: 'remote2', name: 'Hedda (Test)' },
+  { speaker: 'remote1', name: 'Katja Test' },
+  { speaker: 'remote2', name: 'Hedda Test' },
 ];
 // A person admits the guests (join); an unattended bot test expects a lobby bypass and gives up sooner.
 const LOBBY_TIMEOUT_MS = Number(process.env.SUISSE_TEAMS_LOBBY_TIMEOUT_S || 600) * 1000;
@@ -201,7 +201,12 @@ async function typeName(page, name) {
       if (!input) continue;
       const current = await frame.evaluate(el => el.value, input);
       if (current === name) return true;
-      await input.click({ clickCount: 3 });
+      // Empty the field first (a triple click did not select Teams' text, every round appended the name).
+      await input.focus();
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyA');
+      await page.keyboard.up('Control');
+      await page.keyboard.press('Backspace');
       await input.type(name, { delay: 30 });
       return true;
     } catch (_) { /* frame navigating */ }
