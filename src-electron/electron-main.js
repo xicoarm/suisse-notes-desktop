@@ -2148,11 +2148,21 @@ ipcMain.handle('auth:register', async (event, email, password, name) => {
     // Until 4.7.15 a failed registration left no trace anywhere: no log line,
     // no Sentry event (08.10.2026: a prospect failed for 15 minutes). The
     // log hook (sentry-reporting.js) turns this warning into a Sentry event.
-    // Status and codes only - never the e-mail, name or password.
-    log.warn(`auth:register failed: status=${failure.status || '-'} code=${failure.code || '-'} network=${failure.networkCode || '-'}${failure.nonJson ? ' non-json' : ''}`);
+    // Status and codes only - never the e-mail, name or password. Refusals
+    // the customer can fix (400 invalid input, 409 account exists, 429 too
+    // many attempts) stay in the local log (info = breadcrumb); server and
+    // network failures become Sentry warnings.
+    const line = `auth:register failed: status=${failure.status || '-'} code=${failure.code || '-'} network=${failure.networkCode || '-'}${failure.nonJson ? ' non-json' : ''}`;
+    if (isCustomerFixableRegisterRefusal(failure)) log.info(line);
+    else log.warn(line);
     return failure;
   }
 });
+
+/** 400/409/429 with a JSON answer: the customer's input or pace, not an outage. */
+function isCustomerFixableRegisterRefusal(failure) {
+  return !failure.nonJson && [400, 409, 429].includes(failure.status);
+}
 
 /** The backend's machine error code (contract 10/2026), when the body has one. */
 function authErrorCode(data) {
