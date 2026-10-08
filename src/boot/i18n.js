@@ -596,7 +596,9 @@ const messages = {
     micUnsupportedSettings: 'The selected microphone does not support the required settings. Please choose a different microphone.',
     navigationBlockedDuringRecording: 'Not possible while a recording or upload is in progress. Stop the recording or wait until the upload has finished.',
     unsupportedFileFormat: 'This file format is not supported. Please choose an audio or video file (e.g. MP3, M4A, WAV, MP4).',
-    fileReadFailed: 'The file could not be read. Please select it again.'
+    fileReadFailed: 'The file could not be read. Please select it again.',
+    fileUploadFailed: 'The file could not be uploaded. Please try again in a moment.',
+    uploadCancelFailed: 'The upload could not be cancelled.'
   },
   de: {
     autoDeletePaused: 'Automatisches Löschen pausiert',
@@ -1193,7 +1195,9 @@ const messages = {
     micUnsupportedSettings: 'Das gewählte Mikrofon unterstützt die benötigten Einstellungen nicht. Bitte wählen Sie ein anderes Mikrofon.',
     navigationBlockedDuringRecording: 'Während einer laufenden Aufnahme oder eines Uploads nicht möglich. Beenden Sie die Aufnahme oder warten Sie, bis der Upload abgeschlossen ist.',
     unsupportedFileFormat: 'Dieses Dateiformat wird nicht unterstützt. Bitte wählen Sie eine Audio- oder Videodatei (z. B. MP3, M4A, WAV, MP4).',
-    fileReadFailed: 'Die Datei konnte nicht gelesen werden. Bitte wählen Sie sie erneut aus.'
+    fileReadFailed: 'Die Datei konnte nicht gelesen werden. Bitte wählen Sie sie erneut aus.',
+    fileUploadFailed: 'Die Datei konnte nicht hochgeladen werden. Bitte versuchen Sie es gleich nochmals.',
+    uploadCancelFailed: 'Der Upload konnte nicht abgebrochen werden.'
   },
   fr: {
     autoDeletePaused: 'Suppression automatique suspendue',
@@ -1790,7 +1794,9 @@ const messages = {
     micUnsupportedSettings: 'Le microphone sélectionné ne prend pas en charge les réglages requis. Veuillez choisir un autre microphone.',
     navigationBlockedDuringRecording: 'Impossible pendant un enregistrement ou un téléversement en cours. Arrêtez l\'enregistrement ou attendez la fin du téléversement.',
     unsupportedFileFormat: 'Ce format de fichier n\'est pas pris en charge. Veuillez choisir un fichier audio ou vidéo (p. ex. MP3, M4A, WAV, MP4).',
-    fileReadFailed: 'Le fichier n\'a pas pu être lu. Veuillez le sélectionner à nouveau.'
+    fileReadFailed: 'Le fichier n\'a pas pu être lu. Veuillez le sélectionner à nouveau.',
+    fileUploadFailed: 'Le fichier n\'a pas pu être téléversé. Veuillez réessayer dans un instant.',
+    uploadCancelFailed: 'Le téléversement n\'a pas pu être annulé.'
   },
   it: {
     autoDeletePaused: 'Eliminazione automatica sospesa',
@@ -2387,7 +2393,9 @@ const messages = {
     micUnsupportedSettings: 'Il microfono selezionato non supporta le impostazioni richieste. Scegli un altro microfono.',
     navigationBlockedDuringRecording: 'Non è possibile durante una registrazione o un caricamento in corso. Interrompi la registrazione o attendi la fine del caricamento.',
     unsupportedFileFormat: 'Questo formato di file non è supportato. Scegli un file audio o video (ad es. MP3, M4A, WAV, MP4).',
-    fileReadFailed: 'Non è stato possibile leggere il file. Selezionalo di nuovo.'
+    fileReadFailed: 'Non è stato possibile leggere il file. Selezionalo di nuovo.',
+    fileUploadFailed: 'Non è stato possibile caricare il file. Riprova tra un momento.',
+    uploadCancelFailed: 'Non è stato possibile annullare il caricamento.'
   }
 };
 

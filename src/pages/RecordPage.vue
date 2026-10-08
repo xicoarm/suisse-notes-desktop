@@ -689,8 +689,8 @@
                 color="negative"
               />
               <div class="error-info">
-                <span class="error-title">Upload Failed</span>
-                <span class="error-message">{{ uploadError }}</span>
+                <span class="error-title">{{ $t('uploadFailed') }}</span>
+                <span class="error-message">{{ uploadErrorText }}</span>
               </div>
             </div>
 
@@ -698,7 +698,7 @@
               <q-btn
                 unelevated
                 class="gradient-btn"
-                label="Retry Upload"
+                :label="$t('retryUpload')"
                 icon="refresh"
                 :loading="isRetrying"
                 @click="retryUpload"
@@ -706,7 +706,7 @@
               <q-btn
                 flat
                 color="grey-7"
-                label="View History"
+                :label="$t('viewHistory')"
                 icon="history"
                 @click="goToHistory"
               />
@@ -887,6 +887,7 @@ import { useMicSwitchNotifications } from '../composables/useMicSwitchNotificati
 import { isElectron, isCapacitor, isAndroid } from '../utils/platform';
 import { humanizeStorageError } from '../utils/storageErrors';
 import { micPlatform, micStartErrorKey, canOpenMicSettings, openMicrophoneSettings } from '../services/permissionSettings';
+import { uploadErrorKey } from '../utils/uploadErrors';
 import { uploadWithVerification } from '../services/upload';
 import { forceCaptureRecovery, getState as getRecordingServiceState } from '../services/recordingService';
 import { getApiUrlSync } from '../services/api';
@@ -1192,6 +1193,14 @@ const currentStoragePreference = ref('keep');
 const isProcessing = computed(() => recordingStore.isProcessing);
 const isAutoUploading = computed(() => recordingStore.isUploading);
 const uploadError = computed(() => recordingStore.uploadError);
+// The upload card shows what the failure means in the user's language; the
+// pipeline's English text stays in the history entry for diagnostics.
+const uploadErrorText = computed(() => {
+  const raw = uploadError.value;
+  if (!raw) return '';
+  if (raw === t('insufficientMinutesUpload')) return raw;
+  return t(uploadErrorKey(raw, { online: typeof navigator === 'undefined' || navigator.onLine !== false }));
+});
 const retryAttempt = computed(() => recordingStore.uploadRetryAttempt);
 const currentFilePath = computed(() => recordingStore.audioFilePath);
 const currentFileSize = computed(() => recordingStore.currentFileSize);
