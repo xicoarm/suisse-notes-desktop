@@ -18,7 +18,12 @@ const REFRESH_INTERVAL_MS = 60 * 1000;
 const MINUTES_CACHE_KEY = 'minutes_cache';
 
 let refreshTimer = null;
+// The fetch in flight, per token ({ token, promise }); a different token
+// (another account, a refreshed session) never shares it.
 let inflightFetch = null;
+// Bumped by reset() (logout): an answer for the previous session that lands
+// afterwards is dropped instead of becoming the next user's balance.
+let fetchGeneration = 0;
 
 /**
  * True only when the server said so in this session: a balance answered by
@@ -184,14 +189,24 @@ export const useMinutesStore = defineStore('minutes', {
         return { success: false, error: 'Not authenticated' };
       }
 
-      // One request at a time: sign-in, the layout's auth watcher and the
-      // Record page can all ask within the same second.
-      if (inflightFetch) return inflightFetch;
-      inflightFetch = this._fetchMinutesNow(token).finally(() => { inflightFetch = null; });
-      return inflightFetch;
+      // One request at a time per session: sign-in, the layout's auth watcher
+      // and the Record page can all ask within the same second.
+      if (inflightFetch && inflightFetch.token === token) return inflightFetch.promise;
+      const entry = { token, promise: null };
+      entry.promise = this._fetchMinutesNow(token, fetchGeneration)
+        .finally(() => { if (inflightFetch === entry) inflightFetch = null; });
+      inflightFetch = entry;
+      return entry.promise;
     },
 
-    async _fetchMinutesNow(token) {
+    /** Apply a server answer unless the session was reset since the request went out. */
+    _applyIfCurrent(data, generation) {
+      if (generation !== fetchGeneration) return { success: false, stale: true };
+      this.setFromServer(data);
+      return { success: true };
+    },
+
+    async _fetchMinutesNow(token, generation = fetchGeneration) {
       this.loading = true;
       this.error = null;
 
@@ -207,8 +222,7 @@ export const useMinutesStore = defineStore('minutes', {
               if (refreshResult.success) {
                 const retryResponse = await authenticatedRequest(API_ENDPOINTS.desktopMinutes, authStore.token);
                 if (retryResponse.ok) {
-                  this.setFromServer(await readJson(retryResponse));
-                  return { success: true };
+                  return this._applyIfCurrent(await readJson(retryResponse), generation);
                 }
               }
               if (refreshResult.shouldLogout) {
@@ -221,8 +235,7 @@ export const useMinutesStore = defineStore('minutes', {
           }
           throw await apiErrorFromResponse(response, 'Failed to fetch minutes');
         }
-        this.setFromServer(await readJson(response));
-        return { success: true };
+        return this._applyIfCurrent(await readJson(response), generation);
       } catch (error) {
         // An HTTP answer (gateway page during a backend restart, 5xx, 4xx) or
         // a network failure keeps the cached balance; the next tick retries.
@@ -311,6 +324,10 @@ export const useMinutesStore = defineStore('minutes', {
      */
     reset() {
       this.stopAutoRefresh();
+      // Drop the previous session's request: its answer must not land in
+      // the next user's balance, and a new token must not share it.
+      fetchGeneration += 1;
+      inflightFetch = null;
       this.remaining = 0;
       this.unlimited = false;
       this.total = 0;

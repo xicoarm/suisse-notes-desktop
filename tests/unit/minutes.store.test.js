@@ -108,4 +108,34 @@ describe('minutes store: when may the balance block?', () => {
     expect(store.remaining).toBe(30);
     expect(store.knownOutOfMinutes).toBe(false);
   });
+
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  it('a different token never shares the request in flight', async () => {
+    const store = useMinutesStore();
+    const answers = [];
+    authenticatedRequest.mockImplementation(() => new Promise((resolve) => answers.push(resolve)));
+    const a = store.fetchMinutes('token-A', true);
+    const b = store.fetchMinutes('token-B', true);
+    expect(authenticatedRequest).toHaveBeenCalledTimes(2);
+    expect(authenticatedRequest.mock.calls.map(c => c[1])).toEqual(['token-A', 'token-B']);
+    answers[0](json({ remaining: 1, total: 60, used: 59 }));
+    answers[1](json({ remaining: 50, total: 60, used: 10 }));
+    await Promise.all([a, b]);
+  });
+
+  it('after a logout (reset) the previous session\'s late answer is dropped', async () => {
+    const store = useMinutesStore();
+    let answerA;
+    authenticatedRequest.mockReturnValueOnce(new Promise((resolve) => { answerA = resolve; }));
+    const a = store.fetchMinutes('token-A', true);
+    store.reset();
+    authenticatedRequest.mockResolvedValueOnce(json({ remaining: 50, total: 60, used: 10 }));
+    await store.fetchMinutes('token-B', true);
+    answerA(json({ remaining: 0, total: 60, used: 60 }));
+    const lateResult = await a;
+    expect(lateResult).toMatchObject({ success: false, stale: true });
+    expect(store.remaining).toBe(50);
+    expect(store.knownOutOfMinutes).toBe(false);
+  });
 });
