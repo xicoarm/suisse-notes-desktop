@@ -176,6 +176,7 @@
               :label="$t('startUpload') || 'Start Upload'"
               icon="cloud_upload"
               class="start-upload-btn"
+              :loading="startUploadBusy"
               @click="confirmAndStartUpload"
             />
             <q-btn
@@ -855,7 +856,20 @@ const clearFileSelection = () => {
 };
 
 // User confirms and starts the upload
+// The start now waits up to 3 s for the minutes balance: latch it so a
+// second click in that window cannot start a second upload.
+const startUploadBusy = ref(false);
 const confirmAndStartUpload = async () => {
+  if (startUploadBusy.value) return;
+  startUploadBusy.value = true;
+  try {
+    await confirmAndStartUploadInternal();
+  } finally {
+    startUploadBusy.value = false;
+  }
+};
+
+const confirmAndStartUploadInternal = async () => {
   if (!hasSelectedFile.value) return;
 
   // A context document is still uploading/extracting - starting now would
@@ -865,8 +879,16 @@ const confirmAndStartUpload = async () => {
     return;
   }
 
-  // Check if user has minutes remaining
-  if (!minutesStore.hasMinutesRemaining) {
+  // Ask the server first (3 s at most). Only a balance it confirmed in this
+  // session can refuse the upload; an unknown balance (offline, slow answer,
+  // brand-new account) lets the server decide - it refuses an upload without
+  // minutes itself.
+  await Promise.race([
+    minutesStore.syncWithServer(authStore.token),
+    new Promise((resolve) => setTimeout(resolve, 3000))
+  ]).catch(() => {});
+
+  if (minutesStore.knownOutOfMinutes) {
     if (isCapacitor()) {
       // Apple Guideline 3.1.1: simple notification on mobile
       $q.notify({
@@ -885,7 +907,7 @@ const confirmAndStartUpload = async () => {
   // If we have duration info, check if user has enough minutes
   if (currentDuration.value > 0) {
     const durationMinutes = currentDuration.value / 60;
-    if (durationMinutes > minutesStore.remainingMinutes) {
+    if (minutesStore.balanceKnown && durationMinutes > minutesStore.remainingMinutes) {
       // File is longer than remaining minutes
       $q.notify({
         type: 'warning',

@@ -1604,14 +1604,17 @@ const handleStartClickInternal = async () => {
   recordingStore.uploadError =null;
   recordingStore.uploadRetryAttempt = 0;
 
-  // Sync minutes with server before checking (3s timeout, fallback to cached)
+  // Sync minutes with server before checking (3s timeout). Only a balance the
+  // server confirmed in this session can block the start: an unknown one
+  // (fetch lost the race, offline, brand-new account) lets the recording
+  // run and the server decides at upload - new accounts were told "no
+  // minutes" by the empty default balance.
   await Promise.race([
     minutesStore.syncWithServer(authStore.token),
     new Promise((_, reject) => setTimeout(() => reject(), 3000))
   ]).catch(() => {});
 
-  // Check if user has minutes remaining
-  if (!minutesStore.hasMinutesRemaining) {
+  if (minutesStore.knownOutOfMinutes) {
     if (isCapacitor()) {
       // Apple Guideline 3.1.1: simple notification on mobile
       $q.notify({
@@ -1627,8 +1630,8 @@ const handleStartClickInternal = async () => {
     return;
   }
 
-  // Show low minutes warning if less than 5 minutes
-  if (minutesStore.remainingMinutes < 5) {
+  // Show low minutes warning if less than 5 minutes (confirmed balance only)
+  if (minutesStore.balanceKnown && minutesStore.remainingMinutes < 5) {
     $q.notify({
       type: 'warning',
       message: t('minutesLimitWarning', { minutes: Math.round(minutesStore.remainingMinutes) }),

@@ -7,7 +7,7 @@ vi.mock('../../src/services/api', async (importOriginal) => {
   return { ...actual, authenticatedRequest: (...args) => authenticatedRequest(...args) };
 });
 
-const { useMinutesStore } = await import('../../src/stores/minutes');
+const { useMinutesStore, isKnownOutOfMinutes, isKnownBelow } = await import('../../src/stores/minutes');
 
 const htmlResponse = (status) => new Response(
   '<html>\r\n<head><title>502 Bad Gateway</title></head><body>nginx</body></html>',
@@ -60,5 +60,52 @@ describe('minutes store: fetchMinutes', () => {
 
     expect(result.success).toBe(true);
     expect(store.remaining).toBe(10);
+  });
+});
+
+describe('minutes store: when may the balance block?', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    authenticatedRequest.mockReset();
+    try { localStorage.clear(); } catch { /* no storage */ }
+  });
+
+  it('an unknown balance (default 0, never fetched) never blocks', () => {
+    const store = useMinutesStore();
+    expect(store.remaining).toBe(0);
+    expect(store.lastFetchedAt).toBeNull();
+    expect(store.knownOutOfMinutes).toBe(false);
+    expect(isKnownOutOfMinutes({ remaining: 0, unlimited: false, lastFetchedAt: null })).toBe(false);
+  });
+
+  it('a cached balance from an earlier session is shown but not trusted to block', () => {
+    localStorage.setItem('minutes_cache', JSON.stringify({ remaining: 0, unlimited: false, total: 60, used: 60, cachedAt: Date.now() - 86400000 }));
+    const store = useMinutesStore();
+    expect(store.remaining).toBe(0);
+    expect(store.balanceKnown).toBe(false);
+    expect(store.knownOutOfMinutes).toBe(false);
+  });
+
+  it('a server-confirmed 0 blocks; unlimited never does', () => {
+    const store = useMinutesStore();
+    store.setFromServer({ remaining: 0, total: 60, used: 60, unlimited: false });
+    expect(store.knownOutOfMinutes).toBe(true);
+    store.setFromServer({ remaining: -1, total: -1, used: 5 });
+    expect(store.knownOutOfMinutes).toBe(false);
+    expect(isKnownBelow({ remaining: 3, unlimited: false, lastFetchedAt: 1 }, 5)).toBe(true);
+    expect(isKnownBelow({ remaining: 3, unlimited: false, lastFetchedAt: null }, 5)).toBe(false);
+  });
+
+  it('concurrent fetches share one request', async () => {
+    const store = useMinutesStore();
+    let answer;
+    authenticatedRequest.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    const a = store.fetchMinutes('token', true);
+    const b = store.fetchMinutes('token', true);
+    answer(new Response(JSON.stringify({ remaining: 30, total: 60, used: 30 }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    await Promise.all([a, b]);
+    expect(authenticatedRequest).toHaveBeenCalledTimes(1);
+    expect(store.remaining).toBe(30);
+    expect(store.knownOutOfMinutes).toBe(false);
   });
 });

@@ -18,6 +18,28 @@ const REFRESH_INTERVAL_MS = 60 * 1000;
 const MINUTES_CACHE_KEY = 'minutes_cache';
 
 let refreshTimer = null;
+let inflightFetch = null;
+
+/**
+ * True only when the server said so in this session: a balance answered by
+ * the server (lastFetchedAt set) that is really used up.
+ *
+ * WHY: the balance starts at 0 (or yesterday's cached value) until the first
+ * fetch answers. SSO and registration did not fetch it, the Record page gave
+ * the fetch 3 seconds and the Upload page never asked - so brand-new accounts
+ * were told "no minutes left" (10/2026). An unknown balance never blocks: the
+ * server decides when the recording is uploaded.
+ */
+export function isKnownOutOfMinutes(state) {
+  if (!state || state.lastFetchedAt == null || state.unlimited) return false;
+  return !(state.remaining > 0);
+}
+
+/** True only when a server-confirmed balance is below `minutes`. */
+export function isKnownBelow(state, minutes) {
+  if (!state || state.lastFetchedAt == null || state.unlimited) return false;
+  return Math.max(0, state.remaining) < minutes;
+}
 
 // Persist minutes to localStorage so offline recording works
 function _cacheMinutes(data) {
@@ -52,11 +74,20 @@ export const useMinutesStore = defineStore('minutes', {
       used: cached?.used ?? 0,
       loading: false,
       error: null,
-      lastFetchedAt: cached ? cached.cachedAt : null
+      // Set only by a server answer in THIS session; the cached balance
+      // (cachedAt) is shown but never treated as confirmed.
+      lastFetchedAt: null,
+      cachedAt: cached ? cached.cachedAt : null
     };
   },
 
   getters: {
+    /** Server-confirmed in this session that no minutes are left. */
+    knownOutOfMinutes: (state) => isKnownOutOfMinutes(state),
+
+    /** Whether the balance shown was answered by the server in this session. */
+    balanceKnown: (state) => state.lastFetchedAt != null,
+
     /**
      * Remaining minutes for display (0 if unlimited, clamped to 0 minimum)
      */
@@ -116,6 +147,7 @@ export const useMinutesStore = defineStore('minutes', {
       this.remaining = remaining;
       this.total = total;
       this.lastFetchedAt = Date.now();
+      this.cachedAt = this.lastFetchedAt;
       this.error = null;
 
       // Cache to localStorage so offline recording works
@@ -138,6 +170,14 @@ export const useMinutesStore = defineStore('minutes', {
         return { success: false, error: 'Not authenticated' };
       }
 
+      // One request at a time: sign-in, the layout's auth watcher and the
+      // Record page can all ask within the same second.
+      if (inflightFetch) return inflightFetch;
+      inflightFetch = this._fetchMinutesNow(token).finally(() => { inflightFetch = null; });
+      return inflightFetch;
+    },
+
+    async _fetchMinutesNow(token) {
       this.loading = true;
       this.error = null;
 
@@ -264,6 +304,7 @@ export const useMinutesStore = defineStore('minutes', {
       this.loading = false;
       this.error = null;
       this.lastFetchedAt = null;
+      this.cachedAt = null;
       try { localStorage.removeItem(MINUTES_CACHE_KEY); } catch { /* ignore */ }
     }
   }
