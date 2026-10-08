@@ -35,6 +35,20 @@ export function isKnownOutOfMinutes(state) {
   return !(state.remaining > 0);
 }
 
+/**
+ * Auto-stop limit for a recording, in seconds, or null for none.
+ * A recording is never cut by an unconfirmed balance: the cached value can
+ * be yesterday's (minutes bought since), so only a balance the server
+ * answered in this session sets a limit. `alreadyRecordedSeconds` extends it
+ * on resume (same rule as before: the balance is deducted after upload).
+ */
+export function recordingCapSeconds(state, alreadyRecordedSeconds = 0) {
+  if (!state || state.lastFetchedAt == null || state.unlimited) return null;
+  const remaining = Math.max(0, Math.floor(Number(state.remaining) * 60));
+  if (!(remaining > 0)) return null;
+  return remaining + Math.max(0, Number(alreadyRecordedSeconds) || 0);
+}
+
 /** True only when a server-confirmed balance is below `minutes`. */
 export function isKnownBelow(state, minutes) {
   if (!state || state.lastFetchedAt == null || state.unlimited) return false;
