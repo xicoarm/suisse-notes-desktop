@@ -21,6 +21,20 @@ function networkKind(error) {
 }
 
 /**
+ * End any SSO wait (spinner) and drop an SSO result the desktop main process
+ * still buffers, so it can never be applied to a later session. Used on
+ * password sign-in, registration and logout.
+ */
+function discardPendingSSO(authStore) {
+  authStore.ssoProvider = null;
+  if (!isElectron()) return;
+  try {
+    const take = window.electronAPI?.auth?.takePendingSSO;
+    if (typeof take === 'function') Promise.resolve(take()).catch(() => {});
+  } catch { /* nothing buffered */ }
+}
+
+/**
  * Load the minutes balance for a session that did not bring one (SSO,
  * registration, a login answer without `minutes`). Without it the Record page
  * judged a brand-new account by the empty default and said "no credits".
@@ -238,6 +252,9 @@ export const useAuthStore = defineStore('auth', {
           this.user = result.user;
           this.token = result.token;
           this.isAuthenticated = true;
+          // A Microsoft/Google sign-in still waiting in the browser is over:
+          // its result must not replace this session later.
+          discardPendingSSO(this);
 
           // Save token and user info securely
           await platformSaveToken(result.token);
@@ -355,6 +372,11 @@ export const useAuthStore = defineStore('auth', {
     async completeSSO(payload) {
       const provider = this.ssoProvider || 'unknown';
       this.ssoProvider = null;
+      // Never switch or touch a signed-in session (see boot/sso.js).
+      if (this.isAuthenticated) {
+        addBreadcrumb({ category: 'sso', message: 'SSO result ignored: already signed in', level: 'warning' });
+        return { success: false, ignored: true, reason: 'already_signed_in' };
+      }
       const seq = this.ssoOutcome.seq + 1;
 
       if (!payload || payload.error || payload.code || !payload.token) {
@@ -398,6 +420,7 @@ export const useAuthStore = defineStore('auth', {
           this.user = result.user;
           this.token = result.token;
           this.isAuthenticated = true;
+          discardPendingSSO(this);
 
           // Save token and user info securely
           await platformSaveToken(result.token);
@@ -488,7 +511,7 @@ export const useAuthStore = defineStore('auth', {
       this.token = null;
       this.isAuthenticated = false;
       this.error = null;
-      this.ssoProvider = null;
+      discardPendingSSO(this);
       this._refreshPromise = null;
     },
 

@@ -25,11 +25,10 @@ import { addBreadcrumb } from './sentry';
  * @param {object} deps
  * @param {() => object} deps.getAuthStore
  * @param {object} deps.router - vue-router instance
- * @param {() => boolean|Promise<boolean>} [deps.isRecordingActive] - a recording/upload is running
  * @param {() => Promise<void>} [deps.closeBrowser] - close the in-app browser (Android)
  * @returns {(payload: object) => Promise<void>}
  */
-export function createSSOResultHandler({ getAuthStore, router, isRecordingActive = () => false, closeBrowser = null }) {
+export function createSSOResultHandler({ getAuthStore, router, closeBrowser = null }) {
   const handledDeliveries = new Set();
   let queue = Promise.resolve();
 
@@ -39,13 +38,16 @@ export function createSSOResultHandler({ getAuthStore, router, isRecordingActive
     try { await router.isReady(); } catch { /* proceed anyway */ }
     const authStore = getAuthStore();
 
-    let recordingActive = false;
-    if (payload.token && authStore.isAuthenticated) {
-      try { recordingActive = !!(await isRecordingActive()); } catch { recordingActive = false; }
-    }
-    if (recordingActive) {
-      // Never switch the account under a running recording or upload.
-      addBreadcrumb({ category: 'sso', message: 'SSO success ignored: recording or upload in progress', level: 'warning' });
+    // SECURITY: a result is applied only while nobody is signed in - the
+    // same rule as when only the login page handled it. A crafted
+    // suissenotes://auth/callback?token=... link, the hand-off page's "open
+    // the app" link left open in the browser, or a late Microsoft result
+    // after a password sign-in must never switch the account (on mobile the
+    // queued recordings of the previous user would then upload under the
+    // new token). Success and error results alike are dropped, not kept.
+    if (authStore.isAuthenticated) {
+      addBreadcrumb({ category: 'sso', message: `SSO result ignored: already signed in (${payload.token ? 'success' : 'error'})`, level: 'warning' });
+      authStore.abandonSSO();
       return;
     }
 
@@ -82,11 +84,6 @@ export default ({ router, store }) => {
   const handle = createSSOResultHandler({
     getAuthStore: () => useAuthStore(store),
     router,
-    isRecordingActive: async () => {
-      // Lazy: keeps the capture stack out of this boot file's module graph.
-      const { useRecordingStore } = await import('../stores/recording');
-      return useRecordingStore(store).isBlocking;
-    },
     closeBrowser: isCapacitor()
       ? async () => { const { closeSSO } = await import('../services/ssoAuth'); await closeSSO(); }
       : null

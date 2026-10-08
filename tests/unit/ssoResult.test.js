@@ -115,15 +115,66 @@ describe('app-wide SSO result handler (boot/sso.js)', () => {
     expect(cancelRouter.push).not.toHaveBeenCalled();
   });
 
-  it('never switches the account under a running recording', async () => {
+  it('SECURITY: a success result while signed in is ignored - no account switch (crafted link, stale hand-off, late result)', async () => {
+    const store = useAuthStore();
+    store.isAuthenticated = true;
+    store.token = 'current';
+    store.user = { id: 'me' };
+    store.ssoProvider = 'microsoft';
+    const loginWithSSO = vi.spyOn(store, 'loginWithSSO');
+    const router = fakeRouter('history');
+    const handle = createSSOResultHandler({ getAuthStore: () => store, router });
+
+    await handle({ token: 'attacker', user: { id: 'evil' }, deliveryId: 11 });
+
+    expect(loginWithSSO).not.toHaveBeenCalled();
+    expect(store.token).toBe('current');
+    expect(store.user).toEqual({ id: 'me' });
+    expect(store.ssoProvider).toBeNull();
+    expect(electronAuth.saveToken).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+    expect(sentry.addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringMatching(/ignored: already signed in/) }));
+  });
+
+  it('SECURITY: an error result while signed in is ignored - no navigation, no error banner', async () => {
     const store = useAuthStore();
     store.isAuthenticated = true;
     store.token = 'current';
     const router = fakeRouter('record');
-    const handle = createSSOResultHandler({ getAuthStore: () => store, router, isRecordingActive: async () => true });
-    await handle({ token: 'other', user: { id: 'u9' } });
-    expect(store.token).toBe('current');
+    const handle = createSSOResultHandler({ getAuthStore: () => store, router });
+
+    await handle({ error: 'Login failed', code: 'sso_failed' });
+
     expect(router.push).not.toHaveBeenCalled();
+    expect(store.error).toBeNull();
+    expect(store.ssoOutcome.seq).toBe(0);
+    expect(sentry.captureMessage).not.toHaveBeenCalled();
+  });
+
+  it('the store refuses an SSO result for a signed-in session on its own as well', async () => {
+    const store = useAuthStore();
+    store.isAuthenticated = true;
+    store.token = 'current';
+    const result = await store.completeSSO({ token: 'other', user: { id: 'x' } });
+    expect(result).toMatchObject({ success: false, ignored: true });
+    expect(store.token).toBe('current');
+  });
+
+  it('a password sign-in ends the SSO wait and drops a result main still buffers', async () => {
+    const takePendingSSO = vi.fn(async () => ({ token: 'stale', user: { id: 's' } }));
+    electronAuth.takePendingSSO = takePendingSSO;
+    electronAuth.login = vi.fn(async () => ({ success: true, token: 'pw', user: { id: 'me' }, minutes: { remaining: 5 } }));
+    try {
+      const store = useAuthStore();
+      store.beginSSO('google');
+      await store.login('a@b.ch', 'secret');
+      expect(store.ssoProvider).toBeNull();
+      expect(takePendingSSO).toHaveBeenCalled();
+      expect(store.token).toBe('pw');
+    } finally {
+      delete electronAuth.takePendingSSO;
+      delete electronAuth.login;
+    }
   });
 
   it('closes the in-app browser on mobile', async () => {
