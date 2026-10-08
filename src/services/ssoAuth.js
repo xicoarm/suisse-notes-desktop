@@ -12,7 +12,7 @@
  *
  * Both code paths produce the same shape: a parsed { token, user } | { error }
  * dispatched via the 'sso:callback' window event, so downstream handlers
- * (LoginPage.handleSSOPayload) stay platform-agnostic.
+ * (the app-wide handler in src/boot/sso.js) stay platform-agnostic.
  */
 
 import { registerPlugin } from '@capacitor/core';
