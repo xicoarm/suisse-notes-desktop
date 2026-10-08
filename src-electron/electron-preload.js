@@ -361,7 +361,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeAllListeners('system:audio-service-crashed');
     },
     // Get recordings path
-    getRecordingsPath: () => ipcRenderer.invoke('system:getRecordingsPath')
+    getRecordingsPath: () => ipcRenderer.invoke('system:getRecordingsPath'),
+    // Open the OS microphone privacy settings (macOS / Windows); { success }.
+    openMicrophoneSettings: () => ipcRenderer.invoke('system:openMicrophoneSettings')
   }
 });
 

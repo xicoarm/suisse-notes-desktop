@@ -4662,6 +4662,25 @@ ipcMain.handle('shell:openExternal', async (event, url) => {
   }
 });
 
+// Microphone access denied: open the OS page where the user can allow it.
+// Fixed URLs only (no renderer input), so shell:openExternal's domain
+// allow-list does not need to admit OS settings schemes.
+const MICROPHONE_SETTINGS_URLS = {
+  darwin: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
+  win32: 'ms-settings:privacy-microphone'
+};
+ipcMain.handle('system:openMicrophoneSettings', async () => {
+  const url = MICROPHONE_SETTINGS_URLS[process.platform];
+  if (!url) return { success: false, error: 'unsupported_platform' };
+  try {
+    await shell.openExternal(url);
+    return { success: true };
+  } catch (error) {
+    log.warn(`Could not open the microphone privacy settings: ${error.message}`);
+    return { success: false, error: error.message };
+  }
+});
+
 // Show a file in its parent folder in the OS file manager
 ipcMain.handle('shell:showItemInFolder', async (event, filePath) => {
   try {

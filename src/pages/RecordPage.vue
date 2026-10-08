@@ -886,6 +886,7 @@ import { useRecorder } from '../composables/useRecorder';
 import { useMicSwitchNotifications } from '../composables/useMicSwitchNotifications';
 import { isElectron, isCapacitor, isAndroid } from '../utils/platform';
 import { humanizeStorageError } from '../utils/storageErrors';
+import { micPlatform, micStartErrorKey, canOpenMicSettings, openMicrophoneSettings } from '../services/permissionSettings';
 import { uploadWithVerification } from '../services/upload';
 import { forceCaptureRecovery, getState as getRecordingServiceState } from '../services/recordingService';
 import { getApiUrlSync } from '../services/api';
@@ -1473,7 +1474,7 @@ onMounted(async () => {
             } catch (err) {
               $q.notify({
                 type: 'negative',
-                message: t('micPermissionDenied'),
+                message: t('micDeniedAndroid'),
                 icon: 'mic_off',
                 timeout: 8000,
                 actions: [
@@ -1649,7 +1650,7 @@ const handleStartClickInternal = async () => {
     } catch (err) {
       $q.notify({
         type: 'negative',
-        message: t('micPermissionDenied'),
+        message: t('micDeniedAndroid'),
         icon: 'mic_off',
         timeout: 0,
         actions: [
@@ -1767,11 +1768,44 @@ const doStartRecordingInternal = async () => {
     });
   }
   if (!result.success) {
+    notifyStartFailure(result);
+  }
+};
+
+// A failed start in the user's language. Microphone access denied gets the
+// platform's own path to the switch plus a button to open it (until 4.7.15:
+// English "Microphone access denied." with no way forward on macOS and iOS).
+const notifyStartFailure = (result) => {
+  const platform = micPlatform();
+  const key = micStartErrorKey(result.errorCode, platform);
+  if (result.errorCode === 'mic_permission_denied') {
     $q.notify({
       type: 'negative',
-      message: result.error || t('failedToStartRecording')
+      message: t(key),
+      icon: 'mic_off',
+      timeout: 0,
+      multiLine: true,
+      actions: [
+        ...(canOpenMicSettings(platform)
+          ? [{ label: t('openSettings'), color: 'white', handler: () => { openMicrophoneSettings(platform); } }]
+          : []),
+        { label: t('dismiss'), color: 'white' }
+      ]
     });
+    return;
   }
+  if (key) {
+    $q.notify({ type: 'negative', message: t(key), icon: 'mic_off', timeout: 10000, multiLine: true });
+    return;
+  }
+  // Other failures: the translated headline, the technical detail below it
+  // (support needs it; it may come from the OS or the storage layer).
+  $q.notify({
+    type: 'negative',
+    message: t('failedToStartRecording'),
+    caption: result.error || undefined,
+    timeout: 8000
+  });
 };
 
 const handlePause = () => {
