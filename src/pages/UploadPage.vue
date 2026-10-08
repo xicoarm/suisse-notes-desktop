@@ -870,6 +870,9 @@ const clearFileSelection = () => {
 // The start now waits up to 3 s for the minutes balance: latch it so a
 // second click in that window cannot start a second upload.
 const startUploadBusy = ref(false);
+let pageUnmounted = false;
+const selectionSnapshot = () => ({ file: selectedFile.value, path: currentFilePath.value, recordId: currentRecordId.value });
+const sameSelection = (a, b) => a.file === b.file && a.path === b.path && a.recordId === b.recordId;
 const confirmAndStartUpload = async () => {
   if (startUploadBusy.value) return;
   startUploadBusy.value = true;
@@ -894,10 +897,14 @@ const confirmAndStartUploadInternal = async () => {
   // session can refuse the upload; an unknown balance (offline, slow answer,
   // brand-new account) lets the server decide - it refuses an upload without
   // minutes itself.
+  const selectionBefore = selectionSnapshot();
   await Promise.race([
     minutesStore.syncWithServer(authStore.token),
     new Promise((resolve) => setTimeout(resolve, 3000))
   ]).catch(() => {});
+  // The user may have left the page or changed/cleared the file while the
+  // balance loaded: never start an upload nobody is looking at.
+  if (pageUnmounted || !hasSelectedFile.value || !sameSelection(selectionBefore, selectionSnapshot())) return;
 
   if (minutesStore.knownOutOfMinutes) {
     if (isCapacitor()) {
@@ -1420,6 +1427,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  pageUnmounted = true;
   window.removeEventListener('beforeunload', handleBeforeUnload);
 
   // Note: We do NOT call removeAllListeners() here because MainLayout has a global
