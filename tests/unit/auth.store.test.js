@@ -1,6 +1,16 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { useAuthStore } from '../../src/stores/auth';
+import { i18n } from '../../src/boot/i18n';
+
+// Sign-in now loads the minutes balance in the background; keep that off the
+// network (the real store would call the production API from a test).
+const fetchMinutes = vi.fn(async () => ({ success: true }));
+vi.mock('../../src/stores/minutes', () => ({
+  useMinutesStore: () => ({ fetchMinutes, setFromServer: vi.fn(), reset: vi.fn() })
+}));
+
+const en = (key) => i18n.global.getLocaleMessage('en')[key];
 
 // Mock electronAPI
 const mockElectronAPI = {
@@ -16,8 +26,11 @@ const mockElectronAPI = {
 };
 
 // Set up global mock
+// performance: vue-i18n marks its message lookups with window.performance;
+// without it every translation fails and returns the bare key.
 vi.stubGlobal('window', {
-  electronAPI: mockElectronAPI
+  electronAPI: mockElectronAPI,
+  performance: globalThis.performance
 });
 
 describe('Auth Store', () => {
@@ -65,20 +78,56 @@ describe('Auth Store', () => {
       expect(mockElectronAPI.auth.saveUserInfo).toHaveBeenCalledWith(mockUser);
     });
 
-    it('should handle login failure', async () => {
+    it('should handle login failure with a translated text, never the server sentence', async () => {
       const store = useAuthStore();
+      i18n.global.locale.value = 'en';
 
       mockElectronAPI.auth.login.mockResolvedValue({
         success: false,
-        error: 'Invalid credentials'
+        status: 401,
+        serverError: 'Invalid credentials'
       });
 
       const result = await store.login('test@example.com', 'wrongpassword');
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe('Invalid credentials');
+      expect(result.error).toBe(en('loginInvalidCredentials'));
+      expect(result.reason).toBe('status_401');
       expect(store.isAuthenticated).toBe(false);
-      expect(store.error).toBe('Invalid credentials');
+      expect(store.error).not.toBe('Invalid credentials');
+    });
+
+    it('prefers the backend code: use_sso names the provider button', async () => {
+      const store = useAuthStore();
+      i18n.global.locale.value = 'de';
+      mockElectronAPI.auth.login.mockResolvedValue({ success: false, status: 400, code: 'use_sso', provider: 'google' });
+
+      const result = await store.login('a@b.ch', 'x');
+
+      expect(result.error).toBe(i18n.global.getLocaleMessage('de').loginUseSsoGoogle);
+      expect(result.reason).toBe('use_sso');
+      i18n.global.locale.value = 'en';
+    });
+
+    it('treats a gateway page during a restart as "briefly unavailable", not as wrong credentials', async () => {
+      const store = useAuthStore();
+      i18n.global.locale.value = 'en';
+      mockElectronAPI.auth.login.mockResolvedValue({ success: false, status: 502, nonJson: true });
+
+      const result = await store.login('a@b.ch', 'x');
+
+      expect(result.error).toBe(en('authServiceUnavailable'));
+      expect(result.error).not.toBe(en('loginInvalidCredentials'));
+    });
+
+    it('loads the minutes balance when the login answer has none', async () => {
+      const store = useAuthStore();
+      mockElectronAPI.auth.login.mockResolvedValue({ success: true, user: { id: 'u1' }, token: 'tok' });
+      mockElectronAPI.auth.saveToken.mockResolvedValue({ success: true });
+      mockElectronAPI.auth.saveUserInfo.mockResolvedValue({ success: true });
+
+      await store.login('a@b.ch', 'x');
+      await vi.waitFor(() => expect(fetchMinutes).toHaveBeenCalledWith('tok', true));
     });
 
     it('should handle network errors', async () => {
@@ -136,18 +185,32 @@ describe('Auth Store', () => {
       expect(store.isAuthenticated).toBe(true);
     });
 
-    it('should handle registration failure', async () => {
+    it('should handle registration failure: 409 says "account exists" and keeps the reset hint', async () => {
       const store = useAuthStore();
+      i18n.global.locale.value = 'en';
 
       mockElectronAPI.auth.register.mockResolvedValue({
         success: false,
-        error: 'Email already exists'
+        status: 409,
+        serverError: 'User with this email already exists.'
       });
 
       const result = await store.register('existing@example.com', 'password123', 'User');
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe('Email already exists');
+      expect(result.error).toBe(en('registerAccountExists'));
+      expect(result.error).toMatch(/Forgot Password/);
+      expect(result.reason).toBe('status_409');
+    });
+
+    it('loads the minutes balance of the new account', async () => {
+      const store = useAuthStore();
+      mockElectronAPI.auth.register.mockResolvedValue({ success: true, user: { id: 'n1' }, token: 'new-tok' });
+      mockElectronAPI.auth.saveToken.mockResolvedValue({ success: true });
+      mockElectronAPI.auth.saveUserInfo.mockResolvedValue({ success: true });
+
+      await store.register('n@b.ch', 'password123', 'N');
+      await vi.waitFor(() => expect(fetchMinutes).toHaveBeenCalledWith('new-tok', true));
     });
   });
 

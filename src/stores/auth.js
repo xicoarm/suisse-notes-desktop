@@ -1,16 +1,37 @@
 import { defineStore } from 'pinia';
 import { isElectron, isCapacitor, getPlatform } from '../utils/platform';
-import { storeToken, getToken, clearToken, storeUserCredentials, getUserCredentials, clearAllCredentials } from '../services/secureStorage';
+import { storeToken, getToken, storeUserCredentials, getUserCredentials, clearAllCredentials } from '../services/secureStorage';
 import { apiRequest, authenticatedRequest, API_ENDPOINTS, parseJsonSafe } from '../services/api';
 import { addBreadcrumb, captureException, captureMessage, setUser } from '../boot/sentry';
 import { i18n } from '../boot/i18n';
+import { describeLoginFailure, describeRegisterFailure, classifySsoError } from '../utils/authErrors';
 
-const tr = (key) => { try { return i18n.global.t(key); } catch { return key; } };
+const tr = (key, params) => { try { return params ? i18n.global.t(key, params) : i18n.global.t(key); } catch { return key; } };
 
 /** fetch() rejects with TypeError offline, TimeoutError on our deadline. */
 function isNetworkFailure(error) {
   return !!error && (error.name === 'TypeError' || error.name === 'TimeoutError' || error.code === 'ETIMEDOUT' ||
     /failed to fetch|load failed|network|timed out/i.test(error.message || ''));
+}
+
+/** Kind of a thrown network failure, for the translated message. */
+function networkKind(error) {
+  if (error?.name === 'TimeoutError' || error?.code === 'ETIMEDOUT' || /timed out/i.test(error?.message || '')) return 'timeout';
+  return 'offline';
+}
+
+/**
+ * Load the minutes balance for a session that did not bring one (SSO,
+ * registration, a login answer without `minutes`). Without it the Record page
+ * judged a brand-new account by the empty default and said "no credits".
+ * Never blocks sign-in; the minutes store dedupes concurrent fetches.
+ */
+async function refreshMinutesInBackground(token) {
+  if (!token) return;
+  try {
+    const { useMinutesStore } = await import('./minutes');
+    useMinutesStore().fetchMinutes(token, true).catch(() => {});
+  } catch { /* the minutes load again on the next refresh tick */ }
 }
 
 /**
@@ -58,14 +79,15 @@ async function platformLogin(username, password) {
   } catch (error) {
     if (isNetworkFailure(error)) {
       addBreadcrumb({ category: 'auth', message: `Login: network failure (${error.message})`, level: 'warning' });
-      return { success: false, error: tr('networkUnavailable'), networkError: true };
+      return { success: false, network: networkKind(error), networkError: true };
     }
     throw error;
   }
   const data = await parseJsonSafe(response);
-  if (!response.ok || data.nonJson) {
-    addBreadcrumb({ category: 'auth', message: `Login failed: ${data.error || response.status}`, level: 'warning' });
-    return { success: false, error: data.nonJson ? tr('serverUnexpectedResponse') : (data.error || 'Login failed') };
+  if (!response.ok || data.nonJson || !data.token) {
+    addBreadcrumb({ category: 'auth', message: `Login failed: HTTP ${response.status} code=${data.code || '-'}`, level: 'warning' });
+    // Structured for describeLoginFailure; the server's sentence is never shown.
+    return failureFromAnswer(response, data);
   }
   addBreadcrumb({ category: 'auth', message: 'Login successful', level: 'info' });
   return { success: true, token: data.token, user: data.user, minutes: data.minutes };
@@ -82,14 +104,31 @@ async function platformRegister(email, password, name) {
       body: JSON.stringify({ email, password, name })
     });
   } catch (error) {
-    if (isNetworkFailure(error)) return { success: false, error: tr('networkUnavailable'), networkError: true };
+    if (isNetworkFailure(error)) return { success: false, network: networkKind(error), networkError: true };
     throw error;
   }
   const data = await parseJsonSafe(response);
-  if (!response.ok || data.nonJson) {
-    return { success: false, error: data.nonJson ? tr('serverUnexpectedResponse') : (data.error || 'Registration failed') };
+  if (!response.ok || data.nonJson || !data.token) {
+    return failureFromAnswer(response, data);
   }
   return { success: true, token: data.token, user: data.user };
+}
+
+/**
+ * Failed (or unusable) auth answer -> the structured failure the error
+ * mapping reads. A 2xx without a token counts as an unexpected answer.
+ */
+function failureFromAnswer(response, data) {
+  const usable = response.ok && !data.nonJson;
+  return {
+    success: false,
+    status: usable ? 0 : response.status,
+    code: typeof data.code === 'string' ? data.code : undefined,
+    provider: typeof data.provider === 'string' ? data.provider : undefined,
+    nonJson: !!data.nonJson || usable,
+    // Only matched against the legacy backend's known sentences, never shown.
+    serverError: typeof data.error === 'string' ? data.error.slice(0, 200) : undefined
+  };
 }
 
 async function platformSaveToken(token) {
@@ -177,6 +216,12 @@ export const useAuthStore = defineStore('auth', {
     sessionChecked: false,  // Track if initial session check is complete
     loading: false,
     error: null,
+    // SSO flow in flight: null | 'microsoft' | 'google'. Lives here (not in
+    // the login page) because the result is handled app-wide - it may arrive
+    // while another page is shown, or minutes later after a 2FA step.
+    ssoProvider: null,
+    // Last SSO outcome; `seq` increments per result so a screen can react.
+    ssoOutcome: { seq: 0, success: false, cancelled: false, reason: null },
     _refreshPromise: null,  // Mutex for token refresh (prevents concurrent stampede)
     _tokenRefreshInterval: null,
   }),
@@ -206,6 +251,8 @@ export const useAuthStore = defineStore('auth', {
             const { useMinutesStore } = await import('./minutes');
             const minutesStore = useMinutesStore();
             minutesStore.setFromServer(result.minutes);
+          } else {
+            refreshMinutesInBackground(result.token);
           }
 
           // Start periodic token refresh
@@ -225,18 +272,20 @@ export const useAuthStore = defineStore('auth', {
 
           return { success: true };
         } else {
-          this.error = result.error || 'Login failed';
-          return { success: false, error: this.error };
+          const failure = describeLoginFailure(result);
+          this.error = tr(failure.key);
+          return { success: false, error: this.error, reason: failure.reason };
         }
       } catch (error) {
         if (isNetworkFailure(error)) {
           captureMessage(`auth: login network failure — ${error.message}`, 'warning');
-          this.error = tr('networkUnavailable');
-        } else {
-          captureException(error, { tags: { action: 'login' } });
-          this.error = error.message || 'An unexpected error occurred';
+          const failure = describeLoginFailure({ network: networkKind(error) });
+          this.error = tr(failure.key);
+          return { success: false, error: this.error, reason: failure.reason };
         }
-        return { success: false, error: this.error };
+        captureException(error, { tags: { action: 'login' } });
+        this.error = tr('loginFailedGeneric');
+        return { success: false, error: this.error, reason: 'exception' };
       } finally {
         this.loading = false;
       }
@@ -249,7 +298,7 @@ export const useAuthStore = defineStore('auth', {
      */
     async loginWithSSO({ token, user }) {
       if (!token || !user) {
-        this.error = 'Invalid SSO callback';
+        this.error = tr('ssoFailed');
         return { success: false, error: this.error };
       }
       try {
@@ -263,6 +312,7 @@ export const useAuthStore = defineStore('auth', {
 
         setUser(user);
         this.startTokenRefresh();
+        refreshMinutesInBackground(token);
 
         try {
           const { useDeviceStore } = await import('./device');
@@ -277,9 +327,64 @@ export const useAuthStore = defineStore('auth', {
         return { success: true };
       } catch (error) {
         captureException(error, { tags: { action: 'loginWithSSO' } });
-        this.error = error.message || 'SSO login failed';
+        this.error = tr('ssoFailed');
         return { success: false, error: this.error };
       }
+    },
+
+    /** An SSO flow was started in the browser (shows the spinner on the login page). */
+    beginSSO(provider) {
+      this.error = null;
+      this.ssoProvider = provider === 'google' ? 'google' : 'microsoft';
+      addBreadcrumb({ category: 'sso', message: `SSO started provider=${this.ssoProvider}`, level: 'info' });
+    },
+
+    /** The user gave up waiting for the browser (the result is still accepted if it arrives). */
+    abandonSSO() {
+      this.ssoProvider = null;
+    },
+
+    /**
+     * Handle one SSO callback result ({ token, user } | { error, code }),
+     * wherever the app currently is. Called by the app-wide SSO handler
+     * (boot/sso.js), never by a page: a result that arrived while the login
+     * page was not mounted (cold start, Register page open, a late 2FA
+     * completion after the wait timed out) used to be dropped.
+     * @returns {Promise<{ success: boolean, cancelled?: boolean, reason?: string }>}
+     */
+    async completeSSO(payload) {
+      const provider = this.ssoProvider || 'unknown';
+      this.ssoProvider = null;
+      const seq = this.ssoOutcome.seq + 1;
+
+      if (!payload || payload.error || payload.code || !payload.token) {
+        const outcome = classifySsoError(payload && (payload.error || payload.code)
+          ? payload
+          : { error: 'invalid_callback' });
+        addBreadcrumb({ category: 'sso', message: `SSO result: ${outcome.cancelled ? 'cancelled' : 'failed'} reason=${outcome.reason}`, level: 'info' });
+        if (outcome.cancelled) {
+          this.error = null;
+        } else {
+          this.error = tr(outcome.key);
+          // Only codes and the provider: no user data, no raw IdP text.
+          captureMessage(`auth: SSO sign-in failed (${outcome.reason})`, 'warning', {
+            fingerprint: ['sso-sign-in-failed', outcome.reason],
+            tags: { sso_reason: outcome.reason, sso_provider: provider }
+          });
+        }
+        this.ssoOutcome = { seq, success: false, cancelled: outcome.cancelled, reason: outcome.reason };
+        return { success: false, cancelled: outcome.cancelled, reason: outcome.reason };
+      }
+
+      const result = await this.loginWithSSO(payload);
+      if (!result.success) {
+        captureMessage('auth: SSO sign-in could not be stored (session_failed)', 'warning', {
+          fingerprint: ['sso-sign-in-failed', 'session_failed'],
+          tags: { sso_reason: 'session_failed', sso_provider: provider }
+        });
+      }
+      this.ssoOutcome = { seq, success: result.success, cancelled: false, reason: result.success ? null : 'session_failed' };
+      return { success: result.success, reason: result.success ? null : 'session_failed' };
     },
 
     async register(email, password, name) {
@@ -298,8 +403,11 @@ export const useAuthStore = defineStore('auth', {
           await platformSaveToken(result.token);
           await platformSaveUserInfo(result.user);
 
+          setUser(result.user);
+
           // Start periodic token refresh
           this.startTokenRefresh();
+          refreshMinutesInBackground(result.token);
 
           // Reload device store for this new user
           try {
@@ -315,12 +423,24 @@ export const useAuthStore = defineStore('auth', {
 
           return { success: true };
         } else {
-          this.error = result.error || 'Registration failed';
-          return { success: false, error: this.error };
+          const failure = describeRegisterFailure(result);
+          this.error = tr(failure.key);
+          // A refusal the customer can fix (account exists, invalid input) is
+          // not a bug; everything else (server, network, unknown) is reported
+          // so a stuck sign-up is visible without a customer complaint. On
+          // desktop the main process logs it (log.warn -> Sentry) already.
+          if (!isElectron() && !['registerAccountExists', 'registerEmailInvalid', 'registerPasswordTooShort', 'registerMissingFields', 'authTooManyAttempts'].includes(failure.key)) {
+            captureMessage(`auth: registration failed (${failure.reason})`, 'warning', {
+              fingerprint: ['registration-failed', failure.reason],
+              tags: { register_reason: failure.reason }
+            });
+          }
+          return { success: false, error: this.error, reason: failure.reason };
         }
       } catch (error) {
-        this.error = error.message || 'An unexpected error occurred';
-        return { success: false, error: this.error };
+        captureException(error, { tags: { action: 'register' } });
+        this.error = tr('registerFailedGeneric');
+        return { success: false, error: this.error, reason: 'exception' };
       } finally {
         this.loading = false;
       }
@@ -368,6 +488,7 @@ export const useAuthStore = defineStore('auth', {
       this.token = null;
       this.isAuthenticated = false;
       this.error = null;
+      this.ssoProvider = null;
       this._refreshPromise = null;
     },
 

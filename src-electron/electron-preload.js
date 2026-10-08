@@ -65,6 +65,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onSSOCallback: (callback) => {
       ipcRenderer.on('auth:ssoCallback', (_event, data) => callback(data));
     },
+    // The SSO result main still holds (cold start / renderer reload), or null.
+    // Taking it also acknowledges a result that arrived via onSSOCallback.
+    takePendingSSO: () => ipcRenderer.invoke('auth:takePendingSSO'),
     removeSSOCallbackListener: () => {
       ipcRenderer.removeAllListeners('auth:ssoCallback');
     },
