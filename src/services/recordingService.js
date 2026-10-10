@@ -3455,18 +3455,25 @@ async function startRecordingInternal(options) {
     }
     nativeOwnedStreams.clear();
 
+    // `error` stays English (history entry, logs); `errorCode` lets the page
+    // show translated, platform-specific guidance (services/permissionSettings.js).
     let errorMessage = error.message;
+    let errorCode;
     if (error.name === 'NotAllowedError') {
       const isWindows = navigator.userAgent.includes('Windows');
       errorMessage = isWindows
         ? 'Microphone access denied. Check Windows Settings > Privacy & Security > Microphone and ensure "Let desktop apps access your microphone" is enabled.'
         : 'Microphone access denied.';
+      errorCode = 'mic_permission_denied';
     } else if (error.name === 'NotFoundError') {
       errorMessage = 'No microphone found.';
+      errorCode = 'mic_not_found';
     } else if (error.name === 'NotReadableError') {
       errorMessage = 'Microphone is in use by another application. Try closing Teams/Zoom or selecting a different microphone.';
+      errorCode = 'mic_in_use';
     } else if (error.name === 'OverconstrainedError') {
       errorMessage = 'Selected microphone does not support required settings. Try a different microphone.';
+      errorCode = 'mic_unsupported_settings';
     }
 
     if (audioTeeActive) await window.electronAPI?.systemAudio?.stop?.().catch(() => {});
@@ -3476,7 +3483,7 @@ async function startRecordingInternal(options) {
     }
     if (!error.cancelled && !hasNativeAudio) recordingStore.reset();
     else if (!error.cancelled) recordingStore.setError?.(errorMessage);
-    return { success: false, error: errorMessage, ...(hasNativeAudio ? { partialRecovery: true, recordId: recordingStore.recordId } : {}), ...(error.cancelled ? { cancelled: true } : {}) };
+    return { success: false, error: errorMessage, ...(errorCode ? { errorCode } : {}), ...(hasNativeAudio ? { partialRecovery: true, recordId: recordingStore.recordId } : {}), ...(error.cancelled ? { cancelled: true } : {}) };
   }
 }
 

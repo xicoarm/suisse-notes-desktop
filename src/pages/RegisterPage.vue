@@ -66,17 +66,22 @@
         </div>
 
         <!-- Register Form -->
+        <!-- The button is never disabled: a click runs the field rules and
+             each field says what is missing (08.10.2026: a silently disabled
+             button kept a prospect from registering for 15 minutes). -->
         <q-form
           class="register-form"
           @submit="handleRegister"
+          @validation-error="onRegisterBlocked"
         >
           <q-input
             v-model="name"
-            label="Full Name"
+            :label="$t('fullName')"
             outlined
-            :rules="[val => !!val || 'Name is required']"
+            :rules="[val => !!String(val || '').trim() || $t('nameRequired')]"
             autocomplete="name"
             class="q-mb-md"
+            @update:model-value="tracker.noteInput()"
           >
             <template #prepend>
               <q-icon
@@ -88,15 +93,16 @@
 
           <q-input
             v-model="email"
-            label="Email"
+            :label="$t('email')"
             type="email"
             outlined
             :rules="[
-              val => !!val || 'Email is required',
-              val => isValidEmail(val) || 'Please enter a valid email'
+              val => !!String(val || '').trim() || $t('emailRequired'),
+              val => isValidEmail(val) || $t('emailInvalid')
             ]"
             autocomplete="email"
             class="q-mb-md"
+            @update:model-value="tracker.noteInput()"
           >
             <template #prepend>
               <q-icon
@@ -108,15 +114,16 @@
 
           <q-input
             v-model="password"
-            label="Password"
+            :label="$t('password')"
             type="password"
             outlined
             :rules="[
-              val => !!val || 'Password is required',
-              val => val.length >= 8 || 'Password must be at least 8 characters'
+              val => !!val || $t('passwordRequired'),
+              val => val.length >= MIN_PASSWORD_LENGTH || $t('passwordMinLength')
             ]"
             autocomplete="new-password"
             class="q-mb-md"
+            @update:model-value="tracker.noteInput()"
           >
             <template #prepend>
               <q-icon
@@ -128,15 +135,16 @@
 
           <q-input
             v-model="confirmPassword"
-            label="Confirm Password"
+            :label="$t('confirmPassword')"
             type="password"
             outlined
             :rules="[
-              val => !!val || 'Please confirm your password',
-              val => val === password || 'Passwords do not match'
+              val => !!val || $t('confirmPasswordRequired'),
+              val => val === password || $t('passwordsDoNotMatch')
             ]"
             autocomplete="new-password"
             class="q-mb-md"
+            @update:model-value="tracker.noteInput()"
           >
             <template #prepend>
               <q-icon
@@ -173,7 +181,7 @@
             size="lg"
             :loading="authStore.loading"
           >
-            Create Account
+            {{ $t('createAccount') }}
           </q-btn>
         </q-form>
 
@@ -197,19 +205,22 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '../stores/auth';
 import { isCapacitor } from '../utils/platform';
 import { useLanguage } from '../composables/useLanguage';
-
-const { t } = useI18n();
+import { createStepTracker } from '../services/customerTelemetry';
+import { isValidEmail, registerFieldProblems, MIN_PASSWORD_LENGTH } from '../utils/entryForms';
 
 const router = useRouter();
 const authStore = useAuthStore();
 const { languages, currentLang, currentLangShort, setLanguage, initLanguage } = useLanguage();
 
+// Customer-step telemetry for this visit of the registration screen.
+const tracker = createStepTracker('signup');
+
 // Set white status bar icons for purple background on mobile
 onMounted(async () => {
+  tracker.view();
   initLanguage();
   if (isCapacitor()) {
     try {
@@ -220,6 +231,8 @@ onMounted(async () => {
 });
 
 onUnmounted(async () => {
+  if (authStore.isAuthenticated) tracker.done();
+  else tracker.left();
   if (isCapacitor()) {
     try {
       const { StatusBar, Style } = await import('@capacitor/status-bar');
@@ -233,21 +246,29 @@ const email = ref('');
 const password = ref('');
 const confirmPassword = ref('');
 
-const isValidEmail = (val) => {
-  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return emailPattern.test(val);
+const fieldProblems = () => registerFieldProblems({
+  name: name.value, email: email.value, password: password.value, confirmPassword: confirmPassword.value
+});
+
+const onRegisterBlocked = () => {
+  tracker.blocked(fieldProblems());
 };
 
 const handleRegister = async () => {
-  if (!name.value || !email.value || !password.value || !confirmPassword.value) return;
-  if (password.value.length < 8) return;
-  if (password.value !== confirmPassword.value) return;
-  if (!isValidEmail(email.value)) return;
+  const problems = fieldProblems();
+  if (problems.length) {
+    tracker.blocked(problems);
+    return;
+  }
 
-  const result = await authStore.register(email.value, password.value, name.value);
+  tracker.sent();
+  const result = await authStore.register(email.value.trim(), password.value, name.value.trim());
 
   if (result.success) {
+    tracker.done();
     router.push('/record');
+  } else {
+    tracker.rejected(result.reason);
   }
 };
 </script>

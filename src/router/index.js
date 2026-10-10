@@ -1,6 +1,17 @@
 import { createRouter, createMemoryHistory, createWebHistory, createWebHashHistory } from 'vue-router';
+import { Notify } from 'quasar';
 import { useAuthStore } from '../stores/auth';
 import { isMobile, isCapacitor } from '../utils/platform';
+import { i18n } from '../boot/i18n';
+import { blockedNavigationTarget, createBlockedNotice } from '../utils/navigationBlock';
+
+// Say why a navigation was refused (it used to bounce back silently).
+const notifyNavigationBlocked = createBlockedNotice(() => Notify.create({
+  type: 'warning',
+  message: i18n.global.t('navigationBlockedDuringRecording'),
+  icon: 'lock_clock',
+  timeout: 4000
+}));
 
 const routes = [
   {
@@ -109,20 +120,12 @@ export default function (/* { store, ssrContext } */) {
       const { useRecordingStore } = await import('../stores/recording');
       const recordingStore = useRecordingStore();
 
-      if (from.name === 'record' && to.name !== 'record' && recordingStore.isBlocking) {
-        next({ name: 'record' });
-        return;
-      }
-
-      // Block navigation away from upload page during active file upload
-      if (from.name === 'upload' && to.name !== 'upload' && recordingStore.isBlocking) {
-        next({ name: 'upload' });
-        return;
-      }
-
-      // Prevent navigating to upload page while recording is active
-      if (to.name === 'upload' && recordingStore.isBlocking) {
-        next({ name: 'record' });
+      // Stay on Record/Upload while recording, processing or uploading, and
+      // never open Upload during a recording.
+      const target = blockedNavigationTarget(to, from, recordingStore.isBlocking);
+      if (target) {
+        notifyNavigationBlocked();
+        next({ name: target });
         return;
       }
 

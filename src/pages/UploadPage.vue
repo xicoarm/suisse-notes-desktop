@@ -176,6 +176,7 @@
               :label="$t('startUpload') || 'Start Upload'"
               icon="cloud_upload"
               class="start-upload-btn"
+              :loading="startUploadBusy"
               @click="confirmAndStartUpload"
             />
             <q-btn
@@ -297,8 +298,8 @@
               color="negative"
             />
             <div class="error-info">
-              <span class="error-title">Upload Failed</span>
-              <span class="error-message">{{ uploadError }}</span>
+              <span class="error-title">{{ $t('uploadFailed') }}</span>
+              <span class="error-message">{{ uploadErrorText }}</span>
             </div>
           </div>
 
@@ -306,7 +307,7 @@
             <q-btn
               unelevated
               class="gradient-btn"
-              label="Retry Upload"
+              :label="$t('retryUpload')"
               icon="refresh"
               :loading="isRetrying"
               @click="retryUpload"
@@ -535,6 +536,7 @@ import { useTranscriptionSettingsStore } from '../stores/transcription-settings'
 import { useMinutesStore } from '../stores/minutes';
 import { useAuthStore } from '../stores/auth';
 import { isElectron, isCapacitor, isMobile as isMobilePlatform } from '../utils/platform';
+import { uploadErrorKey } from '../utils/uploadErrors';
 import { pickAudioFile } from '../services/filePicker';
 import { uploadWithVerification, cancelUpload as cancelMobileUpload } from '../services/upload';
 import { getApiUrlSync } from '../services/api';
@@ -704,12 +706,22 @@ const progressIconColor = computed(() => {
 });
 
 const progressHeaderText = computed(() => {
-  if (isProcessing.value) return 'Processing File';
-  if (isUploading.value) return 'Uploading File';
-  if (uploadError.value) return 'Upload Failed';
-  if (isUploaded.value) return 'Upload Complete';
-  return 'Upload';
+  if (isProcessing.value) return t('processing');
+  if (isUploading.value) return t('uploading');
+  if (uploadError.value) return t('uploadFailed');
+  if (isUploaded.value) return t('uploadComplete');
+  return t('uploadFile');
 });
+
+// What a failed file upload means, in the user's language. The pipeline's
+// English text (uploadError) stays for diagnostics and the retry logic.
+const fileUploadErrorText = (raw) => {
+  if (!raw) return '';
+  if (raw === t('insufficientMinutesUpload')) return raw;
+  const key = uploadErrorKey(raw, { online: typeof navigator === 'undefined' || navigator.onLine !== false });
+  return t({ uploadFailedNoInternet: 'networkUnavailable', uploadFailedServer: 'fileUploadFailed' }[key] || key);
+};
+const uploadErrorText = computed(() => fileUploadErrorText(uploadError.value));
 
 // Drag and drop handlers
 const onDragOver = () => {
@@ -733,7 +745,7 @@ const onDrop = async (event) => {
   if (!ext || !validExtensions.includes(ext)) {
     $q.notify({
       type: 'negative',
-      message: 'Unsupported file format'
+      message: t('unsupportedFileFormat')
     });
     return;
   }
@@ -747,7 +759,7 @@ const handleDroppedFile = async (file) => {
     if (!filePath) {
       $q.notify({
         type: 'negative',
-        message: 'Could not get file path'
+        message: t('fileReadFailed')
       });
       return;
     }
@@ -757,7 +769,7 @@ const handleDroppedFile = async (file) => {
     if (!result.success) {
       $q.notify({
         type: 'negative',
-        message: result.error || 'Could not process file'
+        message: t('fileReadFailed')
       });
       return;
     }
@@ -767,7 +779,7 @@ const handleDroppedFile = async (file) => {
   } catch (error) {
     $q.notify({
       type: 'negative',
-      message: error.message || 'Error processing file'
+      message: t('fileReadFailed')
     });
   }
 };
@@ -786,7 +798,7 @@ const handleMobileFileSelect = async (event) => {
   } catch (error) {
     $q.notify({
       type: 'negative',
-      message: error.message || 'Error processing file'
+      message: t('fileReadFailed')
     });
   } finally {
     isFileLoading.value = false;
@@ -808,7 +820,7 @@ const selectFileForUpload = async () => {
     if (result.error) {
       $q.notify({
         type: 'negative',
-        message: result.error
+        message: t('fileReadFailed')
       });
       isFileLoading.value = false;
       return;
@@ -823,7 +835,7 @@ const selectFileForUpload = async () => {
   } catch (error) {
     $q.notify({
       type: 'negative',
-      message: error.message || 'Error selecting file'
+      message: t('fileReadFailed')
     });
   } finally {
     isFileLoading.value = false;
@@ -855,7 +867,23 @@ const clearFileSelection = () => {
 };
 
 // User confirms and starts the upload
+// The start now waits up to 3 s for the minutes balance: latch it so a
+// second click in that window cannot start a second upload.
+const startUploadBusy = ref(false);
+let pageUnmounted = false;
+const selectionSnapshot = () => ({ file: selectedFile.value, path: currentFilePath.value, recordId: currentRecordId.value });
+const sameSelection = (a, b) => a.file === b.file && a.path === b.path && a.recordId === b.recordId;
 const confirmAndStartUpload = async () => {
+  if (startUploadBusy.value) return;
+  startUploadBusy.value = true;
+  try {
+    await confirmAndStartUploadInternal();
+  } finally {
+    startUploadBusy.value = false;
+  }
+};
+
+const confirmAndStartUploadInternal = async () => {
   if (!hasSelectedFile.value) return;
 
   // A context document is still uploading/extracting - starting now would
@@ -865,8 +893,20 @@ const confirmAndStartUpload = async () => {
     return;
   }
 
-  // Check if user has minutes remaining
-  if (!minutesStore.hasMinutesRemaining) {
+  // Ask the server first (3 s at most). Only a balance it confirmed in this
+  // session can refuse the upload; an unknown balance (offline, slow answer,
+  // brand-new account) lets the server decide - it refuses an upload without
+  // minutes itself.
+  const selectionBefore = selectionSnapshot();
+  await Promise.race([
+    minutesStore.syncWithServer(authStore.token),
+    new Promise((resolve) => setTimeout(resolve, 3000))
+  ]).catch(() => {});
+  // The user may have left the page or changed/cleared the file while the
+  // balance loaded: never start an upload nobody is looking at.
+  if (pageUnmounted || !hasSelectedFile.value || !sameSelection(selectionBefore, selectionSnapshot())) return;
+
+  if (minutesStore.knownOutOfMinutes) {
     if (isCapacitor()) {
       // Apple Guideline 3.1.1: simple notification on mobile
       $q.notify({
@@ -885,7 +925,7 @@ const confirmAndStartUpload = async () => {
   // If we have duration info, check if user has enough minutes
   if (currentDuration.value > 0) {
     const durationMinutes = currentDuration.value / 60;
-    if (durationMinutes > minutesStore.remainingMinutes) {
+    if (minutesStore.balanceKnown && durationMinutes > minutesStore.remainingMinutes) {
       // File is longer than remaining minutes
       $q.notify({
         type: 'warning',
@@ -1049,17 +1089,17 @@ const startUpload = async (filePath, fileSize, filename, duration) => {
         $q.notify({ type: 'warning', message: t('insufficientMinutesUpload'), icon: 'schedule', timeout: 8000 });
       } else {
         uploadError.value = errMsg;
-        $q.notify({ type: 'negative', message: errMsg });
+        $q.notify({ type: 'negative', message: fileUploadErrorText(errMsg) });
       }
     }
   } catch (error) {
     recordingStore.reset();
     isUploading.value = false;
     isFileLoading.value = false;
-    uploadError.value = error.message;
+    uploadError.value = error.message || 'Upload failed';
     $q.notify({
       type: 'negative',
-      message: error.message || 'Error uploading file'
+      message: fileUploadErrorText(uploadError.value)
     });
   }
 };
@@ -1154,7 +1194,7 @@ const startMobileUpload = async (file, fileSize, filename) => {
 
       $q.notify({
         type: 'positive',
-        message: 'File uploaded successfully'
+        message: t('uploadSuccessful')
       });
     } else {
       const errMsg = uploadResult.error || 'Upload failed';
@@ -1165,16 +1205,16 @@ const startMobileUpload = async (file, fileSize, filename) => {
         $q.notify({ type: 'warning', message: t('insufficientMinutesUpload'), icon: 'schedule', timeout: 8000 });
       } else {
         uploadError.value = errMsg;
-        $q.notify({ type: 'negative', message: errMsg });
+        $q.notify({ type: 'negative', message: fileUploadErrorText(errMsg) });
       }
     }
   } catch (error) {
     isUploading.value = false;
     isFileLoading.value = false;
-    uploadError.value = error.message;
+    uploadError.value = error.message || 'Upload failed';
     $q.notify({
       type: 'negative',
-      message: error.message || 'Error uploading file'
+      message: fileUploadErrorText(uploadError.value)
     });
   }
 };
@@ -1221,19 +1261,19 @@ const cancelCurrentUpload = async () => {
     if (result.success || result.cancelled) {
       $q.notify({
         type: 'info',
-        message: 'Upload cancelled'
+        message: t('uploadCancelled')
       });
     } else {
       $q.notify({
         type: 'warning',
-        message: 'Could not cancel upload'
+        message: t('uploadCancelFailed')
       });
     }
   } catch (error) {
     console.error('Error cancelling upload:', error);
     $q.notify({
       type: 'negative',
-      message: 'Error cancelling upload'
+      message: t('uploadCancelFailed')
     });
   } finally {
     isCancelling.value = false;
@@ -1395,6 +1435,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  pageUnmounted = true;
   window.removeEventListener('beforeunload', handleBeforeUnload);
 
   // Note: We do NOT call removeAllListeners() here because MainLayout has a global

@@ -65,6 +65,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onSSOCallback: (callback) => {
       ipcRenderer.on('auth:ssoCallback', (_event, data) => callback(data));
     },
+    // The SSO result main still holds (cold start / renderer reload), or null.
+    // Taking it also acknowledges a result that arrived via onSSOCallback.
+    takePendingSSO: () => ipcRenderer.invoke('auth:takePendingSSO'),
+    // Removes EVERY listener, including the app-wide SSO handler
+    // (src/boot/sso.js) - pages must not call this.
     removeSSOCallbackListener: () => {
       ipcRenderer.removeAllListeners('auth:ssoCallback');
     },
@@ -358,7 +363,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeAllListeners('system:audio-service-crashed');
     },
     // Get recordings path
-    getRecordingsPath: () => ipcRenderer.invoke('system:getRecordingsPath')
+    getRecordingsPath: () => ipcRenderer.invoke('system:getRecordingsPath'),
+    // Open the OS microphone privacy settings (macOS / Windows); { success }.
+    openMicrophoneSettings: () => ipcRenderer.invoke('system:openMicrophoneSettings')
   }
 });
 

@@ -12,7 +12,7 @@
  *
  * Both code paths produce the same shape: a parsed { token, user } | { error }
  * dispatched via the 'sso:callback' window event, so downstream handlers
- * (LoginPage.handleSSOPayload) stay platform-agnostic.
+ * (the app-wide handler in src/boot/sso.js) stay platform-agnostic.
  */
 
 import { registerPlugin } from '@capacitor/core';
@@ -40,7 +40,11 @@ export function parseSSOCallbackUrl(rawUrl) {
     && parsed.pathname.startsWith('/sso/');
   if (!isCustomScheme && !isUniversalLink) return null;
 
+  // `code` (contract 10/2026) is what the app translates; `error` stays an
+  // English sentence for older app versions.
   const error = parsed.searchParams.get('error');
+  const code = parsed.searchParams.get('code');
+  if (code) return { error: error || code, code };
   if (error) return { error };
 
   const token = parsed.searchParams.get('token');

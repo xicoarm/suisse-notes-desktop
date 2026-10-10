@@ -56,7 +56,11 @@ function parseSSOCallbackUrl(rawUrl) {
     && parsed.pathname.startsWith('/sso/');
   if (!isCustomScheme && !isUniversalLink) return null;
 
+  // `code` (contract 10/2026) is what the app translates; `error` stays an
+  // English sentence for older app versions.
   const error = parsed.searchParams.get('error');
+  const code = parsed.searchParams.get('code');
+  if (code) return { error: error || code, code };
   if (error) return { error };
 
   const token = parsed.searchParams.get('token');

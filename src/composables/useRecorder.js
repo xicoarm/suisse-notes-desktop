@@ -1,7 +1,7 @@
 import { ref, computed, onUnmounted, onMounted } from 'vue';
 import { useRecordingStore } from '../stores/recording';
 import { useAuthStore } from '../stores/auth';
-import { useMinutesStore } from '../stores/minutes';
+import { useMinutesStore, recordingCapSeconds } from '../stores/minutes';
 import { useSystemAudio } from './useSystemAudio';
 import { isElectron, isCapacitor } from '../utils/platform';
 import * as recordingService from '../services/recordingService';
@@ -496,8 +496,9 @@ export function useRecorder() {
     captureRecoveryFailed.value = null;
     chunkSaveError.value = null;
 
-    // Use user's remaining minutes as max duration if not specified
-    const maxSeconds = maxRecordingSeconds ?? minutesStore.remainingSeconds;
+    // Auto-stop at the remaining minutes - only a balance the server confirmed
+    // in this session; a cached or unknown one never cuts a recording.
+    const maxSeconds = maxRecordingSeconds ?? recordingCapSeconds(minutesStore);
 
     const startResult = await recordingService.startRecording({
       recordingStore,
@@ -527,9 +528,8 @@ export function useRecorder() {
     minutesLimitReached.value = false;
 
     // Calculate remaining seconds based on already recorded duration
-    const remainingMinutesSeconds = minutesStore.remainingSeconds;
-    const alreadyRecorded = recordingStore.duration;
-    const maxSeconds = remainingMinutesSeconds > 0 ? remainingMinutesSeconds + alreadyRecorded : null;
+    // (server-confirmed balance only, as on start).
+    const maxSeconds = recordingCapSeconds(minutesStore, recordingStore.duration);
 
     return recordingService.resumeRecording(recordingStore, isAutoSplitting, maxSeconds);
   };

@@ -21,16 +21,19 @@
       </q-card-section>
 
       <q-card-section>
+        <!-- The send button is never disabled: a click validates and the
+             field says what is missing. The organisation is optional
+             (private customers have none). -->
         <q-form
+          ref="formRef"
           class="contact-form"
           @submit.prevent="onSubmit"
         >
           <q-input
             v-model="form.organizationName"
-            :label="$t('organizationName')"
+            :label="$t('organizationNameOptional')"
             outlined
             dense
-            :rules="[val => !!val || $t('organizationName')]"
             class="q-mb-md"
           />
 
@@ -38,9 +41,10 @@
             v-model.number="form.minutesNeeded"
             :label="$t('minutesNeededPerMonth')"
             type="number"
+            min="1"
             outlined
             dense
-            :rules="[val => val > 0 || $t('minutesNeededPerMonth')]"
+            :rules="[val => isValidMinutes(val) || $t('minutesNeededInvalid')]"
             class="q-mb-md"
           />
 
@@ -80,7 +84,6 @@
           :label="$t('contactSalesBtn')"
           class="gradient-btn"
           :loading="submitting"
-          :disable="!isFormValid"
           @click="onSubmit"
         />
       </q-card-actions>
@@ -94,6 +97,7 @@ import { useQuasar } from 'quasar';
 import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '../stores/auth';
 import { submitSalesInquiry } from '../services/api';
+import { buildSalesInquiry, isValidMinutes } from '../utils/salesInquiry';
 
 export default {
   name: 'ContactSalesDialog',
@@ -119,6 +123,7 @@ export default {
 
     const dialogVisible = ref(props.modelValue);
     const submitting = ref(false);
+    const formRef = ref(null);
 
     const form = ref({
       organizationName: '',
@@ -150,11 +155,6 @@ export default {
       }
     });
 
-    const isFormValid = computed(() => {
-      return form.value.organizationName.trim() !== '' &&
-             form.value.minutesNeeded > 0;
-    });
-
     // Sync dialog visibility with prop
     watch(() => props.modelValue, (val) => {
       dialogVisible.value = val;
@@ -165,17 +165,15 @@ export default {
     });
 
     const onSubmit = async () => {
-      if (!isFormValid.value) return;
+      if (submitting.value) return;
+      // Validate on click: the field shows what is missing.
+      const valid = formRef.value ? await formRef.value.validate(true) : isValidMinutes(form.value.minutesNeeded);
+      if (!valid) return;
 
       submitting.value = true;
 
       try {
-        const inquiry = {
-          email: userEmail.value,
-          organizationName: form.value.organizationName,
-          minutesNeeded: form.value.minutesNeeded,
-          message: form.value.message || null
-        };
+        const inquiry = buildSalesInquiry({ email: userEmail.value, ...form.value });
 
         await submitSalesInquiry(inquiry, authStore.token);
 
@@ -198,8 +196,8 @@ export default {
         console.error('Failed to submit inquiry:', error);
         $q.notify({
           type: 'negative',
-          message: error.message || 'Failed to submit inquiry. Please try again.',
-          timeout: 5000
+          message: t('inquiryFailed'),
+          timeout: 6000
         });
       } finally {
         submitting.value = false;
@@ -214,11 +212,12 @@ export default {
     return {
       dialogVisible,
       form,
+      formRef,
       submitting,
       userEmail,
       title,
       subtitle,
-      isFormValid,
+      isValidMinutes,
       onSubmit,
       onClose
     };
