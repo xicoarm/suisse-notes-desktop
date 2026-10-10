@@ -47,6 +47,9 @@ export default function (ctx) {
       'axios',
       'i18n',
       ctx.mode.electron ? 'sentry' : '',
+      // App-wide SSO result handler: registered before lifecycle so a
+      // deep-link result delivered at startup is never dropped.
+      'sso',
       // Load lifecycle boot file only on Capacitor (mobile)
       ctx.mode.capacitor ? 'lifecycle' : ''
     ].filter(Boolean),

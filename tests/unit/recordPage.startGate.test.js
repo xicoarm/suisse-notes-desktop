@@ -4,14 +4,15 @@ import fs from 'node:fs';
 
 // The real start-click handler of the Record page, compiled with narrow
 // dependencies (the approach of recordingBackpressure.handlers.test.js).
-function startHandler({ microphones = [], afterReload = microphones, systemAudio = false, android = false } = {}) {
+function startHandler({ microphones = [], afterReload = microphones, systemAudio = false, android = false,
+  minutes = { syncWithServer: async () => {}, knownOutOfMinutes: false, balanceKnown: true, remainingMinutes: 100 } } = {}) {
   const source = fs.readFileSync('src/pages/RecordPage.vue', 'utf8').replace(/\r\n/g, '\n');
   const first = source.indexOf('const handleStartClickInternal = async () => {');
   const last = source.indexOf('const onSalesInquirySubmitted', first);
   if (first < 0 || last < first) throw new Error('Missing start handler declaration');
   const availableMicrophones = { value: microphones };
   const deps = {
-    recordingStore: {}, minutesStore: { syncWithServer: async () => {}, hasMinutesRemaining: true, remainingMinutes: 100 },
+    recordingStore: {}, minutesStore: minutes,
     authStore: { token: 'token' }, isCapacitor: () => false, isAndroid: () => android,
     $q: { notify: vi.fn() }, t: key => key, contactSalesReason: { value: null }, showContactSalesDialog: { value: false },
     navigator: { mediaDevices: { getUserMedia: vi.fn(async () => ({ getTracks: () => [] })) } }, openAndroidAppSettings: vi.fn(),
@@ -63,5 +64,35 @@ describe('record start gate: microphone list', () => {
     expect(android.deps.loadMicrophones).toHaveBeenCalledTimes(1); // from the Android flow only
     expect(android.deps.microphonesLoaded).not.toHaveBeenCalled();
     expect(android.deps.doStartRecording).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('record start gate: minutes balance', () => {
+  it('records when the balance is unknown (new account, fetch lost the 3 s race) - the server decides', async () => {
+    vi.useFakeTimers();
+    try {
+      const { handler, deps } = startHandler({
+        microphones: mic,
+        minutes: { syncWithServer: () => new Promise(() => {}), knownOutOfMinutes: false, balanceKnown: false, remainingMinutes: 0 }
+      });
+      const run = handler();
+      await vi.advanceTimersByTimeAsync(3000);
+      await run;
+      expect(deps.doStartRecording).toHaveBeenCalledTimes(1);
+      expect(deps.showContactSalesDialog.value).toBe(false);
+      expect(deps.$q.notify).not.toHaveBeenCalled(); // no "0 minutes left" warning either
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('refuses only a balance the server confirmed as used up', async () => {
+    const { handler, deps } = startHandler({
+      microphones: mic,
+      minutes: { syncWithServer: async () => {}, knownOutOfMinutes: true, balanceKnown: true, remainingMinutes: 0 }
+    });
+    await handler();
+    expect(deps.doStartRecording).not.toHaveBeenCalled();
+    expect(deps.showContactSalesDialog.value).toBe(true);
   });
 });

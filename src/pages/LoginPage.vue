@@ -70,15 +70,17 @@
         <q-form
           class="login-form"
           @submit="handleLogin"
+          @validation-error="onLoginBlocked"
         >
           <q-input
             v-model="email"
             :label="$t('email')"
             type="email"
             outlined
-            :rules="[val => !!val || $t('emailRequired')]"
+            :rules="[val => !!String(val || '').trim() || $t('emailRequired')]"
             autocomplete="email"
             class="q-mb-md"
+            @update:model-value="tracker.noteInput()"
           >
             <template #prepend>
               <q-icon
@@ -96,6 +98,7 @@
             :rules="[val => !!val || $t('passwordRequired')]"
             autocomplete="current-password"
             class="q-mb-md"
+            @update:model-value="tracker.noteInput()"
           >
             <template #prepend>
               <q-icon
@@ -201,6 +204,24 @@
 
         <!-- Links -->
         <div class="login-links">
+          <!-- Phones: registration is not offered in the app (App Store
+               3.1.1), but a Microsoft/Google sign-in creates the account.
+               No link to a web sign-up or purchase. -->
+          <p
+            v-if="isMobileApp"
+            class="sso-signup-hint"
+          >
+            {{ $t('ssoCreatesAccountHint') }}
+          </p>
+          <p v-else-if="isDesktopApp">
+            {{ $t('noAccount') }}
+            <router-link
+              to="/register"
+              class="register-link"
+            >
+              {{ $t('createAccount') }}
+            </router-link>
+          </p>
           <a
             href="#"
             class="forgot-link"
@@ -244,13 +265,15 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '../stores/auth';
 import { isElectron, isCapacitor, getPlatform } from '../utils/platform';
 import { useLanguage } from '../composables/useLanguage';
-import { addBreadcrumb } from '../boot/sentry';
+import { captureMessage } from '../boot/sentry';
+import { createStepTracker } from '../services/customerTelemetry';
+import { loginFieldProblems } from '../utils/entryForms';
 
 const router = useRouter();
 const authStore = useAuthStore();
@@ -258,22 +281,33 @@ const { t } = useI18n();
 const { languages, currentLang, currentLangShort, setLanguage, initLanguage } = useLanguage();
 const isDesktopApp = isElectron();
 const isMobileApp = isCapacitor();
-// null | 'microsoft' | 'google' — which SSO flow is currently in flight
-const ssoLoading = ref(null);
+// null | 'microsoft' | 'google' — which SSO flow is currently in flight. Kept
+// in the auth store: the result is handled app-wide by boot/sso.js.
+const ssoLoading = computed(() => authStore.ssoProvider);
+
+// Customer-step telemetry for this visit of the sign-in screen.
+const tracker = createStepTracker('login');
 
 // Safety timeout: if the user closes the browser without completing OAuth,
-// no callback ever arrives. Auto-clear the loading state so the UI isn't
-// stuck. Mobile gets a longer window because cellular MFA tends to be slower.
-const SSO_TIMEOUT_MS = isMobileApp ? 5 * 60 * 1000 : 3 * 60 * 1000;
+// no callback ever arrives, so the spinner stops after a while. A sign-in
+// that continues through a 2FA page in the browser can take minutes - and a
+// result that arrives after this timeout is still accepted (boot/sso.js).
+const SSO_TIMEOUT_MS = 15 * 60 * 1000;
 let ssoTimeoutHandle = null;
 
 function startSSOTimeout() {
   clearSSOTimeoutHandle();
   ssoTimeoutHandle = setTimeout(() => {
     ssoTimeoutHandle = null;
-    if (ssoLoading.value) {
-      ssoLoading.value = null;
+    const provider = authStore.ssoProvider;
+    if (provider) {
+      authStore.abandonSSO();
       authStore.error = t('ssoTimedOut');
+      captureMessage('auth: SSO sign-in timed out', 'warning', {
+        fingerprint: ['sso-sign-in-timeout'],
+        tags: { sso_provider: provider }
+      });
+      tracker.rejected('sso_timeout');
     }
   }, SSO_TIMEOUT_MS);
 }
@@ -287,13 +321,21 @@ function clearSSOTimeoutHandle() {
 
 async function cancelSSOLogin() {
   clearSSOTimeoutHandle();
-  ssoLoading.value = null;
+  authStore.abandonSSO();
   authStore.clearError();
   if (isMobileApp) {
     const { closeSSO } = await import('../services/ssoAuth');
     await closeSSO();
   }
 }
+
+// Every SSO result (handled app-wide) ends this page's wait.
+watch(() => authStore.ssoOutcome.seq, () => {
+  clearSSOTimeoutHandle();
+  const outcome = authStore.ssoOutcome;
+  if (outcome.success) tracker.done();
+  else tracker.rejected(outcome.cancelled ? 'sso_cancelled' : outcome.reason);
+});
 
 // Brand marks — inlined to avoid extra image fetches
 const microsoftLogoSvg = '<svg viewBox="0 0 21 21" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="1" width="9" height="9" fill="#F25022"/><rect x="11" y="1" width="9" height="9" fill="#7FBA00"/><rect x="1" y="11" width="9" height="9" fill="#00A4EF"/><rect x="11" y="11" width="9" height="9" fill="#FFB900"/></svg>';
@@ -309,62 +351,25 @@ onMounted(async () => {
     } catch (e) { /* not available */ }
   }
 
-  // Wire up SSO callback listener — same payload shape on desktop and mobile.
-  // Electron: main process parses the suissenotes:// URL and IPC-pushes the
-  //           payload via auth:ssoCallback.
-  // Capacitor: src/boot/lifecycle.js parses appUrlOpen and dispatches a
-  //            'sso:callback' CustomEvent on window with the payload as detail.
-  if (isDesktopApp && window.electronAPI?.auth?.onSSOCallback) {
-    window.electronAPI.auth.onSSOCallback(handleSSOPayload);
-  }
-  if (isMobileApp) {
-    window.addEventListener('sso:callback', handleSSOPayloadEvent);
-  }
+  tracker.view();
+  // An SSO flow started before this page was (re)opened is still waiting.
+  if (authStore.ssoProvider) startSSOTimeout();
+  // SSO results are handled app-wide (src/boot/sso.js), not here: this page
+  // is not mounted on a cold start, while Register is open, or when a 2FA
+  // sign-in comes back after the wait timed out.
 });
 
 onUnmounted(async () => {
   clearSSOTimeoutHandle();
+  if (authStore.isAuthenticated) tracker.done();
+  else tracker.left();
   if (isCapacitor()) {
     try {
       const { StatusBar, Style } = await import('@capacitor/status-bar');
       await StatusBar.setStyle({ style: Style.Light });
     } catch (e) { /* not available */ }
   }
-  if (isDesktopApp && window.electronAPI?.auth?.removeSSOCallbackListener) {
-    window.electronAPI.auth.removeSSOCallbackListener();
-  }
-  if (isMobileApp) {
-    window.removeEventListener('sso:callback', handleSSOPayloadEvent);
-  }
 });
-
-async function handleSSOPayload(payload) {
-  addBreadcrumb({ category: 'sso', message: `handleSSOPayload entry hasToken=${!!payload?.token} hasError=${!!payload?.error}`, level: 'info' });
-  clearSSOTimeoutHandle();
-  ssoLoading.value = null;
-  if (!payload || payload.error) {
-    // User-cancel is silent (no error banner); other errors show in red.
-    authStore.error = payload?.error === 'canceled' ? null : (payload?.error || 'SSO login failed');
-    if (isMobileApp) {
-      const { closeSSO } = await import('../services/ssoAuth');
-      await closeSSO();
-    }
-    return;
-  }
-  const result = await authStore.loginWithSSO(payload);
-  addBreadcrumb({ category: 'sso', message: `loginWithSSO returned success=${result.success}`, level: 'info' });
-  if (result.success) {
-    if (isMobileApp) {
-      const { closeSSO } = await import('../services/ssoAuth');
-      await closeSSO();
-    }
-    router.push('/record');
-  }
-}
-
-function handleSSOPayloadEvent(event) {
-  return handleSSOPayload(event.detail);
-}
 
 const email = ref('');
 const password = ref('');
@@ -372,13 +377,27 @@ const password = ref('');
 // Current year for copyright
 const currentYear = new Date().getFullYear();
 
-const handleLogin = async () => {
-  if (!email.value || !password.value) return;
+// The sign-in button is never disabled: a click with missing input runs the
+// field rules (messages under the fields) and is reported as "blocked".
+const onLoginBlocked = () => {
+  tracker.blocked(loginFieldProblems({ email: email.value, password: password.value }));
+};
 
-  const result = await authStore.login(email.value, password.value);
+const handleLogin = async () => {
+  const problems = loginFieldProblems({ email: email.value, password: password.value });
+  if (problems.length) {
+    tracker.blocked(problems);
+    return;
+  }
+
+  tracker.sent('password');
+  const result = await authStore.login(email.value.trim(), password.value);
 
   if (result.success) {
+    tracker.done();
     router.push('/record');
+  } else {
+    tracker.rejected(result.reason);
   }
 };
 
@@ -390,8 +409,8 @@ const handleLogin = async () => {
  * window event dispatched from src/boot/lifecycle.js (mobile).
  */
 async function startSSOFlow(provider) {
-  authStore.clearError();
-  ssoLoading.value = provider;
+  authStore.beginSSO(provider);
+  tracker.sent(`sso_${provider}`);
   startSSOTimeout();
   try {
     if (isDesktopApp && window.electronAPI?.auth) {
@@ -400,7 +419,7 @@ async function startSSOFlow(provider) {
         : window.electronAPI.auth.loginWithGoogle;
       const result = await fn();
       if (!result?.success) {
-        throw new Error(result?.error || `Could not open ${provider} login`);
+        throw new Error('browser could not be opened');
       }
     } else if (isMobileApp) {
       const { openSSO } = await import('../services/ssoAuth');
@@ -417,8 +436,13 @@ async function startSSOFlow(provider) {
     }
   } catch (err) {
     clearSSOTimeoutHandle();
-    ssoLoading.value = null;
-    authStore.error = err?.message || `Could not open ${provider} login`;
+    authStore.abandonSSO();
+    authStore.error = t('ssoOpenFailed');
+    captureMessage('auth: SSO sign-in could not be started', 'warning', {
+      fingerprint: ['sso-open-failed'],
+      tags: { sso_provider: provider }
+    });
+    tracker.rejected('sso_open_failed');
   }
 }
 
@@ -587,6 +611,11 @@ const openForgotPassword = async () => {
     color: #64748b;
     font-size: 14px;
     margin: 0 0 8px 0;
+  }
+
+  .sso-signup-hint {
+    font-size: 13px;
+    line-height: 1.45;
   }
 
   .register-link {

@@ -149,14 +149,26 @@
 
         <!-- Center Section: Pill Navigation (hidden on mobile) -->
         <div class="header-center">
+          <!-- While recording/uploading the menu is locked; it is not
+               "disabled" (a disabled element shows no tooltip): hovering
+               explains why, a click gets the same text as a toast. -->
           <nav
             v-if="authStore.isAuthenticated && !isMobile()"
             class="pill-nav"
-            :class="{ 'nav-disabled': recordingStore.isBlocking }"
+            :class="{ 'nav-disabled': navLocked }"
+            :aria-disabled="navLocked ? 'true' : undefined"
           >
+            <q-tooltip
+              v-if="navLocked"
+              anchor="bottom middle"
+              self="top middle"
+              max-width="320px"
+            >
+              {{ $t('navigationBlockedDuringRecording') }}
+            </q-tooltip>
             <button
               :class="['nav-pill', { active: currentTab === 'about' }]"
-              :disabled="recordingStore.isBlocking"
+              :aria-disabled="navLocked ? 'true' : undefined"
               @click="goTo('/about')"
             >
               <q-icon
@@ -167,7 +179,7 @@
             </button>
             <button
               :class="['nav-pill', { active: currentTab === 'record' || currentTab === 'upload' }]"
-              :disabled="recordingStore.isBlocking"
+              :aria-disabled="navLocked ? 'true' : undefined"
               @click="goTo('/record')"
             >
               <q-icon
@@ -178,7 +190,7 @@
             </button>
             <button
               :class="['nav-pill', { active: currentTab === 'history' }]"
-              :disabled="recordingStore.isBlocking"
+              :aria-disabled="navLocked ? 'true' : undefined"
               @click="goTo('/history')"
             >
               <q-icon
@@ -480,7 +492,7 @@ const toggleMaximize = async () => {
 };
 
 // Sync tab with current route
-watch(() => route.path, (path) => {
+const syncTabWithRoute = (path) => {
   if (path.includes('/history')) {
     currentTab.value = 'history';
   } else if (path.includes('/record')) {
@@ -492,7 +504,11 @@ watch(() => route.path, (path) => {
   } else if (path.includes('/settings')) {
     currentTab.value = 'settings';
   }
-}, { immediate: true });
+};
+watch(() => route.path, syncTabWithRoute, { immediate: true });
+
+// Desktop menu locked while a recording/upload keeps the user on this page.
+const navLocked = computed(() => recordingStore.isBlocking && (route.name === 'record' || route.name === 'upload'));
 
 // Re-login: seed minutes store and restart auto-refresh when auth state transitions to authenticated
 watch(() => authStore.isAuthenticated, async (isAuth, wasAuth) => {
@@ -502,8 +518,13 @@ watch(() => authStore.isAuthenticated, async (isAuth, wasAuth) => {
   }
 });
 
-const goTo = (path) => {
-  router.push(path);
+const goTo = async (path) => {
+  try {
+    await router.push(path);
+  } catch { /* navigation errors are reported by the router */ }
+  // A refused navigation (recording/upload running - the guard shows why)
+  // leaves the route unchanged; the tapped tab must not stay highlighted.
+  syncTabWithRoute(route.path);
 };
 
 const handleLogout = async () => {
@@ -681,9 +702,14 @@ onUnmounted(() => {
   padding: 4px;
   border-radius: 12px;
 
+  // Locked during a recording/upload: dimmed, but still hoverable so the
+  // tooltip can say why (pointer-events: none hid any explanation).
   &.nav-disabled {
     opacity: 0.5;
-    pointer-events: none;
+
+    .nav-pill {
+      cursor: not-allowed;
+    }
   }
 }
 

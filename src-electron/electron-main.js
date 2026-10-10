@@ -311,7 +311,18 @@ if (process.defaultApp) {
   app.setAsDefaultProtocolClient(SSO_PROTOCOL);
 }
 
+// The last SSO result, kept until the renderer confirms it has it
+// (auth:takePendingSSO). A result pushed while the renderer is still booting
+// (cold start by the suissenotes:// URL, a reload) used to be lost: the push
+// arrived before any listener existed, and the app opened /about instead.
 let pendingSSOPayload = null;
+let ssoDeliverySeq = 0;
+
+ipcMain.handle('auth:takePendingSSO', () => {
+  const payload = pendingSSOPayload;
+  pendingSSOPayload = null;
+  return payload;
+});
 
 function handleSSOUrl(url) {
   if (!url || typeof url !== 'string' || !url.startsWith(`${SSO_PROTOCOL}://`)) return;
@@ -323,10 +334,13 @@ function handleSSOUrl(url) {
       return;
     }
     const error = parsed.searchParams.get('error');
+    // Contract 10/2026: `code` is the machine code the app translates;
+    // `error` stays an English sentence for older app versions.
+    const code = parsed.searchParams.get('code');
     const token = parsed.searchParams.get('token');
     const userB64 = parsed.searchParams.get('user');
-    if (error) {
-      payload = { error };
+    if (error || code) {
+      payload = code ? { error: error || code, code } : { error };
     } else if (token && userB64) {
       const userJson = Buffer.from(userB64, 'base64url').toString('utf8');
       payload = { token, user: JSON.parse(userJson) };
@@ -338,14 +352,16 @@ function handleSSOUrl(url) {
     payload = { error: 'invalid_callback' };
   }
 
+  // Buffer first, push second: the renderer acknowledges a push by taking the
+  // buffer (deliveryId lets it ignore the same result arriving both ways).
+  payload.deliveryId = ++ssoDeliverySeq;
+  pendingSSOPayload = payload;
+  log.info(`SSO: callback received (${payload.token ? 'success' : `error code=${payload.code || '-'}`}), delivery ${payload.deliveryId}`);
   if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
     mainWindow.webContents.send('auth:ssoCallback', payload);
-  } else {
-    // App was launched (or relaunched) by the URL — buffer until window exists
-    pendingSSOPayload = payload;
   }
 }
 
@@ -1433,13 +1449,9 @@ function createWindow() {
   }
 
   // If the app was cold-started by a suissenotes:// URL, the SSO payload was
-  // buffered before the window existed — deliver it once the renderer is ready.
-  mainWindow.webContents.once('did-finish-load', () => {
-    if (pendingSSOPayload) {
-      mainWindow.webContents.send('auth:ssoCallback', pendingSSOPayload);
-      pendingSSOPayload = null;
-    }
-  });
+  // buffered before the window existed. The renderer collects it itself
+  // (auth:takePendingSSO from src/boot/sso.js) once its handler exists:
+  // pushing it at did-finish-load raced the renderer's async boot and lost it.
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -2083,34 +2095,13 @@ ipcMain.handle('auth:login', async (event, email, password) => {
         user: response.data.user,
         minutes: response.data.minutes || null
       };
-    } else if (response.data && response.data.error) {
-      return {
-        success: false,
-        error: response.data.error
-      };
-    } else {
-      return {
-        success: false,
-        error: 'Invalid response from server'
-      };
     }
+    // A 2xx without a token: an answer the app cannot use.
+    return { success: false, status: response.status, nonJson: true, code: authErrorCode(response.data) };
   } catch (error) {
-    let errorMessage = 'Login failed';
-
-    if (error.nonJson) {
-      errorMessage = 'Unexpected response from the server. Please try again in a moment.';
-    } else if (error.response) {
-      // Server responded with error
-      errorMessage = error.response.data?.error || error.response.data?.message || `Server error: ${error.response.status}`;
-    } else if (error.code === 'ECONNREFUSED') {
-      errorMessage = 'Could not connect to Suisse Meets server';
-    } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
-      errorMessage = 'Connection timed out. Please check your internet connection.';
-    } else if (error.code === 'ENOTFOUND') {
-      errorMessage = 'Server not found. Please check the API URL.';
-    } else {
-      errorMessage = error.message || 'Unknown error occurred';
-    }
+    // The renderer (src/utils/authErrors.js) turns this into a translated
+    // text: never show the server's sentence or an English transport string.
+    const failure = authFailureFromAxiosError(error);
 
     // Report network/server errors to Sentry (not user auth failures)
     if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED' || error.code === 'ENOTFOUND' || (error.response && error.response.status >= 500)) {
@@ -2120,10 +2111,7 @@ ipcMain.handle('auth:login', async (event, email, password) => {
       });
     }
 
-    return {
-      success: false,
-      error: errorMessage
-    };
+    return failure;
   }
 });
 
@@ -2152,45 +2140,61 @@ ipcMain.handle('auth:register', async (event, email, password, name) => {
         token: response.data.token,
         user: response.data.user
       };
-    } else if (response.data && response.data.error) {
-      return {
-        success: false,
-        error: response.data.error
-      };
-    } else {
-      return {
-        success: false,
-        error: 'Invalid response from server'
-      };
     }
+    log.warn(`auth:register: answer without a token (HTTP ${response.status})`);
+    return { success: false, status: response.status, nonJson: true, code: authErrorCode(response.data) };
   } catch (error) {
-    let errorMessage = 'Registration failed';
-
-    if (error.response) {
-      // Handle specific error codes
-      if (error.response.status === 409) {
-        errorMessage = 'An account with this email already exists';
-      } else if (error.response.status === 400) {
-        errorMessage = error.response.data?.error || 'Invalid registration data';
-      } else {
-        errorMessage = error.response.data?.error || `Server error: ${error.response.status}`;
-      }
-    } else if (error.code === 'ECONNREFUSED') {
-      errorMessage = 'Could not connect to Suisse Meets server';
-    } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
-      errorMessage = 'Connection timed out. Please check your internet connection.';
-    } else if (error.code === 'ENOTFOUND') {
-      errorMessage = 'Server not found. Please check your internet connection.';
-    } else {
-      errorMessage = error.message || 'Unknown error occurred';
-    }
-
-    return {
-      success: false,
-      error: errorMessage
-    };
+    const failure = authFailureFromAxiosError(error);
+    // Until 4.7.15 a failed registration left no trace anywhere: no log line,
+    // no Sentry event (08.10.2026: a prospect failed for 15 minutes). The
+    // log hook (sentry-reporting.js) turns this warning into a Sentry event.
+    // Status and codes only - never the e-mail, name or password. Refusals
+    // the customer can fix (400 invalid input, 409 account exists, 429 too
+    // many attempts) stay in the local log (info = breadcrumb); server and
+    // network failures become Sentry warnings.
+    const line = `auth:register failed: status=${failure.status || '-'} code=${failure.code || '-'} network=${failure.networkCode || '-'}${failure.nonJson ? ' non-json' : ''}`;
+    if (isCustomerFixableRegisterRefusal(failure)) log.info(line);
+    else log.warn(line);
+    return failure;
   }
 });
+
+/** 400/409/429 with a JSON answer: the customer's input or pace, not an outage. */
+function isCustomerFixableRegisterRefusal(failure) {
+  return !failure.nonJson && [400, 409, 429].includes(failure.status);
+}
+
+/** The backend's machine error code (contract 10/2026), when the body has one. */
+function authErrorCode(data) {
+  return data && typeof data === 'object' && typeof data.code === 'string' && /^[a-z_]{1,40}$/.test(data.code)
+    ? data.code
+    : undefined;
+}
+
+/**
+ * axios failure of an auth request -> the structured failure the renderer
+ * maps to a translated text (src/utils/authErrors.js). The server's English
+ * sentence travels only as `serverError` for the legacy-sentence matching.
+ */
+function authFailureFromAxiosError(error) {
+  if (error?.response) {
+    const data = error.response.data;
+    const isObject = data && typeof data === 'object';
+    return {
+      success: false,
+      status: error.response.status,
+      code: authErrorCode(data),
+      provider: isObject && (data.provider === 'google' || data.provider === 'microsoft') ? data.provider : undefined,
+      nonJson: !!error.nonJson || !isObject,
+      serverError: isObject && typeof data.error === 'string' ? data.error.slice(0, 200) : undefined
+    };
+  }
+  return {
+    success: false,
+    networkCode: typeof error?.code === 'string' ? error.code : 'unknown',
+    networkError: true
+  };
+}
 
 ipcMain.handle('auth:saveToken', async (event, token) => {
   try {
@@ -4664,6 +4668,25 @@ ipcMain.handle('shell:openExternal', async (event, url) => {
     return { success: true };
   } catch (error) {
     console.error('Error opening external URL:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Microphone access denied: open the OS page where the user can allow it.
+// Fixed URLs only (no renderer input), so shell:openExternal's domain
+// allow-list does not need to admit OS settings schemes.
+const MICROPHONE_SETTINGS_URLS = {
+  darwin: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
+  win32: 'ms-settings:privacy-microphone'
+};
+ipcMain.handle('system:openMicrophoneSettings', async () => {
+  const url = MICROPHONE_SETTINGS_URLS[process.platform];
+  if (!url) return { success: false, error: 'unsupported_platform' };
+  try {
+    await shell.openExternal(url);
+    return { success: true };
+  } catch (error) {
+    log.warn(`Could not open the microphone privacy settings: ${error.message}`);
     return { success: false, error: error.message };
   }
 });

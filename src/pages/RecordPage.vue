@@ -689,8 +689,8 @@
                 color="negative"
               />
               <div class="error-info">
-                <span class="error-title">Upload Failed</span>
-                <span class="error-message">{{ uploadError }}</span>
+                <span class="error-title">{{ $t('uploadFailed') }}</span>
+                <span class="error-message">{{ uploadErrorText }}</span>
               </div>
             </div>
 
@@ -698,7 +698,7 @@
               <q-btn
                 unelevated
                 class="gradient-btn"
-                label="Retry Upload"
+                :label="$t('retryUpload')"
                 icon="refresh"
                 :loading="isRetrying"
                 @click="retryUpload"
@@ -706,7 +706,7 @@
               <q-btn
                 flat
                 color="grey-7"
-                label="View History"
+                :label="$t('viewHistory')"
                 icon="history"
                 @click="goToHistory"
               />
@@ -886,6 +886,8 @@ import { useRecorder } from '../composables/useRecorder';
 import { useMicSwitchNotifications } from '../composables/useMicSwitchNotifications';
 import { isElectron, isCapacitor, isAndroid } from '../utils/platform';
 import { humanizeStorageError } from '../utils/storageErrors';
+import { micPlatform, micStartErrorKey, canOpenMicSettings, openMicrophoneSettings } from '../services/permissionSettings';
+import { uploadErrorKey } from '../utils/uploadErrors';
 import { uploadWithVerification } from '../services/upload';
 import { forceCaptureRecovery, getState as getRecordingServiceState } from '../services/recordingService';
 import { getApiUrlSync } from '../services/api';
@@ -1191,6 +1193,14 @@ const currentStoragePreference = ref('keep');
 const isProcessing = computed(() => recordingStore.isProcessing);
 const isAutoUploading = computed(() => recordingStore.isUploading);
 const uploadError = computed(() => recordingStore.uploadError);
+// The upload card shows what the failure means in the user's language; the
+// pipeline's English text stays in the history entry for diagnostics.
+const uploadErrorText = computed(() => {
+  const raw = uploadError.value;
+  if (!raw) return '';
+  if (raw === t('insufficientMinutesUpload')) return raw;
+  return t(uploadErrorKey(raw, { online: typeof navigator === 'undefined' || navigator.onLine !== false }));
+});
 const retryAttempt = computed(() => recordingStore.uploadRetryAttempt);
 const currentFilePath = computed(() => recordingStore.audioFilePath);
 const currentFileSize = computed(() => recordingStore.currentFileSize);
@@ -1473,7 +1483,7 @@ onMounted(async () => {
             } catch (err) {
               $q.notify({
                 type: 'negative',
-                message: t('micPermissionDenied'),
+                message: t('micDeniedAndroid'),
                 icon: 'mic_off',
                 timeout: 8000,
                 actions: [
@@ -1604,14 +1614,17 @@ const handleStartClickInternal = async () => {
   recordingStore.uploadError =null;
   recordingStore.uploadRetryAttempt = 0;
 
-  // Sync minutes with server before checking (3s timeout, fallback to cached)
+  // Sync minutes with server before checking (3s timeout). Only a balance the
+  // server confirmed in this session can block the start: an unknown one
+  // (fetch lost the race, offline, brand-new account) lets the recording
+  // run and the server decides at upload - new accounts were told "no
+  // minutes" by the empty default balance.
   await Promise.race([
     minutesStore.syncWithServer(authStore.token),
     new Promise((_, reject) => setTimeout(() => reject(), 3000))
   ]).catch(() => {});
 
-  // Check if user has minutes remaining
-  if (!minutesStore.hasMinutesRemaining) {
+  if (minutesStore.knownOutOfMinutes) {
     if (isCapacitor()) {
       // Apple Guideline 3.1.1: simple notification on mobile
       $q.notify({
@@ -1627,8 +1640,8 @@ const handleStartClickInternal = async () => {
     return;
   }
 
-  // Show low minutes warning if less than 5 minutes
-  if (minutesStore.remainingMinutes < 5) {
+  // Show low minutes warning if less than 5 minutes (confirmed balance only)
+  if (minutesStore.balanceKnown && minutesStore.remainingMinutes < 5) {
     $q.notify({
       type: 'warning',
       message: t('minutesLimitWarning', { minutes: Math.round(minutesStore.remainingMinutes) }),
@@ -1646,7 +1659,7 @@ const handleStartClickInternal = async () => {
     } catch (err) {
       $q.notify({
         type: 'negative',
-        message: t('micPermissionDenied'),
+        message: t('micDeniedAndroid'),
         icon: 'mic_off',
         timeout: 0,
         actions: [
@@ -1764,11 +1777,44 @@ const doStartRecordingInternal = async () => {
     });
   }
   if (!result.success) {
+    notifyStartFailure(result);
+  }
+};
+
+// A failed start in the user's language. Microphone access denied gets the
+// platform's own path to the switch plus a button to open it (until 4.7.15:
+// English "Microphone access denied." with no way forward on macOS and iOS).
+const notifyStartFailure = (result) => {
+  const platform = micPlatform();
+  const key = micStartErrorKey(result.errorCode, platform);
+  if (result.errorCode === 'mic_permission_denied') {
     $q.notify({
       type: 'negative',
-      message: result.error || t('failedToStartRecording')
+      message: t(key),
+      icon: 'mic_off',
+      timeout: 0,
+      multiLine: true,
+      actions: [
+        ...(canOpenMicSettings(platform)
+          ? [{ label: t('openSettings'), color: 'white', handler: () => { openMicrophoneSettings(platform); } }]
+          : []),
+        { label: t('dismiss'), color: 'white' }
+      ]
     });
+    return;
   }
+  if (key) {
+    $q.notify({ type: 'negative', message: t(key), icon: 'mic_off', timeout: 10000, multiLine: true });
+    return;
+  }
+  // Other failures: the translated headline, the technical detail below it
+  // (support needs it; it may come from the OS or the storage layer).
+  $q.notify({
+    type: 'negative',
+    message: t('failedToStartRecording'),
+    caption: result.error || undefined,
+    timeout: 8000
+  });
 };
 
 const handlePause = () => {
