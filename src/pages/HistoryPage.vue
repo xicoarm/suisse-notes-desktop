@@ -179,7 +179,6 @@
             @deleted="onRecordingDeleted"
             @cancel-transfer="handleCancelTransfer"
             @resync="handleResync"
-            @answer-prep="handleAnswerPrep"
           />
         </div>
         <div
@@ -204,7 +203,6 @@
             @deleted="onRecordingDeleted"
             @cancel-transfer="handleCancelTransfer"
             @resync="handleResync"
-            @answer-prep="handleAnswerPrep"
           />
         </div>
       </template>
@@ -220,7 +218,6 @@
         @deleted="onRecordingDeleted"
         @cancel-transfer="handleCancelTransfer"
         @resync="handleResync"
-        @answer-prep="handleAnswerPrep"
       />
 
       <!-- Desktop: flat chronological list -->
@@ -236,7 +233,6 @@
           @deleted="onRecordingDeleted"
           @cancel-transfer="handleCancelTransfer"
           @resync="handleResync"
-          @answer-prep="handleAnswerPrep"
         />
       </template>
     </div>
@@ -501,30 +497,6 @@ export default {
       }
     };
 
-    // Suisse Meets Pro: record is waiting for the context/template answer
-    // ('pending_prep'). Re-open the prompt; on answer the record becomes
-    // 'pending' and the auto-retry/upload paths take over with the prep set.
-    const handleAnswerPrep = async (recording) => {
-      const { useMeetingPrepStore } = await import('../stores/meeting-prep');
-      const prepStore = useMeetingPrepStore();
-      await prepStore.initialize();
-      if (prepStore.isDeviceSyncPrepPending(recording.id)) return;
-      const fields = await prepStore.requestDeviceSyncPrep({
-        recordId: recording.id,
-        title: recording.title,
-        fileName: recording.deviceFilename
-      });
-      const updates = { prepAnswered: true };
-      if (fields && Object.keys(fields).length > 0) {
-        updates.prep = fields;
-      }
-      await historyStore.updateRecording(recording.id, updates);
-      const current = historyStore.recordings.find((r) => r.id === recording.id);
-      if (current?.uploadStatus === 'pending_prep') {
-        await historyStore.updateRecording(recording.id, { uploadStatus: 'pending' });
-      }
-    };
-
     const handleResync = async (recording) => {
       try {
         const { useDeviceStore } = await import('../stores/device');
@@ -679,7 +651,6 @@ export default {
       handleUpload,
       handleReupload,
       handleResync,
-      handleAnswerPrep,
       handleCancelTransfer,
       cancelActiveUpload,
       onRecordingDeleted

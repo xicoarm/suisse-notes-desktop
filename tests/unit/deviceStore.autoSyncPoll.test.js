@@ -35,10 +35,6 @@ const h = vi.hoisted(() => {
   return { recs, historyMock };
 });
 vi.mock('../../src/stores/recordings-history', () => ({ useRecordingsHistoryStore: () => h.historyMock }));
-const prepState = vi.hoisted(() => ({ paused: [] }));
-vi.mock('../../src/stores/meeting-prep', () => ({ useMeetingPrepStore: () => ({
-  async initialize() {}, beginDeviceSyncRun() {}, endDeviceSyncRun() {}, pauseDeviceSyncRun(names) { prepState.paused.push(names); }, clearCarriedApplyToAll() {}, isDeviceSyncPrepPending() { return false; }, requestDeviceSyncPrep() { return Promise.resolve({}); }
-}) }));
 const uploadState = vi.hoisted(() => { const s = { calls: [], result: null }; s.fn = (a) => { s.calls.push(a); return Promise.resolve(s.result); }; return s; });
 vi.mock('../../src/services/upload', () => ({ uploadWithVerification: uploadState.fn }));
 
@@ -118,7 +114,7 @@ describe('device store: automatic sync', () => {
 
   it('a failed upload whose file is already on the phone is re-uploaded without a second Bluetooth transfer', async () => {
     const store = useDeviceStore();
-    h.recs.push({ id: 'rec-1', deviceFilename: FILE.file, uploadStatus: 'failed', filePath: 'suissenotes_recordings/' + FILE.file, prepAnswered: true, userId: 'u1' });
+    h.recs.push({ id: 'rec-1', deviceFilename: FILE.file, uploadStatus: 'failed', filePath: 'suissenotes_recordings/' + FILE.file, userId: 'u1' });
     fsState.existing.add('suissenotes_recordings/' + FILE.file);
     await store._downloadAndUpload(FILE);
     expect(ble.downloadCalls).toEqual([]);
@@ -130,7 +126,7 @@ describe('device store: automatic sync', () => {
 
   it('a saved copy that no longer exists falls back to a download', async () => {
     const store = useDeviceStore();
-    h.recs.push({ id: 'rec-1', deviceFilename: FILE.file, uploadStatus: 'failed', filePath: 'suissenotes_recordings/gone.opus', prepAnswered: true, userId: 'u1' });
+    h.recs.push({ id: 'rec-1', deviceFilename: FILE.file, uploadStatus: 'failed', filePath: 'suissenotes_recordings/gone.opus', userId: 'u1' });
     await store._downloadAndUpload(FILE);
     expect(ble.downloadCalls).toEqual([FILE.file]);
     expect(h.recs[0].uploadStatus).toBe('uploaded');
@@ -219,7 +215,6 @@ describe('device store: no Bluetooth transfer while the user records in the app'
     uploadState.result = { success: true, transcriptionId: 't1', audioFileId: 'a1' };
     ble.downloadCalls.length = 0; ble.listResult = null; ble.listError = null; ble.connectError = null;
     fsState.existing.clear();
-    prepState.paused.length = 0;
   });
 
   it('the poll waits while a recording start is in progress (phase still idle)', async () => {
@@ -289,8 +284,6 @@ describe('device store: no Bluetooth transfer while the user records in the app'
     expect(store.syncedFiles).toEqual(['R20260910-090000.opus']);
     expect(store.syncState).toBe('idle');                         // no "complete" for files not synced
     expect(store._filesForAutoSync().map((f) => f.file)).toEqual(['R20260912-150000.opus', 'R20260911-100000.opus']);
-    // An "apply to all" answer of this run stays with exactly these files.
-    expect(prepState.paused).toEqual([['R20260911-100000.opus', 'R20260912-150000.opus']]);
   });
 
   it('a manual "Sync all" is not paused by an in-app recording', async () => {
@@ -303,10 +296,10 @@ describe('device store: no Bluetooth transfer while the user records in the app'
     expect(store.syncState).toBe('complete');
   });
 
-  it('files waiting for their context answer or uploading are not counted as new', () => {
+  it('files uploading or parked for the history auto-retry are not counted as new', () => {
     const store = useDeviceStore();
     store.deviceFiles = [FILE, { ...FILE, file: 'R20260101-130000.opus' }, { ...FILE, file: 'R20260101-140000.opus' }];
-    h.recs.push({ id: 'a', deviceFilename: FILE.file, uploadStatus: 'pending_prep', filePath: 'suissenotes_recordings/' + FILE.file, userId: 'u1' });
+    h.recs.push({ id: 'a', deviceFilename: FILE.file, uploadStatus: 'pending', filePath: 'suissenotes_recordings/' + FILE.file, userId: 'u1' });
     h.recs.push({ id: 'b', deviceFilename: 'R20260101-130000.opus', uploadStatus: 'uploading', filePath: 'suissenotes_recordings/R20260101-130000.opus', userId: 'u1' });
     expect(store._filesForAutoSync().map((f) => f.file)).toEqual(['R20260101-140000.opus']);
   });

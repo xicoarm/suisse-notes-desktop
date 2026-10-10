@@ -521,7 +521,7 @@ one of them ≥ 30 minutes.
 | ID | Case | Steps | Expected | Prio | Automated |
 |---|---|---|---|---|---|
 | G1 | First pairing | Einstellungen or Aufnahmegerät → "Gerät koppeln" → select the recorder | Bluetooth permission asked now (not at app start), connected, battery and storage shown | P1 | m5 |
-| G2 | Existing files sync by themselves | After pairing, wait | Each file: context prompt (if "Vor dem Hochladen nach Kontext & Vorlage fragen" is on), transferred, uploaded, "Hochgeladen" in History | P1 | m5 |
+| G2 | Existing files sync by themselves | After pairing, wait | Each file: transferred, uploaded, "Hochgeladen" in History; no context/template dialog at any point (removed in 3.9.41) | P1 | m5 |
 | G3 | Record with the recorder's button while connected | Record 1 min on the recorder, stop | Appears and syncs within about a minute | P1 | m5 |
 | G4 | Record while disconnected | Phone Bluetooth off, record on the recorder, Bluetooth on | Reconnects by itself and syncs the new file | P1 | — |
 | G5 | Recorder off and on | Switch the recorder off 5 min, on again, app in foreground | Reconnects without user action, no error toasts | P1 | unit `deviceStore.reconnectBackoff` |
@@ -531,7 +531,7 @@ one of them ≥ 30 minutes.
 | G9 | Skip / unskip a file | Skip on the device page, then sync it again | Skipped file is not auto-synced; manual sync works | P2 | — |
 | G10 | App in background during a transfer (iOS) | Start a transfer, lock the iPhone 2 min | Continues or resumes after unlock, no corrupt file | P2 | — |
 | G11 | Upload fails for a recorder file | Offline right after the transfer | Retries later without transferring the file again | P2 | m5 |
-| G12 | Context prompt | Answer "Übernehmen & hochladen" for one file, "Überspringen" for another, then "Für alle weiteren Aufnahmen übernehmen" | Each option respected, asked once per file | P2 | — |
+| G12 | Recorder sync around a phone recording | Recorder connected with a new file on it; record 2 min on the phone, stop, stay on the result | No transfer while the phone records; afterwards the file transfers and uploads by itself, no dialog over the phone recording's result | P1 | m10 |
 | G13 | Forget and pair again | Aufnahmegerät → ⋮ menu → "Gerät vergessen", then pair again | Unpaired cleanly, pairs again, files not duplicated | P1 | m5, m7 |
 | G14 | Reinstall and pair again | Uninstall app (recorder still paired), install, log in, pair | Pairs without "bereits mit einer anderen App gekoppelt" | P1 | m7 |
 | G15 | Recorder paired to another phone | Pair the same recorder from a second phone/user | Clear, translated message telling what to do | P2 | m7 (foreign app) |
@@ -620,6 +620,20 @@ reports gateway answers to Sentry unless they outlast the retries. Automated:
 harness scenario `m9-gateway-restart`, unit `api.gatewayRetry`, `upload-direct.nonJson`.
 
 Scope: **all P1**, plus B1–B3 (login), E1, E2, E5 (upload and retry), I1 (minutes).
+
+### Scope of 3.9.41
+
+- **Suisse Meets Pro without a prompt** (Areg, 10.10.2026: «We don't want this pop-up. We will just
+  upload it.»): a recorder file is uploaded straight after its transfer; the context/template dialog,
+  its setting in Einstellungen and the "waiting for context" state in History are gone. A file that
+  waited for the dialog under 3.9.40 is uploaded after the update. No recorder transfer while the
+  phone records (it resumes afterwards). Automated: harness m5, m10; unit
+  `recordingsHistory.pendingPrepMigration`, `deviceStore.stableRecordId`.
+- **Sign-in and minutes without dead ends** (PR #35): translated sign-in and registration errors,
+  SSO results handled app-wide, only a server-confirmed empty balance blocks recording or upload.
+
+Scope: **all P1** (G12 is P1 now), plus B2, B3, B6, B9 (login, SSO cancel, user switch), D2
+(microphone denied), E3, E5 (upload, no minutes), I1.
 
 ---
 

@@ -20,8 +20,8 @@
  *                      failed HTTP answers, errors before init, offline queue, unclean exit after a kill
  *   m9-gateway-restart backend restarts behind nginx (HTML 502 for every /api call): login, minutes
  *                      poll and upload ride it out, no JSON parse error, no error event (ELECTRON-6E/6F)
- *   m10-pro-prompt-outside-phone-flow  no recorder transfer during a phone recording, no Pro prompt over
- *                      its result; the prompt appears after leaving it, names the device recording
+ *   m10-pro-sync-outside-phone-flow  no recorder transfer during a phone recording; afterwards the
+ *                      device file is transferred and uploaded without any context/template prompt
  *   all                everything except m2
  */
 'use strict';
@@ -297,7 +297,7 @@ async function m5RecorderSync() {
   return withApp('m5-recorder-sync', { recorder }, async (app, mock, device) => {
     const problems = [], notes = [];
     const uploadsDir = path.join(WORK_DIR, 'uploads', 'm5-recorder-sync');
-    app.autoSkipPrep(true);
+    app.watchForPrepPrompt(true);
 
     // ---- pair through the device page ----
     await app.navigate('/device');
@@ -360,9 +360,8 @@ async function m5RecorderSync() {
     }
     const rstats = await app.recorder('return r.stats');
     notes.push(`recorder stats: ${JSON.stringify(rstats)}, attempts: ${JSON.stringify(await app.recorder('return r.attempts'))}`);
-    notes.push(`pre-meeting prompts answered: ${app.prepPrompts} (once per file that reaches the prep phase)`);
-    if (app.prepPrompts < 1) problems.push('the pre-meeting prompt never appeared for a synced device file');
-    if (app.prepPrompts > recorder.files.length + 2) problems.push(`pre-meeting prompt shown ${app.prepPrompts} times for ${recorder.files.length} files — re-prompting`);
+    notes.push(`context/template prompts shown: ${app.prepPrompts}`);
+    if (app.prepPrompts > 0) problems.push(`a context/template prompt appeared ${app.prepPrompts} time(s) between transfer and upload`);
     if ((await app.recorder('return r.attempts["R20260901-110000.opus"]')) < 2) problems.push('corrupted transfer was not retried');
 
     // ---- recording made on the recorder while connected → picked up ----
@@ -670,26 +669,17 @@ async function m9GatewayRestart() {
   });
 }
 
-async function m10ProPromptOutsidePhoneFlow() {
-  // 03.10.2026: a Suisse Meets Pro prompt ("Kontext & Vorlage für diese
-  // Aufnahme") popped up the moment a phone recording finished uploading and
-  // read as if it were about that recording. Phone recordings get context and
-  // template before the start only; the Pro prompt must stay out of the phone
-  // flow, appear once the user has left it, and say that it is about a
-  // recording from the device.
+async function m10ProSyncOutsidePhoneFlow() {
+  // 03.10.2026: a Suisse Meets Pro prompt ("Kontext & Vorlage") popped up the
+  // moment a phone recording finished uploading. 10.10.2026 (Areg): no prompt
+  // at all - a device recording is uploaded straight after its transfer. The
+  // recorder still waits while the phone records (the transfer competes with
+  // the recording) and catches up afterwards.
   const sc = buildScenario('m10', [{ type: 'speech', seconds: 40 }]);
   const PRO_FILE = 'R20260922-171358.opus';
-  return withApp('m10-pro-prompt-outside-phone-flow', { scenario: sc, recorder: { poweredOn: true, files: [] } }, async (app) => {
+  return withApp('m10-pro-sync-outside-phone-flow', { scenario: sc, recorder: { poweredOn: true, files: [] } }, async (app) => {
     const problems = [], notes = [];
-    const snapshot = () => app.evalTimed(() => {
-      const pinia = window.__harness.pinia();
-      return {
-        prompt: !!pinia._s.get('meeting-prep')?.deviceSyncPrompt,
-        dialog: !!document.querySelector('[data-test=prep-device-recording]'),
-        phase: pinia._s.get('recording')?.phase,
-        route: window.location.hash
-      };
-    });
+    app.watchForPrepPrompt(true);
 
     await app.navigate('/device');
     await app.clickByTest('[data-test=device-scan]');
@@ -701,13 +691,6 @@ async function m10ProPromptOutsidePhoneFlow() {
     await app.startRecording();
     await app.recorder('r.addFile(a)', { file: PRO_FILE, size: 64_000, durationMs: 1_354_000, seed: 21 });
     await app.evalTimed(() => { window.__harness.pinia()._s.get('device')._listRefreshRequested = true; });
-    let seenInFlow = null;
-    const watch = setInterval(async () => {
-      try {
-        const s = await snapshot();
-        if ((s.prompt || s.dialog) && !seenInFlow) seenInFlow = s;
-      } catch { /* navigating */ }
-    }, 500);
     await sleep(35_000);
     const transfersWhileRecording = await app.recorder('return r.attempts[a] || 0', PRO_FILE);
     notes.push(`recorder transfers of ${PRO_FILE} during the phone recording: ${transfersWhileRecording}`);
@@ -715,38 +698,22 @@ async function m10ProPromptOutsidePhoneFlow() {
 
     await app.stopRecording();
     await app.waitForPhase(['uploaded', 'idle'], 180_000);
-    // Stay on the result card: the auto-sync resumes and the file arrives, but
-    // its prompt waits.
-    const held = await app.waitFor(async () => {
+    // Stay on the result card: the auto-sync resumes, the file is transferred
+    // and uploaded with no prompt and no waiting state in between.
+    const statuses = new Set();
+    const uploaded = await app.waitFor(async () => {
       const rec = (await app.getHistory()).find((r) => r.deviceFilename === PRO_FILE);
-      return rec?.uploadStatus === 'pending_prep' ? rec : null;
-    }, { timeoutMs: 120_000, every: 2000, label: 'Pro file transferred after the phone recording' }).catch(() => null);
-    await sleep(3000);
-    clearInterval(watch);
-    const onResult = await snapshot();
-    notes.push(`on the result card: ${JSON.stringify(onResult)}; device record ${held ? held.uploadStatus : 'not transferred'}`);
-    if (!held) problems.push('the Pro file never reached the context prompt after the phone recording');
-    if (seenInFlow) problems.push(`Pro prompt still appeared inside the phone recording flow: ${JSON.stringify(seenInFlow)}`);
+      if (rec?.uploadStatus) statuses.add(rec.uploadStatus);
+      return rec && ['uploaded', 'pending_verification'].includes(rec.uploadStatus) ? rec : null;
+    }, { timeoutMs: 180_000, every: 1000, label: 'Pro file uploaded after the phone recording' }).catch(() => null);
+    notes.push(`device record statuses seen: ${[...statuses].join(' → ') || 'none'}`);
+    if (!uploaded) problems.push('the Pro file was not uploaded after the phone recording');
+    if (statuses.has('pending_prep')) problems.push('the Pro file waited in pending_prep (the context prompt state)');
 
-    // Leaving the result screen releases the prompt, labelled as a Pro recording.
-    await app.navigate('/history');
-    const shown = await app.waitFor(() => app.evalTimed(() => {
-      const el = document.querySelector('[data-test=prep-device-recording]');
-      return el ? { title: document.querySelector('.prep-dialog .dialog-title')?.textContent.trim(), subtitle: el.textContent.trim() } : null;
-    }), { timeoutMs: 30_000, label: 'Pro prompt after leaving the result screen' }).catch(() => null);
-    if (!shown) problems.push('the Pro prompt did not appear after leaving the result screen');
-    else {
-      notes.push(`prompt: "${shown.title}" / "${shown.subtitle}"`);
-      if (!/Suisse Meets Pro/.test(shown.title)) problems.push(`prompt title does not name the Suisse Meets Pro: ${shown.title}`);
-      if (!/22\.09\.2026/.test(shown.subtitle) || !/22:34/.test(shown.subtitle)) problems.push(`prompt does not show the device recording's date and length: ${shown.subtitle}`);
-      await app.clickByTest('[data-test=prep-skip]');
-      const uploaded = await app.waitFor(async () => {
-        const rec = (await app.getHistory()).find((r) => r.deviceFilename === PRO_FILE);
-        return rec && ['uploaded', 'pending_verification'].includes(rec.uploadStatus) ? rec : null;
-      }, { timeoutMs: 120_000, every: 2000, label: 'Pro file uploaded after the answer' }).catch(() => null);
-      if (!uploaded) problems.push('the Pro file was not uploaded after the prompt was answered');
-      else notes.push(`Pro file uploaded after the answer (${uploaded.uploadStatus})`);
-    }
+    await sleep(3000);
+    app.watchForPrepPrompt(false);
+    notes.push(`context/template prompts shown: ${app.prepPrompts}`);
+    if (app.prepPrompts > 0) problems.push(`a context/template prompt appeared ${app.prepPrompts} time(s)`);
     return { pass: problems.length === 0, problems, notes };
   });
 }
@@ -762,7 +729,7 @@ const SCENARIOS = {
   'm7-repair': m7Repair,
   'm8-sentry-capture': m8SentryCapture,
   'm9-gateway-restart': m9GatewayRestart,
-  'm10-pro-prompt-outside-phone-flow': m10ProPromptOutsidePhoneFlow
+  'm10-pro-sync-outside-phone-flow': m10ProSyncOutsidePhoneFlow
 };
 
 (async () => {
