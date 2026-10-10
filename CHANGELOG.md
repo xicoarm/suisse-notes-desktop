@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.16](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.15...v4.7.16) (2026-10-10)
+
+
+### Features
+
+* **i18n:** texts for sign-in, registration, SSO, microphone and navigation problems 38215cb
+
+
+### Bug Fixes
+
+* **auth:** log customer-fixable registration refusals as info, not Sentry warnings bd4186c
+* **auth:** translated sign-in errors, SSO results handled app-wide, entry telemetry 5c1fa49
+* **minutes:** key the shared balance request by token, drop it on logout a2d88b7
+* **minutes:** never auto-stop a recording at an unconfirmed balance f837720
+* **minutes:** only a server-confirmed empty balance blocks recording or upload dee81d8
+* **nav:** say why navigation is blocked during a recording or upload be022b2
+* **record:** translated microphone-denied guidance with an open-settings button 24b05ed
+* **sales:** "get more minutes" dialog validates on click, organisation optional 44b4802
+* **sso:** never apply an SSO result while a user is signed in 4580a6d
+* **upload:** do not start an upload after the page was left during the balance check 1ce16b0
+* **upload:** translated upload errors and file toasts on Record and Upload pages 484d74e
+
 ### [4.7.15](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.14...v4.7.15) (2026-10-05)
 
 
