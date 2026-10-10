@@ -302,7 +302,12 @@ app.on('child-process-gone', (event, details) => {
 // OS routes that URL to this app via either argv (Win/Linux) or 'open-url' (Mac).
 const SSO_PROTOCOL = 'suissenotes';
 
-if (process.defaultApp) {
+if (process.env.SUISSE_E2E_HOOKS === '1') {
+  // Test runs (harness, unpacked build) never take over the suissenotes://
+  // links: on 06.10.2026 a local test run re-registered them for its dev
+  // Electron, and the installed app's SSO callback would have opened the test
+  // build. Tests deliver SSO results via the second-instance argv instead.
+} else if (process.defaultApp) {
   // Dev mode: pass execPath + script path so the OS knows how to relaunch us
   if (process.argv.length >= 2) {
     app.setAsDefaultProtocolClient(SSO_PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);

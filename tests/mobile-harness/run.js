@@ -20,6 +20,8 @@
  *                      failed HTTP answers, errors before init, offline queue, unclean exit after a kill
  *   m9-gateway-restart backend restarts behind nginx (HTML 502 for every /api call): login, minutes
  *                      poll and upload ride it out, no JSON parse error, no error event (ELECTRON-6E/6F)
+ *   m10-pro-sync-outside-phone-flow  no recorder transfer during a phone recording; afterwards the
+ *                      device file is transferred and uploaded without any context/template prompt
  *   all                everything except m2
  */
 'use strict';
@@ -295,7 +297,7 @@ async function m5RecorderSync() {
   return withApp('m5-recorder-sync', { recorder }, async (app, mock, device) => {
     const problems = [], notes = [];
     const uploadsDir = path.join(WORK_DIR, 'uploads', 'm5-recorder-sync');
-    app.autoSkipPrep(true);
+    app.watchForPrepPrompt(true);
 
     // ---- pair through the device page ----
     await app.navigate('/device');
@@ -358,9 +360,8 @@ async function m5RecorderSync() {
     }
     const rstats = await app.recorder('return r.stats');
     notes.push(`recorder stats: ${JSON.stringify(rstats)}, attempts: ${JSON.stringify(await app.recorder('return r.attempts'))}`);
-    notes.push(`pre-meeting prompts answered: ${app.prepPrompts} (once per file that reaches the prep phase)`);
-    if (app.prepPrompts < 1) problems.push('the pre-meeting prompt never appeared for a synced device file');
-    if (app.prepPrompts > recorder.files.length + 2) problems.push(`pre-meeting prompt shown ${app.prepPrompts} times for ${recorder.files.length} files — re-prompting`);
+    notes.push(`context/template prompts shown: ${app.prepPrompts}`);
+    if (app.prepPrompts > 0) problems.push(`a context/template prompt appeared ${app.prepPrompts} time(s) between transfer and upload`);
     if ((await app.recorder('return r.attempts["R20260901-110000.opus"]')) < 2) problems.push('corrupted transfer was not retried');
 
     // ---- recording made on the recorder while connected → picked up ----
@@ -668,6 +669,55 @@ async function m9GatewayRestart() {
   });
 }
 
+async function m10ProSyncOutsidePhoneFlow() {
+  // 03.10.2026: a Suisse Meets Pro prompt ("Kontext & Vorlage") popped up the
+  // moment a phone recording finished uploading. 10.10.2026 (Areg): no prompt
+  // at all - a device recording is uploaded straight after its transfer. The
+  // recorder still waits while the phone records (the transfer competes with
+  // the recording) and catches up afterwards.
+  const sc = buildScenario('m10', [{ type: 'speech', seconds: 40 }]);
+  const PRO_FILE = 'R20260922-171358.opus';
+  return withApp('m10-pro-sync-outside-phone-flow', { scenario: sc, recorder: { poweredOn: true, files: [] } }, async (app) => {
+    const problems = [], notes = [];
+    app.watchForPrepPrompt(true);
+
+    await app.navigate('/device');
+    await app.clickByTest('[data-test=device-scan]');
+    await app.clickByTest('[data-test=device-scan-result]', 30_000);
+    await app.waitFor(async () => { const d = await app.getDeviceState(); return d?.connectionState === 'connected' ? d : null; }, { timeoutMs: 60_000, label: 'pairing' });
+
+    // The phone recording runs; meanwhile a new file sits on the recorder and
+    // the app is told to list it at the next tick.
+    await app.startRecording();
+    await app.recorder('r.addFile(a)', { file: PRO_FILE, size: 64_000, durationMs: 1_354_000, seed: 21 });
+    await app.evalTimed(() => { window.__harness.pinia()._s.get('device')._listRefreshRequested = true; });
+    await sleep(35_000);
+    const transfersWhileRecording = await app.recorder('return r.attempts[a] || 0', PRO_FILE);
+    notes.push(`recorder transfers of ${PRO_FILE} during the phone recording: ${transfersWhileRecording}`);
+    if (transfersWhileRecording > 0) problems.push(`the recorder file was transferred ${transfersWhileRecording} time(s) while the phone was recording`);
+
+    await app.stopRecording();
+    await app.waitForPhase(['uploaded', 'idle'], 180_000);
+    // Stay on the result card: the auto-sync resumes, the file is transferred
+    // and uploaded with no prompt and no waiting state in between.
+    const statuses = new Set();
+    const uploaded = await app.waitFor(async () => {
+      const rec = (await app.getHistory()).find((r) => r.deviceFilename === PRO_FILE);
+      if (rec?.uploadStatus) statuses.add(rec.uploadStatus);
+      return rec && ['uploaded', 'pending_verification'].includes(rec.uploadStatus) ? rec : null;
+    }, { timeoutMs: 180_000, every: 1000, label: 'Pro file uploaded after the phone recording' }).catch(() => null);
+    notes.push(`device record statuses seen: ${[...statuses].join(' → ') || 'none'}`);
+    if (!uploaded) problems.push('the Pro file was not uploaded after the phone recording');
+    if (statuses.has('pending_prep')) problems.push('the Pro file waited in pending_prep (the context prompt state)');
+
+    await sleep(3000);
+    app.watchForPrepPrompt(false);
+    notes.push(`context/template prompts shown: ${app.prepPrompts}`);
+    if (app.prepPrompts > 0) problems.push(`a context/template prompt appeared ${app.prepPrompts} time(s)`);
+    return { pass: problems.length === 0, problems, notes };
+  });
+}
+
 const SCENARIOS = {
   'm0-selftest': m0Selftest,
   'm1-baseline': m1Baseline,
@@ -678,7 +728,8 @@ const SCENARIOS = {
   'm6-crash-recovery': m6CrashRecovery,
   'm7-repair': m7Repair,
   'm8-sentry-capture': m8SentryCapture,
-  'm9-gateway-restart': m9GatewayRestart
+  'm9-gateway-restart': m9GatewayRestart,
+  'm10-pro-sync-outside-phone-flow': m10ProSyncOutsidePhoneFlow
 };
 
 (async () => {

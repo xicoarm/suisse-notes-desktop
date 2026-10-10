@@ -41,7 +41,6 @@ describe('recordings-history: deviceFilename dedupe keeps a stable record id', (
       deviceFilename: 'R20260101-120000.opus',
       uploadStatus: 'failed',
       prep: { context: 'Kickoff' },
-      prepAnswered: true,
       userId: 'u1'
     });
 
@@ -65,8 +64,7 @@ describe('recordings-history: deviceFilename dedupe keeps a stable record id', (
     const rec = store.recordings[0];
     expect(rec.id).toBe('stable-1');
     expect(rec.uploadStatus).toBe('transferring');
-    // The answered context prompt survives the merge — no re-prompt needed.
-    expect(rec.prepAnswered).toBe(true);
+    // Context given for the recording earlier survives the merge.
     expect(rec.prep).toEqual({ context: 'Kickoff' });
     expect(store.recordings.some(r => r.id === 'fresh-2')).toBe(false);
   });

@@ -12,30 +12,15 @@
  *   (contextText / templateId / templatePrefill / contextFileIds). The same
  *   object is persisted on the history record (`prep`) so offline retries and
  *   crash recovery re-send it — see LOCAL_ONLY_FIELDS in recordings-history.
- * - Device-sync settings (ask on Suisse Meets Pro sync / defaults) live here
- *   too and are persisted like transcription settings.
+ * - Suisse Meets Pro recordings are uploaded without asking (Areg, 10.10.2026:
+ *   the context/template prompt between transfer and upload broke the flow).
  */
 
 import { defineStore } from 'pinia';
-import { isElectron, isCapacitor } from '../utils/platform';
 import { getApiUrlSync, fetchWithTimeout, readJson, parseJsonSafe } from '../services/api';
 import { useAuthStore } from './auth';
 
-// Lazy accessor - resolved on first use so store definition order can't bite.
-let useRecordingStoreRef = null;
-import('./recording').then((m) => { useRecordingStoreRef = m.useRecordingStore; }).catch(() => {});
-
-// Capacitor Preferences (lazy loaded)
-let Preferences = null;
-const initPreferences = async () => {
-  if (isCapacitor() && !Preferences) {
-    const module = await import('@capacitor/preferences');
-    Preferences = module.Preferences;
-  }
-};
-
 const TEMPLATE_CACHE_KEY = 'meeting_prep_templates_cache_v1';
-const SETTINGS_KEY = 'meeting_prep_settings_v1';
 const TEMPLATE_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // refetch after 6h (stale cache still usable offline)
 
 export const MAX_CONTEXT_FILES = 5;
@@ -46,7 +31,7 @@ export const CONTEXT_FILE_EXTENSIONS = [
 
 /**
  * Pure builder: turn prep UI state into the wire fields the backend ingest
- * accepts. Used by the session getter AND the device-sync dialog (own state).
+ * accepts. Used by the session getter.
  */
 export function buildPrepFields({ contextText, templateId, prefill, files, sections }) {
   const fields = {};
@@ -80,26 +65,6 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
     templates: [],            // [{ id, name, description, templateType, isBuiltIn, isStarred }]
     templatesFetchedAt: 0,
     sectionsByTemplate: {},   // { templateId: [{ key, label, kind }] }
-
-    // --- device-sync (Suisse Meets Pro) settings, persisted ---
-    askOnDeviceSync: true,
-    deviceSyncDefaultTemplateId: null,
-    deviceSyncDefaultContext: '',
-
-    // --- device-sync prompt runtime state (not persisted) ---
-    deviceSyncPrompt: null,        // { recordId, title, fileName } currently shown
-    _deviceSyncResolve: null,      // resolver of the shown prompt
-    _deviceSyncQueue: [],          // [{ info, resolve }]
-    _deviceSyncInFlight: [],       // recordIds currently awaiting an answer
-    // While a sync run is active and the user ticked "apply to all":
-    // undefined = not set; null = skip all; object = fields for all.
-    // ONLY honored and only settable while deviceSyncRunActive - otherwise a
-    // stale answer would silently apply to unrelated future recordings.
-    deviceSyncApplyToAll: undefined,
-    deviceSyncRunActive: false,
-    // fileName -> pending promise: a re-synced file that minted a NEW recordId
-    // reuses the already-open prompt instead of double-prompting.
-    _deviceSyncPromiseByFile: {},
 
     loaded: false,
     _loadedForUserId: null,
@@ -149,23 +114,16 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
       return `${TEMPLATE_CACHE_KEY}_${this._loadedForUserId || 'anon'}`;
     },
 
-    _settingsKey() {
-      return `${SETTINGS_KEY}_${this._loadedForUserId || 'anon'}`;
-    },
-
     async initialize() {
       const authStore = useAuthStore();
       const userId = authStore.user?.id || 'anon';
       if (this.loaded && this._loadedForUserId === userId) return;
       // User changed (shared device) - never leak the previous user's
-      // templates, sections, defaults or session prep to the new account.
+      // templates, sections or session prep to the new account.
       if (this.loaded && this._loadedForUserId !== userId) {
         this.templates = [];
         this.templatesFetchedAt = 0;
         this.sectionsByTemplate = {};
-        this.askOnDeviceSync = true;
-        this.deviceSyncDefaultTemplateId = null;
-        this.deviceSyncDefaultContext = '';
         this.resetSession();
       }
       this.loaded = true;
@@ -182,53 +140,8 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
       } catch (e) {
         console.warn('[MeetingPrep] cache load failed:', e?.message);
       }
-      try {
-        if (isElectron() && window.electronAPI?.config?.getMeetingPrepSettings) {
-          const s = await window.electronAPI.config.getMeetingPrepSettings();
-          if (s) this._applySettings(s);
-        } else if (isCapacitor()) {
-          await initPreferences();
-          if (Preferences) {
-            const { value } = await Preferences.get({ key: this._settingsKey() });
-            if (value) this._applySettings(JSON.parse(value));
-          }
-        } else {
-          const raw = localStorage.getItem(this._settingsKey());
-          if (raw) this._applySettings(JSON.parse(raw));
-        }
-      } catch (e) {
-        console.warn('[MeetingPrep] settings load failed:', e?.message);
-      }
       // Refresh templates in the background (cache remains usable offline)
       this.fetchTemplates().catch(() => {});
-    },
-
-    _applySettings(s) {
-      if (typeof s.askOnDeviceSync === 'boolean') this.askOnDeviceSync = s.askOnDeviceSync;
-      if (s.deviceSyncDefaultTemplateId !== undefined) this.deviceSyncDefaultTemplateId = s.deviceSyncDefaultTemplateId;
-      if (typeof s.deviceSyncDefaultContext === 'string') this.deviceSyncDefaultContext = s.deviceSyncDefaultContext;
-    },
-
-    async saveSettings() {
-      const settings = {
-        askOnDeviceSync: this.askOnDeviceSync,
-        deviceSyncDefaultTemplateId: this.deviceSyncDefaultTemplateId,
-        deviceSyncDefaultContext: this.deviceSyncDefaultContext
-      };
-      try {
-        if (isElectron() && window.electronAPI?.config?.setMeetingPrepSettings) {
-          await window.electronAPI.config.setMeetingPrepSettings(settings);
-        } else if (isCapacitor()) {
-          await initPreferences();
-          if (Preferences) {
-            await Preferences.set({ key: this._settingsKey(), value: JSON.stringify(settings) });
-          }
-        } else {
-          localStorage.setItem(this._settingsKey(), JSON.stringify(settings));
-        }
-      } catch (e) {
-        console.error('[MeetingPrep] settings save failed:', e);
-      }
     },
 
     _persistCache() {
@@ -300,7 +213,7 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
     /**
      * Validate + upload one context file to the backend WITHOUT touching the
      * session state. Returns { success, file? , error? }. Used by the session
-     * action below and by the device-sync dialog (which owns its file list).
+     * action below.
      */
     async uploadContextFileRaw(file, currentCount = 0) {
       if (currentCount >= MAX_CONTEXT_FILES) {
@@ -407,119 +320,6 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
       this.contextFiles = [];
       this.templateId = null;
       this.prefill = {};
-    },
-
-    // ------------------------------------------------------------------
-    // Suisse Meets Pro device-sync prompt ("context? template?" before the
-    // upload of a device recording). The pipeline WAITS until answered —
-    // skipping is always possible, and with askOnDeviceSync=false the saved
-    // defaults are applied fully automatically.
-    // ------------------------------------------------------------------
-
-    /** Fields derived from the saved device-sync defaults (may be empty). */
-    deviceSyncDefaultFields() {
-      const fields = {};
-      if ((this.deviceSyncDefaultContext || '').trim()) {
-        fields.contextText = this.deviceSyncDefaultContext.trim();
-      }
-      if (this.deviceSyncDefaultTemplateId) {
-        fields.templateId = this.deviceSyncDefaultTemplateId;
-      }
-      return fields;
-    },
-
-    /** Called by device.js around a sync run so "apply to all" scopes to it. */
-    beginDeviceSyncRun() {
-      this.deviceSyncRunActive = true;
-      this.deviceSyncApplyToAll = undefined;
-    },
-
-    endDeviceSyncRun() {
-      this.deviceSyncRunActive = false;
-      this.deviceSyncApplyToAll = undefined;
-    },
-
-    /**
-     * Ask the user for prep fields for one device recording. Resolves with the
-     * wire fields ({} / null = none) once answered. Resolves immediately when
-     * prompting is disabled (defaults are applied automatically) or the user
-     * chose "apply to all" earlier in this sync run.
-     */
-    requestDeviceSyncPrep(info) {
-      if (!this.askOnDeviceSync) {
-        const defaults = this.deviceSyncDefaultFields();
-        return Promise.resolve(Object.keys(defaults).length > 0 ? defaults : null);
-      }
-      if (this.deviceSyncRunActive && this.deviceSyncApplyToAll !== undefined) {
-        return Promise.resolve(this.deviceSyncApplyToAll);
-      }
-      if (this._deviceSyncInFlight.includes(info.recordId)) {
-        // Already queued/shown for this record (e.g. watcher + sync overlap).
-        return Promise.resolve(null);
-      }
-      // A re-sync of the SAME device file can mint a new recordId while a
-      // prompt for the old id is still open - share that prompt's answer
-      // instead of double-prompting (each caller writes prep to its own record).
-      if (info.fileName && this._deviceSyncPromiseByFile[info.fileName]) {
-        return this._deviceSyncPromiseByFile[info.fileName];
-      }
-      this._deviceSyncInFlight.push(info.recordId);
-      const promise = new Promise((resolve) => {
-        this._deviceSyncQueue.push({ info, resolve });
-        this._maybeShowNextPrompt();
-      });
-      if (info.fileName) {
-        this._deviceSyncPromiseByFile[info.fileName] = promise;
-        promise.finally(() => {
-          if (this._deviceSyncPromiseByFile[info.fileName] === promise) {
-            delete this._deviceSyncPromiseByFile[info.fileName];
-          }
-        });
-      }
-      return promise;
-    },
-
-    /** True when this record is already queued or being answered. */
-    isDeviceSyncPrepPending(recordId) {
-      return this._deviceSyncInFlight.includes(recordId);
-    },
-
-    _maybeShowNextPrompt() {
-      if (this.deviceSyncPrompt || this._deviceSyncQueue.length === 0) return;
-      // Never pop a blocking modal while the user is actively recording in-app;
-      // the queue drains when the recording ends (dialog watches isBlocking).
-      try {
-        const recordingStore = useRecordingStoreRef ? useRecordingStoreRef() : null;
-        if (recordingStore && recordingStore.isBlocking) return;
-      } catch { /* recording store unavailable - show the prompt */ }
-      const next = this._deviceSyncQueue.shift();
-      this.deviceSyncPrompt = next.info;
-      this._deviceSyncResolve = next.resolve;
-    },
-
-    /**
-     * Dialog answer. `fields` = wire fields or null for skip; `applyToAll`
-     * repeats this answer for every further prompt of the current sync run.
-     */
-    answerDeviceSyncPrompt(fields, applyToAll = false) {
-      const resolve = this._deviceSyncResolve;
-      const current = this.deviceSyncPrompt;
-      this.deviceSyncPrompt = null;
-      this._deviceSyncResolve = null;
-      if (current) {
-        this._deviceSyncInFlight = this._deviceSyncInFlight.filter((id) => id !== current.recordId);
-      }
-      if (applyToAll && this.deviceSyncRunActive) {
-        this.deviceSyncApplyToAll = fields;
-        // Answer everything already queued with the same result.
-        const queued = this._deviceSyncQueue.splice(0);
-        for (const item of queued) {
-          this._deviceSyncInFlight = this._deviceSyncInFlight.filter((id) => id !== item.info.recordId);
-          item.resolve(fields);
-        }
-      }
-      resolve?.(fields);
-      this._maybeShowNextPrompt();
     }
   }
 });

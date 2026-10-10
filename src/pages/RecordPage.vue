@@ -1541,6 +1541,7 @@ onUnmounted(() => {
     autoSaveTimer.value = null;
   }
   stopBackgroundUploadWatch();
+  recordingStore.startRequested = false;
 });
 
 // When startAutoUpload finds an upload for this recordId already in flight
@@ -1598,6 +1599,9 @@ const watchBackgroundUpload = (recordId) => {
 const startClickBusy = ref(false); // guards handleStartClick pre-work
 const startInFlight = ref(false);  // guards doStartRecording (the actual start)
 const startBusy = computed(() => startClickBusy.value || startInFlight.value);
+// The store flag lets the Suisse Meets Pro prompt wait until the start is
+// through (startRecording sets phase 'recording' before startInFlight clears).
+watch(startBusy, (busy) => { recordingStore.startRequested = busy; }, { immediate: true });
 
 const handleStartClick = async () => {
   if (startBusy.value) return;

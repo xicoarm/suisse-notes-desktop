@@ -158,7 +158,14 @@ const PREF_KEY = 'recordings_storage_preference';
 function _getCachedRecordings(userId) {
   try {
     const raw = localStorage.getItem(`${CACHE_KEY}_${userId}`);
-    return raw ? JSON.parse(raw) : [];
+    const recordings = raw ? JSON.parse(raw) : [];
+    // Up to 3.9.40 a Suisse Meets Pro recording waited in 'pending_prep' for
+    // the context/template prompt, which no longer exists: it is uploaded
+    // like any other pending recording.
+    for (const rec of recordings) {
+      if (rec?.uploadStatus === 'pending_prep') rec.uploadStatus = 'pending';
+    }
+    return recordings;
   } catch {
     return [];
   }
@@ -440,7 +447,7 @@ export const useRecordingsHistoryStore = defineStore('recordings-history', {
               'retryCount', 'lastRetryAt', 'uploadError', '_serverSynced',
               // Pre-meeting preparation (context/template/pre-fill) — client-only,
               // re-sent on retry uploads; the server never returns it.
-              'prep', 'prepAnswered',
+              'prep',
               // Capture forensics shown on the card (segments lost at stop time).
               'captureWarning',
               // Retry bookkeeping and the "audio removed from this phone" marker.

@@ -91,24 +91,6 @@ vi.mock('../../src/stores/recordings-history', () => ({
   useRecordingsHistoryStore: () => h.historyMock
 }));
 
-const prepState = vi.hoisted(() => {
-  const s = { calls: [], resolveWith: {} };
-  s.store = {
-    async initialize() {},
-    beginDeviceSyncRun() {},
-    endDeviceSyncRun() {},
-    isDeviceSyncPrepPending() { return false; },
-    requestDeviceSyncPrep(args) {
-      s.calls.push(args);
-      return Promise.resolve(s.resolveWith);
-    }
-  };
-  return s;
-});
-vi.mock('../../src/stores/meeting-prep', () => ({
-  useMeetingPrepStore: () => prepState.store
-}));
-
 const uploadState = vi.hoisted(() => {
   const s = { calls: [], result: null };
   s.fn = (args) => {
@@ -178,15 +160,13 @@ describe('device store: stable recordId per device file', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     h.recs.length = 0;
-    prepState.calls.length = 0;
-    prepState.resolveWith = {};
     uploadState.calls.length = 0;
     uploadState.result = { success: true, transcriptionId: 't1', audioFileId: 'a1' };
     ble.downloadCalls.length = 0;
     prefs.m.clear();
   });
 
-  it('fresh file: one record, one prep prompt, upload uses the record id, file marked synced', async () => {
+  it('fresh file: one record, uploaded right after the transfer with the record id, file marked synced', async () => {
     const store = useDeviceStore();
     await store._downloadAndUpload(FILE);
 
@@ -194,13 +174,25 @@ describe('device store: stable recordId per device file', () => {
     const rec = h.recs[0];
     expect(uploadState.calls).toHaveLength(1);
     expect(uploadState.calls[0].recordId).toBe(rec.id);
-    expect(prepState.calls).toHaveLength(1);
+    // No context/template prompt in between (10.10.2026): the server applies
+    // the user's default template.
+    expect(uploadState.calls[0].metadata).not.toHaveProperty('templateId');
+    expect(uploadState.calls[0].metadata).not.toHaveProperty('contextText');
     expect(rec.uploadStatus).toBe('uploaded');
-    expect(rec.prepAnswered).toBe(true);
     expect(store.syncedFiles).toContain(FILE.file);
   });
 
-  it('re-attempt after a failed upload reuses the SAME recordId and does not re-prompt', async () => {
+  it('context given for the file under an earlier version still goes with its upload', async () => {
+    const store = useDeviceStore();
+    h.recs.push({ id: 'old-1', deviceFilename: FILE.file, uploadStatus: 'failed', prep: { templateId: 'tpl-1' }, userId: 'u1' });
+    await store._downloadAndUpload(FILE);
+
+    expect(uploadState.calls).toHaveLength(1);
+    expect(uploadState.calls[0].recordId).toBe('old-1');
+    expect(uploadState.calls[0].metadata.templateId).toBe('tpl-1');
+  });
+
+  it('re-attempt after a failed upload reuses the SAME recordId', async () => {
     const store = useDeviceStore();
 
     uploadState.result = { success: false, error: 'no minutes' };
@@ -209,7 +201,6 @@ describe('device store: stable recordId per device file', () => {
     expect(h.recs).toHaveLength(1);
     const firstId = h.recs[0].id;
     expect(h.recs[0].uploadStatus).toBe('failed');
-    expect(prepState.calls).toHaveLength(1);
     expect(store.syncedFiles).not.toContain(FILE.file);
 
     // Second attempt (e.g. user topped up minutes, device reconnected)
@@ -220,21 +211,13 @@ describe('device store: stable recordId per device file', () => {
     expect(h.recs[0].id).toBe(firstId);
     expect(uploadState.calls).toHaveLength(2);
     expect(uploadState.calls[1].recordId).toBe(firstId);
-    // Prompted once per FILE, not once per attempt.
-    expect(prepState.calls).toHaveLength(1);
     expect(store.syncedFiles).toContain(FILE.file);
   });
 
-  it('skips the file while an open prep prompt or live upload owns it', async () => {
+  it('skips the file while a live upload owns it', async () => {
     const store = useDeviceStore();
-    h.recs.push({ id: 'busy-1', deviceFilename: FILE.file, uploadStatus: 'pending_prep' });
+    h.recs.push({ id: 'busy-1', deviceFilename: FILE.file, uploadStatus: 'uploading' });
 
-    await store._downloadAndUpload(FILE);
-    expect(ble.downloadCalls).toHaveLength(0);
-    expect(uploadState.calls).toHaveLength(0);
-    expect(h.recs).toHaveLength(1);
-
-    h.recs[0].uploadStatus = 'uploading';
     await store._downloadAndUpload(FILE);
     expect(ble.downloadCalls).toHaveLength(0);
     expect(uploadState.calls).toHaveLength(0);

@@ -52,9 +52,10 @@ jobs:
         if: ${{ !inputs.status }}
         run: |
           cat > /tmp/release-notes.txt <<'NOTES'
-          Zuverlässigere Verbindung zum Server:
-          - Kurze Unterbrechungen auf unserer Seite, etwa während eines Updates, überbrückt die App jetzt selbst, statt einen Fehler anzuzeigen.
-          - Uploads, Anmeldung und das Minutenguthaben bleiben stabil, auch wenn ein WLAN-Anmeldeportal oder ein Proxy statt des Servers antwortet.
+          Einfacher mit dem Suisse Meets Pro:
+          - Aufnahmen vom Suisse Meets Pro werden nach der Übertragung direkt hochgeladen, ohne Zwischenfrage.
+          - Während Sie in der App aufnehmen, wartet die Übertragung vom Gerät und läuft danach von selbst weiter.
+          - Klarere Meldungen bei Anmeldung, Registrierung und Minutenguthaben.
           NOTES
           cat /tmp/release-notes.txt
 

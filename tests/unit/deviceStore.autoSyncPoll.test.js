@@ -35,9 +35,6 @@ const h = vi.hoisted(() => {
   return { recs, historyMock };
 });
 vi.mock('../../src/stores/recordings-history', () => ({ useRecordingsHistoryStore: () => h.historyMock }));
-vi.mock('../../src/stores/meeting-prep', () => ({ useMeetingPrepStore: () => ({
-  async initialize() {}, beginDeviceSyncRun() {}, endDeviceSyncRun() {}, isDeviceSyncPrepPending() { return false; }, requestDeviceSyncPrep() { return Promise.resolve({}); }
-}) }));
 const uploadState = vi.hoisted(() => { const s = { calls: [], result: null }; s.fn = (a) => { s.calls.push(a); return Promise.resolve(s.result); }; return s; });
 vi.mock('../../src/services/upload', () => ({ uploadWithVerification: uploadState.fn }));
 
@@ -75,6 +72,7 @@ vi.mock('@capacitor/local-notifications', () => ({ LocalNotifications: {
 } }));
 
 import { useDeviceStore, oldestFirst } from '../../src/stores/device';
+import { useRecordingStore } from '../../src/stores/recording';
 
 const FILE = { file: 'R20260101-120000.opus', size: 4, duration_ms: 60000, creat_time: 1_750_000_000 };
 
@@ -116,7 +114,7 @@ describe('device store: automatic sync', () => {
 
   it('a failed upload whose file is already on the phone is re-uploaded without a second Bluetooth transfer', async () => {
     const store = useDeviceStore();
-    h.recs.push({ id: 'rec-1', deviceFilename: FILE.file, uploadStatus: 'failed', filePath: 'suissenotes_recordings/' + FILE.file, prepAnswered: true, userId: 'u1' });
+    h.recs.push({ id: 'rec-1', deviceFilename: FILE.file, uploadStatus: 'failed', filePath: 'suissenotes_recordings/' + FILE.file, userId: 'u1' });
     fsState.existing.add('suissenotes_recordings/' + FILE.file);
     await store._downloadAndUpload(FILE);
     expect(ble.downloadCalls).toEqual([]);
@@ -128,7 +126,7 @@ describe('device store: automatic sync', () => {
 
   it('a saved copy that no longer exists falls back to a download', async () => {
     const store = useDeviceStore();
-    h.recs.push({ id: 'rec-1', deviceFilename: FILE.file, uploadStatus: 'failed', filePath: 'suissenotes_recordings/gone.opus', prepAnswered: true, userId: 'u1' });
+    h.recs.push({ id: 'rec-1', deviceFilename: FILE.file, uploadStatus: 'failed', filePath: 'suissenotes_recordings/gone.opus', userId: 'u1' });
     await store._downloadAndUpload(FILE);
     expect(ble.downloadCalls).toEqual([FILE.file]);
     expect(h.recs[0].uploadStatus).toBe('uploaded');
@@ -206,5 +204,103 @@ describe('device store: sync order', () => {
     h.recs.length = 0;
     await store.syncAllNew({ auto: true });
     expect(ble.downloadCalls[0]).toBe('R20260910-090000.opus');
+  });
+});
+
+describe('device store: no Bluetooth transfer while the user records in the app', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    h.recs.length = 0;
+    uploadState.calls.length = 0;
+    uploadState.result = { success: true, transcriptionId: 't1', audioFileId: 'a1' };
+    ble.downloadCalls.length = 0; ble.listResult = null; ble.listError = null; ble.connectError = null;
+    fsState.existing.clear();
+  });
+
+  it('the poll waits while a recording start is in progress (phase still idle)', async () => {
+    const store = useDeviceStore();
+    store.connectionState = 'connected';
+    const recording = useRecordingStore();
+    let listCalls = 0;
+    const getFileList = ble.manager.getFileList;
+    ble.manager.getFileList = async () => { listCalls++; return []; };
+    try {
+      recording.startRequested = true;
+      await store._autoSyncPoll();
+      expect(listCalls).toBe(0);
+      recording.startRequested = false;
+      await store._autoSyncPoll();
+      expect(listCalls).toBe(1);
+    } finally {
+      ble.manager.getFileList = getFileList;
+    }
+  });
+
+  it('the poll keeps the link alive but neither lists nor syncs during an in-app recording', async () => {
+    const store = useDeviceStore();
+    store.connectionState = 'connected';
+    const recording = useRecordingStore();
+    let listCalls = 0;
+    const getFileList = ble.manager.getFileList;
+    ble.manager.getFileList = async () => { listCalls++; return []; };
+    try {
+      for (const phase of ['preparing', 'recording', 'paused', 'stopping', 'processing', 'uploading']) {
+        recording.phase = phase;
+        store.batteryLevel = null;
+        await store._autoSyncPoll();
+        expect(store.batteryLevel).toBe(80); // keepalive still sent
+      }
+      expect(listCalls).toBe(0);
+      recording.phase = 'uploaded';
+      await store._autoSyncPoll();
+      expect(listCalls).toBe(1); // the first tick after the recording lists again
+    } finally {
+      ble.manager.getFileList = getFileList;
+    }
+  });
+
+  it('an automatic run stops before the next file once a recording starts in the app', async () => {
+    const store = useDeviceStore();
+    store.connectionState = 'connected';
+    store.deviceFiles = [
+      { file: 'R20260912-150000.opus', size: 4, duration_ms: 60000, creat_time: 1_757_689_200 },
+      { file: 'R20260911-100000.opus', size: 4, duration_ms: 60000, creat_time: 1_757_577_600 },
+      { file: 'R20260910-090000.opus', size: 4, duration_ms: 60000, creat_time: 1_757_487_600 }
+    ];
+    const recording = useRecordingStore();
+    const downloadFile = ble.manager.downloadFile;
+    // The user taps record while the oldest file is being transferred.
+    ble.manager.downloadFile = (name) => {
+      ble.downloadCalls.push(name);
+      recording.phase = 'recording';
+      return Promise.resolve(new Uint8Array([1, 2, 3, 4]));
+    };
+    try {
+      await store.syncAllNew({ auto: true });
+    } finally {
+      ble.manager.downloadFile = downloadFile;
+    }
+    expect(ble.downloadCalls).toEqual(['R20260910-090000.opus']); // the file in flight finishes
+    expect(store.syncedFiles).toEqual(['R20260910-090000.opus']);
+    expect(store.syncState).toBe('idle');                         // no "complete" for files not synced
+    expect(store._filesForAutoSync().map((f) => f.file)).toEqual(['R20260912-150000.opus', 'R20260911-100000.opus']);
+  });
+
+  it('a manual "Sync all" is not paused by an in-app recording', async () => {
+    const store = useDeviceStore();
+    store.connectionState = 'connected';
+    store.deviceFiles = [FILE, { ...FILE, file: 'R20260101-130000.opus' }];
+    useRecordingStore().phase = 'recording';
+    await store.syncAllNew();
+    expect(ble.downloadCalls).toHaveLength(2);
+    expect(store.syncState).toBe('complete');
+  });
+
+  it('files uploading or parked for the history auto-retry are not counted as new', () => {
+    const store = useDeviceStore();
+    store.deviceFiles = [FILE, { ...FILE, file: 'R20260101-130000.opus' }, { ...FILE, file: 'R20260101-140000.opus' }];
+    h.recs.push({ id: 'a', deviceFilename: FILE.file, uploadStatus: 'pending', filePath: 'suissenotes_recordings/' + FILE.file, userId: 'u1' });
+    h.recs.push({ id: 'b', deviceFilename: 'R20260101-130000.opus', uploadStatus: 'uploading', filePath: 'suissenotes_recordings/R20260101-130000.opus', userId: 'u1' });
+    expect(store._filesForAutoSync().map((f) => f.file)).toEqual(['R20260101-140000.opus']);
   });
 });

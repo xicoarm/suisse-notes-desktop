@@ -30,7 +30,7 @@ import { groupRecordingsByDay } from '../utils/historyGroups';
  * Mobile history list: recordings grouped by calendar day with a compact
  * "Today / Yesterday / Thursday, 11 September" header per group, newest
  * first. Every card event (upload, retry, reupload, deleted, cancel-transfer,
- * resync, answer-prep) is forwarded untouched through $attrs.
+ * resync) is forwarded untouched through $attrs.
  */
 export default {
   name: 'HistoryDayGroups',

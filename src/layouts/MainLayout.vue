@@ -356,9 +356,6 @@
     <!-- BLE Transfer Sync Pill (floating, mobile, visible on all pages) -->
     <BleTransferBanner v-if="isMobile() && authStore.isAuthenticated" />
 
-    <!-- Suisse Meets Pro sync: context/template prompt (global, waits until answered) -->
-    <DeviceSyncPrepDialog v-if="isMobile() && authStore.isAuthenticated" />
-
     <!-- Offline Banner -->
     <div
       v-if="isOffline || (isMobile() && !recordingStore.networkConnected)"
@@ -442,7 +439,6 @@ import { useRouter, useRoute } from 'vue-router';
 import { isElectron, isMobile, isIOS } from '../utils/platform';
 import { useLanguage } from '../composables/useLanguage';
 import BleTransferBanner from '../components/BleTransferBanner.vue';
-import DeviceSyncPrepDialog from '../components/DeviceSyncPrepDialog.vue';
 
 const $q = useQuasar();
 const { t } = useI18n();

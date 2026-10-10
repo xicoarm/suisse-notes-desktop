@@ -64,17 +64,6 @@ const h = vi.hoisted(() => {
 });
 vi.mock('../../src/stores/recordings-history', () => ({ useRecordingsHistoryStore: () => h.historyMock }));
 
-const prepState = vi.hoisted(() => ({
-  store: {
-    async initialize() {},
-    beginDeviceSyncRun() {},
-    endDeviceSyncRun() {},
-    isDeviceSyncPrepPending() { return false; },
-    requestDeviceSyncPrep() { return Promise.resolve({}); }
-  }
-}));
-vi.mock('../../src/stores/meeting-prep', () => ({ useMeetingPrepStore: () => prepState.store }));
-
 const uploadState = vi.hoisted(() => {
   const s = { calls: [], result: null };
   s.fn = (args) => { s.calls.push(args); return Promise.resolve(s.result); };

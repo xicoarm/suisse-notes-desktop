@@ -233,19 +233,20 @@ class MobileApp {
   }
 
   /**
-   * The device sync asks for pre-meeting context per file (a product
-   * decision: the pipeline WAITS for the answer). Tap "skip" whenever the
-   * prompt appears, and count the prompts so a scenario can assert it was
-   * asked once per file.
+   * Up to 3.9.40 the device sync asked for context and template per file
+   * before the upload. The prompt is gone (10.10.2026): count every time a
+   * prep dialog shows up anyway, so a scenario can assert it never does.
    */
-  autoSkipPrep(on = true) {
+  watchForPrepPrompt(on = true) {
     this.prepPrompts = this.prepPrompts || 0;
     clearInterval(this._prepTimer);
     if (!on) return;
+    let showing = false;
     this._prepTimer = setInterval(async () => {
       try {
-        const btn = await this.page?.$('[data-test=prep-skip]');
-        if (btn) { this.prepPrompts++; await this.page.$eval('[data-test=prep-skip]', el => el.click()); await sleep(800); }
+        const el = await this.page?.$('.prep-dialog, [data-test=prep-skip], [data-test=prep-device-recording]');
+        if (el && !showing) this.prepPrompts++;
+        showing = !!el;
       } catch { /* page navigating */ }
     }, 700);
   }
