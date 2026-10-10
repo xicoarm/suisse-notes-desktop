@@ -676,10 +676,12 @@ Connect banners at the start of every release.
    Console was signed in; App Store Connect was not.
 3. **Never type a password, never sign in, never create an account.** If a login page
    appears, ask the user to sign in and wait.
-4. **Publishing clicks** — "Speichern und veröffentlichen", "Änderungen zur Überprüfung
-   einreichen", `ios-submit.yml -f submit=true`, merging to `main` — happen only after the
-   user said to release in this conversation, and the final message says exactly what was
-   published.
+4. **Test distribution is Claude's job** (Areg, 10.10.2026: «the next time you do it
+   yourself»): the Play **internal testing** release (§5.2, including "Speichern und
+   veröffentlichen" on that track) and TestFlight happen without asking once Phase A is
+   green. **Production clicks** — "Änderungen zur Überprüfung einreichen", a production
+   release, `ios-submit.yml -f submit=true`, merging to `main` — happen only after the user
+   said to release in this conversation. The final message says exactly what was published.
 5. In the Play Console, find elements by their label (`find`, element refs); screenshot
    coordinates drift. Upload files through the hidden file input, never through the picker
    button. Wait for rendering before reading the page.
