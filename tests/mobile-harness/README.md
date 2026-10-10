@@ -77,6 +77,7 @@ standard location.
 | m5-recorder-sync | pairing, busy card, empty file skipped, corrupted transfer retried, dropped link resumed, bytes identical on the server, button recording picked up, cancelled transfer kept as skipped, unpair |
 | m6-crash-recovery | app killed mid-recording → relaunch → recovery combines and uploads |
 | m7-repair | reinstall (storage wiped) → the recorder still bound to the user's UUID → pairs again |
+| m10-pro-prompt-outside-phone-flow | no recorder transfer while the phone records, no Suisse Meets Pro prompt over the phone recording's result; the prompt appears after leaving it and names the device recording (date, length) |
 
 ## CI
 

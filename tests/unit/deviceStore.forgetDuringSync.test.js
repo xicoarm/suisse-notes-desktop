@@ -36,7 +36,7 @@ const h = vi.hoisted(() => {
 });
 vi.mock('../../src/stores/recordings-history', () => ({ useRecordingsHistoryStore: () => h.historyMock }));
 vi.mock('../../src/stores/meeting-prep', () => ({ useMeetingPrepStore: () => ({
-  async initialize() {}, beginDeviceSyncRun() {}, endDeviceSyncRun() {}, isDeviceSyncPrepPending() { return false; }, requestDeviceSyncPrep() { return Promise.resolve({}); }
+  async initialize() {}, beginDeviceSyncRun() {}, endDeviceSyncRun() {}, pauseDeviceSyncRun() {}, clearCarriedApplyToAll() {}, isDeviceSyncPrepPending() { return false; }, requestDeviceSyncPrep() { return Promise.resolve({}); }
 }) }));
 
 const notif = vi.hoisted(() => ({ scheduled: [], cancelled: [], removed: [] }));

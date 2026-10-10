@@ -28,6 +28,10 @@ export const useRecordingStore = defineStore('recording', {
     // Single authoritative state: idle | preparing | recording | paused | stopping | processing | stopped | uploading | uploaded | error
     // ('stopped' = saved by a stop outside the Record page's upload flow)
     phase: 'idle',
+    // True while the Record page works on a start the user tapped (minutes
+    // check, permissions, session) - phase is still 'idle' then. Read by the
+    // Suisse Meets Pro prompt, which must not open over a recording starting.
+    startRequested: false,
     startTime: null,
     duration: 0, // in seconds
     chunkIndex: 0,

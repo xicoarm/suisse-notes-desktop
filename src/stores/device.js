@@ -35,6 +35,7 @@ import * as storage from '../services/storage';
 import { getApiUrlSync } from '../services/api';
 import { useAuthStore } from './auth';
 import { useRecordingsHistoryStore } from './recordings-history';
+import { useRecordingStore } from './recording';
 import { isRawOpusPackets, rawOpusToOgg } from '../utils/rawOpusToOgg';
 import { i18n } from '../boot/i18n';
 
@@ -67,6 +68,15 @@ const MAX_CRC_FAILURES = 3;            // Corrupted transfers of one file before
 // LIST_EVERY_N_TICKS keepalive tick (20 s each) instead of on every tick, and
 // immediately after the recorder reports that a recording stopped.
 const LIST_EVERY_N_TICKS = 3;
+
+/**
+ * The user is starting or running a recording in the app (or its upload is
+ * running). Automatic recorder transfers wait meanwhile.
+ */
+function isRecordingInApp() {
+  const recordingStore = useRecordingStore();
+  return recordingStore.isBlocking || recordingStore.startRequested;
+}
 
 /**
  * Errors that mean "the Bluetooth link is not there right now" — a device that
@@ -892,9 +902,25 @@ export const useDeviceStore = defineStore('device', {
         prepStoreForRun.beginDeviceSyncRun();
       } catch { /* prep prompt unavailable — sync continues without it */ }
 
+      // Set when an automatic run stops early because the user started a
+      // recording in the app (see the check in the loop), with the files it
+      // did not reach.
+      let pausedForPhoneRecording = false;
+      let notReached = [];
+
       try {
-        for (const file of newFiles) {
+        for (const [index, file] of newFiles.entries()) {
           if (this._cancelRequested || !live()) break;
+          // The user is recording in the app: no further Bluetooth transfers
+          // until that ends. They compete with the recorder, and each one ends
+          // in the Pro context prompt, which must not land in the user's own
+          // recording. The remaining files stay new; the next poll takes them.
+          if (auto && isRecordingInApp()) {
+            pausedForPhoneRecording = true;
+            notReached = newFiles.slice(index).map((f) => f.file);
+            addBreadcrumb({ category: 'ble', message: `Auto-sync paused before ${file.file}: recording in the app`, level: 'info' });
+            break;
+          }
           this.syncCurrent++;
           this.currentSyncFile = file.file;
           this.syncProgress = 0;
@@ -934,6 +960,9 @@ export const useDeviceStore = defineStore('device', {
           aggregateErr.totalCount = newFiles.length;
           aggregateErr.failures = failures;
           throw aggregateErr;
+        } else if (pausedForPhoneRecording) {
+          this.syncState = 'idle';
+          clearLocalNotification(NOTIF_SYNC_PROGRESS);
         } else {
           this.syncState = 'complete';
           sendLocalNotification(NOTIF_SYNC_COMPLETE, t('syncComplete'), t('bleSyncCompleteBody', { count: newFiles.length }));
@@ -957,8 +986,10 @@ export const useDeviceStore = defineStore('device', {
         if (live()) {
           this.currentSyncFile = null;
           this.syncPhase = 'idle';
-          // End of the run — "apply to all" answers no longer carry over.
-          prepStoreForRun?.endDeviceSyncRun();
+          // End of the run — "apply to all" answers no longer carry over,
+          // except to the files a run paused for a phone recording left.
+          if (pausedForPhoneRecording) prepStoreForRun?.pauseDeviceSyncRun(notReached);
+          else prepStoreForRun?.endDeviceSyncRun();
         }
       }
     },
@@ -1484,12 +1515,17 @@ export const useDeviceStore = defineStore('device', {
      * until the user retries — so the poll must not re-download them over
      * Bluetooth every tick. Manual "Sync all" / per-file sync still takes
      * them (and re-uses the saved copy).
+     * Files whose record waits for the context answer ('pending_prep') or is
+     * uploading are owned by that prompt / pipeline: _downloadAndUpload skips
+     * them anyway, and counting them here started a "sync" that ended with a
+     * "Sync complete" notification for files that were not synced.
      */
     _filesForAutoSync() {
       const historyStore = useRecordingsHistoryStore();
       return this.autoSyncableFiles.filter(f => {
         const rec = historyStore.getRecordingByDeviceFilename?.(f.file);
         if (!rec) return true;
+        if (rec.uploadStatus === 'pending_prep' || rec.uploadStatus === 'uploading') return false;
         const parked = (rec.uploadStatus === 'failed' || rec.uploadStatus === 'pending') && (rec.filePath || rec.uploadTerminal);
         return !parked;
       });
@@ -1519,6 +1555,12 @@ export const useDeviceStore = defineStore('device', {
         // Don't fetch file list or sync while device is recording —
         // entering sync state disables device buttons
         if (this.isRecordingOnDevice) return;
+
+        // Nor while the user records in the app: the transfer competes with
+        // the recorder, and its context prompt must not appear in the middle
+        // of (or right after) the user's own recording. The keepalive above
+        // keeps the link; the list and sync resume on the first tick after.
+        if (isRecordingInApp()) return;
 
         // The list runs inside the recorder's sync state (buttons disabled):
         // every LIST_EVERY_N_TICKS ticks, or right after a recording stopped.
@@ -1594,7 +1636,7 @@ export const useDeviceStore = defineStore('device', {
       this._listRefreshRequested = false;
       clearLocalNotification(NOTIF_SYNC_PROGRESS);
       import('./meeting-prep')
-        .then(m => m.useMeetingPrepStore().endDeviceSyncRun())
+        .then(m => { const prep = m.useMeetingPrepStore(); prep.endDeviceSyncRun(); prep.clearCarriedApplyToAll(); })
         .catch(() => { /* prep prompt unavailable */ });
     },
 

@@ -20,10 +20,9 @@ import { defineStore } from 'pinia';
 import { isElectron, isCapacitor } from '../utils/platform';
 import { getApiUrlSync, fetchWithTimeout, readJson, parseJsonSafe } from '../services/api';
 import { useAuthStore } from './auth';
-
-// Lazy accessor - resolved on first use so store definition order can't bite.
-let useRecordingStoreRef = null;
-import('./recording').then((m) => { useRecordingStoreRef = m.useRecordingStore; }).catch(() => {});
+// Static import: until 3.9.40 this was a lazy import, and until it resolved
+// the "hold the prompt while recording" gate was skipped.
+import { useRecordingStore } from './recording';
 
 // Capacitor Preferences (lazy loaded)
 let Preferences = null;
@@ -68,6 +67,19 @@ export function buildPrepFields({ contextText, templateId, prefill, files, secti
   return fields;
 }
 
+/**
+ * True while the user's own recording or file upload starts or runs, or its
+ * result is still showing (record or upload page; a recording error only
+ * shows on the record page). A Suisse Meets Pro prompt waits meanwhile:
+ * phone recordings get context and template before the start, never after
+ * the stop, so a prompt there reads as if it were about the phone recording.
+ */
+export function isOwnRecordingFlowOnScreen({ isBlocking, startRequested, phase, routeName }) {
+  return !!isBlocking || !!startRequested ||
+    (phase === 'uploaded' && ['record', 'upload'].includes(routeName)) ||
+    (phase === 'error' && routeName === 'record');
+}
+
 export const useMeetingPrepStore = defineStore('meeting-prep', {
   state: () => ({
     // --- per-session preparation (reset after each upload start) ---
@@ -97,9 +109,16 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
     // stale answer would silently apply to unrelated future recordings.
     deviceSyncApplyToAll: undefined,
     deviceSyncRunActive: false,
+    // A run that paused for a phone recording keeps its "apply to all" answer
+    // for exactly the files it had not reached: { answer, files: [fileName] }.
+    _carriedApplyToAll: null,
     // fileName -> pending promise: a re-synced file that minted a NEW recordId
     // reuses the already-open prompt instead of double-prompting.
     _deviceSyncPromiseByFile: {},
+    // True while the user's own recording or file upload, or its result
+    // screen, is showing (set by DeviceSyncPrepDialog from route + phase).
+    // Device prompts wait meanwhile.
+    phoneFlowActive: false,
 
     loaded: false,
     _loadedForUserId: null,
@@ -166,6 +185,7 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
         this.askOnDeviceSync = true;
         this.deviceSyncDefaultTemplateId = null;
         this.deviceSyncDefaultContext = '';
+        this._carriedApplyToAll = null;
         this.resetSession();
       }
       this.loaded = true;
@@ -440,6 +460,23 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
     },
 
     /**
+     * An automatic run stopped early because the user started a recording in
+     * the app. An "apply to all" answer given in it still covers the files
+     * the run had not reached - only those - when a later run takes them.
+     */
+    pauseDeviceSyncRun(remainingFileNames = []) {
+      if (this.deviceSyncRunActive && this.deviceSyncApplyToAll !== undefined && remainingFileNames.length > 0) {
+        this._carriedApplyToAll = { answer: this.deviceSyncApplyToAll, files: [...remainingFileNames] };
+      }
+      this.endDeviceSyncRun();
+    },
+
+    /** Drop a carried answer (device forgotten or disconnected, user switch). */
+    clearCarriedApplyToAll() {
+      this._carriedApplyToAll = null;
+    },
+
+    /**
      * Ask the user for prep fields for one device recording. Resolves with the
      * wire fields ({} / null = none) once answered. Resolves immediately when
      * prompting is disabled (defaults are applied automatically) or the user
@@ -449,6 +486,12 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
       if (!this.askOnDeviceSync) {
         const defaults = this.deviceSyncDefaultFields();
         return Promise.resolve(Object.keys(defaults).length > 0 ? defaults : null);
+      }
+      const carried = this._carriedApplyToAll;
+      if (carried && info.fileName && carried.files.includes(info.fileName)) {
+        carried.files = carried.files.filter((f) => f !== info.fileName);
+        if (carried.files.length === 0) this._carriedApplyToAll = null;
+        return Promise.resolve(carried.answer);
       }
       if (this.deviceSyncRunActive && this.deviceSyncApplyToAll !== undefined) {
         return Promise.resolve(this.deviceSyncApplyToAll);
@@ -484,13 +527,23 @@ export const useMeetingPrepStore = defineStore('meeting-prep', {
       return this._deviceSyncInFlight.includes(recordId);
     },
 
+    /** Called by DeviceSyncPrepDialog when the user's own flow starts or ends. */
+    setPhoneFlowActive(active) {
+      this.phoneFlowActive = !!active;
+      if (!this.phoneFlowActive) this._maybeShowNextPrompt();
+    },
+
     _maybeShowNextPrompt() {
       if (this.deviceSyncPrompt || this._deviceSyncQueue.length === 0) return;
-      // Never pop a blocking modal while the user is actively recording in-app;
-      // the queue drains when the recording ends (dialog watches isBlocking).
+      // Never pop a device prompt into the user's own recording or upload:
+      // not while it runs and not over its result. Shown there, the prompt read
+      // as if it were about the recording just made (03.10.2026: a stranded
+      // Pro file from 22.09. popped up the moment a phone upload finished).
+      // The queue drains once the user has left that flow.
+      if (this.phoneFlowActive) return;
       try {
-        const recordingStore = useRecordingStoreRef ? useRecordingStoreRef() : null;
-        if (recordingStore && recordingStore.isBlocking) return;
+        const recordingStore = useRecordingStore();
+        if (recordingStore.isBlocking || recordingStore.startRequested) return;
       } catch { /* recording store unavailable - show the prompt */ }
       const next = this._deviceSyncQueue.shift();
       this.deviceSyncPrompt = next.info;
