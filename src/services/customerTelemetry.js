@@ -30,8 +30,9 @@ export const TELEMETRY_EVENTS = Object.freeze(['view', 'blocked', 'sent', 'rejec
 
 const SID_RE = /^[a-z0-9]{6,24}$/;
 const REASON_RE = /^[A-Za-z0-9_]{1,40}$/;
-// "field:kind", both programmer-defined identifiers (e.g. "email:missing").
-const FIELD_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,30}:[a-z][a-z0-9_]{0,30}$/;
+// "field:kind", both programmer-defined identifiers (e.g. "email:missing",
+// "code:invalidFormat").
+const FIELD_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,30}:[a-zA-Z][a-zA-Z0-9_]{0,30}$/;
 const MAX_FIELDS = 10;
 const SID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 

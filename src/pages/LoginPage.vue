@@ -66,8 +66,115 @@
           <p>{{ $t('signInToStart') }}</p>
         </div>
 
+        <!-- Second factor (password sign-in of a 2FA account). Never a
+             disabled button: a click with a wrong format says what is wrong. -->
+        <q-form
+          v-if="twoFactorStep"
+          class="login-form two-factor-form"
+          @submit="handleVerifyCode"
+          @validation-error="onCodeBlocked"
+        >
+          <p class="two-factor-hint">
+            {{ $t(twoFactorHintKey(twoFactorStep.method, useBackupCode)) }}
+          </p>
+
+          <q-input
+            v-if="!useBackupCode"
+            key="otp"
+            v-model="otpCode"
+            :label="$t('twoFactorCodeLabel')"
+            outlined
+            autofocus
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            maxlength="16"
+            :rules="[val => isValidOtp(val) || $t('twoFactorCodeFormat')]"
+            lazy-rules="ondemand"
+            class="q-mb-md two-factor-code"
+            @update:model-value="tracker.noteInput()"
+          >
+            <template #prepend>
+              <q-icon
+                name="dialpad"
+                color="grey-6"
+              />
+            </template>
+          </q-input>
+          <q-input
+            v-else
+            key="backup"
+            v-model="backupCode"
+            :label="$t('twoFactorBackupCodeLabel')"
+            outlined
+            autofocus
+            autocomplete="off"
+            autocapitalize="characters"
+            spellcheck="false"
+            maxlength="20"
+            :rules="[val => isValidBackupCode(val) || $t('twoFactorBackupCodeFormat')]"
+            lazy-rules="ondemand"
+            class="q-mb-md two-factor-code"
+            @update:model-value="tracker.noteInput()"
+          >
+            <template #prepend>
+              <q-icon
+                name="vpn_key"
+                color="grey-6"
+              />
+            </template>
+          </q-input>
+
+          <div
+            v-if="authStore.error"
+            class="error-banner q-mb-md"
+          >
+            <q-icon
+              name="error_outline"
+              color="negative"
+            />
+            <span>{{ authStore.error }}</span>
+            <q-btn
+              flat
+              round
+              size="sm"
+              icon="close"
+              color="grey-7"
+              @click="authStore.clearError()"
+            />
+          </div>
+
+          <q-btn
+            type="submit"
+            unelevated
+            class="gradient-btn full-width"
+            size="lg"
+            :loading="authStore.loading"
+          >
+            {{ $t('twoFactorVerify') }}
+          </q-btn>
+
+          <div class="two-factor-links">
+            <a
+              href="#"
+              @click.prevent="toggleBackupCode"
+            >{{ useBackupCode ? $t('twoFactorUseCode') : $t('twoFactorUseBackupCode') }}</a>
+            <a
+              v-if="twoFactorStep.method === 'EMAIL' && !useBackupCode"
+              href="#"
+              :class="{ 'link-waiting': resendWait > 0 || authStore.twoFactorResending }"
+              :aria-disabled="resendWait > 0 ? 'true' : undefined"
+              @click.prevent="handleResendCode"
+            >{{ resendWait > 0 ? $t('twoFactorResendIn', { seconds: resendWait }) : $t('twoFactorResend') }}</a>
+            <a
+              href="#"
+              @click.prevent="backToPassword"
+            >{{ $t('twoFactorBackToLogin') }}</a>
+          </div>
+        </q-form>
+
         <!-- Login Form -->
         <q-form
+          v-else
           class="login-form"
           @submit="handleLogin"
           @validation-error="onLoginBlocked"
@@ -141,7 +248,7 @@
 
         <!-- SSO providers (desktop + mobile) -->
         <div
-          v-if="isDesktopApp || isMobileApp"
+          v-if="(isDesktopApp || isMobileApp) && !twoFactorStep"
           class="sso-section"
         >
           <div class="sso-divider">
@@ -203,7 +310,10 @@
         </div>
 
         <!-- Links -->
-        <div class="login-links">
+        <div
+          v-if="!twoFactorStep"
+          class="login-links"
+        >
           <!-- Phones: registration is not offered in the app (App Store
                3.1.1), but a Microsoft/Google sign-in creates the account.
                No link to a web sign-up or purchase. -->
@@ -268,14 +378,17 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
+import { useQuasar } from 'quasar';
 import { useAuthStore } from '../stores/auth';
 import { isElectron, isCapacitor, getPlatform } from '../utils/platform';
 import { useLanguage } from '../composables/useLanguage';
 import { captureMessage } from '../boot/sentry';
 import { createStepTracker } from '../services/customerTelemetry';
 import { loginFieldProblems } from '../utils/entryForms';
+import { isValidOtp, isValidBackupCode, codeFieldProblem, resendSecondsLeft, twoFactorHintKey } from '../utils/twoFactor';
 
 const router = useRouter();
+const $q = useQuasar();
 const authStore = useAuthStore();
 const { t } = useI18n();
 const { languages, currentLang, currentLangShort, setLanguage, initLanguage } = useLanguage();
@@ -361,6 +474,7 @@ onMounted(async () => {
 
 onUnmounted(async () => {
   clearSSOTimeoutHandle();
+  if (resendTicker) { clearInterval(resendTicker); resendTicker = null; }
   if (authStore.isAuthenticated) tracker.done();
   else tracker.left();
   if (isCapacitor()) {
@@ -396,9 +510,91 @@ const handleLogin = async () => {
   if (result.success) {
     tracker.done();
     router.push('/record');
+  } else if (result.requiresTwoFactor) {
+    // The password was right; the code step takes over. The password is not
+    // kept around: an expired step means signing in again anyway.
+    password.value = '';
+    resetCodeInputs();
   } else {
     tracker.rejected(result.reason);
   }
+};
+
+// --- Second factor (2FA accounts, new backend) ---------------------------
+const twoFactorStep = computed(() => authStore.twoFactor);
+const otpCode = ref('');
+const backupCode = ref('');
+const useBackupCode = ref(false);
+const now = ref(Date.now());
+let resendTicker = null;
+const resendWait = computed(() => resendSecondsLeft(authStore.twoFactor, now.value));
+
+function resetCodeInputs() {
+  otpCode.value = '';
+  backupCode.value = '';
+  useBackupCode.value = false;
+}
+
+// Countdown for "send code again" while an e-mail code step is open.
+watch(() => authStore.twoFactor?.method, (method) => {
+  if (resendTicker) { clearInterval(resendTicker); resendTicker = null; }
+  if (method === 'EMAIL') {
+    now.value = Date.now();
+    resendTicker = setInterval(() => { now.value = Date.now(); }, 1000);
+  }
+}, { immediate: true });
+
+const currentCodeProblem = () => codeFieldProblem(useBackupCode.value ? backupCode.value : otpCode.value, { backup: useBackupCode.value });
+
+const onCodeBlocked = () => {
+  const problem = currentCodeProblem();
+  tracker.blocked(problem ? [problem] : []);
+};
+
+const handleVerifyCode = async () => {
+  const problem = currentCodeProblem();
+  if (problem) {
+    tracker.blocked([problem]);
+    return;
+  }
+  const backup = useBackupCode.value;
+  tracker.sent(backup ? '2fa_backup_code' : '2fa_code');
+  const result = await authStore.verifyTwoFactor(backup ? backupCode.value : otpCode.value, { backup });
+  if (result.success) {
+    tracker.done();
+    router.push('/record');
+    return;
+  }
+  tracker.rejected(result.reason);
+  if (result.next === 'password') {
+    // Step over (expired / too many attempts): the text stays on the password form.
+    resetCodeInputs();
+  } else if (backup) {
+    backupCode.value = '';
+  } else {
+    otpCode.value = '';
+  }
+};
+
+const toggleBackupCode = () => {
+  useBackupCode.value = !useBackupCode.value;
+  authStore.clearError();
+};
+
+const handleResendCode = async () => {
+  if (resendWait.value > 0 || authStore.twoFactorResending) return; // the link shows the countdown
+  const result = await authStore.resendTwoFactorEmail();
+  if (result.success) {
+    now.value = Date.now();
+    $q.notify({ type: 'positive', message: t('twoFactorResent'), timeout: 4000 });
+  } else if (result.reason && !result.cooldown) {
+    tracker.rejected(result.reason);
+  }
+};
+
+const backToPassword = () => {
+  authStore.cancelTwoFactor();
+  resetCodeInputs();
 };
 
 /**
@@ -636,6 +832,44 @@ const openForgotPassword = async () => {
     &:hover {
       color: #6366F1;
       text-decoration: underline;
+    }
+  }
+}
+
+// Second-factor step
+.two-factor-hint {
+  color: #475569;
+  font-size: 14px;
+  line-height: 1.45;
+  margin: 0 0 16px 0;
+}
+
+.two-factor-code :deep(input) {
+  letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+}
+
+.two-factor-links {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+
+  a {
+    color: #6366F1;
+    font-size: 13px;
+    text-decoration: none;
+
+    &:hover {
+      text-decoration: underline;
+    }
+
+    // Cooldown: the label shows the remaining seconds.
+    &.link-waiting {
+      color: #94a3b8;
+      cursor: default;
+      text-decoration: none;
     }
   }
 }

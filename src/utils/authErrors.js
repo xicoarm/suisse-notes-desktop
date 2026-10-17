@@ -74,6 +74,9 @@ export function describeLoginFailure(failure = {}) {
     case 'account_disabled': return { key: 'accountDisabled', reason: 'account_disabled' };
     case 'too_many_attempts': return { key: 'authTooManyAttempts', reason: 'too_many_attempts' };
     case 'missing_fields': return { key: 'loginMissingFields', reason: 'missing_fields' };
+    // A backend that requires the second factor answers app versions
+    // without 2FA support for 2FA accounts this way.
+    case 'app_update_required': return { key: 'appUpdateRequired', reason: 'app_update_required' };
     default: break;
   }
 
