@@ -72,7 +72,6 @@ export function createOccurrenceSampler({ burst = BURST_BY_LEVEL, maxKeys = 500 
   };
 }
 
-/** The HTTP-client integration marks failed responses as unhandled — they are not app crashes. */
 /**
  * Failed HTTP answers that are the user's input, not a bug: a mistyped
  * (400), expired (410) or rate-limited (429) second-factor code, and a resend
@@ -94,6 +93,7 @@ export function isExpectedHttpAnswer(event) {
   return EXPECTED_HTTP_ANSWERS.some(rule => rule.path.test(path) && rule.statuses.includes(status));
 }
 
+/** The HTTP-client integration marks failed responses as unhandled — they are not app crashes. */
 export function treatHttpClientAsHandled(event) {
   for (const value of event?.exception?.values || []) {
     if (value?.mechanism?.type === 'http.client') value.mechanism.handled = true;

@@ -115,6 +115,13 @@ class MobileApp {
     await this.page.setViewport({ width: 390, height: 844, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
     this.page.on('console', (m) => { this.console.push(`[${m.type()}] ${m.text()}`); if (this.console.length > 5000) this.console.shift(); });
     this.page.on('pageerror', (e) => this.console.push(`[pageerror] ${e.message}`));
+    // "Failed to fetch" in the app log does not say why; Chrome's error code does
+    // (aborted by the harness on purpose, connection refused, reset, ...).
+    this.page.on('requestfailed', (r) => {
+      const why = r.failure()?.errorText || 'unknown';
+      if (r.url().startsWith('capacitor:') || why === 'net::ERR_INTERNET_DISCONNECTED') return; // aborted by the harness on purpose
+      this.console.push(`[requestfailed] ${r.method()} ${r.url().slice(0, 160)} ${why}`);
+    });
     await this._installInterception();
     await this.page.evaluateOnNewDocument(installVirtualRecorder, this.recorderCfg);
     await this.page.evaluateOnNewDocument(installBridge, { platform: this.platform, deviceUrl: this.device.url, ...this.bridgeCfg });
@@ -187,7 +194,8 @@ class MobileApp {
       } catch (e) { lastErr = e; await sleep(1000); }
     }
     await this.screenshot('stable-page-timeout').catch(() => {});
-    throw new Error(`App page never stabilized: ${lastErr?.message}\n${this.console.slice(-15).join('\n')}`);
+    const where = await this.page.evaluate(() => `${location.href} text=${(document.body?.innerText || '').length} chars`).catch(() => '?');
+    throw new Error(`App page never stabilized (${where}): ${lastErr?.message}\n${this.console.slice(-15).join('\n')}`);
   }
 
   async login(email = 'e2e@test.local', password = 'e2e-password') {
