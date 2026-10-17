@@ -97,7 +97,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       )
   },
 
-  // Recording (WhisperTranscribe pattern)
+  // Recording (chunked, synchronous writes)
   recording: {
     createSession: (id, ext, userId, options) =>
       withTimeout(

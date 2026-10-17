@@ -2471,7 +2471,7 @@ ipcMain.handle('minutes:fetch', async () => {
   }
 });
 
-// --- Recording (WhisperTranscribe Patterns) ---
+// --- Recording (chunked, synchronous writes) ---
 
 // Per-recording mutex. Serializes saveChunk, createSessionFile, and combineChunks
 // for a given recordId so their async await points cannot interleave on disk.
@@ -3429,7 +3429,7 @@ for (const operation of ['beginSource', 'markSourceStarted', 'saveSourceChunk', 
   });
 }
 
-// 2. Save recording chunk - SYNCHRONOUS write (WhisperTranscribe pattern)
+// 2. Save recording chunk - SYNCHRONOUS write
 ipcMain.handle('recording:saveChunk', async (event, recordId, chunkData, chunkIndex, ext, userId) => {
   // Validate first (sync, fail fast without acquiring a lock on bogus IDs)
   let validRecordId, validExt, validChunkIndex, validUserId;
