@@ -17,6 +17,7 @@ import {
   createEarlyErrorBuffer,
   createOccurrenceSampler,
   errorDetails,
+  isExpectedHttpAnswer,
   sanitizeConsoleArguments,
   treatHttpClientAsHandled
 } from '../utils/sentryCapture';
@@ -265,6 +266,8 @@ async function initElectronRenderer(app, router) {
 export function appBeforeSend(event, hint, sampler) {
   const scrubbed = scrubSensitiveData(event, hint);
   if (!scrubbed) return null;
+  // A mistyped/expired second-factor code is the user's, not a bug.
+  if (isExpectedHttpAnswer(scrubbed)) return null;
   treatHttpClientAsHandled(scrubbed);
   sanitizeConsoleArguments(scrubbed);
   const details = errorDetails(hint?.originalException);
