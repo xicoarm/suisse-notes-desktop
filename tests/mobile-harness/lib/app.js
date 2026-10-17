@@ -95,15 +95,7 @@ class MobileApp {
       '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-background-timer-throttling',
       '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows', '--autoplay-policy=no-user-gesture-required',
       '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--no-sandbox', '--disable-dev-shm-usage',
-      '--lang=de-CH',
-      // Chromium 155+ (crbug 513518289, "Avoid CorsURLLoader restart on
-      // redirect") cancels cross-origin loads (net::ERR_ABORTED, canceled)
-      // while DevTools Fetch interception is on - and the harness rewrites
-      // every API request to the mock that way. CI (Chrome 155.0.8059) then
-      // lost random API calls and app chunks after a sign-in or relaunch
-      // ("Failed to fetch dynamically imported module", blank page), on main
-      // as well. Puppeteer merges this with its own --disable-features.
-      '--disable-features=AvoidCorsURLLoaderRestartOnRedirect'
+      '--lang=de-CH'
     ];
     if (this.fakeAudioWav) args.push(`--use-file-for-fake-audio-capture=${this.fakeAudioWav}`);
     this.browser = await puppeteer.launch({
