@@ -4,6 +4,10 @@ import { setActivePinia, createPinia } from 'pinia';
 vi.mock('../../src/boot/sentry', () => ({
   addBreadcrumb: vi.fn(), captureException: vi.fn(), captureMessage: vi.fn(), setUser: vi.fn()
 }));
+// Sign-in only needs the device store's reload hook (the real one is a slow import).
+vi.mock('../../src/stores/device', () => ({
+  useDeviceStore: () => ({ reloadForUser: vi.fn(async () => {}), onLogout: vi.fn(async () => {}) })
+}));
 const setFromServer = vi.fn();
 vi.mock('../../src/stores/minutes', () => ({
   useMinutesStore: () => ({ fetchMinutes: vi.fn(async () => ({ success: true })), setFromServer, reset: vi.fn() })

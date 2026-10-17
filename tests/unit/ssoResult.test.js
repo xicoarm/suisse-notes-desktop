@@ -3,6 +3,11 @@ import { setActivePinia, createPinia } from 'pinia';
 
 const sentry = vi.hoisted(() => ({ captureMessage: vi.fn(), addBreadcrumb: vi.fn(), captureException: vi.fn(), setUser: vi.fn() }));
 vi.mock('../../src/boot/sentry', () => sentry);
+// The real device store (BLE stack) is a slow first import under a loaded
+// full-suite run (timed out once); sign-in only needs its reload hook.
+vi.mock('../../src/stores/device', () => ({
+  useDeviceStore: () => ({ reloadForUser: vi.fn(async () => {}), onLogout: vi.fn(async () => {}) })
+}));
 vi.mock('../../src/stores/minutes', () => ({
   useMinutesStore: () => ({ fetchMinutes: vi.fn(async () => ({ success: true })), setFromServer: vi.fn(), reset: vi.fn() })
 }));
