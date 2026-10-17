@@ -115,13 +115,28 @@ class MobileApp {
     await this.page.setViewport({ width: 390, height: 844, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
     this.page.on('console', (m) => { this.console.push(`[${m.type()}] ${m.text()}`); if (this.console.length > 5000) this.console.shift(); });
     this.page.on('pageerror', (e) => this.console.push(`[pageerror] ${e.message}`));
-    // "Failed to fetch" in the app log does not say why; Chrome's error code does
-    // (aborted by the harness on purpose, connection refused, reset, ...).
-    this.page.on('requestfailed', (r) => {
-      const why = r.failure()?.errorText || 'unknown';
-      if (r.url().startsWith('capacitor:') || why === 'net::ERR_INTERNET_DISCONNECTED') return; // aborted by the harness on purpose
-      this.console.push(`[requestfailed] ${r.method()} ${r.url().slice(0, 160)} ${why}`);
+    // "Failed to fetch" in the app log does not say why. Chrome's own network
+    // log does - also for requests blocked before they reach the network (and
+    // so before the harness interception sees them), which puppeteer's
+    // requestfailed event never reports. Cross-document navigations of the app
+    // page are logged too: a started navigation cancels every running load.
+    const cdp = await this.page.createCDPSession();
+    await cdp.send('Network.enable');
+    await cdp.send('Page.enable');
+    const urls = new Map();
+    cdp.on('Network.requestWillBeSent', (e) => { urls.set(e.requestId, `${e.request.method} ${e.request.url.slice(0, 160)}`); if (urls.size > 2000) urls.delete(urls.keys().next().value); });
+    cdp.on('Network.loadingFailed', (e) => {
+      const what = urls.get(e.requestId) || `(${e.type || 'request'} ${e.requestId})`;
+      if (what.includes(' capacitor:') || e.errorText === 'net::ERR_INTERNET_DISCONNECTED') return; // aborted by the harness on purpose
+      const why = [e.errorText, e.canceled && 'canceled', e.blockedReason && `blocked=${e.blockedReason}`,
+        e.corsErrorStatus && `cors=${e.corsErrorStatus.corsError}`].filter(Boolean).join(' ');
+      this.console.push(`[netfail] ${what} ${why}`);
     });
+    cdp.on('Page.frameRequestedNavigation', (e) => this.console.push(`[navigation] requested ${e.reason} ${e.url.slice(0, 160)}`));
+    cdp.on('Page.frameStartedNavigating', (e) => {
+      if (e.navigationType !== 'sameDocument') this.console.push(`[navigation] started ${e.navigationType} ${e.url.slice(0, 160)}`);
+    });
+    if (!this._versionLogged) { this._versionLogged = true; this.console.push(`[harness] ${await this.browser.version()}`); }
     await this._installInterception();
     await this.page.evaluateOnNewDocument(installVirtualRecorder, this.recorderCfg);
     await this.page.evaluateOnNewDocument(installBridge, { platform: this.platform, deviceUrl: this.device.url, ...this.bridgeCfg });
