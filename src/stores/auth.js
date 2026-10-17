@@ -409,6 +409,12 @@ export const useAuthStore = defineStore('auth', {
       this.error = null;
       try {
         const result = await platformVerifyTwoFactor(step.tempToken, normalized, backup);
+        // "Back to sign-in" (or a new password attempt) while the answer was
+        // on its way: this step is over - neither sign in nor show its error.
+        if (this.twoFactor !== step) {
+          addBreadcrumb({ category: 'auth', message: 'Second-factor answer ignored: step was left', level: 'info' });
+          return { success: false, ignored: true, reason: '2fa_step_left', next: 'password' };
+        }
         if (result?.success && result.token) {
           await this._completePasswordLogin(result);
           addBreadcrumb({ category: 'auth', message: 'Second factor accepted', level: 'info' });
@@ -419,6 +425,9 @@ export const useAuthStore = defineStore('auth', {
         if (failure.next === 'password') this.twoFactor = null;
         return { success: false, reason: failure.reason, next: failure.next, error: this.error };
       } catch (error) {
+        if (this.twoFactor !== step) {
+          return { success: false, ignored: true, reason: '2fa_step_left', next: 'password' };
+        }
         if (isNetworkFailure(error)) {
           const failure = describeTwoFactorFailure({ network: networkKind(error) }, { backup });
           this.error = tr(failure.key);

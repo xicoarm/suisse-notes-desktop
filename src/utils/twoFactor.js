@@ -92,6 +92,11 @@ const VERIFY_CODES = {
  * `reason` is "2fa_<code>" / "2fa_status_<n>" for telemetry.
  */
 export function describeTwoFactorFailure(failure = {}, { backup = false } = {}) {
+  // 429 first: nginx's rate-limit page is HTML, and the not-JSON check below
+  // would call it "service briefly unavailable".
+  if (Number(failure.status) === 429) {
+    return { key: 'twoFactorTooManyAttempts', reason: failure.code ? `2fa_${failure.code}` : '2fa_status_429', next: 'password' };
+  }
   // Network and service problems: the same texts as the password step.
   if (failure.network || failure.networkCode || failure.nonJson || Number(failure.status) >= 500) {
     const generic = describeLoginFailure(failure);

@@ -565,6 +565,7 @@ const handleVerifyCode = async () => {
     router.push('/record');
     return;
   }
+  if (result.ignored) return; // the user left the code step meanwhile
   tracker.rejected(result.reason);
   if (result.next === 'password') {
     // Step over (expired / too many attempts): the text stays on the password form.
