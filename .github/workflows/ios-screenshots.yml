@@ -15,6 +15,16 @@ on:
         description: 'Directory in this ref with the 1320x2868 / 2868x1320 PNG files'
         required: true
         type: string
+      display:
+        description: 'Slot: APP_IPHONE_67 (iPhone 6.9") or APP_IPAD_PRO_3GEN_129 (iPad 13")'
+        required: true
+        default: 'APP_IPHONE_67'
+        type: string
+      locale:
+        description: 'Only this localization (e.g. de-DE); empty = all'
+        required: false
+        default: ''
+        type: string
       dry_run:
         description: 'Only list the current screenshot slots (changes nothing)'
         required: true
@@ -41,4 +51,6 @@ jobs:
             --app 6758680707 \
             --version "${{ inputs.version }}" \
             --dir "${{ inputs.dir }}" \
+            --display "${{ inputs.display }}" \
+            ${{ inputs.locale && format('--locale {0}', inputs.locale) || '' }} \
             ${{ inputs.dry_run && '--dry-run' || '' }}
