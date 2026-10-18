@@ -28,6 +28,11 @@ on:
         required: false
         default: false
         type: boolean
+      withdraw:
+        description: 'Withdraw that version from review (it becomes editable again)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   submit:
@@ -39,6 +44,15 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Withdraw the version from review
+        if: ${{ inputs.withdraw }}
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          ASC_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+        run: |
+          node scripts/asc-submit.js             --app 6758680707             --version "${{ inputs.version }}"             --withdraw
+
       - name: Read the state of the version (changes nothing)
         if: ${{ inputs.status }}
         env:
@@ -49,7 +63,7 @@ jobs:
           node scripts/asc-submit.js             --app 6758680707             --version "${{ inputs.version }}"             --status
 
       - name: Write release notes
-        if: ${{ !inputs.status }}
+        if: ${{ !inputs.status && !inputs.withdraw }}
         run: |
           cat > /tmp/release-notes.txt <<'NOTES'
           Mehr Sicherheit bei der Anmeldung:
@@ -58,7 +72,7 @@ jobs:
           cat /tmp/release-notes.txt
 
       - name: Create version, attach build, submit
-        if: ${{ !inputs.status }}
+        if: ${{ !inputs.status && !inputs.withdraw }}
         env:
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
