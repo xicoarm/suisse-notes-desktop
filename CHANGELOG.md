@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.17](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.16...v4.7.17) (2026-10-18)
+
+
+### Features
+
+* **auth:** ask for the second factor in the app password sign-in ([199f73a](https://github.com/xicoarm/suisse-notes-desktop/commit/199f73ae144ecdf5cfbcba2d659edb8688726ac4))
+* **desktop:** main-process second factor for the password sign-in ([e1c7816](https://github.com/xicoarm/suisse-notes-desktop/commit/e1c78164d7dfb23abef7eb25f87a08c70c582819))
+* **i18n:** texts for the second factor in the password sign-in ([1a8f41f](https://github.com/xicoarm/suisse-notes-desktop/commit/1a8f41fb0b480e1974041fb211f7d8025867fd58))
+
+
+### Bug Fixes
+
+* **auth:** ignore a late second-factor answer; nginx 429 page means too many attempts ([9288f5b](https://github.com/xicoarm/suisse-notes-desktop/commit/9288f5b5d65357b9502d4f8a2ae612725193874c))
+* **device:** no recorder transfer while the user records in the app ([be28709](https://github.com/xicoarm/suisse-notes-desktop/commit/be28709eb4bbbe297d81b0fdeb304e6925dedb4e))
+* **e2e:** test runs never take over the suissenotes:// links ([eee8bfd](https://github.com/xicoarm/suisse-notes-desktop/commit/eee8bfd02d1009dc067f20640f0a02cba114d90c))
+* **mobile:** upload Suisse Meets Pro recordings without the context prompt ([28118ee](https://github.com/xicoarm/suisse-notes-desktop/commit/28118eed1ab77c462929e04847f951febd877e2e))
+* **prep:** close the review gaps of the Pro prompt hold ([bf66f16](https://github.com/xicoarm/suisse-notes-desktop/commit/bf66f16a8ffed2ae98a1e2e6040da589700cd31a))
+* **prep:** keep the Suisse Meets Pro prompt out of the phone recording ([52a7dcd](https://github.com/xicoarm/suisse-notes-desktop/commit/52a7dcd9d3d9d90eebe28dac0c8e8e1bab9e6353))
+* **sentry:** drop expected second-factor answers (mistyped, expired, rate-limited codes) ([7bb4594](https://github.com/xicoarm/suisse-notes-desktop/commit/7bb4594342680c33f483353fc7ff5fe0dcfdd345))
+* **upload:** say "uploaded, transcript is being created" instead of "ready" ([9406e48](https://github.com/xicoarm/suisse-notes-desktop/commit/9406e4810471654320fc5748a08ed752e67fbc49))
+
 ### [4.7.16](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.15...v4.7.16) (2026-10-10)
 
 
