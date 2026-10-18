@@ -139,8 +139,11 @@ async function main() {
     );
     if (!vs.data.length) throw new Error(`version ${version} does not exist for app ${appId}`);
     const versionId = vs.data[0].id;
-    const subs = await api('GET', `/v1/apps/${appId}/reviewSubmissions?limit=20`);
     const open = new Set(['READY_FOR_REVIEW', 'WAITING_FOR_REVIEW', 'IN_REVIEW', 'UNRESOLVED_ISSUES']);
+    const subs = await api(
+      'GET',
+      `/v1/reviewSubmissions?filter[app]=${appId}&filter[state]=${[...open].join(',')}&limit=20`
+    );
     let withdrawn = 0;
     for (const sub of subs.data || []) {
       if (!open.has(sub.attributes.state)) continue;
