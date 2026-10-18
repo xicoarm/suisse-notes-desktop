@@ -1,0 +1,44 @@
+name: iOS Screenshots to App Store
+
+# Replaces the iPhone screenshots of an editable App Store version with the PNG
+# files of a directory in the dispatched ref (sorted by name). iPad and Mac
+# slots are not touched. Run with dry_run first.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Marketing version (e.g. 3.9.42); must be editable'
+        required: true
+        type: string
+      dir:
+        description: 'Directory in this ref with the 1320x2868 / 2868x1320 PNG files'
+        required: true
+        type: string
+      dry_run:
+        description: 'Only list the current screenshot slots (changes nothing)'
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  screenshots:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Replace the iPhone screenshots
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          ASC_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+        run: |
+          node scripts/asc-screenshots.js \
+            --app 6758680707 \
+            --version "${{ inputs.version }}" \
+            --dir "${{ inputs.dir }}" \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
