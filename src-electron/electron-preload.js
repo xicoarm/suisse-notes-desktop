@@ -52,6 +52,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('auth:login', username, password),
     register: (email, password, name) =>
       ipcRenderer.invoke('auth:register', email, password, name),
+    // Second factor of the password sign-in (main validates again).
+    verifyTwoFactor: (tempToken, code, isBackupCode) =>
+      ipcRenderer.invoke('auth:verifyTwoFactor', String(tempToken ?? ''), String(code ?? ''), isBackupCode === true),
+    resendTwoFactorEmail: (tempToken) =>
+      ipcRenderer.invoke('auth:resendTwoFactorEmail', String(tempToken ?? '')),
     saveToken: (token) => ipcRenderer.invoke('auth:saveToken', token),
     getToken: () => ipcRenderer.invoke('auth:getToken'),
     clearToken: () => ipcRenderer.invoke('auth:clearToken'),
@@ -92,7 +97,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       )
   },
 
-  // Recording (WhisperTranscribe pattern)
+  // Recording (chunked, synchronous writes)
   recording: {
     createSession: (id, ext, userId, options) =>
       withTimeout(

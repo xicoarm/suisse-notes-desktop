@@ -5,6 +5,10 @@ import { apiRequest, authenticatedRequest, API_ENDPOINTS, parseJsonSafe } from '
 import { addBreadcrumb, captureException, captureMessage, setUser } from '../boot/sentry';
 import { i18n } from '../boot/i18n';
 import { describeLoginFailure, describeRegisterFailure, classifySsoError } from '../utils/authErrors';
+import {
+  twoFactorChallengeFrom, startTwoFactorStep, resendSecondsLeft, normalizeOtp, normalizeBackupCode,
+  describeTwoFactorFailure, describeResendFailure, RESEND_COOLDOWN_MS
+} from '../utils/twoFactor';
 
 const tr = (key, params) => { try { return params ? i18n.global.t(key, params) : i18n.global.t(key); } catch { return key; } };
 
@@ -81,12 +85,13 @@ async function platformLogin(username, password) {
   if (isElectron()) {
     return window.electronAPI.auth.login(username, password);
   }
-  // Mobile / web: direct fetch
+  // Mobile / web: direct fetch. `twoFactor: "supported"`: this app asks for
+  // the second factor (utils/twoFactor.js); older backends ignore the field.
   let response;
   try {
     response = await apiRequest(API_ENDPOINTS.login, {
       method: 'POST',
-      body: JSON.stringify({ email: username, password }),
+      body: JSON.stringify({ email: username, password, twoFactor: 'supported' }),
       // Safe to resend: a gateway answer means the backend was restarting.
       retryGateway: true
     });
@@ -98,6 +103,11 @@ async function platformLogin(username, password) {
     throw error;
   }
   const data = await parseJsonSafe(response);
+  const challenge = response.ok && !data.nonJson && !data.token ? twoFactorChallengeFrom(data) : null;
+  if (challenge) {
+    addBreadcrumb({ category: 'auth', message: `Login: second factor required (${challenge.twoFactorMethod})`, level: 'info' });
+    return { success: false, ...challenge };
+  }
   if (!response.ok || data.nonJson || !data.token) {
     addBreadcrumb({ category: 'auth', message: `Login failed: HTTP ${response.status} code=${data.code || '-'}`, level: 'warning' });
     // Structured for describeLoginFailure; the server's sentence is never shown.
@@ -126,6 +136,51 @@ async function platformRegister(email, password, name) {
     return failureFromAnswer(response, data);
   }
   return { success: true, token: data.token, user: data.user };
+}
+
+/**
+ * Second factor: POST /api/auth/desktop/verify-2fa. Success has the shape of
+ * a password sign-in success. Desktop goes through the main process.
+ */
+async function platformVerifyTwoFactor(tempToken, code, isBackupCode) {
+  if (isElectron()) {
+    return window.electronAPI.auth.verifyTwoFactor(tempToken, code, isBackupCode);
+  }
+  let response;
+  try {
+    response = await apiRequest(API_ENDPOINTS.verifyTwoFactor, {
+      method: 'POST',
+      body: JSON.stringify({ tempToken, code, isBackupCode }),
+      // A gateway answer never reached the backend: resending cannot count twice.
+      retryGateway: true
+    });
+  } catch (error) {
+    if (isNetworkFailure(error)) return { success: false, network: networkKind(error), networkError: true };
+    throw error;
+  }
+  const data = await parseJsonSafe(response);
+  if (!response.ok || data.nonJson || !data.token) return failureFromAnswer(response, data);
+  return { success: true, token: data.token, user: data.user, minutes: data.minutes };
+}
+
+/** E-mail second factor: POST /api/auth/resend-2fa-email. */
+async function platformResendTwoFactorEmail(tempToken) {
+  if (isElectron()) {
+    return window.electronAPI.auth.resendTwoFactorEmail(tempToken);
+  }
+  let response;
+  try {
+    response = await apiRequest(API_ENDPOINTS.resendTwoFactorEmail, {
+      method: 'POST',
+      body: JSON.stringify({ tempToken })
+    });
+  } catch (error) {
+    if (isNetworkFailure(error)) return { success: false, network: networkKind(error), networkError: true };
+    throw error;
+  }
+  const data = await parseJsonSafe(response);
+  if (response.ok && !data.nonJson && data.success === true) return { success: true };
+  return failureFromAnswer(response, data);
 }
 
 /**
@@ -236,58 +291,37 @@ export const useAuthStore = defineStore('auth', {
     ssoProvider: null,
     // Last SSO outcome; `seq` increments per result so a screen can react.
     ssoOutcome: { seq: 0, success: false, cancelled: false, reason: null },
+    // Password sign-in waiting for the second factor:
+    // null | { method: 'AUTHENTICATOR'|'EMAIL', tempToken, resendAvailableAt }.
+    // In memory only (the temp token is short-lived and never stored).
+    twoFactor: null,
+    twoFactorResending: false,
     _refreshPromise: null,  // Mutex for token refresh (prevents concurrent stampede)
     _tokenRefreshInterval: null,
   }),
 
   actions: {
+    /**
+     * Password sign-in. For an account with 2FA (new backend) the answer is a
+     * challenge: no session yet, `twoFactor` holds the step and the result
+     * says { requiresTwoFactor: true } - the screen then asks for the code
+     * (verifyTwoFactor). Old backends answer exactly as before.
+     */
     async login(username, password) {
       this.loading = true;
       this.error = null;
+      this.twoFactor = null;
 
       try {
         const result = await platformLogin(username, password);
 
         if (result.success) {
-          this.user = result.user;
-          this.token = result.token;
-          this.isAuthenticated = true;
-          // A Microsoft/Google sign-in still waiting in the browser is over:
-          // its result must not replace this session later.
-          discardPendingSSO(this);
-
-          // Save token and user info securely
-          await platformSaveToken(result.token);
-          await platformSaveUserInfo(result.user);
-
-          // Set Sentry user context
-          setUser(result.user);
-
-          // Seed minutes store from login response
-          if (result.minutes) {
-            const { useMinutesStore } = await import('./minutes');
-            const minutesStore = useMinutesStore();
-            minutesStore.setFromServer(result.minutes);
-          } else {
-            refreshMinutesInBackground(result.token);
-          }
-
-          // Start periodic token refresh
-          this.startTokenRefresh();
-
-          // Reload device store for this user (user-scoped BLE pairings)
-          try {
-            const { useDeviceStore } = await import('./device');
-            const deviceStore = useDeviceStore();
-            await deviceStore.reloadForUser();
-          } catch (e) {
-            console.warn('Device store reload after login failed:', e);
-          }
-
-          // P1 Fix: Resume any pending uploads that failed while logged out
-          resumeMobileUploadQueue(this);
-
+          await this._completePasswordLogin(result);
           return { success: true };
+        } else if (result.requiresTwoFactor && result.tempToken) {
+          this.twoFactor = startTwoFactorStep(result);
+          addBreadcrumb({ category: 'auth', message: `Second factor required (${this.twoFactor.method})`, level: 'info' });
+          return { success: false, requiresTwoFactor: true, method: this.twoFactor.method };
         } else {
           const failure = describeLoginFailure(result);
           this.error = tr(failure.key);
@@ -308,6 +342,140 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
+    /** Session from a password sign-in success (directly or after the second factor). */
+    async _completePasswordLogin(result) {
+      this.user = result.user;
+      this.token = result.token;
+      this.isAuthenticated = true;
+      this.twoFactor = null;
+      // A Microsoft/Google sign-in still waiting in the browser is over:
+      // its result must not replace this session later.
+      discardPendingSSO(this);
+
+      // Save token and user info securely
+      await platformSaveToken(result.token);
+      await platformSaveUserInfo(result.user);
+
+      // Set Sentry user context
+      setUser(result.user);
+
+      // Seed minutes store from login response
+      if (result.minutes) {
+        const { useMinutesStore } = await import('./minutes');
+        const minutesStore = useMinutesStore();
+        minutesStore.setFromServer(result.minutes);
+      } else {
+        refreshMinutesInBackground(result.token);
+      }
+
+      // Start periodic token refresh
+      this.startTokenRefresh();
+
+      // Reload device store for this user (user-scoped BLE pairings)
+      try {
+        const { useDeviceStore } = await import('./device');
+        const deviceStore = useDeviceStore();
+        await deviceStore.reloadForUser();
+      } catch (e) {
+        console.warn('Device store reload after login failed:', e);
+      }
+
+      // P1 Fix: Resume any pending uploads that failed while logged out
+      resumeMobileUploadQueue(this);
+    },
+
+    /**
+     * Second factor: the code from the authenticator app / e-mail, or a
+     * backup code. Success continues exactly like a password sign-in.
+     * A failure that ends the step (expired, too many attempts) goes back to
+     * the password form with the text in `error`.
+     * @returns {Promise<{ success: boolean, reason?: string, next?: 'stay'|'password', error?: string }>}
+     */
+    async verifyTwoFactor(code, { backup = false } = {}) {
+      const step = this.twoFactor;
+      if (!step) {
+        this.error = tr('twoFactorSessionExpired');
+        return { success: false, reason: '2fa_no_step', next: 'password', error: this.error };
+      }
+      const normalized = backup ? normalizeBackupCode(code) : normalizeOtp(code);
+      if (!normalized) {
+        // The screen validates first; this is the safety net.
+        const failure = describeTwoFactorFailure({ code: backup ? 'invalid_backup_code' : 'invalid_format' }, { backup });
+        this.error = tr(failure.key);
+        return { success: false, reason: failure.reason, next: 'stay', error: this.error };
+      }
+
+      this.loading = true;
+      this.error = null;
+      try {
+        const result = await platformVerifyTwoFactor(step.tempToken, normalized, backup);
+        // "Back to sign-in" (or a new password attempt) while the answer was
+        // on its way: this step is over - neither sign in nor show its error.
+        if (this.twoFactor !== step) {
+          addBreadcrumb({ category: 'auth', message: 'Second-factor answer ignored: step was left', level: 'info' });
+          return { success: false, ignored: true, reason: '2fa_step_left', next: 'password' };
+        }
+        if (result?.success && result.token) {
+          await this._completePasswordLogin(result);
+          addBreadcrumb({ category: 'auth', message: 'Second factor accepted', level: 'info' });
+          return { success: true };
+        }
+        const failure = describeTwoFactorFailure(result || {}, { backup });
+        this.error = tr(failure.key);
+        if (failure.next === 'password') this.twoFactor = null;
+        return { success: false, reason: failure.reason, next: failure.next, error: this.error };
+      } catch (error) {
+        if (this.twoFactor !== step) {
+          return { success: false, ignored: true, reason: '2fa_step_left', next: 'password' };
+        }
+        if (isNetworkFailure(error)) {
+          const failure = describeTwoFactorFailure({ network: networkKind(error) }, { backup });
+          this.error = tr(failure.key);
+          return { success: false, reason: failure.reason, next: 'stay', error: this.error };
+        }
+        captureException(error, { tags: { action: 'verifyTwoFactor' } });
+        this.error = tr('twoFactorFailedGeneric');
+        return { success: false, reason: '2fa_exception', next: 'stay', error: this.error };
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    /** E-mail second factor: send a new code (60 s cooldown). */
+    async resendTwoFactorEmail(now = Date.now()) {
+      const step = this.twoFactor;
+      if (!step || step.method !== 'EMAIL') return { success: false, reason: '2fa_resend_no_step' };
+      if (resendSecondsLeft(step, now) > 0 || this.twoFactorResending) {
+        return { success: false, reason: '2fa_resend_cooldown', cooldown: true };
+      }
+      this.twoFactorResending = true;
+      this.error = null;
+      try {
+        const result = await platformResendTwoFactorEmail(step.tempToken);
+        if (result?.success) {
+          if (this.twoFactor === step) this.twoFactor = { ...step, resendAvailableAt: Date.now() + RESEND_COOLDOWN_MS };
+          return { success: true };
+        }
+        const failure = describeResendFailure(result || {});
+        this.error = tr(failure.key);
+        if (failure.next === 'password') this.twoFactor = null;
+        return { success: false, reason: failure.reason, next: failure.next };
+      } catch (error) {
+        const failure = describeResendFailure(isNetworkFailure(error) ? { network: networkKind(error) } : {});
+        if (!isNetworkFailure(error)) captureException(error, { tags: { action: 'resendTwoFactorEmail' } });
+        this.error = tr(failure.key);
+        return { success: false, reason: failure.reason, next: 'stay' };
+      } finally {
+        this.twoFactorResending = false;
+      }
+    },
+
+    /** "Back to sign-in": drop the code step. */
+    cancelTwoFactor() {
+      this.twoFactor = null;
+      this.error = null;
+    },
+
     /**
      * Hydrate session state from a JWT + user object obtained out-of-band
      * (e.g. via the SSO custom-protocol callback). Mirrors the post-success
@@ -323,6 +491,7 @@ export const useAuthStore = defineStore('auth', {
         this.token = token;
         this.isAuthenticated = true;
         this.error = null;
+        this.twoFactor = null;
 
         await platformSaveToken(token);
         await platformSaveUserInfo(user);
@@ -511,6 +680,7 @@ export const useAuthStore = defineStore('auth', {
       this.token = null;
       this.isAuthenticated = false;
       this.error = null;
+      this.twoFactor = null;
       discardPendingSSO(this);
       this._refreshPromise = null;
     },

@@ -61,10 +61,20 @@ jobs:
         run: npx quasar build -m capacitor -T android --skip-pkg
         env:
           NODE_ENV: production
+      # The runners' Chrome 155 (155.0.8059) cancels running loads of the app
+      # (net::ERR_ABORTED, canceled) while the harness intercepts requests:
+      # random sign-ins, API calls and app chunks failed, on main as well
+      # (17.10.2026: Chrome 155 seven red runs; the same commit on Chrome for
+      # Testing 154 green with no canceled load). Pinned until a newer Chrome
+      # runs the full suite without [netfail] lines in the console logs.
+      - name: Chrome for Testing 154 for the harness
+        run: |
+          CHROME=$(npx --yes @puppeteer/browsers install chrome@154.0.8037.92 --path "$RUNNER_TEMP/cft" --format "{{path}}" | tail -1)
+          "$CHROME" --version
+          echo "CHROME_PATH=$CHROME" >> "$GITHUB_ENV"
       - name: Run the mobile harness
         env:
           SUISSE_E2E_SYNTH_SPEECH: '1'
-          CHROME_PATH: /usr/bin/google-chrome
         run: node tests/mobile-harness/run.js ${{ github.event.inputs.scenario || 'all' }} --platform ${{ github.event.inputs.platform || matrix.platform }}
       - name: Upload evidence (results, screenshots, console logs, device file systems)
         if: always()
@@ -96,10 +106,20 @@ jobs:
         run: npx quasar build -m capacitor -T android --skip-pkg
         env:
           NODE_ENV: production
+      # The runners' Chrome 155 (155.0.8059) cancels running loads of the app
+      # (net::ERR_ABORTED, canceled) while the harness intercepts requests:
+      # random sign-ins, API calls and app chunks failed, on main as well
+      # (17.10.2026: Chrome 155 seven red runs; the same commit on Chrome for
+      # Testing 154 green with no canceled load). Pinned until a newer Chrome
+      # runs the full suite without [netfail] lines in the console logs.
+      - name: Chrome for Testing 154 for the harness
+        run: |
+          CHROME=$(npx --yes @puppeteer/browsers install chrome@154.0.8037.92 --path "$RUNNER_TEMP/cft" --format "{{path}}" | tail -1)
+          "$CHROME" --version
+          echo "CHROME_PATH=$CHROME" >> "$GITHUB_ENV"
       - name: 5h15 recording on the virtual phone
         env:
           SUISSE_E2E_SYNTH_SPEECH: '1'
-          CHROME_PATH: /usr/bin/google-chrome
         run: node tests/mobile-harness/run.js m2-endurance --platform android --minutes ${{ github.event.inputs.minutes || '315' }}
       - name: Upload evidence
         if: always()

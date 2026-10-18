@@ -152,6 +152,7 @@ Sentry.init({
 // breadcrumbs. Before this, a failed AudioTee start, a failed finalization or a
 // refused IPC call existed only in the user's local main.log.
 const sentryReporting = require('./sentry-reporting');
+const twoFactorAuth = require('./auth-two-factor');
 sentryReporting.installLogReporting({ log, Sentry });
 const windowReporting = sentryReporting.installWindowReporting({ Sentry, log });
 
@@ -2075,14 +2076,15 @@ ipcMain.handle('auth:loginWithGoogle', () => openSSOBrowser('google'));
 // Authentication - Production only (no demo mode)
 ipcMain.handle('auth:login', async (event, email, password) => {
   try {
-    // Suisse Notes API authentication
-    const response = await axios.post(`${API_BASE_URL}/api/auth/desktop`, {
+    // Suisse Notes API authentication. `twoFactor: "supported"` tells the
+    // backend this app can ask for the second factor (src-electron/auth-two-factor.js).
+    const response = await axios.post(`${API_BASE_URL}/api/auth/desktop`, twoFactorAuth.buildLoginBody({
       email,
       password,
       deviceId: getDeviceId(),
       platform: process.platform,
       appVersion: app.getVersion()
-    }, {
+    }), {
       timeout: 30000,
       // Safe to resend: a gateway answer means the backend was restarting.
       retryGateway: true,
@@ -2093,13 +2095,15 @@ ipcMain.handle('auth:login', async (event, email, password) => {
     });
 
     // Check for successful response
-    if (response.data && response.data.success && response.data.token) {
-      return {
-        success: true,
-        token: response.data.token,
-        user: response.data.user,
-        minutes: response.data.minutes || null
-      };
+    if (response.data && response.data.success) {
+      const success = twoFactorAuth.loginSuccessFrom(response.data);
+      if (success) return success;
+    }
+    // 2FA account: the renderer asks for the code (no token yet).
+    const challenge = twoFactorAuth.twoFactorChallengeFrom(response.data);
+    if (challenge) {
+      log.info(`auth:login: second factor required (${challenge.twoFactorMethod})`);
+      return challenge;
     }
     // A 2xx without a token: an answer the app cannot use.
     return { success: false, status: response.status, nonJson: true, code: authErrorCode(response.data) };
@@ -2116,6 +2120,52 @@ ipcMain.handle('auth:login', async (event, email, password) => {
       });
     }
 
+    return failure;
+  }
+});
+
+// Second factor of the password sign-in: the code the user typed. Inputs are
+// validated in auth-two-factor.js before any request; the URL comes from the
+// configured API base only. Success has the shape of an auth:login success.
+ipcMain.handle('auth:verifyTwoFactor', async (event, tempToken, code, isBackupCode) => {
+  const request = twoFactorAuth.buildVerifyRequest(API_BASE_URL, tempToken, code, isBackupCode);
+  if (!request.ok) return request.failure;
+  try {
+    const response = await axios.post(request.url, request.body, {
+      timeout: 30000,
+      // A gateway answer never reached the backend: resending cannot count twice.
+      retryGateway: true,
+      headers: { 'Content-Type': 'application/json', 'X-Desktop-App-Version': app.getVersion() }
+    });
+    const success = twoFactorAuth.loginSuccessFrom(response.data);
+    if (success) return success;
+    return { success: false, status: response.status, nonJson: true, code: authErrorCode(response.data) };
+  } catch (error) {
+    const failure = authFailureFromAxiosError(error);
+    // Wrong or expired codes are the user's; outages are ours.
+    const line = `auth:verifyTwoFactor failed: status=${failure.status || '-'} code=${failure.code || '-'} network=${failure.networkCode || '-'}${failure.nonJson ? ' non-json' : ''}`;
+    if (failure.networkError || failure.nonJson || failure.status >= 500) log.warn(line);
+    else log.info(line);
+    return failure;
+  }
+});
+
+// E-mail second factor: send a new code (the renderer enforces the 60 s cooldown).
+ipcMain.handle('auth:resendTwoFactorEmail', async (event, tempToken) => {
+  const request = twoFactorAuth.buildResendRequest(API_BASE_URL, tempToken);
+  if (!request.ok) return request.failure;
+  try {
+    const response = await axios.post(request.url, request.body, {
+      timeout: 30000,
+      headers: { 'Content-Type': 'application/json', 'X-Desktop-App-Version': app.getVersion() }
+    });
+    if (response.data && response.data.success === true) return { success: true };
+    return { success: false, status: response.status, nonJson: true, code: authErrorCode(response.data) };
+  } catch (error) {
+    const failure = authFailureFromAxiosError(error);
+    const line = `auth:resendTwoFactorEmail failed: status=${failure.status || '-'} code=${failure.code || '-'} network=${failure.networkCode || '-'}`;
+    if (failure.networkError || failure.nonJson || failure.status >= 500) log.warn(line);
+    else log.info(line);
     return failure;
   }
 });
@@ -2421,7 +2471,7 @@ ipcMain.handle('minutes:fetch', async () => {
   }
 });
 
-// --- Recording (WhisperTranscribe Patterns) ---
+// --- Recording (chunked, synchronous writes) ---
 
 // Per-recording mutex. Serializes saveChunk, createSessionFile, and combineChunks
 // for a given recordId so their async await points cannot interleave on disk.
@@ -3379,7 +3429,7 @@ for (const operation of ['beginSource', 'markSourceStarted', 'saveSourceChunk', 
   });
 }
 
-// 2. Save recording chunk - SYNCHRONOUS write (WhisperTranscribe pattern)
+// 2. Save recording chunk - SYNCHRONOUS write
 ipcMain.handle('recording:saveChunk', async (event, recordId, chunkData, chunkIndex, ext, userId) => {
   // Validate first (sync, fail fast without acquiring a lock on bogus IDs)
   let validRecordId, validExt, validChunkIndex, validUserId;

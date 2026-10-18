@@ -46,6 +46,8 @@ function networkProblem(failure) {
 /** 5xx, gateway pages and HTML bodies: the backend is restarting or failing. */
 function serviceProblem(failure) {
   const status = Number(failure?.status) || 0;
+  // nginx's 429 rate-limit page is HTML: "too many attempts", not an outage.
+  if (status === 429) return null;
   if (failure?.code === 'server_error') return { key: 'authServiceUnavailable', reason: 'server_error' };
   if (status >= 500) return { key: 'authServiceUnavailable', reason: `status_${status}` };
   if (failure?.nonJson) return { key: 'authServiceUnavailable', reason: status ? `non_json_${status}` : 'non_json' };
@@ -74,6 +76,9 @@ export function describeLoginFailure(failure = {}) {
     case 'account_disabled': return { key: 'accountDisabled', reason: 'account_disabled' };
     case 'too_many_attempts': return { key: 'authTooManyAttempts', reason: 'too_many_attempts' };
     case 'missing_fields': return { key: 'loginMissingFields', reason: 'missing_fields' };
+    // A backend that requires the second factor answers app versions
+    // without 2FA support for 2FA accounts this way.
+    case 'app_update_required': return { key: 'appUpdateRequired', reason: 'app_update_required' };
     default: break;
   }
 

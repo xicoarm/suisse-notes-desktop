@@ -26,6 +26,9 @@ const API_URLS = {
 export const API_ENDPOINTS = {
   // Authentication
   login: '/api/auth/desktop',
+  // Second factor of the password sign-in (after requiresTwoFactor)
+  verifyTwoFactor: '/api/auth/desktop/verify-2fa',
+  resendTwoFactorEmail: '/api/auth/resend-2fa-email',
   register: '/api/auth/register',
   refreshToken: '/api/auth/refresh',
   logout: '/api/auth/logout',

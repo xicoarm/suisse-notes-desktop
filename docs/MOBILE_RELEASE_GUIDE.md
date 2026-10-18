@@ -635,6 +635,19 @@ Scope: **all P1**, plus B1–B3 (login), E1, E2, E5 (upload and retry), I1 (minu
 Scope: **all P1** (G12 is P1 now), plus B2, B3, B6, B9 (login, SSO cancel, user switch), D2
 (microphone denied), E3, E5 (upload, no minutes), I1.
 
+### Scope of 3.9.42
+
+- **Second factor in the password sign-in** (PR #36, Areg 17.10.2026): an account with 2FA gets
+  a code step after the password (authenticator code, e-mail code with "send again" after 60 s,
+  or a backup code `A1B2-C3D4`); wrong, expired and too many codes say so, "Back to sign-in"
+  returns to the password form. Accounts without 2FA and Microsoft/Google sign-in are unchanged.
+  Backend live since 17.10.2026; it lets older apps through until the transition switch is
+  turned off after this release. Automated: unit `auth.twoFactor`, `twoFactor`,
+  `twoFactor.review`, `loginPage.twoFactorStep`; harness all scenarios.
+
+Scope: **all P1**, plus B1–B3 (login) with a 2FA account: authenticator code, e-mail code
+(incl. resend), backup code, one wrong code, "Back to sign-in".
+
 ---
 
 ## 10. Troubleshooting — failures that already happened

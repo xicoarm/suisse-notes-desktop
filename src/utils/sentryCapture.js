@@ -72,6 +72,27 @@ export function createOccurrenceSampler({ burst = BURST_BY_LEVEL, maxKeys = 500 
   };
 }
 
+/**
+ * Failed HTTP answers that are the user's input, not a bug: a mistyped
+ * (400), expired (410) or rate-limited (429) second-factor code, and a resend
+ * asked for too early (429). The screen explains them; as Sentry events they
+ * were noise (policy: Sentry only for real bugs).
+ */
+const EXPECTED_HTTP_ANSWERS = [
+  { path: /\/api\/auth\/desktop\/verify-2fa(?:[?#]|$)/, statuses: [400, 410, 429] },
+  { path: /\/api\/auth\/resend-2fa-email(?:[?#]|$)/, statuses: [429] }
+];
+
+/** True for an HTTP-client event of an expected answer (dropped in beforeSend). */
+export function isExpectedHttpAnswer(event) {
+  const isHttpClient = (event?.exception?.values || []).some(v => v?.mechanism?.type === 'http.client');
+  if (!isHttpClient) return false;
+  let path = String(event?.request?.url || '');
+  try { path = new URL(path).pathname; } catch { /* already a path */ }
+  const status = Number(event?.contexts?.response?.status_code);
+  return EXPECTED_HTTP_ANSWERS.some(rule => rule.path.test(path) && rule.statuses.includes(status));
+}
+
 /** The HTTP-client integration marks failed responses as unhandled — they are not app crashes. */
 export function treatHttpClientAsHandled(event) {
   for (const value of event?.exception?.values || []) {
