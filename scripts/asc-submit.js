@@ -144,7 +144,8 @@ async function main() {
     let withdrawn = 0;
     for (const sub of subs.data || []) {
       if (!open.has(sub.attributes.state)) continue;
-      const items = await api('GET', `/v1/reviewSubmissions/${sub.id}/items?limit=50`);
+      // The version relationship is only filled in when it is included.
+      const items = await api('GET', `/v1/reviewSubmissions/${sub.id}/items?include=appStoreVersion&limit=50`);
       const hasVersion = (items.data || []).some(
         (it) => it.relationships && it.relationships.appStoreVersion && it.relationships.appStoreVersion.data &&
           it.relationships.appStoreVersion.data.id === versionId
