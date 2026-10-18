@@ -81,9 +81,10 @@ async function main() {
   const doSubmit = arg('submit', false) === true;
 
   const statusOnly = arg('status', false) === true;
+  const withdraw = arg('withdraw', false) === true;
 
-  if (!appId || !version || (!build && !statusOnly)) {
-    console.error('usage: --app <id> --version <x.y.z> (--build <n> [--notes-file f] [--submit] | --status)');
+  if (!appId || !version || (!build && !statusOnly && !withdraw)) {
+    console.error('usage: --app <id> --version <x.y.z> (--build <n> [--notes-file f] [--submit] | --status | --withdraw)');
     process.exit(2);
   }
 
@@ -124,6 +125,40 @@ async function main() {
     for (const sub of (subs && subs.data) || []) {
       console.log(`  reviewSubmission ${sub.id}: state=${sub.attributes.state} submitted=${sub.attributes.submittedDate || '-'}`);
     }
+    return;
+  }
+
+  // ---- 0b. withdraw from review --------------------------------------------
+  // `--withdraw` cancels the open review submission that contains this
+  // version (App Store Connect "Von der Prüfung entfernen"). The version then
+  // becomes editable again (e.g. new screenshots) and is submitted again later.
+  if (withdraw) {
+    const vs = await api(
+      'GET',
+      `/v1/apps/${appId}/appStoreVersions?filter[versionString]=${encodeURIComponent(version)}&limit=5`
+    );
+    if (!vs.data.length) throw new Error(`version ${version} does not exist for app ${appId}`);
+    const versionId = vs.data[0].id;
+    const subs = await api('GET', `/v1/apps/${appId}/reviewSubmissions?limit=20`);
+    const open = new Set(['READY_FOR_REVIEW', 'WAITING_FOR_REVIEW', 'IN_REVIEW', 'UNRESOLVED_ISSUES']);
+    let withdrawn = 0;
+    for (const sub of subs.data || []) {
+      if (!open.has(sub.attributes.state)) continue;
+      const items = await api('GET', `/v1/reviewSubmissions/${sub.id}/items?limit=50`);
+      const hasVersion = (items.data || []).some(
+        (it) => it.relationships && it.relationships.appStoreVersion && it.relationships.appStoreVersion.data &&
+          it.relationships.appStoreVersion.data.id === versionId
+      );
+      if (!hasVersion) continue;
+      await api('PATCH', `/v1/reviewSubmissions/${sub.id}`, {
+        data: { type: 'reviewSubmissions', id: sub.id, attributes: { canceled: true } },
+      });
+      console.log(`withdrew review submission ${sub.id} (was ${sub.attributes.state})`);
+      withdrawn += 1;
+    }
+    if (!withdrawn) console.log(`no open review submission contains version ${version}`);
+    const after = await api('GET', `/v1/appStoreVersions/${versionId}`);
+    console.log(`appStoreState = ${after.data.attributes.appStoreState}`);
     return;
   }
 
