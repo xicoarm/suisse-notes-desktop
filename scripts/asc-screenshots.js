@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * Replace the iPhone screenshots of one App Store version, in every locale,
- * via the App Store Connect REST API. No browser.
+ * Replace the screenshots of one slot of an App Store version, in every
+ * locale (or one with --locale), via the App Store Connect REST API.
  *
  * The PNG files of a directory (sorted by name) become the screenshots of the
- * largest iPhone slot (APP_IPHONE_67 = 6.7"/6.9", e.g. 1320x2868 or
- * 2868x1320), in that order. The smaller iPhone slots are emptied, so App
- * Store Connect scales the new set down instead of showing old screenshots on
- * smaller iPhones. iPad, Mac and all other slots are not touched.
+ * slot, in that order. Slots: APP_IPHONE_67 (6.7"/6.9", default) and
+ * APP_IPAD_PRO_3GEN_129 (iPad 13"). For the iPhone slot the smaller iPhone
+ * slots are emptied, so App Store Connect scales the new set down instead of
+ * showing old screenshots on smaller iPhones. All other slots stay untouched.
  *
  * The version must be editable (e.g. PREPARE_FOR_SUBMISSION or
  * DEVELOPER_REJECTED after `asc-submit.js --withdraw`).
@@ -16,6 +16,8 @@
  *   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_CONTENT (the .p8 contents)
  * Args:
  *   --app <id> --version <string> --dir <path with the PNG files>
+ *   --display APP_IPHONE_67 | APP_IPAD_PRO_3GEN_129   (default APP_IPHONE_67)
+ *   --locale <code>   (only this localization, e.g. de-DE)
  *   --dry-run   (only print the current slots, change nothing)
  */
 
@@ -24,7 +26,10 @@ const fs = require('fs');
 const path = require('path');
 
 const API = 'https://api.appstoreconnect.apple.com';
-const TARGET = 'APP_IPHONE_67';
+const SIZES = {
+  APP_IPHONE_67: [[1320, 2868], [1290, 2796]],
+  APP_IPAD_PRO_3GEN_129: [[2064, 2752], [2048, 2732]],
+};
 
 function arg(name, dflt) {
   const i = process.argv.indexOf(`--${name}`);
@@ -125,6 +130,12 @@ async function main() {
   const version = String(arg('version', ''));
   const dir = arg('dir', '');
   const dryRun = arg('dry-run', false) === true;
+  const TARGET = String(arg('display', 'APP_IPHONE_67'));
+  const onlyLocale = arg('locale', null);
+  if (!SIZES[TARGET]) {
+    console.error(`unknown --display ${TARGET}; use ${Object.keys(SIZES).join(' or ')}`);
+    process.exit(2);
+  }
   if (!appId || !version || (!dir && !dryRun)) {
     console.error('usage: --app <id> --version <x.y.z> --dir <png dir> [--dry-run]');
     process.exit(2);
@@ -145,9 +156,8 @@ async function main() {
     if (!files.length || files.length > 10) throw new Error(`need 1-10 PNG files in ${dir}, found ${files.length}`);
     for (const f of files) {
       const { width, height } = pngSize(f);
-      const ok = (width === 1320 && height === 2868) || (width === 2868 && height === 1320) ||
-        (width === 1290 && height === 2796) || (width === 2796 && height === 1290);
-      if (!ok) throw new Error(`${path.basename(f)} is ${width}x${height}, not a 6.7"/6.9" size`);
+      const ok = SIZES[TARGET].some(([a, b]) => (width === a && height === b) || (width === b && height === a));
+      if (!ok) throw new Error(`${path.basename(f)} is ${width}x${height}, not a ${TARGET} size`);
       console.log(`file ${path.basename(f)} ${width}x${height}`);
     }
   }
@@ -164,6 +174,7 @@ async function main() {
   const locs = await api('GET', `/v1/appStoreVersions/${v.id}/appStoreVersionLocalizations?limit=50`);
   for (const loc of locs.data || []) {
     const locale = loc.attributes.locale;
+    if (onlyLocale && locale !== onlyLocale) continue;
     const sets = (await api('GET', `/v1/appStoreVersionLocalizations/${loc.id}/appScreenshotSets?limit=50`)).data || [];
     console.log(`\n[${locale}]`);
     for (const set of sets) {
@@ -198,13 +209,13 @@ async function main() {
 
     for (const set of sets) {
       const type = set.attributes.screenshotDisplayType;
-      if (!type.startsWith('APP_IPHONE_') || type === TARGET) continue;
+      if (TARGET !== 'APP_IPHONE_67' || !type.startsWith('APP_IPHONE_') || type === TARGET) continue;
       const shots = await screenshotsOf(set.id);
       for (const s of shots) await api('DELETE', `/v1/appScreenshots/${s.id}`);
       if (shots.length) console.log(`  ${type}: ${shots.length} old screenshot(s) removed (scaled from ${TARGET})`);
     }
   }
-  console.log(dryRun ? '\nDRY RUN: nothing changed.' : '\nDONE: iPhone screenshots replaced.');
+  console.log(dryRun ? '\nDRY RUN: nothing changed.' : `\nDONE: ${TARGET} screenshots replaced.`);
 }
 
 main().catch((e) => {
