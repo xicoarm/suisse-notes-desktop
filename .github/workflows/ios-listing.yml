@@ -26,6 +26,11 @@ on:
         default: true
         type: boolean
 
+
+# Least privilege: these jobs only read the repository.
+permissions:
+  contents: read
+
 jobs:
   listing:
     runs-on: ubuntu-latest
@@ -42,8 +47,16 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
           ASC_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
           COPYRIGHT: ${{ inputs.copyright }}
+          # Inputs reach the shell only as quoted variables, validated first
+          # (never interpolated into the script: no command injection).
+          IN_VERSION: ${{ inputs.version }}
+          IN_TEXTS: ${{ inputs.texts }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          set -- --app 6758680707 --version "${{ inputs.version }}" --texts "${{ inputs.texts }}"
+          set -euo pipefail
+          [[ "$IN_VERSION" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]] || { echo "::error::invalid version"; exit 1; }
+          [[ "$IN_TEXTS" =~ ^[A-Za-z0-9._/-]+\.json$ && "$IN_TEXTS" != *..* && "$IN_TEXTS" != /* ]] || { echo "::error::invalid texts path"; exit 1; }
+          set -- --app 6758680707 --version "$IN_VERSION" --texts "$IN_TEXTS"
           if [ -n "$COPYRIGHT" ]; then set -- "$@" --copyright "$COPYRIGHT"; fi
-          if [ "${{ inputs.dry_run }}" = "true" ]; then set -- "$@" --dry-run; fi
+          if [ "$IN_DRY_RUN" = "true" ]; then set -- "$@" --dry-run; fi
           node scripts/asc-listing.js "$@"

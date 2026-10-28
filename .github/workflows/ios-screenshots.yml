@@ -31,6 +31,11 @@ on:
         default: true
         type: boolean
 
+
+# Least privilege: these jobs only read the repository.
+permissions:
+  contents: read
+
 jobs:
   screenshots:
     runs-on: ubuntu-latest
@@ -46,11 +51,22 @@ jobs:
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
           ASC_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+          # Inputs reach the shell only as quoted variables, validated first
+          # (never interpolated into the script: no command injection).
+          IN_VERSION: ${{ inputs.version }}
+          IN_DIR: ${{ inputs.dir }}
+          IN_DISPLAY: ${{ inputs.display }}
+          IN_LOCALE: ${{ inputs.locale }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          node scripts/asc-screenshots.js \
-            --app 6758680707 \
-            --version "${{ inputs.version }}" \
-            --dir "${{ inputs.dir }}" \
-            --display "${{ inputs.display }}" \
-            ${{ inputs.locale && format('--locale {0}', inputs.locale) || '' }} \
-            ${{ inputs.dry_run && '--dry-run' || '' }}
+          set -euo pipefail
+          [[ "$IN_VERSION" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]] || { echo "::error::invalid version"; exit 1; }
+          [[ "$IN_DIR" =~ ^[A-Za-z0-9._/-]+$ && "$IN_DIR" != *..* && "$IN_DIR" != /* ]] || { echo "::error::invalid dir"; exit 1; }
+          case "$IN_DISPLAY" in APP_IPHONE_67|APP_IPAD_PRO_3GEN_129) ;; *) echo "::error::invalid display"; exit 1 ;; esac
+          set -- --app 6758680707 --version "$IN_VERSION" --dir "$IN_DIR" --display "$IN_DISPLAY"
+          if [ -n "$IN_LOCALE" ]; then
+            [[ "$IN_LOCALE" =~ ^[a-z]{2,3}(-[A-Za-z]{2,4})?$ ]] || { echo "::error::invalid locale"; exit 1; }
+            set -- "$@" --locale "$IN_LOCALE"
+          fi
+          if [ "$IN_DRY_RUN" = "true" ]; then set -- "$@" --dry-run; fi
+          node scripts/asc-screenshots.js "$@"
