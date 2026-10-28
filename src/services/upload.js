@@ -198,18 +198,96 @@ export function getMobileUploadQueue() {
   return [];
 }
 
+// --- Queue ownership (security) ---
+// Every queued recording belongs to the account that recorded it. The queue
+// uploads an item only while that same account is signed in; otherwise the
+// item is held (never uploaded under another account). Items queued before
+// owners were recorded are claimed once by the account whose session the
+// update found (QUEUE_OWNER_MIGRATED_KEY); an item whose owner is still
+// unknown later is held until the signed-in user explicitly claims it.
+const QUEUE_OWNER_MIGRATED_KEY = MOBILE_UPLOAD_QUEUE_KEY + '_owner_migrated';
+
+function _currentUserId(authStore) {
+  const id = authStore?.user?.id;
+  return id === undefined || id === null || id === '' ? null : String(id);
+}
+
+/**
+ * Who may upload this item now?
+ * @returns {'owner'|'other_account'|'owner_unknown'|'signed_out'}
+ */
+export function queueItemOwnership(item, currentUserId) {
+  if (!currentUserId) return 'signed_out';
+  if (!item || item.ownerUserId === undefined || item.ownerUserId === null || item.ownerUserId === '') return 'owner_unknown';
+  return String(item.ownerUserId) === String(currentUserId) ? 'owner' : 'other_account';
+}
+
+/** One-time claim of items queued before owners were recorded. */
+function _migrateUnownedQueueItems(userId) {
+  if (!userId) return;
+  try {
+    if (localStorage.getItem(QUEUE_OWNER_MIGRATED_KEY)) return;
+    const queue = getMobileUploadQueue();
+    let changed = false;
+    for (const item of queue) {
+      if (item.ownerUserId === undefined) { item.ownerUserId = userId; changed = true; }
+    }
+    if (changed) _safeWriteQueue(queue);
+    localStorage.setItem(QUEUE_OWNER_MIGRATED_KEY, '1');
+  } catch (e) {
+    console.warn('Upload queue owner migration failed:', e?.message || e);
+  }
+}
+
+/**
+ * Held items for the UI: recordings waiting for another account, and items
+ * whose owner is unknown (the user may claim those explicitly).
+ */
+export function getHeldMobileUploads(currentUserId) {
+  const held = { otherAccount: [], ownerUnknown: [] };
+  const uid = currentUserId ? String(currentUserId) : null;
+  if (!uid) return held;
+  for (const item of getMobileUploadQueue()) {
+    const ownership = queueItemOwnership(item, uid);
+    if (ownership === 'other_account') held.otherAccount.push(item.recordId);
+    else if (ownership === 'owner_unknown') held.ownerUnknown.push(item.recordId);
+  }
+  return held;
+}
+
+/**
+ * The signed-in user confirmed that recordings of unknown owner are theirs.
+ * Only items without an owner can be claimed — never another account's.
+ * @returns {number} claimed items
+ */
+export function claimUnownedMobileUploads(userId, recordIds = null) {
+  if (!userId) return 0;
+  const queue = getMobileUploadQueue();
+  let claimed = 0;
+  for (const item of queue) {
+    if (queueItemOwnership(item, userId) !== 'owner_unknown') continue;
+    if (Array.isArray(recordIds) && !recordIds.includes(item.recordId)) continue;
+    item.ownerUserId = String(userId);
+    claimed++;
+  }
+  if (claimed) _safeWriteQueue(queue);
+  return claimed;
+}
+
 /**
  * Add a failed upload to the persistent mobile queue
  * @param {string} recordId
  * @param {string} filePath
  * @param {Object} metadata - Upload metadata (duration, title, customVocabulary, etc.)
+ * @param {string|null} ownerUserId - the account that recorded it (null = unknown, held until claimed)
  */
-export function addToMobileUploadQueue(recordId, filePath, metadata) {
+export function addToMobileUploadQueue(recordId, filePath, metadata, ownerUserId = null) {
   try {
     const queue = getMobileUploadQueue();
     // Don't add duplicates
     if (queue.some(item => item.recordId === recordId)) return;
-    queue.push({ recordId, filePath, metadata, retries: 0, addedAt: Date.now() });
+    const owner = ownerUserId === undefined || ownerUserId === null || ownerUserId === '' ? null : String(ownerUserId);
+    queue.push({ recordId, filePath, metadata, retries: 0, addedAt: Date.now(), ownerUserId: owner });
     _safeWriteQueue(queue);
   } catch (e) {
     console.warn('Failed to add to mobile upload queue:', e);
@@ -310,10 +388,13 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
   if (queue.length === 0) return { processed: 0, succeeded: 0, failed: 0, purged: [], unrecoverable: [] };
 
   const apiUrl = typeof getApiUrl === 'function' ? getApiUrl() : getApiUrl;
+  const currentUserId = _currentUserId(authStore);
+  _migrateUnownedQueueItems(currentUserId);
   let succeeded = 0;
   let failed = 0;
   const purgedRecordIds = [];        // Stale / over-budget items removed silently
   const unrecoverableRecordIds = []; // Items hit non-retryable errors this run
+  const heldRecordIds = [];          // Items of another (or an unknown) account: never uploaded here
   let tokenRefreshAttempts = 0;
   const MAX_TOKEN_REFRESHES_PER_RUN = 2;
 
@@ -366,6 +447,15 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
     }
 
     if (_isMobileUploadActive(item.recordId)) {
+      i++;
+      continue;
+    }
+
+    // SECURITY: upload only under the account that recorded it. Checked per
+    // item, right before the upload (the account can change during a run).
+    const ownership = queueItemOwnership(item, _currentUserId(authStore));
+    if (ownership !== 'owner') {
+      if (!heldRecordIds.includes(item.recordId)) heldRecordIds.push(item.recordId);
       i++;
       continue;
     }
@@ -495,7 +585,8 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
     }
   }
 
-  return { processed: activeQueue.length, succeeded, failed, purged: purgedRecordIds, unrecoverable: unrecoverableRecordIds };
+  if (heldRecordIds.length > 0) crumb(`upload queue: ${heldRecordIds.length} item(s) held for another account`, 'warning');
+  return { processed: activeQueue.length, succeeded, failed, purged: purgedRecordIds, unrecoverable: unrecoverableRecordIds, held: heldRecordIds };
   } finally {
     isProcessingMobileQueue = false;
   }

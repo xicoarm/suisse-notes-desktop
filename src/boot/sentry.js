@@ -66,12 +66,22 @@ export const captureMessage = (message, level = 'info', context = null) => {
 };
 
 /**
+ * The only user data telemetry may carry: the opaque account id.
+ * @returns {{ id: string } | null}
+ */
+export function telemetryUser(user) {
+  const id = user && (typeof user.id === 'string' || typeof user.id === 'number') ? String(user.id) : '';
+  return id ? { id } : null;
+}
+
+/**
  * Set user context (call after login, clear on logout)
  */
 export const setUser = (user) => {
   if (!sentryInitialized || !SentryModule) return;
   if (user) {
-    SentryModule.setUser({ id: user.id, email: user.email });
+    // Opaque account id only: never e-mail, name or IP (data minimisation).
+    SentryModule.setUser(telemetryUser(user));
   } else {
     SentryModule.setUser(null);
   }
@@ -109,6 +119,8 @@ function isTransientNetworkError(err, message) {
 
 // Shared beforeSend to scrub auth tokens + downgrade transient network errors
 function scrubSensitiveData(event, hint) {
+  // Whatever set it (an SDK default, an older call site): only the opaque id.
+  if (event.user) event.user = telemetryUser(event.user) || undefined;
   if (event.request?.headers?.authorization) {
     event.request.headers.authorization = '[REDACTED]';
   }
@@ -150,13 +162,32 @@ function scrubSensitiveData(event, hint) {
 
 export { scrubSensitiveData };
 
+export const DESKTOP_REPLAY_OPTIONS = Object.freeze({
+  maskAllText: true,
+  maskAllInputs: true,
+  blockAllMedia: true,
+  networkDetailAllowUrls: [],
+  networkCaptureBodies: false,
+});
+
 // Shared beforeBreadcrumb filter
 function filterBreadcrumbs(breadcrumb) {
   if (breadcrumb.category === 'console' && breadcrumb.level === 'log') {
     return null;
   }
+  // Scrub at creation as well (beforeSend repeats it): breadcrumbs also feed
+  // the session replay, which beforeSend never sees. Navigation and HTTP
+  // breadcrumbs carry URLs that may hold session/hand-off tokens.
+  if (typeof breadcrumb.message === 'string') breadcrumb.message = redactSecrets(breadcrumb.message);
+  if (breadcrumb.data) {
+    for (const key of ['url', 'to', 'from']) {
+      if (typeof breadcrumb.data[key] === 'string') breadcrumb.data[key] = redactSecrets(breadcrumb.data[key]);
+    }
+  }
   return breadcrumb;
 }
+
+export { filterBreadcrumbs };
 
 /**
  * Initialize Sentry for Electron desktop renderer
@@ -203,7 +234,8 @@ async function initElectronRenderer(app, router) {
       integrations: [
         SentryVue.vueIntegration({
           app,
-          attachProps: true,
+          // Props carry recording titles, file names and user objects.
+          attachProps: false,
           logErrors: true,
           trackComponents: true,
         }),
@@ -218,13 +250,10 @@ async function initElectronRenderer(app, router) {
         // The default ignore list silently dropped bridge errors; the mobile
         // client removed it for the same reason.
         SentryVue.eventFiltersIntegration({ disableErrorDefaults: true }),
-        SentryVue.replayIntegration({
-          maskAllText: false,
-          maskAllInputs: true,
-          blockAllMedia: false,
-          networkDetailAllowUrls: [/suisse-(notes|meets)\.ch/],
-          networkCaptureBodies: false,
-        }),
+        // Replays show layout and clicks only: every text masked, every
+        // image/media blocked, no network details (meeting titles, names and
+        // transcript text must never leave the device this way).
+        SentryVue.replayIntegration(DESKTOP_REPLAY_OPTIONS),
       ],
       tracesSampleRate: 0.1,
       replaysSessionSampleRate: 0.1,
@@ -345,7 +374,7 @@ async function initCapacitor(app, router) {
       transport: SentryVue.makeBrowserOfflineTransport(SentryVue.makeFetchTransport),
       transportOptions: { dbName: 'suisse-sentry-offline', maxQueueSize: 100, flushAtStartup: true },
       integrations: [
-        SentryVue.vueIntegration({ app, attachProps: true, logErrors: true, trackComponents: true }),
+        SentryVue.vueIntegration({ app, attachProps: false, logErrors: true, trackComponents: true }),
         SentryVue.browserTracingIntegration({ router }),
         SentryVue.captureConsoleIntegration({ levels: ['error', 'warn'] }),
         SentryVue.httpClientIntegration({ failedRequestStatusCodes: HTTP_CAPTURE_STATUS_CODES }),

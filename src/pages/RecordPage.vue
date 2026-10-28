@@ -2292,7 +2292,7 @@ const handleUploadError = async (errorMessage, ownerUserId = null, outcome = {})
         title: options.title,
         customVocabulary: options.customVocabulary,
         ...prepStore.metadataFields
-      });
+      }, recordingStore.userId || authStore.user?.id || null);
     } catch (e) {
       console.warn('Could not add to mobile upload queue:', e);
     }

@@ -22,6 +22,8 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         // Register the BackgroundRecording plugin for native recording
         registerPlugin(BackgroundRecordingPlugin.class);
+        // Keystore-backed storage for the session token (no plaintext on disk)
+        registerPlugin(SecureTokenStorePlugin.class);
 
         super.onCreate(savedInstanceState);
 

@@ -4,7 +4,7 @@
  */
 
 import { defineStore } from 'pinia';
-import { v4 as uuidv4, v5 as uuidv5 } from 'uuid';
+import { v5 as uuidv5 } from 'uuid';
 
 // Namespace for deterministic (v5) ids of device files: the SAME user syncing
 // the SAME file from the SAME recorder always gets the same recordId, so the
@@ -17,15 +17,9 @@ export function deviceFileRecordId(userId, deviceKey, filename) {
   return uuidv5(name, DEVICE_FILE_ID_NAMESPACE);
 }
 
-// Bluetooth pairing identity of this app for this USER. Deterministic per
-// user so a reinstall (or a second phone of the same user) presents the same
-// UUID to a recorder that is already bound — the device firmware binds
-// exactly one app UUID and only that app can ever unpair it.
-const APP_UUID_NAMESPACE = '0c1f7a2e-9b6d-4e3a-8c5f-2d7e4b1a9c63';
-export function userAppUuid(userId) {
-  if (!userId) return null;
-  return uuidv5(`suisse-meets-ble-app|${userId}`, APP_UUID_NAMESPACE);
-}
+// Bluetooth pairing keys: random per install, kept in secure storage; the old
+// user-derived UUID survives only for recorders bound before (see bleAppKeys).
+export { userAppUuid } from '../services/bleAppKeys';
 import { isCapacitor } from '../utils/platform';
 import { getBleManager } from '../services/bleService';
 import { noteSessionActivity } from '../services/sessionHealth';
@@ -38,10 +32,17 @@ import { useRecordingsHistoryStore } from './recordings-history';
 import { useRecordingStore } from './recording';
 import { isRawOpusPackets, rawOpusToOgg } from '../utils/rawOpusToOgg';
 import { i18n } from '../boot/i18n';
+import { loadAppKeys, keyForRecord, userAppUuid as derivedAppUuid } from '../services/bleAppKeys';
+import {
+  isSafeDeviceFilename,
+  normalizeDeviceFileEntry,
+  localPathForDeviceFile,
+  isConfinedPath,
+  MAX_DEVICE_FILE_BYTES
+} from '../utils/deviceFileSafety';
 
 // Preferences base keys (scoped per-user at runtime via _userPrefKey)
 const PREF_PAIRED_DEVICE = 'ble_paired_device';
-const PREF_APP_UUID = 'ble_app_uuid';
 const PREF_SYNCED_FILES = 'ble_synced_files';
 const PREF_REJECTED_DEVICES = 'ble_rejected_devices';
 const PREF_SKIPPED_FILES = 'ble_skipped_files';
@@ -132,45 +133,12 @@ async function clearLocalNotification(id) {
 }
 
 /**
- * Get or create a persistent app UUID for BLE pairing.
- * NOT user-scoped — the device firmware locks to this UUID per phone installation.
- * Changing it per-user would cause "already paired to another app" rejection.
- *
- * Migration: a previous version stored UUIDs per-user under 'ble_app_uuid:uXXX'.
- * If a user-scoped UUID exists but no installation UUID, adopt it so devices
- * paired during that period still recognize this phone.
+ * Pairing keys of this installation (migrates the plaintext UUID of earlier
+ * versions into secure storage on first use).
  */
-async function getOrCreateAppUuid() {
-  if (isCapacitor()) {
-    const { Preferences } = await import('@capacitor/preferences');
-    const { value } = await Preferences.get({ key: PREF_APP_UUID });
-    if (value) return value;
-
-    // Migration: check if a user-scoped UUID exists from the previous version
-    const auth = useAuthStore();
-    const userId = auth.user?.id;
-    if (userId) {
-      const scopedKey = `${PREF_APP_UUID}:u${userId}`;
-      const { value: scopedUuid } = await Preferences.get({ key: scopedKey });
-      if (scopedUuid) {
-        // Adopt the scoped UUID as the installation UUID
-        await Preferences.set({ key: PREF_APP_UUID, value: scopedUuid });
-        return scopedUuid;
-      }
-    }
-
-    // Fresh install: prefer the user-derived UUID so a recorder this user
-    // paired on a previous install (or another phone) accepts us again.
-    const newUuid = userAppUuid(userId) || uuidv4();
-    await Preferences.set({ key: PREF_APP_UUID, value: newUuid });
-    return newUuid;
-  }
-  let uuid = localStorage.getItem(PREF_APP_UUID);
-  if (!uuid) {
-    uuid = uuidv4();
-    localStorage.setItem(PREF_APP_UUID, uuid);
-  }
-  return uuid;
+async function getAppKeys() {
+  const auth = useAuthStore();
+  return loadAppKeys({ userId: auth.user?.id || null, isNative: isCapacitor() });
 }
 
 /**
@@ -288,12 +256,14 @@ export const useDeviceStore = defineStore('device', {
     isConnecting: (state) => state.connectionState === 'connecting',
     isConnected: (state) => state.connectionState === 'connected',
     isSyncing: (state) => state.syncState === 'syncing',
-    newFiles: (state) => state.deviceFiles.filter(f => !state.syncedFiles.includes(f.file)),
+    newFiles: (state) => state.deviceFiles.filter(f => !f.unsafe && !state.syncedFiles.includes(f.file)),
     newFilesCount() { return this.newFiles.length; },
     // Files eligible for auto-sync (excludes both synced and skipped)
     autoSyncableFiles: (state) => state.deviceFiles.filter(
-      f => !state.syncedFiles.includes(f.file) && !state.skippedFiles.includes(f.file)
+      f => !f.unsafe && !state.syncedFiles.includes(f.file) && !state.skippedFiles.includes(f.file)
     ),
+    // Entries whose name or size the app refuses to process (shown, never synced)
+    unsafeDeviceFiles: (state) => state.deviceFiles.filter(f => f.unsafe),
     isFileSkipped: (state) => (filename) => state.skippedFiles.includes(filename)
   },
 
@@ -545,35 +515,51 @@ export const useDeviceStore = defineStore('device', {
 
       try {
         const manager = getBleManager();
-        let appUuid = await getOrCreateAppUuid();
+        const auth = useAuthStore();
+        const userId = auth.user?.id || null;
+        const keys = await getAppKeys();
+        // A recorder this user already paired (same platform id) is PINNED:
+        // its protocol UUID must match before any key is sent, and only then
+        // may the older keys of this installation be offered to it.
+        const pinned = this.pairedDevice && this.pairedDevice.deviceId === bleDeviceId && this.pairedDevice.uuid
+          ? this.pairedDevice
+          : null;
+        const expectedDeviceUuid = pinned ? pinned.uuid : null;
+        let keyKind = pinned ? (pinned.keyKind || (keys.legacy ? 'legacy' : 'install')) : 'install';
+        let appUuid = pinned ? keyForRecord(pinned, keys, userId) : keys.install;
         let deviceInfo;
 
         try {
-          deviceInfo = await manager.connect(bleDeviceId, appUuid);
+          deviceInfo = await manager.connect(bleDeviceId, appUuid, { expectedDeviceUuid });
         } catch (e) {
           // The recorder binds exactly ONE app UUID (protocol §1, status 0x01).
-          // If it rejects ours, try every UUID this user may have paired with
-          // before: the legacy user-scoped one from the migration period and
-          // the user-derived one (same user, previous install / other phone).
+          // If it rejects ours, offer the keys an earlier version of this app
+          // may have bound it with. Secret keys only go to the pinned
+          // recorder; the user-derived one is public (computable from the
+          // user id), so offering it to an unpinned recorder reveals nothing.
           if (e.message?.includes('rejected pairing')) {
-            const auth = useAuthStore();
             const candidates = [];
-            const legacy = await this._findAlternativeAppUuid(appUuid);
-            if (legacy) candidates.push({ uuid: legacy, why: 'legacy user-scoped UUID' });
-            const derived = userAppUuid(auth.user?.id);
-            if (derived && derived !== appUuid && derived !== legacy) candidates.push({ uuid: derived, why: 'user-derived UUID' });
+            const tried = new Set([appUuid]);
+            const add = (uuid, kind, why) => {
+              if (!uuid || tried.has(uuid)) return;
+              tried.add(uuid);
+              candidates.push({ uuid, kind, why });
+            };
+            if (pinned) {
+              add(keys.legacy, 'legacy', 'legacy install UUID');
+              add(keys.legacyScoped, 'legacyScoped', 'legacy user-scoped UUID');
+              add(keys.install, 'install', 'install key');
+            }
+            add(derivedAppUuid(userId), 'derived', 'user-derived UUID');
 
             let paired = false;
             for (const candidate of candidates) {
               addBreadcrumb({ category: 'ble', message: `Retrying handshake with ${candidate.why}`, level: 'info' });
               try {
                 await new Promise(r => setTimeout(r, 800)); // the device drops the link after a rejection
-                deviceInfo = await manager.connect(bleDeviceId, candidate.uuid);
-                if (isCapacitor()) {
-                  const { Preferences } = await import('@capacitor/preferences');
-                  await Preferences.set({ key: PREF_APP_UUID, value: candidate.uuid });
-                }
+                deviceInfo = await manager.connect(bleDeviceId, candidate.uuid, { expectedDeviceUuid });
                 appUuid = candidate.uuid;
+                keyKind = candidate.kind;
                 paired = true;
                 break;
               } catch (retryErr) {
@@ -608,7 +594,8 @@ export const useDeviceStore = defineStore('device', {
           deviceId: bleDeviceId,
           uuid: manager.deviceUuid,
           name: this.deviceName,
-          sn: this.deviceSN
+          sn: this.deviceSN,
+          keyKind
         };
         await this._savePairedDevice();
 
@@ -640,13 +627,20 @@ export const useDeviceStore = defineStore('device', {
 
       try {
         const manager = getBleManager();
-        const appUuid = await getOrCreateAppUuid();
+        const keys = await getAppKeys();
+        const appUuid = keyForRecord(this.pairedDevice, keys, useAuthStore().user?.id || null);
+        if (!appUuid) throw new Error('No pairing key for this device');
         // Use rediscovery-aware reconnect: on iOS, runs a service-UUID-filtered
         // scan first to repopulate the system discovery cache, which fixes the
         // multi-day-suspension hang where centralManager.connect() never
         // resolves until the app process is killed. Automatic attempts are
         // `silent`: an unreachable device is their expected outcome.
-        const deviceInfo = await manager.connectWithRediscovery(this.pairedDevice.deviceId, appUuid, { silent: true });
+        // The recorder must present the protocol UUID it had at pairing before
+        // the key is sent (a look-alike at the same address gets nothing).
+        const deviceInfo = await manager.connectWithRediscovery(this.pairedDevice.deviceId, appUuid, {
+          silent: true,
+          expectedDeviceUuid: this.pairedDevice.uuid || null
+        });
 
         this.deviceName = deviceInfo.name || deviceInfo.model || this.pairedDevice.name;
         this.deviceSN = deviceInfo.SN || this.pairedDevice.sn;
@@ -710,7 +704,14 @@ export const useDeviceStore = defineStore('device', {
      * Factory reset: delete all files on device, unpair, and clear local state.
      * @returns {Promise<{success: boolean, deletedCount: number, errors: string[]}>}
      */
-    async resetDevice() {
+    async resetDevice({ confirmed = false } = {}) {
+      // Destructive (wipes every recording on the card): only from the
+      // confirmation dialog, which passes { confirmed: true }.
+      if (confirmed !== true) {
+        const err = new Error('Resetting the recorder requires explicit confirmation');
+        err.code = 'CONFIRMATION_REQUIRED';
+        throw err;
+      }
       if (!this.isConnected) {
         throw new Error('Device must be connected to reset');
       }
@@ -718,7 +719,7 @@ export const useDeviceStore = defineStore('device', {
       const manager = getBleManager();
 
       // Format device storage — single command wipes all files (protocol §9, CMD 0x68)
-      const formatted = await manager.formatDevice();
+      const formatted = await manager.formatDevice({ confirmed: true });
       if (!formatted) {
         throw new Error('Device format failed');
       }
@@ -770,7 +771,7 @@ export const useDeviceStore = defineStore('device', {
       const gen = this._syncGen;
       try {
         const manager = getBleManager();
-        const files = await manager.getFileList();
+        const files = this._normalizeDeviceFiles(await manager.getFileList());
         // Device forgotten/disconnected while the list was being fetched:
         // don't refill deviceFiles (it would revive the paired UI).
         if (gen !== this._syncGen || !this.isConnected) return;
@@ -787,7 +788,7 @@ export const useDeviceStore = defineStore('device', {
           // list — replacing it would make the missing recordings disappear
           // from the device page and from auto-sync. The next poll retries.
           const byName = new Map(this.deviceFiles.map(f => [f.file, f]));
-          for (const f of e.files || []) byName.set(f.file, f);
+          for (const f of this._normalizeDeviceFiles(e.files || [])) byName.set(f.file, f);
           this.deviceFiles = [...byName.values()].sort((a, b) => b.creat_time - a.creat_time);
           this.fileListLoaded = true;
           captureMessage(`BLE file list incomplete: ${e.message} — kept ${this.deviceFiles.length} known file(s)`, 'warning');
@@ -808,9 +809,32 @@ export const useDeviceStore = defineStore('device', {
     },
 
     /**
+     * Typed copies of the recorder's list entries. Names outside the
+     * recorder's scheme (R<date>-<time>.opus|wav) or sizes out of range are
+     * kept only as sanitized display entries marked `unsafe` and never
+     * downloaded (the name used to become part of the local file path).
+     */
+    _normalizeDeviceFiles(files) {
+      const out = (files || []).map(normalizeDeviceFileEntry);
+      const unsafe = out.filter(f => f.unsafe).length;
+      if (unsafe) {
+        // Codes only — the names themselves are device-controlled.
+        captureMessage(`BLE file list: ${unsafe} entr(ies) cannot be processed safely`, 'warning', {
+          fingerprint: ['ble-unsafe-device-file']
+        });
+      }
+      return out;
+    },
+
+    /**
      * Download a single file and queue it for upload
      */
     async syncFile(file) {
+      if (file?.unsafe || !isSafeDeviceFilename(file?.file)) {
+        const err = new Error('Device file cannot be processed safely');
+        err.code = 'UNSAFE_FILENAME';
+        throw err;
+      }
       if (this.syncedFiles.includes(file.file)) return;
 
       // Remove from skipped if manually syncing a previously skipped file
@@ -972,6 +996,13 @@ export const useDeviceStore = defineStore('device', {
      * Download file from device and upload to backend
      */
     async _downloadAndUpload(file, gen = this._syncGen) {
+      // Defense in depth: the name goes back to the recorder as the download
+      // argument and into metadata — never into a local path.
+      if (file?.unsafe || !isSafeDeviceFilename(file?.file)) {
+        const err = new Error('Device file cannot be processed safely');
+        err.code = 'UNSAFE_FILENAME';
+        throw err;
+      }
       const manager = getBleManager();
       const historyStore = useRecordingsHistoryStore();
       const authStore = useAuthStore();
@@ -1023,7 +1054,7 @@ export const useDeviceStore = defineStore('device', {
       // written to history after a verified write, so its presence means the
       // file is complete; a missing file simply falls back to a download.
       let reusableFilePath = null;
-      if (existingRec?.filePath && (existingRec.uploadStatus === 'failed' || existingRec.uploadStatus === 'pending')) {
+      if (existingRec?.filePath && isConfinedPath(existingRec.filePath) && (existingRec.uploadStatus === 'failed' || existingRec.uploadStatus === 'pending')) {
         try {
           if (await storage.exists(existingRec.filePath)) reusableFilePath = existingRec.filePath;
         } catch { /* re-download */ }
@@ -1064,6 +1095,11 @@ export const useDeviceStore = defineStore('device', {
           // Phase 1: BLE download
           if (this._cancelRequested) throw new Error('cancelled');
 
+          if (file.size > MAX_DEVICE_FILE_BYTES) {
+            const big = new Error('Device file size out of range');
+            big.code = 'UNSAFE_SIZE';
+            throw big;
+          }
           if (!(file.size > 0)) {
             // A zero-byte entry on the card (device-side write failure) can
             // never transfer — skip it with a reason instead of asking the
@@ -1101,9 +1137,11 @@ export const useDeviceStore = defineStore('device', {
 
           // storage.writeFile owns the directory choice (app-private on Android,
           // sandbox Documents on iOS) and verifies the bytes reached disk.
+          // The local name is a fresh UUID — never the recorder-reported name
+          // (a name like "../../shared_prefs/x.xml" used to escape the folder).
           const dirPath = 'suissenotes_recordings';
           await storage.createDirectory(dirPath);
-          filePath = `${dirPath}/${file.file}`;
+          filePath = localPathForDeviceFile(file.file);
           const bytes = saveData instanceof Uint8Array ? saveData : new Uint8Array(saveData);
           const writeResult = await storage.writeFile(
             filePath,
@@ -1212,8 +1250,11 @@ export const useDeviceStore = defineStore('device', {
         // instead of retrying on every 20-second poll forever.
         const isCrc = /CRC mismatch/i.test(err.message || '');
         if (isCrc) this._crcFailures[file.file] = (this._crcFailures[file.file] || 0) + 1;
-        if (!isCancelled && (err.code === 'EMPTY_FILE' || (isCrc && this._crcFailures[file.file] >= MAX_CRC_FAILURES))) {
-          const reason = err.code === 'EMPTY_FILE' ? 'EMPTY_FILE' : 'CRC_GAVE_UP';
+        // A file over the size limits (announced or actually sent) is skipped
+        // the same way: re-asking for it can only repeat the abort.
+        const isLimit = err.code === 'SIZE_EXCEEDED' || err.code === 'UNSAFE_SIZE';
+        if (!isCancelled && (err.code === 'EMPTY_FILE' || isLimit || (isCrc && this._crcFailures[file.file] >= MAX_CRC_FAILURES))) {
+          const reason = err.code === 'EMPTY_FILE' ? 'EMPTY_FILE' : (isLimit ? 'SIZE_LIMIT' : 'CRC_GAVE_UP');
           await historyStore.updateRecording(recordId, { uploadStatus: 'skipped', filePath: null, uploadError: reason });
           await this._addSkippedFile(file.file);
           captureMessage(`BLE sync skipped ${file.file}: ${reason} (${err.message})`, 'warning');
@@ -1892,23 +1933,6 @@ export const useDeviceStore = defineStore('device', {
     },
 
     // ========== Persistence ==========
-
-    /**
-     * Find an alternative appUuid that a device might be paired to.
-     * Checks user-scoped UUIDs from the migration period.
-     */
-    async _findAlternativeAppUuid(currentUuid) {
-      if (!isCapacitor()) return null;
-      const auth = useAuthStore();
-      const userId = auth.user?.id;
-      if (!userId) return null;
-
-      const { Preferences } = await import('@capacitor/preferences');
-      const scopedKey = `${PREF_APP_UUID}:u${userId}`;
-      const { value } = await Preferences.get({ key: scopedKey });
-      if (value && value !== currentUuid) return value;
-      return null;
-    },
 
     async _savePairedDevice() {
       if (isCapacitor()) {

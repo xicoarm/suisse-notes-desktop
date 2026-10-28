@@ -82,7 +82,7 @@ describe('the iOS wiring survives a Capacitor sync', () => {
     fs.writeFileSync(path.join(spm, 'Package.swift'), [
       'let package = Package(',
       '    dependencies: [',
-      '        .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", exact: "6.2.1"),',
+      '        .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", exact: "6.2.2"),',
       '        .package(name: "CapacitorApp", path: "../../../node_modules/@capacitor/app")',
       '    ],',
       '    targets: [',
@@ -102,7 +102,7 @@ describe('the iOS wiring survives a Capacitor sync', () => {
     expect(patched).toContain('getsentry/sentry-cocoa');
     expect(patched).toContain('.product(name: "Sentry", package: "sentry-cocoa")');
     expect(JSON.parse(fs.readFileSync(path.join(app, 'capacitor.config.json'), 'utf8')).packageClassList)
-      .toContain('BackgroundRecordingPlugin');
+      .toEqual(expect.arrayContaining(['BackgroundRecordingPlugin', 'SecureTokenStorePlugin']));
     expect(first.every(result => result.changed)).toBe(true);
 
     // Running it again changes nothing (the sync script runs on every build).

@@ -81,18 +81,18 @@ describe('BleDeviceManager.downloadFile', () => {
     // Swap the index bytes of frame 1 (little-endian encoding of 1 = 0x01 0x00)
     frames[1][3] = 0x01; frames[1][4] = 0x00;
     attachDevice(m, { 0x74: syncEcho, 0x1C: () => [...frames, doneFrame(file)] });
-    await expect(m.downloadFile('R1.opus')).rejects.toThrow(/CRC mismatch: frame 256 received, expected 1/);
+    await expect(m.downloadFile('R1.opus', null, 4096)).rejects.toThrow(/CRC mismatch: frame 256 received, expected 1/);
   });
 
   it('a zero-byte file ends with DONE only and is reported as EMPTY_FILE', async () => {
     attachDevice(m, { 0x74: syncEcho, 0x1C: () => [[CMD, 0x1D, 0x00, 0x00, 0x00]] });
-    await expect(m.downloadFile('R0.opus')).rejects.toMatchObject({ code: 'EMPTY_FILE' });
+    await expect(m.downloadFile('R0.opus', null, 1)).rejects.toMatchObject({ code: 'EMPTY_FILE' });
   });
 
   it('a wrong CRC is rejected', async () => {
     const file = new Uint8Array(500).fill(0x11);
     attachDevice(m, { 0x74: syncEcho, 0x1C: () => [...audioFrames(file), [CMD, 0x1D, 0x00, 0x12, 0x34]] });
-    await expect(m.downloadFile('R1.opus')).rejects.toThrow(/CRC mismatch: expected 0x3412/);
+    await expect(m.downloadFile('R1.opus', null, 4096)).rejects.toThrow(/CRC mismatch: expected 0x3412/);
   });
 
   it('real-time audio frames (0x14) interleaved with the transfer are ignored', async () => {
@@ -100,7 +100,7 @@ describe('BleDeviceManager.downloadFile', () => {
     const frames = audioFrames(file);
     const rt = [AUDIO, 0x14, 0x00, 0x00, 0x00, 1, 2, 3];
     attachDevice(m, { 0x74: syncEcho, 0x1C: () => [frames[0], rt, frames[1], rt, doneFrame(file)] });
-    const out = await m.downloadFile('R1.opus');
+    const out = await m.downloadFile('R1.opus', null, 4096);
     expect(out.length).toBe(640);
   });
 });

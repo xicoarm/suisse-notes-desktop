@@ -7,6 +7,32 @@
       </p>
     </div>
 
+    <!-- Recordings waiting for another account (never uploaded under this one) -->
+    <q-banner
+      v-if="heldUploads.otherAccount.length || heldUploads.ownerUnknown.length"
+      class="held-uploads-banner q-mb-md"
+      rounded
+      data-test="held-uploads-banner"
+    >
+      <div v-if="heldUploads.otherAccount.length">
+        {{ $t('heldUploadsOtherAccount', { count: heldUploads.otherAccount.length }) }}
+      </div>
+      <div v-if="heldUploads.ownerUnknown.length">
+        {{ $t('heldUploadsOwnerUnknown', { count: heldUploads.ownerUnknown.length }) }}
+      </div>
+      <template
+        v-if="heldUploads.ownerUnknown.length"
+        #action
+      >
+        <q-btn
+          flat
+          no-caps
+          :label="$t('heldUploadsClaim')"
+          @click="confirmClaimHeldUploads"
+        />
+      </template>
+    </q-banner>
+
     <!-- Upload Progress Banner -->
     <div
       v-if="uploadingRecordingId"
@@ -248,7 +274,7 @@ import { useRecordingsHistoryStore } from '../stores/recordings-history';
 import { useAuthStore } from '../stores/auth';
 import { useRecordingStore } from '../stores/recording';
 import { isElectron, isCapacitor, isMobile as isMobilePlatform } from '../utils/platform';
-import { uploadWithVerification } from '../services/upload';
+import { uploadWithVerification, getHeldMobileUploads, claimUnownedMobileUploads, processMobileUploadQueue } from '../services/upload';
 import { getApiUrlSync } from '../services/api';
 import { pickAudioFile } from '../services/filePicker';
 import { captureException, addBreadcrumb } from '../boot/sentry';
@@ -601,7 +627,26 @@ export default {
       });
     };
 
+    const heldUploads = ref({ otherAccount: [], ownerUnknown: [] });
+    const refreshHeldUploads = () => {
+      if (!isCapacitor()) return;
+      try { heldUploads.value = getHeldMobileUploads(authStore.user?.id); } catch { /* queue unreadable */ }
+    };
+    const confirmClaimHeldUploads = () => {
+      $q.dialog({
+        title: t('heldUploadsClaimTitle'),
+        message: t('heldUploadsClaimMessage', { count: heldUploads.value.ownerUnknown.length }),
+        cancel: true,
+        persistent: true
+      }).onOk(() => {
+        claimUnownedMobileUploads(authStore.user?.id, heldUploads.value.ownerUnknown);
+        refreshHeldUploads();
+        processMobileUploadQueue(authStore, getApiUrlSync).catch(() => {});
+      });
+    };
+
     onMounted(async () => {
+      refreshHeldUploads();
       if (!historyStore.loaded) {
         await historyStore.loadRecordings();
       } else if (isElectron()) {
@@ -639,6 +684,8 @@ export default {
     });
 
     return {
+      heldUploads,
+      confirmClaimHeldUploads,
       historyStore,
       recordingStore,
       isMobile,

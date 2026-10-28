@@ -63,7 +63,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     saveUserInfo: (userInfo) => ipcRenderer.invoke('auth:saveUserInfo', userInfo),
     getUserInfo: () => ipcRenderer.invoke('auth:getUserInfo'),
     refreshToken: () => ipcRenderer.invoke('auth:refreshToken'),
-    createWebSession: () => ipcRenderer.invoke('auth:createWebSession'),
+    // Opens a web-app page signed in as this user; main keeps the hand-off.
+    openWebWithSession: (pagePath) => ipcRenderer.invoke('auth:openWebWithSession', String(pagePath ?? '')),
     // SSO via system browser + suissenotes:// custom protocol
     loginWithMicrosoft: () => ipcRenderer.invoke('auth:loginWithMicrosoft'),
     loginWithGoogle: () => ipcRenderer.invoke('auth:loginWithGoogle'),

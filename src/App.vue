@@ -67,7 +67,7 @@ onMounted(async () => {
               customVocabulary: [],
               // Recovery recs never carry prep - the merged history record does.
               ...(historyStore.recordings.find(r => r.id === rec.id)?.prep || rec.prep || {})
-            });
+            }, rec.userId || null);
           }
         }
         console.log(`Startup: recovered ${recovery.recordings.length} recording(s) and queued for upload`);

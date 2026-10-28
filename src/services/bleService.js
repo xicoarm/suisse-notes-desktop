@@ -12,6 +12,14 @@
 import { isCapacitor, isAndroid, isIOS } from '../utils/platform';
 import { addBreadcrumb, captureException, captureMessage } from '../boot/sentry';
 
+import {
+  MAX_DEVICE_FILE_BYTES,
+  MAX_DEVICE_FILE_COUNT,
+  LIST_TIME_BUDGET_MS,
+  MIN_TRANSFER_BYTES_PER_SEC,
+  TRANSFER_BASE_BUDGET_MS
+} from '../utils/deviceFileSafety';
+
 // BLE GATT UUIDs
 const BLE_SERVICE_UUID = '00001910-0000-1000-8000-00805f9b34fb';
 const BLE_WRITE_CHAR = '00001912-0000-1000-8000-00805f9b34fb';
@@ -283,7 +291,7 @@ export class BleDeviceManager {
    *   is the expected outcome, so failures are breadcrumbs, not Sentry errors
    * @returns {Promise<Object>} Device info from handshake
    */
-  async connect(bleDeviceId, appUuid, { silent = false } = {}) {
+  async connect(bleDeviceId, appUuid, { silent = false, expectedDeviceUuid = null } = {}) {
     if (!this.ble) await this.initialize();
     const report = (e, action, extra) => {
       if (silent) {
@@ -375,7 +383,7 @@ export class BleDeviceManager {
 
     // Perform handshake
     try {
-      const deviceInfo = await this._handshake(appUuid);
+      const deviceInfo = await this._handshake(appUuid, { expectedDeviceUuid });
       this.connected = true;
       this.deviceInfo = deviceInfo;
       addBreadcrumb({ category: 'ble', message: `BLE handshake OK: ${deviceInfo.name || 'unknown'}`, level: 'info' });
@@ -411,7 +419,9 @@ export class BleDeviceManager {
         captureException(e, { tags: { action: 'ble_handshake' }, extra: { bleDeviceId } });
       }
       await this.disconnect();
-      throw new Error(`Handshake failed: ${e.message}`);
+      const wrapped = new Error(`Handshake failed: ${e.message}`);
+      if (e?.code) wrapped.code = e.code;
+      throw wrapped;
     }
   }
 
@@ -461,18 +471,18 @@ export class BleDeviceManager {
    * Android's connect() handles known peripherals natively, so we skip the
    * scan there to avoid extra latency.
    */
-  async connectWithRediscovery(bleDeviceId, appUuid, { rediscoveryTimeoutMs = 12000, silent = false } = {}) {
+  async connectWithRediscovery(bleDeviceId, appUuid, { rediscoveryTimeoutMs = 12000, silent = false, expectedDeviceUuid = null } = {}) {
     if (!this.ble) await this.initialize();
 
     if (!isIOS()) {
-      return this.connect(bleDeviceId, appUuid, { silent });
+      return this.connect(bleDeviceId, appUuid, { silent, expectedDeviceUuid });
     }
 
     // Deliberately falls through to connect() even when the scan did not see
     // the device: iOS can connect to a peripheral that is connectable but not
     // advertising. The caller (device store) backs off between attempts.
     await this._rediscover(bleDeviceId, rediscoveryTimeoutMs);
-    return this.connect(bleDeviceId, appUuid, { silent });
+    return this.connect(bleDeviceId, appUuid, { silent, expectedDeviceUuid });
   }
 
   /**
@@ -499,7 +509,13 @@ export class BleDeviceManager {
    * Returns 0x00 on success, other value on failure.
    * Device won't accept commands until format completes.
    */
-  async formatDevice() {
+  async formatDevice({ confirmed = false } = {}) {
+    // Destructive: only after the user confirmed it in the UI.
+    if (confirmed !== true) {
+      const err = new Error('Formatting the recorder requires explicit confirmation');
+      err.code = 'CONFIRMATION_REQUIRED';
+      throw err;
+    }
     const release = await this._acquireLock();
     try {
       await this._write(buildCmd(CMD_FORMAT));
@@ -652,7 +668,12 @@ export class BleDeviceManager {
       // abandoned list request, so a shifted stream still completes.
       const maxReads = () => (sawCount ? fileCount * 2 + 8 : 8);
 
+      const listStartedAt = Date.now();
       while (reads < maxReads() && (!sawCount || files.length < fileCount)) {
+        if (Date.now() - listStartedAt > LIST_TIME_BUDGET_MS) {
+          addBreadcrumb({ category: 'ble', message: `getFileList: time budget exhausted after ${files.length}/${fileCount} entries`, level: 'warning' });
+          break;
+        }
         reads++;
         let resp;
         try {
@@ -693,12 +714,21 @@ export class BleDeviceManager {
             files.length = 0;
             seen.clear();
           }
+          if (!Number.isInteger(json.FileNum) || json.FileNum < 0 || json.FileNum > MAX_DEVICE_FILE_COUNT) {
+            const tooMany = new Error(`Device file list too large or invalid (${json.FileNum})`);
+            tooMany.code = 'LIST_TOO_LARGE';
+            throw tooMany;
+          }
           sawCount = true;
           fileCount = json.FileNum;
           addBreadcrumb({ category: 'ble', message: `getFileList fileCount=${fileCount}`, level: 'info' });
           continue;
         }
         if (json.file) {
+          if (files.length >= MAX_DEVICE_FILE_COUNT) {
+            skipped++;
+            continue;
+          }
           if (seen.has(json.file)) {
             // The same name twice can only be a stale frame of an earlier
             // request — never two recordings (the name carries the timestamp).
@@ -806,6 +836,15 @@ export class BleDeviceManager {
   }
 
   async downloadFile(filename, onProgress = null, totalSize = 0) {
+    // The announced size bounds the transfer: it must be positive and below
+    // the hard cap, and the device may not send more than it announced
+    // (+ one frame). A device that streams without end is cut off.
+    if (!(Number.isFinite(totalSize) && totalSize > 0 && totalSize <= MAX_DEVICE_FILE_BYTES)) {
+      const bad = new Error(`Device file size out of range (${totalSize})`);
+      bad.code = 'UNSAFE_SIZE';
+      throw bad;
+    }
+    const transferDeadline = Date.now() + TRANSFER_BASE_BUDGET_MS + Math.ceil(totalSize / MIN_TRANSFER_BYTES_PER_SEC) * 1000;
     const release = await this._acquireLock();
     this._downloadAborted = false;
     this._downloadInProgress = true;
@@ -833,7 +872,13 @@ export class BleDeviceManager {
 
       // Receive audio frames until transfer complete
       let transferring = true;
+      let largestFrame = 0;
       while (transferring) {
+        if (Date.now() > transferDeadline) {
+          const slow = new Error('Device transfer exceeded its time budget');
+          slow.code = 'TRANSFER_TIMEOUT';
+          throw slow;
+        }
         const data = await this._readNotification(30000);
 
         if (data[0] === TYPE_AUDIO) {
@@ -868,6 +913,12 @@ export class BleDeviceManager {
           }
           expectedIndex++;
           const audioData = data.slice(5);
+          if (audioData.length > largestFrame) largestFrame = audioData.length;
+          if (receivedBytes + audioData.length > totalSize + largestFrame) {
+            const over = new Error(`Device sent more data than announced (${receivedBytes + audioData.length} > ${totalSize})`);
+            over.code = 'SIZE_EXCEEDED';
+            throw over;
+          }
           chunks.push(audioData);
           receivedBytes += audioData.length;
 
@@ -952,7 +1003,13 @@ export class BleDeviceManager {
    * @param {string} filename
    * @returns {Promise<boolean>} true if deleted
    */
-  async deleteFile(filename) {
+  async deleteFile(filename, { confirmed = false } = {}) {
+    // Destructive: only after the user confirmed it in the UI.
+    if (confirmed !== true) {
+      const err = new Error('Deleting a recorder file requires explicit confirmation');
+      err.code = 'CONFIRMATION_REQUIRED';
+      throw err;
+    }
     const release = await this._acquireLock();
     try {
       const filenameBytes = new TextEncoder().encode(filename);
@@ -970,7 +1027,7 @@ export class BleDeviceManager {
   /**
    * Perform the 3-step handshake with the device
    */
-  async _handshake(appUuid) {
+  async _handshake(appUuid, { expectedDeviceUuid = null } = {}) {
     // Helper to format bytes for logging
     const hexDump = (data, maxLen = 20) => {
       const bytes = Array.from(data.slice(0, maxLen)).map(b => '0x' + b.toString(16).padStart(2, '0'));
@@ -1001,7 +1058,7 @@ export class BleDeviceManager {
       step1 = await this._readNotification(Math.min(remaining, 5000));
       step1Attempts++;
 
-      addBreadcrumb({ category: 'ble', message: `handshake step1 raw (attempt ${step1Attempts}): ${hexDump(step1, 30)}`, level: 'info' });
+      addBreadcrumb({ category: 'ble', message: `handshake step1 raw (attempt ${step1Attempts}): ${hexDump(step1, 4)}`, level: 'info' });
 
       // Valid step 1: 0x01 0x01 0x00 0x00 + JSON with the device UUID
       // (protocol §二.1.1). Checking only byte[3] let a late reply of another
@@ -1026,9 +1083,21 @@ export class BleDeviceManager {
       }
     }
     const deviceJson = parseJsonFromBuffer(step1, 4);
-    this.deviceUuid = deviceJson.uuid;
+    const reportedUuid = typeof deviceJson?.uuid === 'string' ? deviceJson.uuid : '';
 
-    addBreadcrumb({ category: 'ble', message: `handshake step1 OK: uuid=${deviceJson.uuid}`, level: 'info' });
+    // Pinned recorder: the protocol UUID must match the one stored at pairing
+    // BEFORE this app's key goes over the air. A look-alike at the same
+    // address (or a different recorder) gets nothing.
+    if (expectedDeviceUuid && reportedUuid !== expectedDeviceUuid) {
+      addBreadcrumb({ category: 'ble', message: 'handshake step1: recorder identity does not match the paired recorder — key not sent', level: 'warning' });
+      const mismatch = new Error('Recorder identity does not match the paired recorder');
+      mismatch.code = 'BLE_DEVICE_MISMATCH';
+      throw mismatch;
+    }
+    this.deviceUuid = reportedUuid;
+
+    // The device UUID is pairing material: never put it in telemetry.
+    addBreadcrumb({ category: 'ble', message: 'handshake step1 OK', level: 'info' });
 
     // Step 2: Send app UUID + timestamp
     const timestamp = Math.floor(Date.now() / 1000);

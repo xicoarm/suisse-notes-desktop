@@ -5,6 +5,7 @@ const { writeFileAtomic, writeFileAtomicSync, publishFile, concatenateFiles, arc
 const { createRecordingPersistence, readFinalizedRecording, listSessions } = require('./recording-persistence');
 const nativeSourcePersistence = require('./native-source-persistence');
 const { createNativeSourceFinalization } = require('./native-source-finalization');
+const { createTokenVault } = require('./token-vault');
 const { NATIVE_CAPTURE_MODE, usesNativeSources, readNativeCaptureMarker, markNativeCaptureSession } = require('./native-recording-session');
 const { assessRecordingUpload, FINALIZATION_PENDING_MARKER } = require('./recording-upload-eligibility');
 const { withCaptureWarnings, hydrateHistoryCaptureWarnings } = require('./recording-history-warnings');
@@ -330,33 +331,46 @@ ipcMain.handle('auth:takePendingSSO', () => {
   return payload;
 });
 
-function handleSSOUrl(url) {
-  if (!url || typeof url !== 'string' || !url.startsWith(`${SSO_PROTOCOL}://`)) return;
-  let payload;
+const ssoFlow = require('./sso-flow');
+const ssoFlows = ssoFlow.createSsoFlowStore();
+
+// Exchange a one-time SSO code for the session (PKCE, newer server contract).
+async function exchangeSsoCode(authCode, verifier, state) {
   try {
-    const parsed = new URL(url);
-    if (parsed.host !== 'auth' || parsed.pathname.replace(/\/$/, '') !== '/callback') {
-      log.warn('SSO: ignoring unknown URL path:', url);
-      return;
-    }
-    const error = parsed.searchParams.get('error');
-    // Contract 10/2026: `code` is the machine code the app translates;
-    // `error` stays an English sentence for older app versions.
-    const code = parsed.searchParams.get('code');
-    const token = parsed.searchParams.get('token');
-    const userB64 = parsed.searchParams.get('user');
-    if (error || code) {
-      payload = code ? { error: error || code, code } : { error };
-    } else if (token && userB64) {
-      const userJson = Buffer.from(userB64, 'base64url').toString('utf8');
-      payload = { token, user: JSON.parse(userJson) };
-    } else {
-      payload = { error: 'invalid_callback' };
-    }
-  } catch (e) {
-    log.error('SSO: failed to parse callback URL', e.message);
-    payload = { error: 'invalid_callback' };
+    const response = await axios.post(`${API_BASE_URL}/api/auth/sso/exchange`,
+      { authCode, codeVerifier: verifier, state },
+      { headers: { 'Content-Type': 'application/json' }, timeout: 30000 });
+    const data = response.data || {};
+    if (data.token && data.user && typeof data.user === 'object') return { token: data.token, user: data.user };
+  } catch (error) {
+    log.warn(`SSO: code exchange failed (${error?.response?.status || error?.code || 'error'})`);
   }
+  return { error: 'invalid_callback' };
+}
+
+async function handleSSOUrl(url) {
+  if (!url || typeof url !== 'string' || !url.startsWith(`${SSO_PROTOCOL}://`)) return;
+  const parsed = ssoFlow.parseCallbackUrl(url);
+  if (!parsed) {
+    log.warn('SSO: ignoring unknown callback URL');
+    return;
+  }
+  // SECURITY: apply only the result of a sign-in this app started (state
+  // binding). A crafted suissenotes://auth/callback link is dropped here.
+  const binding = ssoFlows.consume(parsed);
+  if (!binding.ok) {
+    log.warn(`SSO: callback ignored (${binding.reason})`);
+    return;
+  }
+  let payload;
+  if (parsed.authCode) {
+    payload = await exchangeSsoCode(parsed.authCode, binding.verifier, parsed.state);
+  } else if (parsed.token) {
+    payload = { token: parsed.token, user: parsed.user };
+  } else {
+    payload = parsed.code ? { error: parsed.error, code: parsed.code } : { error: parsed.error };
+  }
+  payload.bound = true;
 
   // Buffer first, push second: the renderer acknowledges a push by taking the
   // buffer (deliveryId lets it ignore the same result arriving both ways).
@@ -385,20 +399,20 @@ if (!gotTheLock) {
     }
     // Win/Linux deliver the deep-link URL via argv on the second instance
     const ssoUrl = argv.find(a => typeof a === 'string' && a.startsWith(`${SSO_PROTOCOL}://`));
-    if (ssoUrl) handleSSOUrl(ssoUrl);
+    if (ssoUrl) handleSSOUrl(ssoUrl).catch(() => {});
   });
 }
 
 // macOS deep-link handoff
 app.on('open-url', (event, url) => {
   event.preventDefault();
-  handleSSOUrl(url);
+  handleSSOUrl(url).catch(() => {});
 });
 
 // Cold-start case (Win/Linux): URL is in our own argv
 {
   const ssoUrl = process.argv.find(a => typeof a === 'string' && a.startsWith(`${SSO_PROTOCOL}://`));
-  if (ssoUrl) handleSSOUrl(ssoUrl);
+  if (ssoUrl) handleSSOUrl(ssoUrl).catch(() => {});
 }
 
 // Configure auto-updater logging
@@ -498,11 +512,20 @@ const configStore = new Store({
   }
 });
 
+// Session token: encrypted by the OS keystore only, never plaintext on disk
+// (see token-vault.js; a legacy plaintext token is migrated once).
+const tokenVault = createTokenVault({
+  safeStorage,
+  store: configStore,
+  warn: (msg) => log.warn(msg)
+});
+
 // Restore Sentry user context from stored session (so crash reports identify the user)
 try {
   const storedUser = configStore.get('userInfo');
   if (storedUser) {
-    Sentry.setUser({ id: storedUser.id, email: storedUser.email });
+    // Opaque account id only (no e-mail/name to telemetry).
+    if (storedUser.id) Sentry.setUser({ id: String(storedUser.id) });
   }
 } catch (e) { /* ignore */ }
 
@@ -2060,7 +2083,9 @@ function getDeviceId() {
 // completion arrives asynchronously via the 'auth:ssoCallback' event.
 async function openSSOBrowser(provider) {
   try {
-    const url = `${API_BASE_URL}/api/auth/${provider}/login?client=desktop`;
+    // Bind the callback to this sign-in (state + PKCE, see sso-flow.js).
+    const flow = ssoFlows.begin(provider);
+    const url = ssoFlow.withFlowParams(`${API_BASE_URL}/api/auth/${provider}/login?client=desktop`, flow);
     log.info(`SSO: launching system browser for ${provider} login`);
     await shell.openExternal(url);
     return { success: true };
@@ -2253,13 +2278,10 @@ function authFailureFromAxiosError(error) {
 
 ipcMain.handle('auth:saveToken', async (event, token) => {
   try {
-    if (safeStorage.isEncryptionAvailable()) {
-      const encrypted = safeStorage.encryptString(token);
-      configStore.set('authToken', encrypted.toString('base64'));
-    } else {
-      // Fallback to plain storage (less secure)
-      configStore.set('authToken', token);
-    }
+    // Encrypted by the OS keystore, or (no secure storage) memory-only for
+    // this run - never plaintext on disk.
+    const saved = tokenVault.saveToken(token);
+    if (!saved.success) return { success: false, error: saved.error };
     // Trigger pending uploads now that we have auth
     setImmediate(() => {
       processPendingUploads().catch(err => {
@@ -2275,15 +2297,7 @@ ipcMain.handle('auth:saveToken', async (event, token) => {
 
 ipcMain.handle('auth:getToken', async () => {
   try {
-    const stored = configStore.get('authToken');
-    if (!stored) return null;
-
-    if (safeStorage.isEncryptionAvailable()) {
-      const decrypted = safeStorage.decryptString(Buffer.from(stored, 'base64'));
-      return decrypted;
-    } else {
-      return stored;
-    }
+    return tokenVault.getToken();
   } catch (error) {
     console.error('Error getting token:', error);
     return null;
@@ -2292,7 +2306,7 @@ ipcMain.handle('auth:getToken', async () => {
 
 ipcMain.handle('auth:clearToken', async () => {
   for (const controller of activeAbortControllers.values()) controller.abort();
-  configStore.delete('authToken');
+  tokenVault.clearToken();
   configStore.delete('userInfo');  // Also clear user info on logout
   Sentry.setUser(null);  // Clear Sentry user context on logout
   return { success: true };
@@ -2304,7 +2318,8 @@ ipcMain.handle('auth:saveUserInfo', async (event, userInfo) => {
     configStore.set('userInfo', userInfo);
     // Set Sentry user context so main process errors are attributed to this user
     if (userInfo) {
-      Sentry.setUser({ id: userInfo.id, email: userInfo.email });
+      // Opaque account id only (no e-mail/name to telemetry).
+      if (userInfo.id) Sentry.setUser({ id: String(userInfo.id) });
     }
     return { success: true };
   } catch (error) {
@@ -2322,9 +2337,44 @@ ipcMain.handle('auth:getUserInfo', async () => {
   }
 });
 
-// Create web session token for seamless web login
+// Paths of the web app the signed-in user may be handed into from the app.
+// Everything else is refused: the hand-off signs the browser in as this user.
+const WEB_HANDOFF_PATHS = [/^\/meeting\/audio\/[A-Za-z0-9_-]{1,128}$/, /^\/settings\/integrations$/];
+const WEB_HANDOFF_ORIGIN = 'https://app.suisse-meets.ch';
+
+// Open a page of the web app in the system browser, signed in as the current
+// user. The session/hand-off value is created and used here only: it is never
+// returned to the renderer, copied, or logged (the renderer's «copy link»
+// copies the plain meeting URL).
+ipcMain.handle('auth:openWebWithSession', async (_event, pagePath) => {
+  const path = typeof pagePath === 'string' ? pagePath : '';
+  if (!WEB_HANDOFF_PATHS.some((re) => re.test(path))) {
+    return { success: false, error: 'path_not_allowed' };
+  }
+  const plainUrl = `${WEB_HANDOFF_ORIGIN}${path}`;
+  let query = '';
+  try {
+    const session = await createWebSessionInMain();
+    if (session.success) {
+      query = session.handoffCode
+        ? `handoff=${encodeURIComponent(session.handoffCode)}`
+        : `session=${encodeURIComponent(session.sessionToken)}`;
+    }
+  } catch (error) {
+    log.warn(`Web hand-off could not be created: ${error?.message || 'unknown'}`);
+  }
+  try {
+    await shell.openExternal(query ? `${plainUrl}?${query}` : plainUrl);
+    return { success: true, signedIn: !!query };
+  } catch (error) {
+    log.warn(`Could not open the browser: ${error?.message || 'unknown'}`);
+    return { success: false, error: 'open_failed' };
+  }
+});
+
+// Create web session token for seamless web login (main process only).
 // SECURITY: Verifies token matches stored user to prevent authentication as wrong user
-ipcMain.handle('auth:createWebSession', async () => {
+async function createWebSessionInMain() {
   try {
     const authToken = await getAuthToken();
     if (!authToken) {
@@ -2347,7 +2397,7 @@ ipcMain.handle('auth:createWebSession', async () => {
               storedEmail: storedUserInfo.email
             });
             // Clear the mismatched token to force re-login
-            configStore.delete('authToken');
+            tokenVault.clearToken();
             return {
               success: false,
               error: 'Session mismatch detected. Please log in again for security.'
@@ -2360,7 +2410,7 @@ ipcMain.handle('auth:createWebSession', async () => {
       }
     }
 
-    const response = await axios.post(`${API_BASE_URL}/api/auth/desktop/create-web-session`, {}, {
+    const response = await axios.post(`${API_BASE_URL}/api/auth/desktop/create-web-session`, { purpose: 'open_in_browser' }, {
       headers: {
         'Authorization': `Bearer ${authToken}`,
         'Content-Type': 'application/json'
@@ -2368,22 +2418,25 @@ ipcMain.handle('auth:createWebSession', async () => {
       timeout: 30000
     });
 
-    if (response.data && response.data.success && response.data.sessionToken) {
+    // `handoffCode`: the bound one-time code of the newer server contract;
+    // `sessionToken`: today's short-lived session.
+    if (response.data && response.data.success && (response.data.handoffCode || response.data.sessionToken)) {
       return {
         success: true,
+        handoffCode: typeof response.data.handoffCode === 'string' ? response.data.handoffCode : null,
         sessionToken: response.data.sessionToken
       };
     }
 
     return { success: false, error: 'Failed to create web session' };
   } catch (error) {
-    console.error('Create web session error:', error);
+    log.warn(`Create web session failed: ${error?.response?.status || error?.code || 'error'}`);
     return {
       success: false,
-      error: error.response?.data?.error || error.message || 'Failed to create web session'
+      error: 'Failed to create web session'
     };
   }
-});
+}
 
 // --- Token Refresh ---
 
@@ -2406,11 +2459,7 @@ async function refreshMainAuthToken() {
 
     if (response.data?.token) {
       // Save new token to configStore immediately so main process is in sync
-      if (safeStorage.isEncryptionAvailable()) {
-        configStore.set('authToken', safeStorage.encryptString(response.data.token).toString('base64'));
-      } else {
-        configStore.set('authToken', response.data.token);
-      }
+      tokenVault.saveToken(response.data.token);
       log.info('Token refreshed successfully (main process)');
       return { success: true, token: response.data.token, user: response.data.user };
     }
@@ -3742,13 +3791,7 @@ ipcMain.handle('recording:deleteRecording', async (event, recordId, options = {}
 // Helper: Get auth token
 async function getAuthToken() {
   try {
-    const stored = configStore.get('authToken');
-    if (!stored) return null;
-
-    if (safeStorage.isEncryptionAvailable()) {
-      return safeStorage.decryptString(Buffer.from(stored, 'base64'));
-    }
-    return stored;
+    return tokenVault.getToken();
   } catch (e) {
     console.warn('Could not get auth token:', e);
     return null;

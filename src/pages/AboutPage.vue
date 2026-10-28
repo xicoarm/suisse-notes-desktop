@@ -293,16 +293,13 @@ const openCalendarSettings = async () => {
   const url = 'https://app.suisse-meets.ch/settings/integrations';
 
   if (isElectron()) {
-    let finalUrl = url;
+    let opened = null;
     try {
-      const result = await window.electronAPI.auth.createWebSession();
-      if (result.success && result.sessionToken) {
-        finalUrl += `?session=${encodeURIComponent(result.sessionToken)}`;
-      }
+      opened = await window.electronAPI.auth.openWebWithSession('/settings/integrations');
     } catch (error) {
-      console.warn('Could not create web session:', error);
+      console.warn('Could not open with a web session:', error?.message || 'unknown');
     }
-    window.electronAPI.shell.openExternal(finalUrl);
+    if (!opened?.success) window.electronAPI.shell.openExternal(url);
   } else if (isCapacitor()) {
     const { Browser } = await import('@capacitor/browser');
     await Browser.open({ url });

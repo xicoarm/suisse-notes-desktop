@@ -31,6 +31,10 @@ function networkKind(error) {
  */
 function discardPendingSSO(authStore) {
   authStore.ssoProvider = null;
+  if (isCapacitor()) {
+    import('../services/ssoFlow').then((m) => m.clearSsoFlow()).catch(() => {});
+    return;
+  }
   if (!isElectron()) return;
   try {
     const take = window.electronAPI?.auth?.takePendingSSO;
@@ -257,6 +261,67 @@ function decodeJwtExpMs(token) {
   }
 }
 
+function decodeJwtUserId(token) {
+  try {
+    const payload = token.split('.')[1];
+    const std = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const json = JSON.parse(atob(std + '='.repeat((4 - (std.length % 4)) % 4)));
+    return typeof json.userId === 'string' && json.userId ? json.userId : null;
+  } catch {
+    return null;
+  }
+}
+
+const SSO_USER_FIELDS = ['id', 'email', 'name', 'role', 'organizationId', 'organizationName', 'image', 'language', 'locale'];
+
+/**
+ * The user object of an SSO result comes from a URL. Keep only plain fields
+ * and require the id to be the token's own userId: a result whose user does
+ * not belong to its token is refused.
+ */
+export function sanitizeSsoUser(user, token) {
+  if (!user || typeof user !== 'object' || Array.isArray(user)) return null;
+  const tokenUserId = decodeJwtUserId(token);
+  if (!tokenUserId || String(user.id ?? '') !== tokenUserId) return null;
+  const clean = {};
+  for (const key of SSO_USER_FIELDS) {
+    const value = user[key];
+    if (typeof value === 'string') clean[key] = value.slice(0, 320);
+    else if (typeof value === 'number' || typeof value === 'boolean') clean[key] = value;
+  }
+  clean.id = tokenUserId;
+  return clean;
+}
+
+/**
+ * Was this SSO result requested by this app?
+ * - desktop: main binds the result to the flow it started and marks it
+ *   `bound` (src-electron/sso-flow.js); anything else is unsolicited;
+ * - mobile: the pending flow's state must match (services/ssoFlow.js).
+ * @returns {Promise<{ ok: boolean, reason?: string, verifier?: string }>}
+ */
+async function bindSsoResult(payload) {
+  if (isElectron()) {
+    return payload && payload.bound === true ? { ok: true } : { ok: false, reason: 'unbound_result' };
+  }
+  if (isCapacitor()) {
+    const { consumeSsoFlow } = await import('../services/ssoFlow');
+    return consumeSsoFlow(payload);
+  }
+  return { ok: false, reason: 'unsupported_platform' };
+}
+
+/** Mobile PKCE exchange: one-time code + verifier -> { token, user }. */
+async function exchangeSsoCode(authCode, verifier, state) {
+  const response = await apiRequest('/api/auth/sso/exchange', {
+    method: 'POST',
+    body: JSON.stringify({ authCode, codeVerifier: verifier, state })
+  });
+  const data = await parseJsonSafe(response);
+  if (!response.ok || !data || !data.token || !data.user) return null;
+  return { token: data.token, user: data.user };
+}
+
 /**
  * Classify a stored JWT against the backend's lifetime rules:
  * 'active' — valid with comfortable lifetime left
@@ -481,7 +546,8 @@ export const useAuthStore = defineStore('auth', {
      * (e.g. via the SSO custom-protocol callback). Mirrors the post-success
      * branch of login() so downstream stores see identical state.
      */
-    async loginWithSSO({ token, user }) {
+    async loginWithSSO({ token, user: rawUser }) {
+      const user = token ? sanitizeSsoUser(rawUser, token) : null;
       if (!token || !user) {
         this.error = tr('ssoFailed');
         return { success: false, error: this.error };
@@ -546,7 +612,27 @@ export const useAuthStore = defineStore('auth', {
         addBreadcrumb({ category: 'sso', message: 'SSO result ignored: already signed in', level: 'warning' });
         return { success: false, ignored: true, reason: 'already_signed_in' };
       }
+      // SECURITY: only a result of a sign-in this app started is applied.
+      // A crafted suissenotes://auth/callback link (web page, message, QR
+      // code, another app) is dropped without a trace in the UI.
+      const binding = await bindSsoResult(payload);
+      if (!binding.ok) {
+        addBreadcrumb({ category: 'sso', message: `SSO result ignored: ${binding.reason}`, level: 'warning' });
+        // Keep waiting for the real result of a sign-in in progress.
+        this.ssoProvider = provider === 'unknown' ? null : provider;
+        return { success: false, ignored: true, reason: binding.reason };
+      }
       const seq = this.ssoOutcome.seq + 1;
+
+      if (payload && !payload.error && !payload.code && payload.authCode && binding.verifier) {
+        let exchanged = null;
+        try {
+          exchanged = await exchangeSsoCode(payload.authCode, binding.verifier, payload.state);
+        } catch (error) {
+          if (!isNetworkFailure(error)) captureException(error, { tags: { action: 'ssoExchange' } });
+        }
+        payload = exchanged || { error: 'invalid_callback' };
+      }
 
       if (!payload || payload.error || payload.code || !payload.token) {
         const outcome = classifySsoError(payload && (payload.error || payload.code)

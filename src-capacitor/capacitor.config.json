@@ -26,5 +26,10 @@
   },
   "android": {
     "backgroundColor": "#6366F1"
+  },
+  "cordova": {
+    "preferences": {
+      "DisableDeploy": "true"
+    }
   }
 }

@@ -621,8 +621,12 @@ async function startSSOFlow(provider) {
     } else if (isMobileApp) {
       const { openSSO } = await import('../services/ssoAuth');
       const { getApiUrlSync } = await import('../services/api');
+      const { beginSsoFlow, withFlowParams } = await import('../services/ssoFlow');
       const platform = getPlatform();  // 'ios' | 'android'
-      const url = `${getApiUrlSync()}/api/auth/${provider}/login?client=${platform}`;
+      // Bind the callback to this sign-in: only a callback carrying this
+      // flow's state is accepted (services/ssoFlow.js).
+      const flow = await beginSsoFlow(provider);
+      const url = withFlowParams(`${getApiUrlSync()}/api/auth/${provider}/login?client=${platform}`, flow);
       // On iOS this awaits ASWebAuthenticationSession's completion and
       // dispatches 'sso:callback' itself; on Android it just opens Custom
       // Tabs and the deep-link/lifecycle.js path delivers the callback

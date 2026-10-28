@@ -43,9 +43,45 @@ async function watchForStuckBrowser() {
   }, 1000);
 }
 
+const WEB_APP_ORIGIN = 'https://app.suisse-meets.ch';
+const AUDIO_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
 /**
- * Composable for generating shareable meeting links and opening them in the system browser.
- * Session tokens are created on-demand (each call generates a fresh token).
+ * The plain meeting URL: what «Link kopieren» copies and what may be shared.
+ * It never carries a session token or a hand-off code — the recipient signs in
+ * with their own account (meeting access is checked by the server).
+ * @param {string} audioFileId - The server-assigned audio file ID
+ * @returns {string} '' for a missing or malformed id
+ */
+export function buildMeetingUrl(audioFileId) {
+  const id = typeof audioFileId === 'string' ? audioFileId : String(audioFileId ?? '');
+  if (!AUDIO_ID_PATTERN.test(id)) return '';
+  return `${WEB_APP_ORIGIN}/meeting/audio/${encodeURIComponent(id)}`;
+}
+
+/**
+ * Hand-off query for the signed-in user's own «open in browser» action only.
+ * Prefers the bound one-time code (`handoffCode`) once the server returns it;
+ * until then the short-lived `sessionToken` of today's contract. The result is
+ * opened in the browser and never copied, shared, logged or returned to UI.
+ * @param {object} data - create-web-session response body
+ * @returns {string} '' when the response holds neither
+ */
+export function handoffQuery(data) {
+  if (!data || data.success === false) return '';
+  if (typeof data.handoffCode === 'string' && data.handoffCode) {
+    return `handoff=${encodeURIComponent(data.handoffCode)}`;
+  }
+  if (typeof data.sessionToken === 'string' && data.sessionToken) {
+    return `session=${encodeURIComponent(data.sessionToken)}`;
+  }
+  return '';
+}
+
+/**
+ * Composable for meeting links.
+ * - copyLink: the plain meeting URL (no token, ever).
+ * - openInBrowser: the signed-in user's own hand-off into the web app.
  */
 export function useShareLink() {
   const $q = useQuasar();
@@ -53,75 +89,72 @@ export function useShareLink() {
   const authStore = useAuthStore();
 
   /**
-   * Generate a transcript URL with a fresh session token for seamless login.
-   * @param {string} audioFileId - The server-assigned audio file ID
-   * @returns {Promise<string>} The full URL with session token
+   * Plain, shareable meeting URL (kept for callers of the old name).
+   * @param {string} audioFileId
+   * @returns {Promise<string>}
    */
-  const generateTranscriptUrl = async (audioFileId) => {
-    if (!audioFileId) return '';
+  const generateTranscriptUrl = async (audioFileId) => buildMeetingUrl(audioFileId);
 
-    let url = `https://app.suisse-meets.ch/meeting/audio/${audioFileId}`;
-
-    if (isElectron()) {
-      try {
-        const result = await window.electronAPI.auth.createWebSession();
-        if (result.success && result.sessionToken) {
-          url += `?session=${encodeURIComponent(result.sessionToken)}`;
-        }
-      } catch (error) {
-        console.warn('Could not create web session:', error);
-      }
-    } else if (isCapacitor()) {
-      try {
-        if (authStore.token) {
-          const response = await fetchWithTimeout(`${getApiUrlSync()}/api/auth/desktop/create-web-session`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${authStore.token}`
-            }
-          });
-          const data = await parseJsonSafe(response);
-          if (response.ok && data.success && data.sessionToken) {
-            url += `?session=${encodeURIComponent(data.sessionToken)}`;
-          }
-        }
-      } catch (error) {
-        console.warn('Could not create web session for mobile:', error);
-      }
+  /** Mobile: URL with a fresh hand-off for the browser; never leaves this module. */
+  const mobileHandoffUrl = async (url) => {
+    if (!authStore.token) return url;
+    try {
+      const response = await fetchWithTimeout(`${getApiUrlSync()}/api/auth/desktop/create-web-session`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authStore.token}`
+        },
+        body: JSON.stringify({ purpose: 'open_in_browser' })
+      });
+      const data = await parseJsonSafe(response);
+      const query = response.ok ? handoffQuery(data) : '';
+      return query ? `${url}?${query}` : url;
+    } catch (error) {
+      console.warn('Could not create web session for mobile:', error?.message || 'unknown');
+      return url;
     }
-
-    return url;
   };
 
   /**
-   * Open a recording in the system's default browser (Safari, Chrome, etc.)
+   * Open a recording in the system's default browser (Safari, Chrome, etc.),
+   * signed in as the current user.
    * @param {string} audioFileId - The server-assigned audio file ID
    */
   const openInBrowser = async (audioFileId) => {
-    if (!audioFileId) return;
-
-    const url = await generateTranscriptUrl(audioFileId);
+    const url = buildMeetingUrl(audioFileId);
+    if (!url) return;
 
     if (isElectron()) {
-      if (!url.includes('session=')) {
+      // Main creates the hand-off and opens the browser itself: the token
+      // never reaches this renderer.
+      let opened = null;
+      try {
+        opened = await window.electronAPI.auth.openWebWithSession(new URL(url).pathname);
+      } catch (error) {
+        console.warn('Could not open the meeting with a web session:', error?.message || 'unknown');
+      }
+      if (!opened?.success || !opened?.signedIn) {
         $q.notify({
           type: 'warning',
           message: t('sessionCreationFailed'),
           timeout: 3000
         });
       }
-      window.electronAPI.shell.openExternal(url);
+      if (!opened?.success) window.electronAPI.shell.openExternal(url);
     } else if (isCapacitor()) {
       if (browserOpening) return;   // a tap already opened one; ignore the double-tap
       browserOpening = true;
       try {
-        const { Browser } = await import('@capacitor/browser');
-        await Browser.open({ url });
-        watchForStuckBrowser();
-      } catch (e) {
-        addBreadcrumb({ category: 'ui', message: `Browser.open failed, falling back to window.open: ${e?.message || e}`, level: 'warning' });
-        window.open(url, '_blank');
+        const target = await mobileHandoffUrl(url);
+        try {
+          const { Browser } = await import('@capacitor/browser');
+          await Browser.open({ url: target });
+          watchForStuckBrowser();
+        } catch (e) {
+          addBreadcrumb({ category: 'ui', message: `Browser.open failed, falling back to window.open: ${e?.message || e}`, level: 'warning' });
+          window.open(target, '_blank');
+        }
       } finally {
         // Release shortly after: long enough to swallow a rapid double-tap,
         // short enough that a real second open later still works.
@@ -131,13 +164,14 @@ export function useShareLink() {
   };
 
   /**
-   * Copy a recording's shareable link to clipboard (generates a fresh session token)
+   * Copy a recording's shareable link to the clipboard: the plain meeting URL,
+   * never a session token (anyone holding a token link was signed in as the
+   * copying user).
    * @param {string} audioFileId - The server-assigned audio file ID
    */
   const copyLink = async (audioFileId) => {
-    if (!audioFileId) return;
-
-    const url = await generateTranscriptUrl(audioFileId);
+    const url = buildMeetingUrl(audioFileId);
+    if (!url) return;
 
     try {
       if (isElectron() && window.electronAPI?.clipboard?.writeText) {

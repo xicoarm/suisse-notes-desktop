@@ -14,11 +14,11 @@ let package = Package(
         // Kept manually: native crash, app-hang and out-of-memory reporting.
         // The WebView layer cannot report a process that died, and the
         // @sentry/capacitor plugin cannot be used here — it requires
-        // capacitor-swift-pm 7, while this app pins 6.2.1.
+        // capacitor-swift-pm 7, while this app pins 6.2.2.
         // `tests/unit/mobileNativeSentry.test.js` fails if a Capacitor CLI
         // regeneration drops this line.
         .package(url: "https://github.com/getsentry/sentry-cocoa", from: "8.56.2"),
-        .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", exact: "6.2.1"),
+        .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", exact: "6.2.2"),
         .package(name: "CapacitorCommunityBluetoothLe", path: "..\..\..\node_modules\@capacitor-community\bluetooth-le"),
         .package(name: "CapacitorApp", path: "..\..\..\node_modules\@capacitor\app"),
         .package(name: "CapacitorBrowser", path: "..\..\..\node_modules\@capacitor\browser"),

@@ -8,7 +8,8 @@
  * query values before a URL or free-text message leaves the device.
  */
 
-const SECRET_QUERY_KEYS = ['token', 'access_token', 'refresh_token', 'id_token', 'session', 'user', 'auth', 'code', 'password'];
+const SECRET_QUERY_KEYS = ['token', 'access_token', 'refresh_token', 'id_token', 'session', 'user', 'auth', 'code', 'password',
+  'auth_code', 'handoff', 'state', 'app_state', 'code_verifier', 'code_challenge'];
 
 const SECRET_QUERY_RE = new RegExp(`([?&#]|^)(${SECRET_QUERY_KEYS.join('|')})=([^&#\\s'"]+)`, 'gi');
 // Bare JWTs (three base64url segments) — they are recognizable without a key.

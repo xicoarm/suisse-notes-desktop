@@ -29,6 +29,19 @@
  */
 
 import { isElectron, isCapacitor, isAndroid, PlatformConstants } from '../utils/platform';
+import { isConfinedPath } from '../utils/deviceFileSafety';
+
+/**
+ * Mobile write/delete guard: only canonical relative paths below the app's
+ * own storage roots (`recordings/…`, `suissenotes_recordings/…`). A path
+ * built from untrusted input (e.g. a recorder-reported file name such as
+ * "../../shared_prefs/x.xml") is refused before it reaches the filesystem.
+ */
+const refuseUnconfined = (path) => {
+  if (isConfinedPath(path)) return null;
+  console.error('Storage: refused a path outside the app storage area');
+  return { success: false, error: 'Path is outside the app storage area', code: 'PATH_NOT_CONFINED' };
+};
 
 // Capacitor filesystem imports (lazy loaded)
 let Filesystem = null;
@@ -310,6 +323,8 @@ export const writeFile = async (path, data) => {
   }
 
   if (isCapacitor()) {
+    const refused = refuseUnconfined(path);
+    if (refused) return refused;
     await initCapacitorFilesystem();
 
     try {
@@ -345,6 +360,8 @@ export const deleteFile = async (path) => {
   }
 
   if (isCapacitor()) {
+    const refused = refuseUnconfined(path);
+    if (refused) return refused;
     await initCapacitorFilesystem();
 
     try {
@@ -371,6 +388,8 @@ export const deleteDirectory = async (path) => {
   }
 
   if (isCapacitor()) {
+    const refused = refuseUnconfined(path);
+    if (refused) return refused;
     await initCapacitorFilesystem();
 
     const candidates = [primaryDirectory(), legacyDirectory()].filter(Boolean);
@@ -474,6 +493,8 @@ export const createDirectory = async (path) => {
   }
 
   if (isCapacitor()) {
+    const refused = refuseUnconfined(path);
+    if (refused) return refused;
     await initCapacitorFilesystem();
 
     try {
