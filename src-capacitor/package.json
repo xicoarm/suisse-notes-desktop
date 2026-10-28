@@ -5,7 +5,7 @@
   "private": true,
   "dependencies": {
     "@capacitor-community/bluetooth-le": "^6.1.0",
-    "@capacitor/android": "^6.0.0",
+    "@capacitor/android": "^6.2.2",
     "@capacitor/app": "^6.0.3",
     "@capacitor/browser": "^6.0.6",
     "@capacitor/device": "^6.0.3",
