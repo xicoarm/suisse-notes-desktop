@@ -18,6 +18,8 @@ const path = require('path');
 const { buildScenario } = require('./lib/audio');
 const { AppDriver, sleep } = require('./lib/app-driver');
 const backend = require('./lib/backend');
+// Credentials from the environment only; stop before launching anything.
+backend.requireLiveCredentials();
 
 const line = '='.repeat(70);
 
