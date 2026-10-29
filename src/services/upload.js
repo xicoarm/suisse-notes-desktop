@@ -283,6 +283,39 @@ function _resolveLegacyQueueOwners() {
 }
 
 /**
+ * May this upload run with this token? Used by uploadWithVerification for
+ * every caller.
+ * - The owner is the queued item's owner (mobile), else the caller's explicit
+ *   owner; both must agree.
+ * - A queued item of unknown owner from an earlier app run is held until the
+ *   user claims it (claimUnownedMobileUploads).
+ * - With a known owner, the token must belong to that account (an
+ *   undecodable token cannot prove it and is refused).
+ * @returns {{ ok: true, owner: string|null } | { ok: false, reason: 'other_account'|'owner_unknown' }}
+ */
+export function uploadOwnershipCheck({ recordId, filePath, authToken, ownerUserId = null }) {
+  let owner = _normOwner(ownerUserId);
+  if (isCapacitor() && filePath && recordId) {
+    let queued = getMobileUploadQueue().find(item => item.recordId === recordId);
+    if (queued && queued.ownerUserId === undefined) {
+      _resolveLegacyQueueOwners();
+      queued = getMobileUploadQueue().find(item => item.recordId === recordId);
+    }
+    if (queued) {
+      const queuedOwner = _normOwner(queued.ownerUserId);
+      if (queuedOwner) {
+        if (owner && owner !== queuedOwner) return { ok: false, reason: 'other_account' };
+        owner = queuedOwner;
+      } else if (!_enqueuedThisProcess.has(recordId)) {
+        return { ok: false, reason: 'owner_unknown' };
+      }
+    }
+  }
+  if (owner && tokenUserId(authToken) !== owner) return { ok: false, reason: 'other_account' };
+  return { ok: true, owner };
+}
+
+/**
  * Held items for the UI: recordings waiting for another account, and items
  * whose owner is unknown (the user may claim those explicitly).
  */
@@ -937,12 +970,37 @@ export const uploadWithVerification = async (options) => {
     return { success: false, canDelete: false, canRetry: false, error: 'Missing recording id' };
   }
 
-  // Helper to get a fresh token
+  // SECURITY: every upload path (queue, manual retry, auto-retry, device
+  // sync) runs through here, so the owner check lives here: a recording is
+  // uploaded only with a token of the account that owns it.
+  const ownership = uploadOwnershipCheck({ recordId, filePath, authToken, ownerUserId });
+  if (!ownership.ok) {
+    crumb(`refused upload recordId=${recordId}: ${ownership.reason}`);
+    return {
+      success: false,
+      canDelete: false,
+      canRetry: false,
+      held: true,
+      ownership: ownership.reason,
+      error: ownership.reason === 'owner_unknown'
+        ? 'Recording owner unknown: confirm it in History before uploading'
+        : 'Recording belongs to another account'
+    };
+  }
+  const expectedOwner = ownership.owner;
+
+  // Helper to get a fresh token. A refreshed token of another account (the
+  // user switched accounts during the upload) is never used for this
+  // recording.
   const getFreshToken = async () => {
     if (getAuthStore) {
       const authStore = getAuthStore();
       const result = await authStore.handleAuthError();
       if (result.success) {
+        if (expectedOwner && tokenUserId(result.token) !== expectedOwner) {
+          crumb(`refused token refresh for recordId=${recordId}: account changed`);
+          return null;
+        }
         return result.token;
       }
     }
@@ -963,7 +1021,7 @@ export const uploadWithVerification = async (options) => {
   // The owner is the account whose token this upload uses (or the caller's
   // explicit owner): a retry later runs only under that same account.
   if (isCapacitor() && filePath && recordId) {
-    addToMobileUploadQueue(recordId, filePath, metadata, ownerUserId || tokenUserId(authToken));
+    addToMobileUploadQueue(recordId, filePath, metadata, expectedOwner || tokenUserId(authToken));
   }
 
   if (!_beginMobileUpload(recordId)) {

@@ -128,13 +128,17 @@ describe('upload queue ownership', () => {
     expect(networkCalls()).toBeGreaterThan(before);
   });
 
-  it('central upload path: an explicit owner wins; a missing owner is completed only for items of this process', async () => {
+  it('central upload path: an explicit owner must match the token; a missing owner is completed only for items of this process', async () => {
     await uploadWithVerification({ filePath: '/p/x.m4a', recordId: 'x', apiUrl: 'https://api.example', authToken: 'not-a-jwt', metadata: {} });
     expect(getMobileUploadQueue()[0].ownerUserId).toBeNull();
     addToMobileUploadQueue('x', '/p/x.m4a', {}, 'bob');
     expect(getMobileUploadQueue()[0].ownerUserId).toBe('bob');
-    await uploadWithVerification({ filePath: '/p/y.m4a', recordId: 'y', apiUrl: 'https://api.example', authToken: jwtFor('bob'), metadata: {}, ownerUserId: 'carol' });
+    await uploadWithVerification({ filePath: '/p/y.m4a', recordId: 'y', apiUrl: 'https://api.example', authToken: jwtFor('carol'), metadata: {}, ownerUserId: 'carol' });
     expect(getMobileUploadQueue().find(i => i.recordId === 'y').ownerUserId).toBe('carol');
+    // An explicit owner that is not the token's account is refused, nothing queued.
+    const refused = await uploadWithVerification({ filePath: '/p/z.m4a', recordId: 'z', apiUrl: 'https://api.example', authToken: jwtFor('bob'), metadata: {}, ownerUserId: 'carol' });
+    expect(refused).toMatchObject({ success: false, held: true, ownership: 'other_account' });
+    expect(getMobileUploadQueue().find(i => i.recordId === 'z')).toBeUndefined();
     // An unknown-owner item from an earlier run is never completed by an enqueue.
     localStorage.setItem('mobile_upload_queue', JSON.stringify([{ recordId: 'earlier', filePath: '/p/e.m4a', metadata: {}, retries: 0, addedAt: Date.now(), ownerUserId: null }]));
     addToMobileUploadQueue('earlier', '/p/e.m4a', {}, 'bob');
