@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { createRequire } from 'module';
 import { createCrashPersistence, Crash, Fault } from './support/crashPersistence';
+import { createQueueRun } from './support/queueRun';
 
 // R5 / E9 (security review 10/2026 round 6): a crash right before or right
 // after EVERY storage operation of a whole life of the app - first start
@@ -30,8 +31,8 @@ const HEAVY = 120_000;
 const { createSessionAuthority, configUserStore, configMarkStore } = require('../../src-electron/session-authority.js');
 const { createTokenVault } = require('../../src-electron/token-vault.js');
 const ssoFlow = require('../../src-electron/sso-flow.js');
-const { createPendingUploadProcessor } = require('../../src-electron/pending-uploads.js');
-const { tokenUserId, canUploadForUser } = require('../../src-electron/upload-safety.js');
+
+const { tokenUserId } = require('../../src-electron/upload-safety.js');
 
 const jwt = (userId, tag) => `h.${Buffer.from(JSON.stringify({ userId, tag })).toString('base64url')}.s`;
 const userB64 = (user) => Buffer.from(JSON.stringify(user)).toString('base64url');
@@ -91,28 +92,14 @@ function bootDesktop(p, { upload } = {}) {
   authority = createSessionAuthority({ recordStore, vault, userStore: configUserStore(config), migrationMark: markStore(config), flows, now: () => 5000 });
   authority.startup();
   const handleCallback = ssoFlow.createSsoCallbackHandler({ authority, flows, exchange: async () => ({ error: 'invalid_callback' }), deliver: (x) => authority.setPending(x) });
-  const requests = [];
-  const processPendingUploads = createPendingUploadProcessor({
+  // Round 9: the queue run in a SessionScope (support/queueRun.js); queue
+  // and history writes are crash points.
+  const { processPendingUploads, requests } = createQueueRun({
     authority,
-    getQueue: () => queue.get('items', []),
-    removeFromQueue: (id) => queue.set('items', queue.get('items', []).filter((i) => i.recordId !== id)),
-    bumpRetry: (id) => queue.set('items', queue.get('items', []).map((i) => (i.recordId === id ? { ...i, retryCount: i.retryCount + 1 } : i))),
-    inFlight: new Set(),
-    upload: async (recordId, filePath, metadata, maxRetries, ticket) => {
-      const token = authority.isCurrent(ticket) ? authority.getToken() : null;
-      if (!token) return { success: false, status: 401, canRetry: false };
-      requests.push({ recordId, token });
-      return upload ? upload() : { success: false, canRetry: true, error: 'offline' };
-    },
-    mayUpload: (item, userId) => canUploadForUser(item.userId, userId),
-    readReceipt: () => null,
-    access: async () => {},
-    updateHistory: () => p.op('history.set', () => {}),
-    saveOutcome: () => {},
-    notify: () => {},
-    tokenUserId,
-    wait: async () => {},
-    log: { info: () => {}, warn: () => {}, error: () => {} }
+    queue: { get: (k, d) => queue.get('items', d), set: (k, v) => queue.set('items', v) },
+    history: { get: (k, d) => d, set: () => p.op('history.set', () => {}) },
+    upload: upload ? () => upload() : undefined,
+    fallback: { success: false, canRetry: true, error: 'offline' }
   });
   return { authority, vault, flows, handleCallback, processPendingUploads, requests, config };
 }

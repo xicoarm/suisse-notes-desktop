@@ -159,19 +159,21 @@ function createScopeRegistry({ authority, http, fs = realFs, stores, send = () =
       return new Promise((resolve, reject) => {
         if (!alive()) { reject(ended()); return; }
         const entry = { reject, handle: null };
+        sleepers.add(entry);
         entry.handle = timers.setTimeout(() => {
-          sleepers.delete(entry);
+          if (!sleepers.delete(entry)) return;
           if (alive()) resolve();
           else reject(ended());
         }, ms);
-        sleepers.add(entry);
+        // Ended while the timer was being set: end() already rejected it.
+        if (!sleepers.has(entry)) timers.clearTimeout(entry.handle);
       });
     }
 
     function timer(ms, fn) {
       if (!alive()) return null;
       const handle = timers.setTimeout(() => {
-        timerSet.delete(handle);
+        if (!timerSet.delete(handle)) return;
         if (alive()) fn();
       }, ms);
       timerSet.add(handle);
@@ -208,11 +210,12 @@ function createScopeRegistry({ authority, http, fs = realFs, stores, send = () =
       timerSet.clear();
       for (const handle of intervalSet) timers.clearInterval(handle);
       intervalSet.clear();
-      for (const entry of sleepers) {
-        timers.clearTimeout(entry.handle);
+      const waiting = [...sleepers];
+      sleepers.clear();
+      for (const entry of waiting) {
+        if (entry.handle !== null) timers.clearTimeout(entry.handle);
         entry.reject(ended());
       }
-      sleepers.clear();
       for (const cancelable of tracked) cancel(cancelable);
       tracked.clear();
     }
@@ -340,6 +343,8 @@ function createScopeRegistry({ authority, http, fs = realFs, stores, send = () =
       }
       return n;
     },
+    /** Running uploads with a cancel handle (quit). */
+    get uploadCount() { return cancels.size; },
     get size() { return live.size; },
   };
 }

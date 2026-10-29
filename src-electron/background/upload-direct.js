@@ -18,14 +18,19 @@
  *
  * If the backend reports `mode: 'fallback'` (e.g. local-storage mode),
  * the caller is expected to fall back to the legacy formData POST flow.
+ *
+ * Round 9 (council 3): background work of a session. Every request, file
+ * read, wait and the duration probe go through the SessionScope of the
+ * upload (src-electron/session-scope.js); after a session change nothing of
+ * it goes out any more and a late answer is a SESSION_ENDED error.
  */
 
 'use strict';
 
-const fs = require('fs');
 const path = require('path');
-const axios = require('axios');
-const log = require('electron-log');
+const { isSessionEnded } = require('./ended');
+
+const noLog = { info() {}, warn() {}, error() {} };
 
 // HTTP status codes that should NEVER be retried — the request will
 // fail identically next time. These come back from /api/uploads/init,
@@ -100,10 +105,6 @@ function isRetryableAxiosError(err) {
   return false;
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
 /**
  * Generate a stable, sortable, base64-encoded block ID.
  * Azure requires all block IDs in a single blob to be the same length.
@@ -121,7 +122,7 @@ function makeBlockId(index) {
  * Per-block retry is independent of overall upload retry — a single
  * flaky chunk shouldn't kill an otherwise-good 1-hour upload.
  */
-async function uploadBlockWithRetry({
+async function uploadBlockWithRetry(scope, {
   filePath,
   start,
   end, // exclusive
@@ -129,6 +130,7 @@ async function uploadBlockWithRetry({
   blockId,
   abortSignal,
   maxAttempts = 4,
+  log,
 }) {
   const blockSize = end - start;
   let lastErr;
@@ -142,7 +144,7 @@ async function uploadBlockWithRetry({
 
     try {
       const url = `${sasUrl}&comp=block&blockid=${encodeURIComponent(blockId)}`;
-      const stream = fs.createReadStream(filePath, { start, end: end - 1 });
+      const stream = scope.fs.createReadStream(filePath, { start, end: end - 1 });
       // Per-block timeout scales with block size at ~200 KB/s floor,
       // capped at 5 min. This is per-attempt; total time across retries
       // is bounded by maxAttempts.
@@ -151,7 +153,7 @@ async function uploadBlockWithRetry({
         Math.max(60_000, Math.ceil(blockSize / (200 * 1024)) * 1000 + 30_000)
       );
 
-      await axios.put(url, stream, {
+      await scope.http.put(url, stream, {
         headers: {
           'Content-Length': blockSize,
           'Content-Type': 'application/octet-stream',
@@ -165,6 +167,7 @@ async function uploadBlockWithRetry({
       return blockId;
     } catch (err) {
       lastErr = err;
+      if (isSessionEnded(err)) throw err;
 
       if (isAbortError(err) || abortSignal?.aborted) {
         const e = new Error('Upload cancelled');
@@ -197,7 +200,7 @@ async function uploadBlockWithRetry({
           `[uploadBlock] block=${blockId} attempt=${attempt + 1}/${maxAttempts} failed ` +
             `(${err.response?.status || err.code}), retrying in ${delay}ms`
         );
-        await sleep(delay);
+        await scope.sleep(delay);
       }
     }
   }
@@ -208,7 +211,7 @@ async function uploadBlockWithRetry({
 /**
  * Commit the staged blocks via Put Block List.
  */
-async function commitBlockList({ sasUrl, blockIds, contentType, abortSignal }) {
+async function commitBlockList(scope, { sasUrl, blockIds, contentType, abortSignal }) {
   const blocksXml = blockIds
     .map((id) => `<Latest>${escapeXml(id)}</Latest>`)
     .join('');
@@ -216,7 +219,7 @@ async function commitBlockList({ sasUrl, blockIds, contentType, abortSignal }) {
 
   const url = `${sasUrl}&comp=blocklist`;
 
-  await axios.put(url, body, {
+  await scope.http.put(url, body, {
     headers: {
       'Content-Type': 'application/xml',
       'x-ms-blob-content-type': contentType,
@@ -236,37 +239,16 @@ function escapeXml(s) {
 }
 
 /**
- * Probe duration via ffprobe. Optional but strongly preferred so the
- * server can reserve minutes accurately.
- *
- * @param {object} ffmpeg - fluent-ffmpeg instance (already configured by caller)
- */
-function probeDurationSeconds(ffmpeg, filePath) {
-  return new Promise((resolve) => {
-    try {
-      ffmpeg.ffprobe(filePath, (err, metadata) => {
-        if (err || !metadata) return resolve(0);
-        const d = Number(metadata?.format?.duration);
-        if (!Number.isFinite(d) || d <= 0) return resolve(0);
-        resolve(d);
-      });
-    } catch {
-      resolve(0);
-    }
-  });
-}
-
-/**
  * Main entry point.
  *
+ * @param {object} scope - SessionScope of the upload (token, requests, reads, waits, duration probe)
  * @param {object} opts
  * @param {string} opts.apiBaseUrl - e.g. https://app.suisse-meets.ch
- * @param {string} opts.authToken
  * @param {string} opts.recordId
  * @param {string} opts.filePath
  * @param {object} opts.metadata
  * @param {AbortController} opts.abortController
- * @param {object} opts.ffmpeg - fluent-ffmpeg with ffprobe configured
+ * @param {object} [opts.log]
  * @param {function} opts.onProgress - ({progress, bytesUploaded, bytesTotal, phase}) => void
  * @param {function} [opts.onSession] - ({audioFileId, blobName}) => void
  *   Fires once init succeeds, before any blocks are staged. Lets the caller
@@ -287,20 +269,19 @@ function probeDurationSeconds(ffmpeg, filePath) {
  *   deduplicated?: boolean,
  * }>}
  */
-async function uploadViaPresignedSas(opts) {
+async function uploadViaPresignedSas(scope, opts) {
   const {
     apiBaseUrl,
-    authToken,
     recordId,
     filePath,
     metadata = {},
     abortController,
-    ffmpeg,
     onProgress = () => {},
     onSession = () => {},
+    log = noLog,
   } = opts;
 
-  const stats = await fs.promises.stat(filePath);
+  const stats = await scope.fs.stat(filePath);
   const fileSize = stats.size;
   const fileName = path.basename(filePath);
   const contentType = detectContentType(filePath);
@@ -308,8 +289,8 @@ async function uploadViaPresignedSas(opts) {
   // Probe duration up-front. If ffprobe fails we still proceed but
   // pass `0` and let the server reject if it cannot estimate.
   let durationSeconds = Number(metadata?.duration) || 0;
-  if (durationSeconds <= 0 && ffmpeg) {
-    durationSeconds = await probeDurationSeconds(ffmpeg, filePath);
+  if (durationSeconds <= 0 && scope.port.probeDuration) {
+    durationSeconds = await scope.port.probeDuration(filePath);
   }
   if (durationSeconds <= 0) {
     log.warn(`[uploadDirect] No duration available for ${recordId}; will let server decide`);
@@ -318,7 +299,7 @@ async function uploadViaPresignedSas(opts) {
   // === Step 1: Init ===
   let initResp;
   try {
-    initResp = await axios.post(
+    initResp = await scope.http.post(
       `${apiBaseUrl}/api/uploads/init`,
       {
         recordId,
@@ -328,12 +309,13 @@ async function uploadViaPresignedSas(opts) {
         durationSeconds,
       },
       {
-        headers: { Authorization: `Bearer ${authToken}` },
+        auth: true,
         timeout: 30_000,
         signal: abortController?.signal,
       }
     );
   } catch (err) {
+    if (isSessionEnded(err)) throw err;
     if (isAbortError(err)) {
       return { mode: 'azure', success: false, cancelled: true, canRetry: false };
     }
@@ -439,15 +421,17 @@ async function uploadViaPresignedSas(opts) {
     const blockId = makeBlockId(i);
 
     try {
-      await uploadBlockWithRetry({
+      await uploadBlockWithRetry(scope, {
         filePath,
         start,
         end,
         sasUrl,
         blockId,
         abortSignal: abortController?.signal,
+        log,
       });
     } catch (err) {
+      if (isSessionEnded(err)) throw err;
       if (err?.cancelled) {
         return { mode: 'azure', success: false, cancelled: true, canRetry: false };
       }
@@ -455,11 +439,11 @@ async function uploadViaPresignedSas(opts) {
         // Re-init to get a fresh SAS, then resume from current block.
         log.warn(`[uploadDirect] SAS expired mid-upload at block ${i}; re-initializing`);
         try {
-          const reinitResp = await axios.post(
+          const reinitResp = await scope.http.post(
             `${apiBaseUrl}/api/uploads/init`,
             { recordId, fileName, fileSize, contentType, durationSeconds },
             {
-              headers: { Authorization: `Bearer ${authToken}` },
+              auth: true,
               timeout: 30_000,
               signal: abortController?.signal,
             }
@@ -488,8 +472,9 @@ async function uploadViaPresignedSas(opts) {
               return { mode: 'azure', success: false, cancelled: true, canRetry: false };
             }
             try {
-              await abortDirectUpload({ apiBaseUrl, authToken, recordId, audioFileId, signal: abortController?.signal });
+              await abortDirectUpload(scope, { apiBaseUrl, recordId, audioFileId, signal: abortController?.signal, log });
             } catch (e) {
+              if (isSessionEnded(e)) throw e;
               log.warn('[uploadDirect] Abort of stale session failed (non-fatal):', e?.message);
             }
             audioFileId = reinit.audioFileId;
@@ -502,6 +487,7 @@ async function uploadViaPresignedSas(opts) {
             continue;
           }
         } catch (e) {
+          if (isSessionEnded(e)) throw e;
           log.error(`[uploadDirect] Re-init after SAS expiry failed:`, e.message);
           // A FATAL status from re-init (400/402/413/…) will fail identically
           // on every future attempt — returning canRetry:true here fed the
@@ -547,13 +533,14 @@ async function uploadViaPresignedSas(opts) {
   // === Step 3: Commit block list ===
   onProgress({ progress: 96, bytesUploaded: fileSize, bytesTotal: fileSize, phase: 'committing' });
   try {
-    await commitBlockList({
+    await commitBlockList(scope, {
       sasUrl,
       blockIds,
       contentType,
       abortSignal: abortController?.signal,
     });
   } catch (err) {
+    if (isSessionEnded(err)) throw err;
     if (isAbortError(err)) {
       return { mode: 'azure', success: false, cancelled: true, canRetry: false };
     }
@@ -571,7 +558,7 @@ async function uploadViaPresignedSas(opts) {
 
   let completeResp;
   try {
-    completeResp = await axios.post(
+    completeResp = await scope.http.post(
       `${apiBaseUrl}/api/uploads/complete`,
       {
         recordId,
@@ -584,12 +571,13 @@ async function uploadViaPresignedSas(opts) {
         metadata,
       },
       {
-        headers: { Authorization: `Bearer ${authToken}` },
+        auth: true,
         timeout: 120_000,
         signal: abortController?.signal,
       }
     );
   } catch (err) {
+    if (isSessionEnded(err)) throw err;
     if (isAbortError(err)) {
       return { mode: 'azure', success: false, cancelled: true, canRetry: false };
     }
@@ -647,22 +635,23 @@ async function uploadViaPresignedSas(opts) {
  * Best-effort abort: deletes the staged blob server-side so it doesn't
  * accumulate orphans. Safe to call when the blob doesn't exist.
  */
-async function abortDirectUpload({ apiBaseUrl, authToken, recordId, audioFileId, signal }) {
+async function abortDirectUpload(scope, { apiBaseUrl, recordId, audioFileId, signal, log = noLog }) {
   if (!audioFileId) return { success: true };
   try {
-    await axios.post(
+    await scope.http.post(
       `${apiBaseUrl}/api/uploads/abort`,
       { recordId, audioFileId },
       {
-        headers: { Authorization: `Bearer ${authToken}` },
+        auth: true,
         timeout: 15_000,
-        // Main aborts it on a session change (the upload's own controller);
-        // the user cancel passes none (its controller is already aborted).
+        // The scope signal ends it at a session change; the user cancel
+        // passes none (its controller is already aborted).
         signal,
       }
     );
     return { success: true };
   } catch (err) {
+    if (isSessionEnded(err)) throw err;
     log.warn(`[uploadDirect] Abort cleanup failed for ${audioFileId}:`, err.message);
     return { success: false, error: err.message };
   }

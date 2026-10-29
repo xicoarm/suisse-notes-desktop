@@ -1,150 +1,142 @@
 // @vitest-environment node
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import vm from 'node:vm';
+import { createBackgroundRig } from './support/backgroundRig.js';
 
-// Exercise the actual main-process upload functions without starting Electron
-// or a network listener. Keep their retry/receipt decisions intact and replace
-// only I/O, clocks, and the direct-upload fallback boundary.
-const mainSource = fs.readFileSync(path.resolve('src-electron/electron-main.js'), 'utf8');
-function functionSource(start, end) {
-  const from = mainSource.indexOf(start), to = mainSource.indexOf(end, from);
-  if (from < 0 || to <= from) throw new Error('Upload function boundary changed');
-  return mainSource.slice(from, to);
-}
-const uploadFunctions = functionSource('async function uploadWithRetry(', 'async function tryDirectUpload(') +
-  functionSource('async function uploadWithRetryLegacy(', '\nconst inFlightUploads');
+// The real background upload (src-electron/background/upload.js, since
+// review round 9) on the real session scope: retry and receipt decisions of
+// the legacy POST stay intact; only the transport, files and clocks are
+// stand-ins (tests/unit/support/backgroundRig.js).
+
 const brokenPipe = () => Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
 const accepted = { status: 200, data: { success: true, audioFileId: 'accepted-id' } };
+const LEGACY = '/api/desktop/upload';
 
-function fixture() {
-  const calls = { post: vi.fn(), verify: vi.fn().mockResolvedValue({ success: true, audioFileId: 'accepted-id', canDelete: false }),
-    sleep: vi.fn().mockResolvedValue(), source: vi.fn(() => ({})), receipt: vi.fn(() => null),
-    report: vi.fn(), direct: vi.fn().mockResolvedValue({ handled: false, reason: 'test fallback' }),
-    eligibility: vi.fn().mockResolvedValue({ allowed: true }) };
-  const snapshot = { size: 1234, mtimeMs: 5678 };
-  // The session ticket of the run; `signOut()` makes it stale (E7).
-  const session = { ticket: Object.freeze({ epoch: 1 }), signOut() { this.ticket = Object.freeze({ epoch: 2 }); } };
-  class FormData {
-    constructor() { this.fields = []; }
-    append(...values) { this.fields.push(values); }
-    getHeaders() { return { 'Content-Type': 'multipart/form-data; boundary=test' }; }
-  }
-  const context = {
-    require: name => { if (name !== 'form-data') throw new Error('Unexpected dependency'); return FormData; },
-    fs: { statSync: () => snapshot, promises: { stat: async () => snapshot }, createReadStream: calls.source },
-    path, API_BASE_URL: 'http://127.0.0.1:3000', axios: { post: calls.post }, getAuthToken: async () => 'test-token',
-    canUploadForUser: (owner, user) => owner === user, tokenUserId: () => 'owner', recordingOwner: () => 'owner',
-    readUploadReceipt: calls.receipt, verifyAcceptedUpload: calls.verify, tryDirectUpload: calls.direct,
-    sleep: calls.sleep, captureUploadFailureOnce: calls.report, calculateUploadTimeout: () => 600000,
-    app: { getVersion: () => 'test-version' }, mainWindow: { isDestroyed: () => false, webContents: { send: vi.fn() } },
-    log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, console: { log: vi.fn() },
-    setInterval: () => 1, clearInterval: vi.fn(), AbortController,
-    activeAbortControllers: new Map(), activeDirectAudioFileIds: new Map(), unsavedRecordingId: null,
-    assessRecordingUpload: calls.eligibility, getRecordingsPath: () => '/synthetic',
-    recordingLocks: new Map(), isRecordingInProgress: false,
-    sessionAuthority: { ticket: () => session.ticket, isCurrent: (t) => t === session.ticket, getToken: () => 'test-token' },
-    // As in main (round 8): work without the current ticket has no session.
-    tokenFor: (t) => (t === session.ticket ? 'test-token' : null),
-    sessionEndedFor: (t) => t !== session.ticket,
-    sessionEndedResult: () => ({ success: false, canDelete: false, canRetry: true, sessionEnded: true, error: 'Signed out' }),
-  };
-  const functions = vm.runInNewContext(uploadFunctions + '\n({ uploadWithRetry, uploadWithRetryLegacy });', context);
-  const invoke = (retries = 3, controller = new AbortController()) => functions.uploadWithRetryLegacy(
-    'record', '/synthetic/audio.webm', { duration: 45 }, retries, controller, 'owner', snapshot, session.ticket);
-  return { calls, snapshot, invoke, functions, session };
+const rigs = [];
+afterEach(() => { for (const r of rigs.splice(0)) r.cleanup(); });
+
+/** A rig whose server asks for the legacy POST (local-storage mode). */
+function fixture(opts) {
+  const r = createBackgroundRig(opts);
+  rigs.push(r);
+  r.answer('post', '/api/uploads/init', { status: 200, data: { mode: 'fallback' } });
+  const scope = r.scopes.open();
+  const snapshot = fs.statSync(r.filePath());
+  const legacyPosts = () => r.requests.filter((q) => q.method === 'post' && q.url.endsWith(LEGACY));
+  const invoke = (retries = 3, controller = new AbortController(), sc = scope) =>
+    r.uploads.uploadWithRetryLegacy(sc, 'r1', r.filePath(), { duration: 45 }, retries, controller, 'a', snapshot);
+  return { r, scope, snapshot, legacyPosts, invoke };
 }
 
 describe('legacy upload broken-pipe recovery', () => {
   it('blocks both upload transports and accepted-receipt resume while saved sources require finalization', async () => {
-    const { calls, functions, session } = fixture();
-    calls.eligibility.mockResolvedValue({ allowed: false, requiresFinalization: true, error: 'Combine the saved sources first' });
-    calls.receipt.mockReturnValue({ audioFileId: 'stale-accepted-id' });
-    expect(await functions.uploadWithRetry('record', '/synthetic/audio.webm', {}, 3, session.ticket)).toMatchObject({
+    let receiptReads = 0;
+    const { r, scope } = fixture({
+      read: {
+        assessRecordingUpload: async () => ({ allowed: false, requiresFinalization: true, error: 'Combine the saved sources first' }),
+        readUploadReceipt: () => { receiptReads++; return { audioFileId: 'stale-accepted-id' }; },
+      },
+    });
+    expect(await r.uploads.uploadWithRetry(scope, 'r1', r.filePath(), {}, 3)).toMatchObject({
       success: false, canDelete: false, requiresFinalization: true, error: 'Combine the saved sources first',
     });
-    expect(calls.receipt).not.toHaveBeenCalled();
-    expect(calls.verify).not.toHaveBeenCalled();
-    expect(calls.post).not.toHaveBeenCalled();
-    expect(calls.direct).not.toHaveBeenCalled();
-    expect(calls.source).not.toHaveBeenCalled();
+    expect(receiptReads).toBe(0);
+    expect(r.requests).toEqual([]);
+    expect(r.streams).toEqual([]);
+    expect(r.effects).toEqual([]);
   });
 
   it('reopens the source for EPIPE retry and verifies the accepted response once', async () => {
-    const { calls, snapshot, invoke, session } = fixture();
-    calls.post.mockRejectedValueOnce(brokenPipe()).mockResolvedValueOnce(accepted);
-    expect(await invoke()).toMatchObject({ success: true, canDelete: false });
-    expect(calls.post).toHaveBeenCalledTimes(2);
-    expect(calls.sleep.mock.calls).toEqual([[2000]]);
-    expect(calls.source.mock.calls).toEqual([['/synthetic/audio.webm'], ['/synthetic/audio.webm']]);
-    expect(calls.post.mock.calls[0][1]).not.toBe(calls.post.mock.calls[1][1]);
-    expect(calls.verify).toHaveBeenCalledTimes(1);
-    expect(calls.verify).toHaveBeenCalledWith('record', '/synthetic/audio.webm', accepted.data, 'owner', true, snapshot, session.ticket);
-    expect(calls.report).not.toHaveBeenCalled();
+    const { r, legacyPosts, invoke } = fixture();
+    r.answer('post', LEGACY, brokenPipe());
+    r.answer('post', LEGACY, accepted);
+    expect(await invoke()).toMatchObject({ success: true, verified: true, audioFileId: 'accepted-id' });
+    expect(legacyPosts()).toHaveLength(2);
+    expect(r.sleeps.map((s) => s.ms)).toEqual([2000]);
+    expect(r.streams).toEqual([r.filePath(), r.filePath()]);
+    expect(legacyPosts()[0].body).not.toBe(legacyPosts()[1].body);
+    expect(r.requests.filter((q) => q.url.endsWith('/accepted-id/status'))).toHaveLength(1);
+    expect(r.read.readUploadReceipt('r1')).toMatchObject({ audioFileId: 'accepted-id', verified: true });
+    expect(r.report.failures).toEqual([]);
   });
 
   it('bounds repeated broken pipes and keeps the recording eligible for later retry', async () => {
-    const { calls, invoke } = fixture();
-    calls.post.mockRejectedValue(brokenPipe());
+    const { r, legacyPosts, invoke } = fixture();
+    for (let i = 0; i < 3; i++) r.answer('post', LEGACY, brokenPipe());
     expect(await invoke(2)).toMatchObject({ success: false, canRetry: true, error: 'Connection was interrupted. Please try again.' });
-    expect(calls.post).toHaveBeenCalledTimes(3);
-    expect(calls.sleep.mock.calls).toEqual([[2000], [5000]]);
-    expect(calls.verify).not.toHaveBeenCalled();
-    expect(calls.report).toHaveBeenCalledTimes(1);
+    expect(legacyPosts()).toHaveLength(3);
+    expect(r.sleeps.map((s) => s.ms)).toEqual([2000, 5000]);
+    expect(r.read.readUploadReceipt('r1')).toBeNull();
+    expect(r.report.failures).toHaveLength(1);
   });
 
   it('does not retry a user abort even when the transport reports EPIPE', async () => {
-    const { calls, invoke } = fixture(), controller = new AbortController();
-    calls.post.mockRejectedValue(brokenPipe()); controller.abort();
+    const { r, legacyPosts, invoke } = fixture({ lateAnswers: true });
+    const controller = new AbortController();
+    r.answer('post', LEGACY, brokenPipe());
+    controller.abort();
     expect(await invoke(3, controller)).toMatchObject({ success: false, cancelled: true, canRetry: false });
-    expect(calls.post).toHaveBeenCalledTimes(1);
-    expect(calls.sleep).not.toHaveBeenCalled();
-    expect(calls.verify).not.toHaveBeenCalled();
+    // axios refuses an already aborted signal before the transport.
+    expect(legacyPosts()).toHaveLength(0);
+    expect(r.sleeps).toEqual([]);
+    expect(r.read.readUploadReceipt('r1')).toBeNull();
   });
 
-  it.each([400, 401, 402, 403, 413, 422])('keeps HTTP %i terminal for this attempt', async status => {
-    const { calls, invoke } = fixture();
-    calls.post.mockRejectedValue(Object.assign(new Error('Rejected'), { response: { status, data: { error: 'Rejected' } } }));
+  it('does not retry when the user aborts while the POST is on the wire and it then fails with EPIPE', async () => {
+    const { r, legacyPosts, invoke } = fixture({ lateAnswers: true });
+    const controller = new AbortController();
+    let fail;
+    r.answer('post', LEGACY, () => new Promise((resolve) => { fail = () => resolve(brokenPipe()); }));
+    const done = invoke(3, controller);
+    for (let i = 0; i < 100 && !fail; i++) await new Promise((res) => setTimeout(res, 0));
+    controller.abort();
+    fail();
+    expect(await done).toMatchObject({ success: false, cancelled: true, canRetry: false });
+    expect(legacyPosts()).toHaveLength(1);
+    expect(r.sleeps).toEqual([]);
+  });
+
+  it.each([400, 401, 402, 403, 413, 422])('keeps HTTP %i terminal for this attempt', async (status) => {
+    const { r, legacyPosts, invoke } = fixture();
+    r.answer('post', LEGACY, { status, data: { error: 'Rejected' } });
     expect(await invoke()).toMatchObject({ success: false, canRetry: false, status });
-    expect(calls.post).toHaveBeenCalledTimes(1);
-    expect(calls.sleep).not.toHaveBeenCalled();
-    expect(calls.verify).not.toHaveBeenCalled();
+    expect(legacyPosts()).toHaveLength(1);
+    expect(r.sleeps).toEqual([]);
+    expect(r.read.readUploadReceipt('r1')).toBeNull();
   });
 
   it('verifies an existing accepted ID without replaying either upload transport', async () => {
-    const { calls, snapshot, functions, session } = fixture();
-    const receipt = { audioFileId: 'already-accepted', ownerId: 'owner', fileSize: snapshot.size, fileMtimeMs: snapshot.mtimeMs };
-    calls.receipt.mockReturnValue(receipt);
-    calls.verify.mockResolvedValue({ success: false, pendingVerification: true, canDelete: false });
-    expect(await functions.uploadWithRetry('record', '/synthetic/audio.webm', {}, 3, session.ticket)).toMatchObject({ pendingVerification: true, canDelete: false });
-    expect(calls.verify).toHaveBeenCalledTimes(1);
-    expect(calls.verify).toHaveBeenCalledWith('record', '/synthetic/audio.webm', receipt, 'owner', false, null, session.ticket);
-    expect(calls.post).not.toHaveBeenCalled();
-    expect(calls.direct).not.toHaveBeenCalled();
+    const { r, scope, snapshot } = fixture();
+    const receipt = { audioFileId: 'already-accepted', ownerId: 'a', fileSize: snapshot.size, fileMtimeMs: snapshot.mtimeMs, verified: false };
+    fs.writeFileSync(path.join(r.root, 'r1', 'upload-receipt.json'), JSON.stringify(receipt));
+    r.answer('get', /\/status$/, { status: 200, data: { status: 'RECORDING' } });
+    r.answer('get', /\/status$/, { status: 404, data: {} });
+    expect(await r.uploads.uploadWithRetry(scope, 'r1', r.filePath(), {}, 3)).toMatchObject({ pendingVerification: true, canDelete: false });
+    expect(r.requests.map((q) => q.url)).toEqual([
+      expect.stringMatching(/already-accepted\/status$/), expect.stringMatching(/already-accepted\/status$/),
+    ]);
   });
 
   // E7 (council decision 2): a sign-out during the retry sleep stops the
   // upload - no further request, nothing deleted, the recording stays queued.
   it('stops after a sign-out during the retry sleep without a further request', async () => {
-    const { calls, snapshot, functions, session } = fixture();
-    calls.post.mockRejectedValueOnce(brokenPipe()).mockResolvedValueOnce(accepted);
-    calls.sleep.mockImplementationOnce(async () => { session.signOut(); });
-    const ticket = { epoch: 1 };
-    session.ticket = ticket;
-    const result = await functions.uploadWithRetryLegacy('record', '/synthetic/audio.webm', { duration: 45 }, 3, new AbortController(), 'owner', snapshot, ticket);
-    expect(result).toMatchObject({ success: false, canDelete: false, sessionEnded: true });
-    expect(calls.post).toHaveBeenCalledTimes(1);
-    expect(calls.verify).not.toHaveBeenCalled();
+    const { r, scope, legacyPosts } = fixture();
+    r.answer('post', LEGACY, brokenPipe());
+    r.answer('post', LEGACY, accepted);
+    r.hooks.onTimer = (ms) => { if (ms === 2000) { r.hooks.onTimer = null; r.signOut(); } };
+    expect(await r.uploads.uploadWithRetry(scope, 'r1', r.filePath(), {}, 3)).toMatchObject({ success: false, canDelete: false, sessionEnded: true });
+    expect(legacyPosts()).toHaveLength(1);
+    expect(r.requestsAfter()).toEqual([]);
+    expect(r.effectsAfter()).toEqual([]);
   });
 
-  it('the main upload path refuses to start for a stale ticket', async () => {
-    const { calls, functions, session } = fixture();
-    const stale = session.ticket;
-    session.signOut();
-    expect(await functions.uploadWithRetry('record', '/synthetic/audio.webm', {}, 3, stale)).toMatchObject({ success: false, sessionEnded: true });
-    expect(calls.post).not.toHaveBeenCalled();
-    expect(calls.direct).not.toHaveBeenCalled();
-    expect(calls.receipt).not.toHaveBeenCalled();
+  it('the main upload path refuses to start in an ended scope', async () => {
+    const { r, scope } = fixture();
+    r.signOutThenB();
+    expect(await r.uploads.uploadWithRetry(scope, 'r1', r.filePath(), {}, 3)).toMatchObject({ success: false, sessionEnded: true });
+    expect(r.requests).toEqual([]);
+    expect(r.streams).toEqual([]);
+    expect(r.effects).toEqual([]);
   });
 });

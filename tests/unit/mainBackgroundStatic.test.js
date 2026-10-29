@@ -2,50 +2,45 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { auditSource, axiosWithoutSignal } from './support/e7Audit';
+import { createRequire } from 'node:module';
 
-// Review round 8, E7 audit as a static rule (tests/unit/support/e7Audit.js):
-// a new await, catch or callback in main's background work without a ticket
-// check fails here. Exceptions carry a `// E7: <reason>` marker on their line
-// and are listed in the round-8 result table. Failed at 82ab3187.
+// Review round 9 (council 3, R-S2): main's background work lives in
+// src-electron/background/ and reaches effects only through its
+// SessionScope. The ticket audit of round 8 (support/e7Audit.js, `// E7:`
+// markers) is gone with the code it audited.
 
-const read = (file) => fs.readFileSync(path.resolve(file), 'utf8');
+const require = createRequire(import.meta.url);
+const espree = require('espree');
+const MAIN = fs.readFileSync(path.resolve('src-electron/electron-main.js'), 'utf8');
+const AST = espree.parse(MAIN, { ecmaVersion: 'latest', sourceType: 'script' });
 
-// Background work of main that is audited even without a `ticket` in its body.
-const MAIN_BACKGROUND = ['refreshMainAuthToken', 'pollServerStatus', 'pollMeetingTranscriptionStatus', 'verifyAcceptedUpload',
-  'uploadWithRetry', 'tryDirectUpload', 'uploadWithRetryLegacy', 'recoverOrphanedRecordings'];
+const MOVED = ['saveUploadOutcome', 'sessionEndedVerification', 'verifyAcceptedUpload', 'updateUploadQueueRetry',
+  'recoverOrphanedRecordings', 'combineChunksForRecovery', 'cleanupOldOrphanedDirectories', 'refreshMainAuthToken',
+  'tokenFor', 'sessionEndedResult', 'pollServerStatus', 'pollMeetingTranscriptionStatus', 'uploadWithRetry',
+  'tryDirectUpload', 'uploadWithRetryLegacy', 'rmDirSafeBestEffort', 'processPendingUploadsRun'];
 
-describe('E7 static audit', () => {
-  it('electron-main.js: every await, catch and callback of ticketed or background work checks the ticket', () => {
-    const { findings, audited } = auditSource(read('src-electron/electron-main.js'), { functions: MAIN_BACKGROUND });
-    for (const name of [...MAIN_BACKGROUND, 'upload:start', 'upload:cancel']) expect(audited, name).toContain(name);
-    expect(findings).toEqual([]);
+function topLevelNames(ast) {
+  const names = new Set();
+  for (const node of ast.body) {
+    if (node.type === 'FunctionDeclaration') names.add(node.id.name);
+    if (node.type === 'VariableDeclaration') for (const d of node.declarations) if (d.id.type === 'Identifier') names.add(d.id.name);
+  }
+  return names;
+}
+
+describe('main background moved into src-electron/background (round 9, P3)', () => {
+  it('main defines none of the moved background functions', () => {
+    const names = topLevelNames(AST);
+    expect(MOVED.filter((n) => names.has(n))).toEqual([]);
   });
 
-  it('pending-uploads.js: the whole queue run', () => {
-    expect(auditSource(read('src-electron/pending-uploads.js'), { all: true }).findings).toEqual([]);
+  it('main no longer requires the direct upload module or tus-js-client', () => {
+    expect(MAIN).not.toMatch(/require\(['"]\.\/upload-direct['"]\)/);
+    expect(MAIN).not.toMatch(/tus-js-client/);
   });
 
-  it('upload-direct.js: every request carries the abort signal (aborted on every session change)', () => {
-    expect(axiosWithoutSignal(read('src-electron/upload-direct.js'))).toEqual([]);
-  });
-
-  it('control: the rules find an unchecked await, catch, callback and refresh', () => {
-    const src = `
-      async function work(ticket) {
-        await sleep(1);
-        writeFileAtomic('x');
-        try { await axios.get('u'); if (sessionEndedFor(ticket)) return; } catch (e) { saveUploadOutcome('r', e); }
-        later(() => removeFromUploadQueue('r'));
-        await refreshMainAuthToken();
-        if (sessionEndedFor(ticket)) return;
-        await sleep(2); // E7: test marker
-        await sleep(3);
-        if (sessionEndedFor(ticket)) return null;
-        return await sleep(4);
-      }`;
-    const rules = auditSource(src).findings.map((f) => f.rule[0]).sort();
-    expect(rules).toEqual(['A', 'B', 'C', 'D']);
-    expect(axiosWithoutSignal('axios.post(u, b, { timeout: 1 }); axios.get(u, { signal });')).toHaveLength(1);
+  it('control: the walker finds a top-level function', () => {
+    const ast = espree.parse('function uploadWithRetry() {}\nconst tokenFor = () => 1;', { ecmaVersion: 'latest' });
+    expect(MOVED.filter((n) => topLevelNames(ast).has(n))).toEqual(['tokenFor', 'uploadWithRetry']);
   });
 });
