@@ -123,6 +123,13 @@ function createTokenVault({ safeStorage, store, platform = process.platform, war
     try {
       const decrypted = safeStorage.decryptString(Buffer.from(stored, 'base64'));
       memoryToken = decrypted;
+      if (!secure()) {
+        // Written by an older version with an insecure backend (Linux
+        // basic_text: a fixed, public key - effectively plaintext). Same rule
+        // as for plaintext: memory for this run, off the disk.
+        try { store.delete(TOKEN_KEY); } catch { /* ignore */ }
+        warn('token-vault: token stored with an insecure backend removed from disk, kept in memory for this session only');
+      }
       return decrypted;
     } catch (error) {
       warn(`token-vault: decrypting the token failed (${error?.message || error})`);

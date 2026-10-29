@@ -92,6 +92,23 @@ describe('token-vault (desktop session token)', () => {
     }
   });
 
+  it('update case: a token an older version encrypted with Linux basic_text leaves the disk after the RAM hand-over', () => {
+    const basic = fakeSafeStorage({ backend: 'basic_text' });
+    const store = memoryStore({ authToken: basic.encryptString(JWT).toString('base64') });
+    const vault = createTokenVault({ safeStorage: basic, store, platform: 'linux' });
+    expect(vault.getToken()).toBe(JWT);
+    expect(store.data.authToken).toBeUndefined();
+    expect(vault.getToken()).toBe(JWT); // this run keeps working
+    expect(createTokenVault({ safeStorage: basic, store, platform: 'linux' }).getToken()).toBeNull();
+  });
+
+  it('a secure backend keeps its encrypted token on disk', () => {
+    const safe = fakeSafeStorage({ backend: 'gnome_libsecret' });
+    const store = memoryStore({ authToken: safe.encryptString(JWT).toString('base64') });
+    expect(createTokenVault({ safeStorage: safe, store, platform: 'linux' }).getToken()).toBe(JWT);
+    expect(store.data.authToken).toBeDefined();
+  });
+
   it('a failed encryption on save leaves nothing on disk', () => {
     const store = memoryStore({ authToken: 'old.plain.token' });
     const vault = createTokenVault({ safeStorage: fakeSafeStorage({ failEncrypt: true }), store, platform: 'win32' });
