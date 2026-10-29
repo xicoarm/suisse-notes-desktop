@@ -116,8 +116,9 @@ function recordStore(disk) {
  * @param {(authCode: string, verifier: string, state: string) => Promise<object>} [opts.exchange]
  * @param {(item: object, ticket: object, token: string|null) => Promise<object>} [opts.upload]
  * @param {(ms: number) => Promise<void>} [opts.wait]
+ * @param {() => void} [opts.onAbort] - also called at every abort (round 9: the scope registry)
  */
-export function boot(disk, { exchange = async () => ({ error: 'invalid_callback' }), upload, wait } = {}) {
+export function boot(disk, { exchange = async () => ({ error: 'invalid_callback' }), upload, wait, onAbort } = {}) {
   const config = configStore(disk);
   let authority;
   const vault = createTokenVault({
@@ -135,7 +136,7 @@ export function boot(disk, { exchange = async () => ({ error: 'invalid_callback'
     // Absent before the migration existed (fail-first run at a3c841fa).
     migrationMark: sessionAuthorityModule.configMarkStore ? sessionAuthorityModule.configMarkStore(config) : undefined,
     flows,
-    abortRequests: () => { counters.aborted++; },
+    abortRequests: () => { counters.aborted++; if (onAbort) onAbort(); },
     now: () => disk.now
   });
   authority.startup();
