@@ -8,12 +8,15 @@ import { join } from 'node:path';
 // Keychain write fails (it used to delete first, then add). The write
 // strategy (KeychainUpsert, in the plugin source between BEGIN/END markers)
 // is compiled with swiftc against the real Security constants and run with
-// simulated Keychain results. Runs wherever swiftc exists (macOS CI runner);
+// simulated Keychain results. Runs on macOS with swiftc (macOS CI runner);
 // on a macOS CI runner a missing swiftc fails the test instead of skipping.
 
 const PLUGIN = 'src-capacitor/ios/App/App/Plugins/SecureTokenStorePlugin.swift';
-const hasSwiftc = spawnSync('swiftc', ['--version'], { stdio: 'ignore' }).status === 0;
-const mustRun = process.platform === 'darwin' && !!process.env.CI;
+// macOS only: the Security framework (OSStatus constants) exists there; Linux
+// runners may have swiftc but no Security module.
+const isMac = process.platform === 'darwin';
+const hasSwiftc = isMac && spawnSync('swiftc', ['--version'], { stdio: 'ignore' }).status === 0;
+const mustRun = isMac && !!process.env.CI;
 
 function upsertSource() {
   const src = readFileSync(PLUGIN, 'utf8');
