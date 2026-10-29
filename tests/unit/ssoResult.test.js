@@ -12,9 +12,15 @@ vi.mock('../../src/stores/minutes', () => ({
   useMinutesStore: () => ({ fetchMinutes: vi.fn(async () => ({ success: true })), setFromServer: vi.fn(), reset: vi.fn() })
 }));
 
+// Desktop: main applies the SSO session (sso-flow.js + session-authority.js)
+// and the renderer mirrors main's session of the result's epoch.
+const mainSession = vi.hoisted(() => ({ current: { signedOut: true, epoch: 0 } }));
 const electronAuth = {
-  saveToken: vi.fn(async () => ({ success: true })),
-  saveUserInfo: vi.fn(async () => ({ success: true }))
+  currentSession: vi.fn(async () => mainSession.current)
+};
+const appliedIn = (epoch, userId) => {
+  mainSession.current = { signedOut: false, epoch, token: jwt(userId), user: { id: userId } };
+  return { bound: true, applied: true, epoch };
 };
 // performance: vue-i18n needs window.performance to translate.
 vi.stubGlobal('window', { electronAPI: { auth: electronAuth }, performance: globalThis.performance });
@@ -63,23 +69,35 @@ describe('auth store: completeSSO', () => {
       expect.objectContaining({ tags: { sso_reason: 'AADSTS65001', sso_provider: 'microsoft' } }));
   });
 
-  it('a success signs in', async () => {
+  it('a success signs in (main\'s session of that epoch)', async () => {
     const store = useAuthStore();
     store.beginSSO('google');
-    const result = await store.completeSSO({ token: jwt('u1'), user: { id: 'u1' }, deliveryId: 1, bound: true });
+    const result = await store.completeSSO({ ...appliedIn(1, 'u1'), deliveryId: 1 });
+    store.stopTokenRefresh();
     expect(result.success).toBe(true);
     expect(store.isAuthenticated).toBe(true);
+    expect(store.token).toBe(jwt('u1'));
     expect(store.ssoOutcome).toMatchObject({ seq: 1, success: true });
-    expect(electronAuth.saveToken).toHaveBeenCalledWith(jwt('u1'));
   });
 
   it('a success that arrives after the wait was abandoned (2FA in the browser) is still accepted', async () => {
     const store = useAuthStore();
     store.beginSSO('microsoft');
     store.abandonSSO();
-    const result = await store.completeSSO({ token: jwt('u2'), user: { id: 'u2' }, bound: true });
+    const result = await store.completeSSO(appliedIn(2, 'u2'));
+    store.stopTokenRefresh();
     expect(result.success).toBe(true);
     expect(store.token).toBe(jwt('u2'));
+  });
+
+  it('a result of an epoch main has left (sign-out meanwhile) is never mirrored', async () => {
+    const store = useAuthStore();
+    const payload = appliedIn(3, 'u3');
+    mainSession.current = { signedOut: true, epoch: 4 };
+    const result = await store.completeSSO(payload);
+    expect(result).toMatchObject({ success: false, ignored: true });
+    expect(store.isAuthenticated).toBe(false);
+    expect(store.token).toBeNull();
   });
 });
 
@@ -93,7 +111,8 @@ describe('app-wide SSO result handler (boot/sso.js)', () => {
     const store = useAuthStore();
     const router = fakeRouter('about');
     const handle = createSSOResultHandler({ getAuthStore: () => store, router });
-    await handle({ token: jwt('u1'), user: { id: 'u1' }, deliveryId: 7, bound: true });
+    await handle({ ...appliedIn(5, 'u1'), deliveryId: 7 });
+    store.stopTokenRefresh();
     expect(router.isReady).toHaveBeenCalled();
     expect(store.isAuthenticated).toBe(true);
     expect(router.push).toHaveBeenCalledWith('/record');
@@ -138,7 +157,7 @@ describe('app-wide SSO result handler (boot/sso.js)', () => {
     expect(store.token).toBe('current');
     expect(store.user).toEqual({ id: 'me' });
     expect(store.ssoProvider).toBeNull();
-    expect(electronAuth.saveToken).not.toHaveBeenCalled();
+    expect(electronAuth.currentSession).not.toHaveBeenCalled();
     expect(router.push).not.toHaveBeenCalled();
     expect(sentry.addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringMatching(/ignored: already signed in/) }));
   });
@@ -167,19 +186,20 @@ describe('app-wide SSO result handler (boot/sso.js)', () => {
     expect(store.token).toBe('current');
   });
 
-  it('a password sign-in ends the SSO wait and drops a result main still buffers', async () => {
-    const takePendingSSO = vi.fn(async () => ({ token: 'stale', user: { id: 's' } }));
-    electronAuth.takePendingSSO = takePendingSSO;
-    electronAuth.login = vi.fn(async () => ({ success: true, token: 'pw', user: { id: 'me' }, minutes: { remaining: 5 } }));
+  it('a password sign-in ends the SSO wait (main drops its flow and buffer with the new epoch)', async () => {
+    electronAuth.login = vi.fn(async () => ({ success: true, token: 'pw', user: { id: 'me' }, minutes: { remaining: 5 }, epoch: 6 }));
     try {
       const store = useAuthStore();
       store.beginSSO('google');
       await store.login('a@b.ch', 'secret');
+      store.stopTokenRefresh();
       expect(store.ssoProvider).toBeNull();
-      expect(takePendingSSO).toHaveBeenCalled();
+      expect(store.token).toBe('pw');
+      // A buffered result of the older epoch is never mirrored afterwards.
+      mainSession.current = { signedOut: false, epoch: 6, token: 'pw', user: { id: 'me' } };
+      expect((await store.completeSSO({ bound: true, applied: true, epoch: 5 })).ignored).toBe(true);
       expect(store.token).toBe('pw');
     } finally {
-      delete electronAuth.takePendingSSO;
       delete electronAuth.login;
     }
   });
@@ -205,7 +225,6 @@ describe('SECURITY: SSO results are bound to a sign-in this app started', () => 
     const result = await store.completeSSO({ token: jwt('evil'), user: { id: 'evil' } });
     expect(result).toMatchObject({ success: false, ignored: true, reason: 'unbound_result' });
     expect(store.isAuthenticated).toBe(false);
-    expect(electronAuth.saveToken).not.toHaveBeenCalled();
     // The real result of the sign-in in progress is still awaited.
     expect(store.ssoProvider).toBe('microsoft');
   });
@@ -218,18 +237,12 @@ describe('SECURITY: SSO results are bound to a sign-in this app started', () => 
     expect(store.ssoOutcome.seq).toBe(0);
   });
 
-  it('a result whose user is not the token\'s user is refused', async () => {
+  it('desktop: the renderer never applies a token from a payload, even a "bound" one', async () => {
     const store = useAuthStore();
-    const result = await store.completeSSO({ token: jwt('u1'), user: { id: 'someone-else' }, bound: true });
-    expect(result.success).toBe(false);
+    const result = await store.completeSSO({ token: jwt('u1'), user: { id: 'u1' }, bound: true });
+    expect(result).toMatchObject({ success: false, ignored: true, reason: 'not_applied' });
     expect(store.isAuthenticated).toBe(false);
-    expect(electronAuth.saveToken).not.toHaveBeenCalled();
-  });
-
-  it('only plain profile fields from the URL are kept', async () => {
-    const store = useAuthStore();
-    await store.completeSSO({ token: jwt('u1'), user: { id: 'u1', email: 'a@b.ch', isAdmin: true, nested: { x: 1 } }, bound: true });
-    expect(store.user).toEqual({ id: 'u1', email: 'a@b.ch' });
+    expect(electronAuth.currentSession).not.toHaveBeenCalled();
   });
 });
 

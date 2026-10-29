@@ -326,23 +326,21 @@ if (process.env.SUISSE_E2E_HOOKS === '1') {
   app.setAsDefaultProtocolClient(SSO_PROTOCOL);
 }
 
-// The last SSO result, kept until the renderer confirms it has it
-// (auth:takePendingSSO). A result pushed while the renderer is still booting
-// (cold start by the suissenotes:// URL, a reload) used to be lost: the push
-// arrived before any listener existed, and the app opened /about instead.
-let pendingSSOPayload = null;
+// The last SSO result is kept by the session authority until the renderer
+// confirms it has it (auth:takePendingSSO). A result pushed while the renderer
+// is still booting (cold start by the suissenotes:// URL, a reload) used to be
+// lost: the push arrived before any listener existed.
 let ssoDeliverySeq = 0;
 
-ipcMain.handle('auth:takePendingSSO', () => {
-  const payload = pendingSSOPayload;
-  pendingSSOPayload = null;
-  return payload;
-});
+ipcMain.handle('auth:takePendingSSO', () => (sessionAuthority ? sessionAuthority.takePending() : null));
 
 const ssoFlow = require('./sso-flow');
-// The pending flow lives in configStore (survives a restart: the browser
-// sign-in may come back to a cold start); created below, after configStore.
+const { createSessionAuthority, fileRecordStore, configUserStore, tokenUserId: sessionTokenUserId, RECORD_FILE } = require('./session-authority');
+// Created below, after configStore: the pending flow lives in configStore
+// (survives a restart: the browser sign-in may come back to a cold start).
 let ssoFlows = null;
+let sessionAuthority = null;
+let handleSsoCallback = null;
 
 // Exchange a one-time SSO code for the session (PKCE, newer server contract).
 async function exchangeSsoCode(authCode, verifier, state) {
@@ -358,41 +356,27 @@ async function exchangeSsoCode(authCode, verifier, state) {
   return { error: 'invalid_callback' };
 }
 
-async function handleSSOUrl(url) {
-  if (!url || typeof url !== 'string' || !url.startsWith(`${SSO_PROTOCOL}://`)) return;
-  const parsed = ssoFlow.parseCallbackUrl(url);
-  if (!parsed) {
-    log.warn('SSO: ignoring unknown callback URL');
-    return;
-  }
-  // SECURITY: apply only the result of a sign-in this app started (state
-  // binding). A crafted suissenotes://auth/callback link is dropped here.
-  const binding = ssoFlows.consume(parsed);
-  if (!binding.ok) {
-    log.warn(`SSO: callback ignored (${binding.reason})`);
-    return;
-  }
-  let payload;
-  if (parsed.authCode) {
-    payload = await exchangeSsoCode(parsed.authCode, binding.verifier, parsed.state);
-  } else if (parsed.token) {
-    payload = { token: parsed.token, user: parsed.user };
-  } else {
-    payload = parsed.code ? { error: parsed.error, code: parsed.code } : { error: parsed.error };
-  }
-  payload.bound = true;
-
-  // Buffer first, push second: the renderer acknowledges a push by taking the
-  // buffer (deliveryId lets it ignore the same result arriving both ways).
+// Buffer first, push second: the renderer acknowledges a push by taking the
+// buffer (deliveryId lets it ignore the same result arriving both ways).
+function deliverSsoResult(payload) {
   payload.deliveryId = ++ssoDeliverySeq;
-  pendingSSOPayload = payload;
-  log.info(`SSO: callback received (${payload.token ? 'success' : `error code=${payload.code || '-'}`}), delivery ${payload.deliveryId}`);
+  if (!sessionAuthority.setPending(payload)) return;
+  log.info(`SSO: callback received (${payload.applied ? 'signed in' : `error code=${payload.code || '-'}`}), delivery ${payload.deliveryId}`);
   if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
     mainWindow.webContents.send('auth:ssoCallback', payload);
   }
+  if (payload.applied) afterSessionApplied();
+}
+
+async function handleSSOUrl(url) {
+  if (!url || typeof url !== 'string' || !url.startsWith(`${SSO_PROTOCOL}://`)) return;
+  // SECURITY: applied only through the session authority with the ticket of
+  // a flow this app started (state binding); see sso-flow.js.
+  if (!handleSsoCallback) return;
+  await handleSsoCallback(url);
 }
 
 // === Single Instance Lock ===
@@ -524,10 +508,39 @@ const configStore = new Store({
 const tokenVault = createTokenVault({
   safeStorage,
   store: configStore,
-  warn: (msg) => log.warn(msg)
+  warn: (msg) => log.warn(msg),
+  // E6: nothing is returned while the session authority says signed out.
+  isAllowed: () => !!sessionAuthority && sessionAuthority.tokenAllowed()
 });
 
 ssoFlows = ssoFlow.createSsoFlowStore({ storage: configStore });
+
+// Session authority: the one writer of token and user, and the sign-out
+// tombstone that every main path honours (session-authority.js).
+sessionAuthority = createSessionAuthority({
+  recordStore: fileRecordStore(path.join(app.getPath('userData'), RECORD_FILE)),
+  vault: tokenVault,
+  userStore: configUserStore(configStore),
+  flows: ssoFlows,
+  abortRequests: () => {
+    for (const controller of activeAbortControllers.values()) {
+      try { controller.abort(); } catch { /* already aborted */ }
+    }
+  },
+  warn: (msg) => log.warn(msg)
+});
+sessionAuthority.startup();
+
+handleSsoCallback = ssoFlow.createSsoCallbackHandler({
+  authority: sessionAuthority,
+  flows: ssoFlows,
+  exchange: exchangeSsoCode,
+  deliver: deliverSsoResult,
+  // Rollout stop signal: an open flow got a callback without the state echo
+  // (backend without «SSO state echo»). No URL, no user data.
+  countMissingState: () => Sentry.captureMessage('sso_missing_state', { level: 'warning', fingerprint: ['sso_missing_state'] }),
+  log: (msg) => log.warn(msg)
+});
 
 // Cold-start case (Win/Linux): URL is in our own argv
 {
@@ -537,7 +550,7 @@ ssoFlows = ssoFlow.createSsoFlowStore({ storage: configStore });
 
 // Restore Sentry user context from stored session (so crash reports identify the user)
 try {
-  const storedUser = configStore.get('userInfo');
+  const storedUser = sessionAuthority.getUser();
   if (storedUser) {
     // Opaque account id only (no e-mail/name to telemetry).
     if (storedUser.id) Sentry.setUser({ id: String(storedUser.id) });
@@ -631,7 +644,7 @@ function saveUploadOutcome(recordId, result) {
     historyStore.set('recordings', recordings);
   }
 }
-async function verifyAcceptedUpload(recordId, filePath, accepted, ownerId, remember = true, sourceSnapshot = null) {
+async function verifyAcceptedUpload(recordId, filePath, accepted, ownerId, remember = true, sourceSnapshot = null, ticket = null) {
   const stats = fs.statSync(filePath);
   const receipt = { ...accepted, verified: false, contentVerified: false, canDelete: false, ownerId, filePath, fileSize: sourceSnapshot?.size ?? stats.size, fileMtimeMs: sourceSnapshot?.mtimeMs ?? stats.mtimeMs };
   if (remember) {
@@ -644,8 +657,11 @@ async function verifyAcceptedUpload(recordId, filePath, accepted, ownerId, remem
     return result;
   }
   const verification = accepted.audioFileId
-    ? await pollServerStatus(accepted.audioFileId, 15, ownerId)
+    ? await pollServerStatus(accepted.audioFileId, 15, ownerId, ticket)
     : { persisted: false, verified: false, error: 'Server returned no recording identifier' };
+  // E7: signed out while verifying - the receipt stays as it is (verified
+  // later, in the owner's session).
+  if (verification.sessionEnded || sessionEndedFor(ticket)) return { ...accepted, ...sessionEndedResult(), pendingVerification: true };
   const result = verifiedUploadResult(accepted, verification);
   await writeFileAtomic(path.join(getRecordingPath(recordId), 'upload-receipt.json'), JSON.stringify({ ...receipt, verified: result.verified, contentVerified: result.contentVerified, canDelete: result.canDelete }));
   saveUploadOutcome(recordId, result);
@@ -1057,146 +1073,39 @@ async function cleanupOldOrphanedDirectories() {
   }
 }
 
-// Process pending uploads on app startup or after login
-let isProcessingUploads = false;
-
-async function processPendingUploads() {
-  if (isProcessingUploads) {
-    log.info('Upload processing already in progress, skipping');
-    return;
-  }
-  isProcessingUploads = true;
-
-  try {
-  const queue = uploadQueueStore.get('pendingUploads', []);
-  if (queue.length === 0) return;
-
-  log.info(`Found ${queue.length} pending uploads, processing...`);
-
-  // Check if we have auth token
-  const authToken = await getAuthToken();
-  if (!authToken) {
-    log.info('No auth token, skipping pending uploads');
-    return;
-  }
-
-  // Process each pending upload with delay between them
-  for (const upload of queue) {
-    const currentUserId = tokenUserId(await getAuthToken());
-    if (!canUploadForUser(upload.userId || recordingOwner(upload.recordId), currentUserId)) continue;
-    // Don't double-upload: if the renderer's upload:start path already has this
-    // recording in flight, let it finish — otherwise we POST the same file twice
-    // and create a duplicate meeting on the server.
-    if (inFlightUploads.has(upload.recordId)) {
-      log.info(`Pending processor: ${upload.recordId} already in flight (renderer path), skipping`);
-      continue;
-    }
-    // Skip if too many retries (max 10)
-    if (upload.retryCount >= 10 && !readUploadReceipt(upload.recordId)?.audioFileId) {
-      log.warn(`Upload ${upload.recordId} exceeded max retries, removing from queue`);
-      removeFromUploadQueue(upload.recordId);
-      // Surface the drop in history — a silent queue removal leaves the
-      // entry 'pending' forever with no retry button and no explanation.
-      const recordings = historyStore.get('recordings', []);
-      const recording = recordings.find(r => r.id === upload.recordId);
-      if (recording && recording.uploadStatus !== 'uploaded') {
-        recording.uploadStatus = 'failed';
-        recording.uploadError = 'Upload failed after 10 attempts';
-        historyStore.set('recordings', recordings);
-      }
-      continue;
-    }
-
-    // Check if file still exists
-    try {
-      await fs.promises.access(upload.filePath);
-    } catch (e) {
-      log.warn(`File not found for ${upload.recordId}, removing from queue`);
-      removeFromUploadQueue(upload.recordId);
-      continue;
-    }
-
-    log.info(`Retrying upload for ${upload.recordId} (attempt ${upload.retryCount + 1})`);
-    updateUploadQueueRetry(upload.recordId);
-
-    inFlightUploads.add(upload.recordId);
-    updateRecordingPowerBlocker();
-    try {
-      const result = await uploadWithRetry(upload.recordId, upload.filePath, upload.metadata, 2);
-
-      // If auth expired, stop processing and notify user
-      if (!result.success && result.status === 401) {
-        log.warn('Token expired - stopping pending uploads processing');
-        // Notify renderer to prompt for re-login
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('auth:expired', {
-            message: 'Your session has expired. Please log in again to continue uploading.',
-            pendingUploads: queue.length
-          });
-        }
-        break; // Stop processing pending uploads
-      }
-
-      if (result.success) {
-        removeFromUploadQueue(upload.recordId);
-        // Update history status
-        const recordings = historyStore.get('recordings', []);
-        const recording = recordings.find(r => r.id === upload.recordId);
-        if (recording) {
-          recording.uploadStatus = 'uploaded';
-          recording.transcriptionId = result.transcriptionId;
-          recording.audioFileId = result.audioFileId;
-          historyStore.set('recordings', recordings);
-        }
-        log.info(`Successfully uploaded pending recording: ${upload.recordId}`);
-
-        // Notify renderer about background upload success
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('upload:complete', {
-            recordId: upload.recordId,
-            success: true,
-            audioFileId: result.audioFileId,
-            background: true
-          });
-        }
-      } else if (result.pendingVerification) {
-        saveUploadOutcome(upload.recordId, result);
-      } else if (result.canRetry === false) {
-        // Terminal failure (413, 402, 415, 400, etc.) — drop from queue so we
-        // don't keep re-attempting a doomed upload on every app launch.
-        log.warn(`[upload] Terminal failure for pending ${upload.recordId} (status=${result.status}): ${result.error} — removing from queue`);
-        removeFromUploadQueue(upload.recordId);
-        const recordings = historyStore.get('recordings', []);
-        const recording = recordings.find(r => r.id === upload.recordId);
-        if (recording) {
-          recording.uploadStatus = 'failed';
-          recording.uploadError = result.error || 'Upload rejected by server';
-          historyStore.set('recordings', recordings);
-        }
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('upload:complete', {
-            recordId: upload.recordId,
-            success: false,
-            error: result.error,
-            terminal: true,
-            background: true,
-          });
-        }
-      }
-    } catch (e) {
-      log.error(`Failed to upload ${upload.recordId}:`, e.message);
-    } finally {
-      inFlightUploads.delete(upload.recordId);
-      updateRecordingPowerBlocker();
-    }
-
-    // Wait 5 seconds between uploads to avoid overwhelming the server
-    await new Promise(r => setTimeout(r, 5000));
-  }
-  } finally {
-    isProcessingUploads = false;
-  }
-}
+// Process pending uploads on app startup or after login. E7: one session
+// ticket per run; a sign-out stops it without touching the queue
+// (pending-uploads.js).
+const { createPendingUploadProcessor } = require('./pending-uploads');
+const processPendingUploads = createPendingUploadProcessor({
+  authority: { ticket: () => sessionAuthority.ticket(), isCurrent: (t) => sessionAuthority.isCurrent(t), getToken: () => sessionAuthority.getToken() },
+  getQueue: () => uploadQueueStore.get('pendingUploads', []),
+  removeFromQueue: (recordId) => removeFromUploadQueue(recordId),
+  bumpRetry: (recordId) => updateUploadQueueRetry(recordId),
+  // Lazy: inFlightUploads is declared further down.
+  inFlight: { has: (id) => inFlightUploads.has(id), add: (id) => inFlightUploads.add(id), delete: (id) => inFlightUploads.delete(id) },
+  upload: (recordId, filePath, metadata, maxRetries, ticket) => uploadWithRetry(recordId, filePath, metadata, maxRetries, ticket),
+  mayUpload: (item, userId) => canUploadForUser(item.userId || recordingOwner(item.recordId), userId),
+  readReceipt: (recordId) => readUploadReceipt(recordId),
+  access: (filePath) => fs.promises.access(filePath),
+  updateHistory: (recordId, change) => {
+    const recordings = historyStore.get('recordings', []);
+    const recording = recordings.find(r => r.id === recordId);
+    if (!recording) return;
+    const { onlyIfNotUploaded, ...fields } = change;
+    if (onlyIfNotUploaded && recording.uploadStatus === 'uploaded') return;
+    Object.assign(recording, fields);
+    historyStore.set('recordings', recordings);
+  },
+  saveOutcome: (recordId, result) => saveUploadOutcome(recordId, result),
+  notify: (channel, payload) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+  },
+  tokenUserId,
+  wait: (ms) => new Promise(r => setTimeout(r, ms)),
+  onBusyChange: () => updateRecordingPowerBlocker(),
+  log
+});
 
 // Set FFmpeg path (cross-platform)
 if (app.isPackaged) {
@@ -2098,8 +2007,10 @@ function getDeviceId() {
 // completion arrives asynchronously via the 'auth:ssoCallback' event.
 async function openSSOBrowser(provider) {
   try {
-    // Bind the callback to this sign-in (state + PKCE, see sso-flow.js).
-    const flow = ssoFlows.begin(provider);
+    // A signed-in app never starts an SSO flow (its result would be dropped).
+    if (!sessionAuthority.state().signedOut) return { success: false, error: 'already_signed_in' };
+    // Bind the callback to this sign-in (state + PKCE + session epoch, see sso-flow.js).
+    const flow = ssoFlows.begin(provider, sessionAuthority.state().epoch);
     const url = ssoFlow.withFlowParams(`${API_BASE_URL}/api/auth/${provider}/login?client=desktop`, flow);
     log.info(`SSO: launching system browser for ${provider} login`);
     await shell.openExternal(url);
@@ -2114,7 +2025,37 @@ ipcMain.handle('auth:loginWithMicrosoft', () => openSSOBrowser('microsoft'));
 ipcMain.handle('auth:loginWithGoogle', () => openSSOBrowser('google'));
 
 // Authentication - Production only (no demo mode)
+/**
+ * E2: a password, 2FA or registration success is applied here, with the
+ * ticket taken when the request started. A sign-out (or any other session
+ * change) meanwhile drops it: { success: false, ignored: true }.
+ */
+function applySignIn(ticket, success) {
+  const applied = sessionAuthority.applySession(ticket, { token: success.token, user: success.user }, { kind: 'login' });
+  if (!applied.applied) {
+    log.info(`auth: sign-in result dropped (${applied.reason})`);
+    return { success: false, ignored: true, reason: applied.reason };
+  }
+  afterSessionApplied();
+  return { ...success, epoch: applied.epoch, persisted: applied.persisted };
+}
+
+/** A new session is in place: uploads waiting for a sign-in may run. */
+function afterSessionApplied() {
+  try {
+    const user = sessionAuthority.getUser();
+    // Opaque account id only (no e-mail/name to telemetry).
+    if (user && user.id) Sentry.setUser({ id: String(user.id) });
+  } catch { /* telemetry optional */ }
+  setImmediate(() => {
+    processPendingUploads().catch(err => {
+      log.error('Error processing pending uploads after login:', err);
+    });
+  });
+}
+
 ipcMain.handle('auth:login', async (event, email, password) => {
+  const ticket = sessionAuthority.ticket();
   try {
     // Suisse Notes API authentication. `twoFactor: "supported"` tells the
     // backend this app can ask for the second factor (src-electron/auth-two-factor.js).
@@ -2137,7 +2078,7 @@ ipcMain.handle('auth:login', async (event, email, password) => {
     // Check for successful response
     if (response.data && response.data.success) {
       const success = twoFactorAuth.loginSuccessFrom(response.data);
-      if (success) return success;
+      if (success) return applySignIn(ticket, success);
     }
     // 2FA account: the renderer asks for the code (no token yet).
     const challenge = twoFactorAuth.twoFactorChallengeFrom(response.data);
@@ -2168,6 +2109,7 @@ ipcMain.handle('auth:login', async (event, email, password) => {
 // validated in auth-two-factor.js before any request; the URL comes from the
 // configured API base only. Success has the shape of an auth:login success.
 ipcMain.handle('auth:verifyTwoFactor', async (event, tempToken, code, isBackupCode) => {
+  const ticket = sessionAuthority.ticket();
   const request = twoFactorAuth.buildVerifyRequest(API_BASE_URL, tempToken, code, isBackupCode);
   if (!request.ok) return request.failure;
   try {
@@ -2178,7 +2120,7 @@ ipcMain.handle('auth:verifyTwoFactor', async (event, tempToken, code, isBackupCo
       headers: { 'Content-Type': 'application/json', 'X-Desktop-App-Version': app.getVersion() }
     });
     const success = twoFactorAuth.loginSuccessFrom(response.data);
-    if (success) return success;
+    if (success) return applySignIn(ticket, success);
     return { success: false, status: response.status, nonJson: true, code: authErrorCode(response.data) };
   } catch (error) {
     const failure = authFailureFromAxiosError(error);
@@ -2212,6 +2154,7 @@ ipcMain.handle('auth:resendTwoFactorEmail', async (event, tempToken) => {
 
 // Registration - Create new account
 ipcMain.handle('auth:register', async (event, email, password, name) => {
+  const ticket = sessionAuthority.ticket();
   try {
     const response = await axios.post(`${API_BASE_URL}/api/auth/register`, {
       email,
@@ -2230,11 +2173,11 @@ ipcMain.handle('auth:register', async (event, email, password, name) => {
 
     // Check for successful response (register endpoint returns { user, token })
     if (response.data && response.data.token) {
-      return {
+      return applySignIn(ticket, {
         success: true,
         token: response.data.token,
         user: response.data.user
-      };
+      });
     }
     log.warn(`auth:register: answer without a token (HTTP ${response.status})`);
     return { success: false, status: response.status, nonJson: true, code: authErrorCode(response.data) };
@@ -2291,68 +2234,55 @@ function authFailureFromAxiosError(error) {
   };
 }
 
-ipcMain.handle('auth:saveToken', async (event, token) => {
-  try {
-    // Encrypted by the OS keystore, or (no secure storage) memory-only for
-    // this run - never plaintext on disk.
-    const saved = tokenVault.saveToken(token);
-    if (!saved.success) return { success: false, error: saved.error };
-    // Trigger pending uploads now that we have auth
-    setImmediate(() => {
-      processPendingUploads().catch(err => {
-        log.error('Error processing pending uploads after login:', err);
-      });
-    });
-
-    // persisted=false: memory only for this run (the renderer then keeps
-    // the sign-out marker, so the next start does not restore an older copy).
-    return { success: true, persisted: saved.persisted !== false };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
+// Token and user are written only by the session authority (applySession):
+// there is no IPC that stores a token or a user without a ticket (E2).
 
 ipcMain.handle('auth:getToken', async () => {
   try {
-    return tokenVault.getToken();
+    return sessionAuthority.getToken();
   } catch (error) {
     console.error('Error getting token:', error);
     return null;
   }
 });
 
-ipcMain.handle('auth:clearToken', async () => {
-  for (const controller of activeAbortControllers.values()) controller.abort();
-  const cleared = tokenVault.clearToken();
-  let userInfoCleared = true;
-  try { configStore.delete('userInfo'); } catch { userInfoCleared = false; }  // Also clear user info on logout
-  Sentry.setUser(null);  // Clear Sentry user context on logout
-  return cleared.success && userInfoCleared ? { success: true } : { success: false, error: cleared.error || 'User info not removed' };
-});
-
-// Save user info (for session restoration)
-ipcMain.handle('auth:saveUserInfo', async (event, userInfo) => {
-  try {
-    configStore.set('userInfo', userInfo);
-    // Set Sentry user context so main process errors are attributed to this user
-    if (userInfo) {
-      // Opaque account id only (no e-mail/name to telemetry).
-      if (userInfo.id) Sentry.setUser({ id: String(userInfo.id) });
-    }
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-// Get user info
 ipcMain.handle('auth:getUserInfo', async () => {
   try {
-    return configStore.get('userInfo', null);
+    return sessionAuthority.getUser();
   } catch (error) {
     console.error('Error getting user info:', error);
     return null;
   }
+});
+
+// Start of the renderer: the stored session, or signed out (E6).
+ipcMain.handle('auth:restoreSession', () => {
+  try {
+    return sessionAuthority.restore();
+  } catch (error) {
+    log.warn(`auth:restoreSession failed (${error?.message || error})`);
+    return { signedOut: true };
+  }
+});
+
+// The session as main holds it now (after an SSO result was applied).
+ipcMain.handle('auth:currentSession', () => {
+  const state = sessionAuthority.state();
+  if (state.signedOut) return { signedOut: true, epoch: state.epoch };
+  return { signedOut: false, epoch: state.epoch, token: sessionAuthority.getToken(), user: sessionAuthority.getUser() };
+});
+
+// E5 steps 1-3 (the renderer does the BLE clean-up afterwards).
+ipcMain.handle('auth:signOut', () => {
+  let result;
+  try {
+    result = sessionAuthority.signOut();
+  } catch (error) {
+    log.warn(`auth:signOut failed (${error?.message || error})`);
+    result = { success: false, error: 'sign_out_incomplete', epoch: sessionAuthority.state().epoch };
+  }
+  Sentry.setUser(null);  // Clear Sentry user context on logout
+  return result;
 });
 
 // Paths of the web app the signed-in user may be handed into from the app.
@@ -2402,7 +2332,7 @@ async function createWebSessionInMain(codeChallenge) {
 
     // CRITICAL SECURITY CHECK: Verify the token belongs to the expected user
     // This prevents authenticating as a stale/wrong user if token storage got out of sync
-    const storedUserInfo = configStore.get('userInfo');
+    const storedUserInfo = sessionAuthority.getUser();
     if (storedUserInfo && storedUserInfo.id) {
       try {
         // Decode JWT to check the userId (without verifying signature - server will verify)
@@ -2415,8 +2345,11 @@ async function createWebSessionInMain(codeChallenge) {
               storedUserId: storedUserInfo.id,
               storedEmail: storedUserInfo.email
             });
-            // Clear the mismatched token to force re-login
-            tokenVault.clearToken();
+            // Sign out to force re-login (the renderer follows on auth:expired)
+            sessionAuthority.signOut();
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('auth:expired', { message: 'Session mismatch detected. Please log in again for security.' });
+            }
             return {
               success: false,
               error: 'Session mismatch detected. Please log in again for security.'
@@ -2467,6 +2400,8 @@ async function refreshMainAuthToken() {
     if (!authToken) {
       return { success: false, error: 'Not authenticated' };
     }
+    // E3: the new token applies only in the same session and for the same user.
+    const ticket = sessionAuthority.ticket({ userId: sessionTokenUserId(authToken) });
 
     const response = await axios.post(`${API_BASE_URL}/api/auth/refresh`, {}, {
       headers: {
@@ -2476,10 +2411,13 @@ async function refreshMainAuthToken() {
     });
 
     if (response.data?.token) {
-      // Save new token to configStore immediately so main process is in sync
-      tokenVault.saveToken(response.data.token);
+      const applied = sessionAuthority.applySession(ticket, { token: response.data.token, user: response.data.user }, { kind: 'refresh' });
+      if (!applied.applied) {
+        log.info(`Token refresh result dropped (${applied.reason})`);
+        return { success: false, ignored: true, error: 'Session changed' };
+      }
       log.info('Token refreshed successfully (main process)');
-      return { success: true, token: response.data.token, user: response.data.user };
+      return { success: true, token: response.data.token, user: sessionAuthority.getUser(), epoch: applied.epoch };
     }
     return { success: false, error: 'No token in refresh response' };
   } catch (error) {
@@ -3809,11 +3747,26 @@ ipcMain.handle('recording:deleteRecording', async (event, recordId, options = {}
 // Helper: Get auth token
 async function getAuthToken() {
   try {
-    return tokenVault.getToken();
+    return sessionAuthority.getToken();
   } catch (e) {
     console.warn('Could not get auth token:', e);
     return null;
   }
+}
+
+// E7: the token for work that started under `ticket` - null once the
+// session changed (sign-out, another account), so no further request goes out.
+function tokenFor(ticket) {
+  return ticket && !sessionAuthority.isCurrent(ticket) ? null : sessionAuthority.getToken();
+}
+
+function sessionEndedFor(ticket) {
+  return !!ticket && !sessionAuthority.isCurrent(ticket);
+}
+
+// Result of upload work stopped by a session change: nothing is removed.
+function sessionEndedResult() {
+  return { success: false, canDelete: false, canRetry: true, sessionEnded: true, error: 'Signed out' };
 }
 
 // Helper: Sleep for delay
@@ -3830,9 +3783,9 @@ function sleep(ms) {
  * @param {number} maxAttempts - Maximum polling attempts (default 15 = 30 seconds)
  * @returns {Promise<{persisted: boolean, verified: boolean, error?: string}>}
  */
-async function pollServerStatus(audioFileId, maxAttempts = 15, ownerId = null) {
+async function pollServerStatus(audioFileId, maxAttempts = 15, ownerId = null, ticket = null) {
   const pollInterval = 2000; // 2 seconds between polls
-  let authToken = await getAuthToken();
+  let authToken = tokenFor(ticket);
   // Parity with the renderer poller: a token that expired during a long
   // transfer gets ONE refresh before we give up on real verification.
   let authRefreshAttempted = false;
@@ -3854,8 +3807,9 @@ async function pollServerStatus(audioFileId, maxAttempts = 15, ownerId = null) {
   ]);
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (sessionEndedFor(ticket)) return { persisted: false, verified: false, sessionEnded: true, error: 'Signed out' };
     try {
-      if (ownerId && !canUploadForUser(ownerId, tokenUserId(await getAuthToken()))) {
+      if (ownerId && !canUploadForUser(ownerId, tokenUserId(tokenFor(ticket)))) {
         return { persisted: false, verified: false, authError: true, error: 'Sign in to the recording account to verify this upload' };
       }
       const response = await axios.get(
@@ -3948,11 +3902,13 @@ async function pollServerStatus(audioFileId, maxAttempts = 15, ownerId = null) {
  */
 async function pollMeetingTranscriptionStatus(meetingId, maxAttempts = 30) {
   const pollInterval = 30000; // 30 seconds between polls
+  const ticket = sessionAuthority.ticket();
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       // Re-fetch token each iteration to handle expiry during long polls
-      const authToken = await getAuthToken();
+      // (null after a sign-out: E7).
+      const authToken = tokenFor(ticket);
       if (!authToken) {
         log.warn(`[MeetingPoll] No auth token available for meeting ${meetingId}`);
         return { status: 'AUTH_EXPIRED', resolved: false };
@@ -4021,15 +3977,16 @@ async function pollMeetingTranscriptionStatus(meetingId, maxAttempts = 30) {
 //      client's ffprobe duration probe failed (e.g. AV blocking ffprobe.exe
 //      on Windows). The legacy POST does its own server-side probe so it
 //      doesn't need a client-supplied duration.
-async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
+async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3, ticket = sessionAuthority.ticket()) {
   if (unsavedRecordingId === recordId) return { success: false, canDelete: false, canRetry: true, error: 'Finish saving the recording before uploading it' };
   if (recordingLocks.has(recordId) || (isRecordingInProgress && getActiveRecording()?.recordId === recordId)) {
     return { success: false, canDelete: false, canRetry: true, error: 'The recording is still being saved' };
   }
   const eligibility = await assessRecordingUpload({ recordId, filePath, recordingsRoot: getRecordingsPath() });
+  if (sessionEndedFor(ticket)) return sessionEndedResult();
   if (!eligibility.allowed) return { success: false, canDelete: false, canRetry: true, requiresFinalization: true, error: eligibility.error };
   const ownerId = recordingOwner(recordId);
-  if (!canUploadForUser(ownerId, tokenUserId(await getAuthToken()))) {
+  if (!canUploadForUser(ownerId, tokenUserId(tokenFor(ticket)))) {
     return { success: false, status: 401, canDelete: false, canRetry: true, error: 'Sign in to the account that owns this recording' };
   }
   const receipt = readUploadReceipt(recordId);
@@ -4038,7 +3995,7 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
     if (receipt.ownerId !== ownerId || receipt.fileSize !== stats.size || receipt.fileMtimeMs !== stats.mtimeMs) {
       return { success: false, canDelete: false, canRetry: false, error: 'The local audio changed after upload. Both copies are retained; review the recording before uploading again.' };
     }
-    return verifyAcceptedUpload(recordId, filePath, receipt, ownerId, false);
+    return verifyAcceptedUpload(recordId, filePath, receipt, ownerId, false, null, ticket);
   }
   const sourceSnapshot = fs.statSync(filePath);
   const abortController = new AbortController();
@@ -4053,17 +4010,22 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
       abortController,
       maxRetries,
       ownerId,
+      ticket,
     });
 
     if (directResult.handled) {
       // Direct flow either succeeded or failed terminally — do not run legacy.
-      if (directResult.result.success) return verifyAcceptedUpload(recordId, filePath, directResult.result, ownerId, true, sourceSnapshot);
+      if (directResult.result.success) return verifyAcceptedUpload(recordId, filePath, directResult.result, ownerId, true, sourceSnapshot, ticket);
+      // Aborted by a sign-out: not a cancel, not terminal.
+      if (sessionEndedFor(ticket)) return sessionEndedResult();
       return directResult.result;
     }
+    if (sessionEndedFor(ticket)) return sessionEndedResult();
     log.info(`[upload] Direct flow not available for ${recordId} (${directResult.reason}); falling back to legacy POST`);
 
     // === Phase 2: Legacy formData POST fallback ===
-    return await uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, abortController, ownerId, sourceSnapshot);
+    const legacy = await uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, abortController, ownerId, sourceSnapshot, ticket);
+    return !legacy.success && sessionEndedFor(ticket) ? sessionEndedResult() : legacy;
   } finally {
     activeAbortControllers.delete(recordId);
     activeDirectAudioFileIds.delete(recordId);
@@ -4075,8 +4037,8 @@ async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
  *   { handled: true, result } — finished (success or terminal failure)
  *   { handled: false, reason } — caller should run the legacy fallback
  */
-async function tryDirectUpload({ recordId, filePath, metadata, abortController, maxRetries, ownerId }) {
-  const authToken = await getAuthToken();
+async function tryDirectUpload({ recordId, filePath, metadata, abortController, maxRetries, ownerId, ticket = null }) {
+  const authToken = tokenFor(ticket);
   if (!authToken) {
     // status 401 so the renderer's token-refresh/re-login recovery path
     // treats this exactly like a server-side auth rejection (it keys on
@@ -4116,6 +4078,7 @@ async function tryDirectUpload({ recordId, filePath, metadata, abortController, 
       }
       await sleep(delay);
     }
+    if (sessionEndedFor(ticket)) return { handled: true, result: sessionEndedResult() };
 
     if (abortController.signal.aborted) {
       return {
@@ -4126,7 +4089,7 @@ async function tryDirectUpload({ recordId, filePath, metadata, abortController, 
 
     let result;
     try {
-      const attemptToken = await getAuthToken();
+      const attemptToken = tokenFor(ticket);
       if (!canUploadForUser(ownerId, tokenUserId(attemptToken))) return { handled: true, result: { success: false, status: 401, canRetry: true, error: 'Sign in as the recording owner to upload it' } };
       result = await uploadViaPresignedSas({
         apiBaseUrl: API_BASE_URL,
@@ -4241,7 +4204,7 @@ async function tryDirectUpload({ recordId, filePath, metadata, abortController, 
 
 // Legacy formData POST upload path — only invoked when the backend
 // reports it is in local-storage mode (no Azure SAS available).
-async function uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, abortController, ownerId, sourceSnapshot) {
+async function uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, abortController, ownerId, sourceSnapshot, ticket = null) {
   const retryDelays = [0, 2000, 5000, 10000]; // Exponential backoff
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -4271,8 +4234,9 @@ async function uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, a
 
         await sleep(delay);
       }
+      if (sessionEndedFor(ticket)) return sessionEndedResult();
 
-      const authToken = await getAuthToken();
+      const authToken = tokenFor(ticket);
       if (authToken && !canUploadForUser(ownerId, tokenUserId(authToken))) {
         return { success: false, status: 401, canDelete: false, canRetry: true, error: 'The recording belongs to a different account' };
       }
@@ -4391,7 +4355,7 @@ async function uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, a
       if (response.data && response.data.success) {
         console.log('Upload HTTP response successful:', response.data);
 
-        return await verifyAcceptedUpload(recordId, filePath, response.data, ownerId, true, sourceSnapshot);
+        return await verifyAcceptedUpload(recordId, filePath, response.data, ownerId, true, sourceSnapshot, ticket);
       } else {
         stopProgressUpdates();
         throw new Error(response.data?.error || 'Upload failed');
@@ -4527,7 +4491,10 @@ ipcMain.handle('upload:start', async (event, params) => {
     // Clear any previous cancelled state for this recordId (e.g. from a retry)
     cancelledUploads.delete(recordId);
 
-    const result = await uploadWithRetry(recordId, filePath, metadata);
+    const ticket = sessionAuthority.ticket();
+    const result = await uploadWithRetry(recordId, filePath, metadata, 3, ticket);
+    // E7: signed out during the upload - the queue keeps the recording.
+    if (sessionEndedFor(ticket)) return sessionEndedResult();
 
     // Remove from queue on success OR on terminal failure (canRetry === false).
     // The old behavior left non-retryable failures in the queue, where they
@@ -4537,7 +4504,7 @@ ipcMain.handle('upload:start', async (event, params) => {
     // recordId in cancelledUploads), it must NOT be removed from the queue — we
     // want it to resume on next launch.
     // 401 is NOT terminal for the recording: it becomes uploadable the moment
-    // the user re-logs-in (auth:saveToken triggers processPendingUploads).
+    // the user re-logs-in (a new session triggers processPendingUploads).
     // Dropping it here silently lost recordings made on an expired session.
     const authFailure = result.status === 401;
     const abortedByQuit = result.cancelled && isQuittingWithUploads && !cancelledUploads.has(recordId);

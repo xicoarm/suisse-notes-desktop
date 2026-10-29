@@ -53,9 +53,19 @@ const capacitorProxy = (impl) => new Proxy({}, {
 vi.mock('@capacitor/core', () => ({ registerPlugin: (name) => capacitorProxy(name === 'SecureTokenStore' ? keystore : {}) }));
 vi.mock('@capacitor/preferences', () => ({ Preferences: capacitorProxy(prefs) }));
 
-const storage = await import('../../src/services/secureStorage');
+let storage;
+let authority;
+const RECORD = 'auth.session.v1';
 
-beforeEach(() => {
+// Token and user are written only by the session authority (E2).
+const signIn = (token, user) => authority.applySession(authority.sessionTicket(), { token, user }, { kind: 'login' });
+const restart = async () => {
+  vi.resetModules();
+  storage = await import('../../src/services/secureStorage');
+  authority = await import('../../src/services/sessionAuthority');
+};
+
+beforeEach(async () => {
   keystoreData.clear();
   prefsData.clear();
   localStorage.clear();
@@ -63,11 +73,12 @@ beforeEach(() => {
   keystore.failAll = false;
   vi.clearAllMocks();
   vi.spyOn(console, 'error').mockImplementation(() => {});
+  await restart();
 });
 
 describe('secureStorage on mobile: keystore only', () => {
   it('stores and reads the token through the keystore, never through Preferences', async () => {
-    expect(await storage.storeToken('jwt.abc.def')).toEqual({ success: true });
+    expect(await signIn('jwt.abc.def', { id: 'u1' })).toMatchObject({ applied: true, persisted: true });
     expect(keystoreData.get('authToken')).toBe('jwt.abc.def');
     expect(prefs.set).not.toHaveBeenCalled();
     expect(await storage.getToken()).toBe('jwt.abc.def');
@@ -75,18 +86,18 @@ describe('secureStorage on mobile: keystore only', () => {
 
   it('has no plaintext fallback: a keystore failure fails the save and writes nothing', async () => {
     keystore.failWrites = true;
-    const result = await storage.storeToken('jwt.abc.def');
-    expect(result.success).toBe(false);
+    const result = await signIn('jwt.abc.def', { id: 'u1' });
+    expect(result).toMatchObject({ applied: true, persisted: false });
     expect(prefs.set).not.toHaveBeenCalled();
     expect(prefsData.size).toBe(0);
+    expect(keystoreData.size).toBe(0);
   });
 
   it('a failed save keeps the previous keystore value (T4)', async () => {
     keystoreData.set('authToken', 'old.jwt.token');
     keystore.failWrites = true;
-    expect((await storage.storeToken('new.jwt.token')).success).toBe(false);
+    expect((await storage.setSecureItem('authToken', 'new.jwt.token')).success).toBe(false);
     expect(keystoreData.get('authToken')).toBe('old.jwt.token');
-    expect(await storage.getToken()).toBe('old.jwt.token');
   });
 
   it('never returns a plaintext Preferences value (T1), also when the keystore fails', async () => {
@@ -98,11 +109,17 @@ describe('secureStorage on mobile: keystore only', () => {
     expect(prefs.set).not.toHaveBeenCalled();
   });
 
-  it('stores user info and the refresh token in the keystore as well', async () => {
-    await storage.storeUserCredentials({ id: 'u1', email: 'a@example.com' });
-    await storage.storeRefreshToken('refresh.tok.en');
+  it('E6: while signed out a token left in the keystore is never returned', async () => {
+    keystoreData.set('authToken', 'k.jwt.token');
+    keystoreData.set('userInfo', JSON.stringify({ id: 'u1' }));
+    localStorage.setItem(RECORD, JSON.stringify({ epoch: 4, signedOut: true }));
+    expect(await storage.getToken()).toBeNull();
+    expect(await storage.getUserCredentials()).toEqual({});
+  });
+
+  it('stores user info in the keystore as well', async () => {
+    await signIn('jwt.abc.def', { id: 'u1', email: 'a@example.com' });
     expect(JSON.parse(keystoreData.get('userInfo'))).toEqual({ id: 'u1', email: 'a@example.com' });
-    expect(keystoreData.get('refreshToken')).toBe('refresh.tok.en');
     expect(prefs.set).not.toHaveBeenCalled();
     expect(await storage.getUserCredentials()).toEqual({ id: 'u1', email: 'a@example.com' });
   });
@@ -126,7 +143,7 @@ describe('secureStorage on mobile: read-back', () => {
     keystore.get
       .mockImplementationOnce(async ({ key }) => ({ value: keystoreData.get(key) })) // previous value
       .mockResolvedValueOnce({ value: 'something.else' }); // read-back
-    expect((await storage.storeToken('new.jwt.token')).success).toBe(false);
+    expect((await storage.setSecureItem('authToken', 'new.jwt.token')).success).toBe(false);
     expect(keystoreData.get('authToken')).toBe('old.jwt.token');
   });
 
@@ -134,13 +151,13 @@ describe('secureStorage on mobile: read-back', () => {
     keystore.get
       .mockResolvedValueOnce({ value: null })
       .mockResolvedValueOnce({ value: 'something.else' });
-    expect((await storage.storeToken('new.jwt.token')).success).toBe(false);
+    expect((await storage.setSecureItem('authToken', 'new.jwt.token')).success).toBe(false);
     expect(keystoreData.has('authToken')).toBe(false);
   });
 
-  it('a successful save never touches Preferences', async () => {
+  it('a successful sign-in never touches Preferences', async () => {
     prefsData.set('authToken', 'old.plain.token');
-    expect(await storage.storeToken('new.jwt.token')).toEqual({ success: true });
+    expect(await signIn('new.jwt.token', { id: 'u1' })).toMatchObject({ applied: true, persisted: true });
     expect(prefs.set).not.toHaveBeenCalled();
     expect(prefs.get).not.toHaveBeenCalled();
   });
@@ -150,9 +167,7 @@ describe('secureStorage on mobile: plaintext copies of older versions are delete
   it('every start deletes the five auth keys from Preferences (T2), pairing keys stay (T6)', async () => {
     for (const k of ['authToken', 'refreshToken', 'userId', 'userEmail', 'userInfo']) prefsData.set(k, `legacy-${k}`);
     prefsData.set('ble_app_uuid', 'pairing-uuid');
-    const session = await storage.loadStoredSession();
-    expect(session.token).toBeNull();
-    expect(session.userInfo).toEqual({});
+    expect(await authority.loadSession()).toEqual({ signedOut: true });
     expect([...prefsData.keys()]).toEqual(['ble_app_uuid']);
     expect(keystoreData.size).toBe(0);
     expect(prefs.set).not.toHaveBeenCalled();
@@ -163,18 +178,17 @@ describe('secureStorage on mobile: plaintext copies of older versions are delete
     prefs.remove.mockImplementationOnce(async () => { throw new Error('PREFS_UNAVAILABLE'); });
     expect(await storage.purgeLegacyAuthPreferences()).toBe(false);
     expect(prefsData.get('authToken')).toBe('legacy.jwt.token');
-    vi.resetModules();
-    const restarted = await import('../../src/services/secureStorage');
-    expect(await restarted.purgeLegacyAuthPreferences()).toBe(true);
+    await restart();
+    expect(await storage.purgeLegacyAuthPreferences()).toBe(true);
     expect(prefsData.has('authToken')).toBe(false);
   });
 
   it('a keystore session survives the start; the plaintext copy next to it is deleted', async () => {
+    localStorage.setItem(RECORD, JSON.stringify({ epoch: 3, signedOut: false }));
     keystoreData.set('authToken', 'k.jwt.token');
     keystoreData.set('userInfo', JSON.stringify({ id: 'u1' }));
     prefsData.set('authToken', 'old.plain.token');
-    const session = await storage.loadStoredSession();
-    expect(session).toEqual({ token: 'k.jwt.token', userInfo: { id: 'u1' } });
+    expect(await authority.loadSession()).toEqual({ signedOut: false, token: 'k.jwt.token', user: { id: 'u1' }, epoch: 3 });
     expect(prefsData.size).toBe(0);
   });
 
@@ -184,15 +198,15 @@ describe('secureStorage on mobile: plaintext copies of older versions are delete
     expect(await storage.getUserCredentials()).toEqual({});
   });
 
-  it('sign-out sets the marker first, then removes keystore entries and plaintext copies', async () => {
-    keystoreData.set('authToken', 't');
-    keystoreData.set('userInfo', '{}');
+  it('sign-out writes the tombstone first, then removes keystore entries and plaintext copies', async () => {
+    await signIn('t.jwt.x', { id: 'u1' });
     prefsData.set('authToken', 'legacy');
     prefsData.set('userEmail', 'c@example.com');
     prefsData.set('refreshToken', 'r');
+    vi.clearAllMocks();
     const setItem = vi.spyOn(Storage.prototype, 'setItem');
-    expect(await storage.clearAllCredentials()).toEqual({ success: true });
-    expect(setItem).toHaveBeenCalledWith('auth.signedOut', '1');
+    expect(await authority.signOut()).toMatchObject({ success: true });
+    expect(setItem).toHaveBeenCalledWith(RECORD, expect.stringContaining('"signedOut":true'));
     expect(setItem.mock.invocationCallOrder[0]).toBeLessThan(keystore.remove.mock.invocationCallOrder[0]);
     expect(keystoreData.size).toBe(0);
     expect(prefsData.size).toBe(0);
@@ -200,26 +214,33 @@ describe('secureStorage on mobile: plaintext copies of older versions are delete
   });
 
   it('sign-out with a failing keystore remove: reported, and the next start restores nothing (T5)', async () => {
-    keystoreData.set('authToken', 'k.jwt.token');
-    keystoreData.set('userInfo', JSON.stringify({ id: 'u1' }));
+    await signIn('k.jwt.token', { id: 'u1' });
     keystore.remove.mockImplementation(async () => { throw new Error('KEYSTORE_REMOVE_FAILED'); });
-    expect((await storage.clearAllCredentials()).success).toBe(false);
+    expect((await authority.signOut()).success).toBe(false);
     expect(keystoreData.get('authToken')).toBe('k.jwt.token');
-    vi.resetModules();
-    const restarted = await import('../../src/services/secureStorage');
-    expect(await restarted.loadStoredSession()).toMatchObject({ token: null, signedOut: true });
+    expect(await storage.getToken()).toBeNull();
+    await restart();
+    expect(await authority.loadSession()).toEqual({ signedOut: true });
+    expect(await storage.getToken()).toBeNull();
     keystore.remove.mockReset();
     keystore.remove.mockImplementation(async ({ key }) => { checkKey(key); keystoreData.delete(key); });
   });
 
-  it('only a stored login clears the marker', async () => {
+  it('the previous version\'s marker counts as signed out; only a stored login clears it', async () => {
+    localStorage.setItem(RECORD, JSON.stringify({ epoch: 2, signedOut: false }));
     localStorage.setItem('auth.signedOut', '1');
+    keystoreData.set('authToken', 'k.jwt.token');
+    keystoreData.set('userInfo', JSON.stringify({ id: 'u1' }));
+    expect(await authority.loadSession()).toEqual({ signedOut: true });
     keystore.failWrites = true;
-    expect((await storage.storeSession({ token: 'n.jwt.token', user: { id: 'u1' } })).persisted).toBe(false);
+    expect((await signIn('n.jwt.token', { id: 'u1' })).persisted).toBe(false);
     expect(localStorage.getItem('auth.signedOut')).toBe('1');
+    await restart();
+    expect(await authority.loadSession()).toEqual({ signedOut: true });
     keystore.failWrites = false;
-    expect((await storage.storeSession({ token: 'n.jwt.token', user: { id: 'u1' } })).persisted).toBe(true);
+    expect((await signIn('n.jwt.token', { id: 'u1' })).persisted).toBe(true);
     expect(localStorage.getItem('auth.signedOut')).toBeNull();
-    expect(await storage.loadStoredSession()).toEqual({ token: 'n.jwt.token', userInfo: { id: 'u1' } });
+    await restart();
+    expect(await authority.loadSession()).toMatchObject({ signedOut: false, token: 'n.jwt.token', user: { id: 'u1' } });
   });
 });

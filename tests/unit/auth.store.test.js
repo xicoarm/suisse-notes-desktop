@@ -17,11 +17,13 @@ const mockElectronAPI = {
   auth: {
     login: vi.fn(),
     register: vi.fn(),
-    saveToken: vi.fn(),
-    saveUserInfo: vi.fn(),
     getToken: vi.fn(),
     getUserInfo: vi.fn(),
-    clearToken: vi.fn()
+    // Main's session authority applies sign-ins itself (answers carry its
+    // epoch); the renderer can only restore, read and sign out.
+    restoreSession: vi.fn(),
+    currentSession: vi.fn(),
+    signOut: vi.fn()
   }
 };
 
@@ -61,12 +63,9 @@ describe('Auth Store', () => {
       mockElectronAPI.auth.login.mockResolvedValue({
         success: true,
         user: mockUser,
-        token: mockToken
+        token: mockToken,
+        epoch: 1
       });
-      mockElectronAPI.auth.clearToken.mockResolvedValue({ success: true });
-      mockElectronAPI.auth.saveToken.mockResolvedValue({ success: true });
-      mockElectronAPI.auth.getToken.mockResolvedValue(mockToken);
-      mockElectronAPI.auth.saveUserInfo.mockResolvedValue({ success: true });
 
       const result = await store.login('test@example.com', 'password123');
 
@@ -75,8 +74,24 @@ describe('Auth Store', () => {
       expect(store.token).toBe(mockToken);
       expect(store.isAuthenticated).toBe(true);
       expect(store.error).toBeNull();
-      expect(mockElectronAPI.auth.saveToken).toHaveBeenCalledWith(mockToken);
-      expect(mockElectronAPI.auth.saveUserInfo).toHaveBeenCalledWith(mockUser);
+      store.stopTokenRefresh();
+    });
+
+    it('a result main dropped (session changed meanwhile) signs nothing in', async () => {
+      const store = useAuthStore();
+      mockElectronAPI.auth.login.mockResolvedValue({ success: false, ignored: true, reason: 'session_changed' });
+      const result = await store.login('test@example.com', 'password123');
+      expect(result).toMatchObject({ success: false, ignored: true });
+      expect(store.isAuthenticated).toBe(false);
+      expect(store.token).toBeNull();
+    });
+
+    it('a success without main\'s epoch is never mirrored', async () => {
+      const store = useAuthStore();
+      mockElectronAPI.auth.login.mockResolvedValue({ success: true, user: { id: 'u1' }, token: 'tok' });
+      const result = await store.login('a@b.ch', 'x');
+      expect(result).toMatchObject({ success: false, ignored: true });
+      expect(store.isAuthenticated).toBe(false);
     });
 
     it('should handle login failure with a translated text, never the server sentence', async () => {
@@ -123,11 +138,10 @@ describe('Auth Store', () => {
 
     it('loads the minutes balance when the login answer has none', async () => {
       const store = useAuthStore();
-      mockElectronAPI.auth.login.mockResolvedValue({ success: true, user: { id: 'u1' }, token: 'tok' });
-      mockElectronAPI.auth.saveToken.mockResolvedValue({ success: true });
-      mockElectronAPI.auth.saveUserInfo.mockResolvedValue({ success: true });
+      mockElectronAPI.auth.login.mockResolvedValue({ success: true, user: { id: 'u1' }, token: 'tok', epoch: 1 });
 
       await store.login('a@b.ch', 'x');
+      store.stopTokenRefresh();
       await vi.waitFor(() => expect(fetchMinutes).toHaveBeenCalledWith('tok', true));
     });
 
@@ -151,12 +165,8 @@ describe('Auth Store', () => {
 
       mockElectronAPI.auth.login.mockImplementation(() => {
         expect(store.loading).toBe(true);
-        return Promise.resolve({ success: true, user: {}, token: 'token' });
+        return Promise.resolve({ success: true, user: {}, token: 'token', epoch: 1 });
       });
-      mockElectronAPI.auth.clearToken.mockResolvedValue({ success: true });
-      mockElectronAPI.auth.saveToken.mockResolvedValue({ success: true });
-      mockElectronAPI.auth.getToken.mockResolvedValue('token');
-      mockElectronAPI.auth.saveUserInfo.mockResolvedValue({ success: true });
 
       await store.login('test@example.com', 'password123');
       expect(store.loading).toBe(false);
@@ -172,12 +182,9 @@ describe('Auth Store', () => {
       mockElectronAPI.auth.register.mockResolvedValue({
         success: true,
         user: mockUser,
-        token: mockToken
+        token: mockToken,
+        epoch: 1
       });
-      mockElectronAPI.auth.clearToken.mockResolvedValue({ success: true });
-      mockElectronAPI.auth.saveToken.mockResolvedValue({ success: true });
-      mockElectronAPI.auth.getToken.mockResolvedValue(mockToken);
-      mockElectronAPI.auth.saveUserInfo.mockResolvedValue({ success: true });
 
       const result = await store.register('new@example.com', 'password123', 'New User');
 
@@ -206,9 +213,7 @@ describe('Auth Store', () => {
 
     it('loads the minutes balance of the new account', async () => {
       const store = useAuthStore();
-      mockElectronAPI.auth.register.mockResolvedValue({ success: true, user: { id: 'n1' }, token: 'new-tok' });
-      mockElectronAPI.auth.saveToken.mockResolvedValue({ success: true });
-      mockElectronAPI.auth.saveUserInfo.mockResolvedValue({ success: true });
+      mockElectronAPI.auth.register.mockResolvedValue({ success: true, user: { id: 'n1' }, token: 'new-tok', epoch: 1 });
 
       await store.register('n@b.ch', 'password123', 'N');
       await vi.waitFor(() => expect(fetchMinutes).toHaveBeenCalledWith('new-tok', true));
@@ -224,7 +229,7 @@ describe('Auth Store', () => {
       store.token = 'test-token';
       store.isAuthenticated = true;
 
-      mockElectronAPI.auth.clearToken.mockResolvedValue({ success: true });
+      mockElectronAPI.auth.signOut.mockResolvedValue({ success: true, epoch: 2 });
 
       // Mock the dynamic import
       vi.mock('../../src/stores/recordings-history', () => ({
@@ -238,7 +243,21 @@ describe('Auth Store', () => {
       expect(store.user).toBeNull();
       expect(store.token).toBeNull();
       expect(store.isAuthenticated).toBe(false);
-      expect(mockElectronAPI.auth.clearToken).toHaveBeenCalled();
+      expect(mockElectronAPI.auth.signOut).toHaveBeenCalled();
+      expect(store.error).toBeNull();
+    });
+
+    it('E5: a sign-out main could not confirm is shown to the user; the state is signed out', async () => {
+      const store = useAuthStore();
+      i18n.global.locale.value = 'en';
+      store.user = { id: '123' };
+      store.token = 'test-token';
+      store.isAuthenticated = true;
+      mockElectronAPI.auth.signOut.mockResolvedValue({ success: false, error: 'sign_out_incomplete', epoch: 3 });
+      expect(await store.logout()).toEqual({ success: false });
+      expect(store.isAuthenticated).toBe(false);
+      expect(store.token).toBeNull();
+      expect(store.error).toBe(en('signOutIncomplete'));
     });
   });
 
@@ -248,10 +267,10 @@ describe('Auth Store', () => {
       const mockUser = { id: '123', email: 'test@example.com' };
       const mockToken = 'stored-token';
 
-      mockElectronAPI.auth.getToken.mockResolvedValue(mockToken);
-      mockElectronAPI.auth.getUserInfo.mockResolvedValue(mockUser);
+      mockElectronAPI.auth.restoreSession.mockResolvedValue({ signedOut: false, epoch: 4, token: mockToken, user: mockUser });
 
       await store.checkSession();
+      store.stopTokenRefresh();
 
       expect(store.token).toBe(mockToken);
       expect(store.user).toEqual(mockUser);
@@ -259,40 +278,19 @@ describe('Auth Store', () => {
       expect(store.sessionChecked).toBe(true);
     });
 
-    it('after a sign-out whose removal failed, the next start restores nothing and removes again (T5)', async () => {
+    it('a start main reports as signed out restores nothing', async () => {
       const store = useAuthStore();
-      mockElectronAPI.auth.clearToken.mockResolvedValue({ success: false, error: 'EACCES' });
-      await store.logout();
-      expect(localStorage.getItem('auth.signedOut')).toBe('1');
-      setActivePinia(createPinia());
-      const next = useAuthStore();
-      mockElectronAPI.auth.getToken.mockResolvedValue('stored-token');
-      mockElectronAPI.auth.getUserInfo.mockResolvedValue({ id: '123' });
-      mockElectronAPI.auth.clearToken.mockClear();
-      await next.checkSession();
-      expect(next.isAuthenticated).toBe(false);
-      expect(next.token).toBeNull();
-      expect(mockElectronAPI.auth.clearToken).toHaveBeenCalled();
-    });
-
-    it('only a persisted login clears the sign-out marker', async () => {
-      localStorage.setItem('auth.signedOut', '1');
-      const store = useAuthStore();
-      mockElectronAPI.auth.saveToken.mockResolvedValue({ success: true, persisted: false });
-      mockElectronAPI.auth.saveUserInfo.mockResolvedValue({ success: true });
-      await store.loginWithSSO({ token: 'h.eyJ1c2VySWQiOiIxMjMifQ.s', user: { id: '123' } });
-      expect(localStorage.getItem('auth.signedOut')).toBe('1');
-      mockElectronAPI.auth.saveToken.mockResolvedValue({ success: true, persisted: true });
-      await store.loginWithSSO({ token: 'h.eyJ1c2VySWQiOiIxMjMifQ.s', user: { id: '123' } });
-      expect(localStorage.getItem('auth.signedOut')).toBeNull();
-      store.stopTokenRefresh();
+      mockElectronAPI.auth.restoreSession.mockResolvedValue({ signedOut: true, epoch: 9 });
+      await store.checkSession();
+      expect(store.isAuthenticated).toBe(false);
+      expect(store.token).toBeNull();
+      expect(mockElectronAPI.auth.getToken).not.toHaveBeenCalled();
     });
 
     it('should not authenticate without stored credentials', async () => {
       const store = useAuthStore();
 
-      mockElectronAPI.auth.getToken.mockResolvedValue(null);
-      mockElectronAPI.auth.getUserInfo.mockResolvedValue(null);
+      mockElectronAPI.auth.restoreSession.mockResolvedValue(null);
 
       await store.checkSession();
 
@@ -300,17 +298,15 @@ describe('Auth Store', () => {
       expect(store.sessionChecked).toBe(true);
     });
 
-    it('should clear token if user info is missing', async () => {
+    it('signs out when main reports token and user of different accounts', async () => {
       const store = useAuthStore();
-
-      mockElectronAPI.auth.getToken.mockResolvedValue('orphan-token');
-      mockElectronAPI.auth.getUserInfo.mockResolvedValue(null);
-      mockElectronAPI.auth.clearToken.mockResolvedValue({ success: true });
+      mockElectronAPI.auth.restoreSession.mockResolvedValue({ signedOut: true, mismatch: true });
+      mockElectronAPI.auth.signOut.mockResolvedValue({ success: true, epoch: 5 });
 
       await store.checkSession();
 
       expect(store.isAuthenticated).toBe(false);
-      expect(mockElectronAPI.auth.clearToken).toHaveBeenCalled();
+      expect(mockElectronAPI.auth.signOut).toHaveBeenCalled();
     });
   });
 

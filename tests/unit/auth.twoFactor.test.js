@@ -17,8 +17,7 @@ const electronAuth = {
   login: vi.fn(),
   verifyTwoFactor: vi.fn(),
   resendTwoFactorEmail: vi.fn(),
-  saveToken: vi.fn(async () => ({ success: true })),
-  saveUserInfo: vi.fn(async () => ({ success: true }))
+  signOut: vi.fn(async () => ({ success: true }))
 };
 // performance: vue-i18n needs window.performance to translate.
 vi.stubGlobal('window', { electronAPI: { auth: electronAuth }, performance: globalThis.performance });
@@ -28,7 +27,8 @@ const { i18n } = await import('../../src/boot/i18n');
 const en = (key) => i18n.global.getLocaleMessage('en')[key];
 
 const TEMP = 'eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOiJ1MSJ9.c2lnbmF0dXJl';
-const SUCCESS = { success: true, token: 'jwt-1', user: { id: 'u1', email: 'a@b.ch' }, minutes: { remaining: 30 } };
+// Desktop: main applied the session already; its answer carries the epoch.
+const SUCCESS = { success: true, token: 'jwt-1', user: { id: 'u1', email: 'a@b.ch' }, minutes: { remaining: 30 }, epoch: 1 };
 
 describe('password sign-in with the second factor (desktop IPC path)', () => {
   beforeEach(() => {
@@ -44,9 +44,10 @@ describe('password sign-in with the second factor (desktop IPC path)', () => {
     expect(result).toEqual({ success: true });
     expect(store.isAuthenticated).toBe(true);
     expect(store.twoFactor).toBeNull();
-    expect(electronAuth.saveToken).toHaveBeenCalledWith('jwt-1');
+    expect(store.token).toBe('jwt-1');
     expect(setFromServer).toHaveBeenCalledWith({ remaining: 30 });
     expect(electronAuth.verifyTwoFactor).not.toHaveBeenCalled();
+    store.stopTokenRefresh();
   });
 
   it('a 2FA account gets the code step, no session and no error', async () => {
@@ -58,7 +59,6 @@ describe('password sign-in with the second factor (desktop IPC path)', () => {
     expect(store.token).toBeNull();
     expect(store.error).toBeNull();
     expect(store.twoFactor).toMatchObject({ method: 'AUTHENTICATOR', tempToken: TEMP });
-    expect(electronAuth.saveToken).not.toHaveBeenCalled();
   });
 
   it('a correct code continues the normal sign-in (token, minutes)', async () => {
@@ -71,8 +71,18 @@ describe('password sign-in with the second factor (desktop IPC path)', () => {
     expect(result).toEqual({ success: true });
     expect(store.isAuthenticated).toBe(true);
     expect(store.twoFactor).toBeNull();
-    expect(electronAuth.saveToken).toHaveBeenCalledWith('jwt-1');
+    expect(store.token).toBe('jwt-1');
     expect(setFromServer).toHaveBeenCalledWith({ remaining: 30 });
+    store.stopTokenRefresh();
+  });
+
+  it('a second-factor success main dropped (sign-out meanwhile) signs nothing in', async () => {
+    const store = useAuthStore();
+    store.twoFactor = { method: 'AUTHENTICATOR', tempToken: TEMP, resendAvailableAt: 0 };
+    electronAuth.verifyTwoFactor.mockResolvedValue({ success: false, ignored: true, reason: 'session_changed' });
+    const result = await store.verifyTwoFactor('123456');
+    expect(result).toMatchObject({ success: false, ignored: true });
+    expect(store.isAuthenticated).toBe(false);
   });
 
   it('a backup code is sent as such', async () => {

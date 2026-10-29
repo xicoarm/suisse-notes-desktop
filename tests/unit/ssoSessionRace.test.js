@@ -23,25 +23,34 @@ vi.mock('../../src/services/api', () => ({
   getApiUrlSync: () => 'https://api.example',
   API_ENDPOINTS: { refreshToken: '/api/auth/refresh', login: '/api/auth/login' }
 }));
-const secure = vi.hoisted(() => ({ saved: [] }));
-vi.mock('../../src/services/secureStorage', () => ({
-  storeToken: vi.fn(async (t) => { secure.saved.push(t); return { success: true }; }),
-  storeUserCredentials: vi.fn(async () => ({ success: true })),
-  storeSession: vi.fn(async ({ token }) => { secure.saved.push(token); return { success: true, persisted: true }; }),
-  loadStoredSession: vi.fn(async () => ({ token: null, userInfo: null })),
-  clearAllCredentials: vi.fn(async () => ({ success: true }))
-}));
+// Real session authority over a fake keystore: what lands in the keystore is
+// what a restart would restore.
+const ks = vi.hoisted(() => new Map());
+vi.mock('@capacitor/core', () => {
+  const keystore = {
+    get: async ({ key }) => ({ value: ks.has(key) ? ks.get(key) : null }),
+    set: async ({ key, value }) => { ks.set(key, value); },
+    remove: async ({ key }) => { ks.delete(key); }
+  };
+  return { registerPlugin: () => new Proxy({}, { get: (_, p) => (typeof keystore[p] === 'function' ? keystore[p] : undefined) }) };
+});
+vi.mock('@capacitor/preferences', () => ({ Preferences: { get: async () => ({ value: null }), remove: async () => {}, set: async () => {} } }));
 
-const { useAuthStore } = await import('../../src/stores/auth');
-const { beginSsoFlow, clearSsoFlow } = await import('../../src/services/ssoFlow');
+let useAuthStore;
+let beginSsoFlow;
+let sessionTicket;
 
 const jwt = (userId) => `h.${Buffer.from(JSON.stringify({ userId })).toString('base64url')}.s`;
 const PASSWORD = { success: true, token: jwt('pw'), user: { id: 'pw' } };
 
-beforeEach(() => {
+beforeEach(async () => {
+  vi.resetModules();
+  localStorage.clear();
+  ks.clear();
   setActivePinia(createPinia());
-  clearSsoFlow();
-  secure.saved.length = 0;
+  ({ useAuthStore } = await import('../../src/stores/auth'));
+  ({ beginSsoFlow } = await import('../../src/services/ssoFlow'));
+  ({ sessionTicket } = await import('../../src/services/sessionAuthority'));
   vi.clearAllMocks();
 });
 
@@ -51,7 +60,7 @@ describe('S4: session change while an SSO result is in flight', () => {
     const store = useAuthStore();
     store.beginSSO('microsoft');
     const sso = store.completeSSO({ token: jwt('sso'), user: { id: 'sso' }, state: flow.state });
-    const pw = store._completePasswordLogin(PASSWORD);
+    const pw = store._completePasswordLogin(PASSWORD, sessionTicket());
     const result = await sso;
     await pw;
     store.stopTokenRefresh();
@@ -60,7 +69,7 @@ describe('S4: session change while an SSO result is in flight', () => {
     expect(store.token).toBe(jwt('pw'));
     expect(store.ssoOutcome.seq).toBe(0);
     expect(store.error).toBeNull();
-    expect(secure.saved).not.toContain(jwt('sso'));
+    expect(ks.get('authToken')).toBe(jwt('pw'));
   });
 
   it('code exchange: a password sign-in while the exchange runs wins; the exchanged session is never applied', async () => {
@@ -69,14 +78,14 @@ describe('S4: session change while an SSO result is in flight', () => {
     store.beginSSO('google');
     const sso = store.completeSSO({ authCode: 'one-time', state: flow.state });
     await vi.waitFor(() => expect(exchange.release).toBeTypeOf('function'));
-    await store._completePasswordLogin(PASSWORD);
+    await store._completePasswordLogin(PASSWORD, sessionTicket());
     exchange.release({ ok: true, body: { token: jwt('sso'), user: { id: 'sso' } } });
     const result = await sso;
     store.stopTokenRefresh();
     expect(result).toMatchObject({ success: false, ignored: true });
     expect(store.user.id).toBe('pw');
     expect(store.ssoOutcome.seq).toBe(0);
-    expect(secure.saved).not.toContain(jwt('sso'));
+    expect(ks.get('authToken')).toBe(jwt('pw'));
     exchange.release = null;
   });
 
@@ -85,7 +94,7 @@ describe('S4: session change while an SSO result is in flight', () => {
     const store = useAuthStore();
     const sso = store.completeSSO({ authCode: 'one-time', state: flow.state });
     await vi.waitFor(() => expect(exchange.release).toBeTypeOf('function'));
-    await store._completePasswordLogin(PASSWORD);
+    await store._completePasswordLogin(PASSWORD, sessionTicket());
     await store.logout();
     exchange.release({ ok: true, body: { token: jwt('sso'), user: { id: 'sso' } } });
     expect(await sso).toMatchObject({ ignored: true });

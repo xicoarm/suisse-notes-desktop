@@ -21,16 +21,18 @@
  *   lives in memory for this run only.
  * - T4 A failed save leaves the previous value in place (the native write is
  *   atomic; a read-back mismatch puts the previous value back).
- * - T5 Sign-out sets the marker "auth.signedOut" (localStorage, no secret)
- *   BEFORE anything is removed; it is cleared only after a login was stored.
- *   While it is set, a start restores no session and removes again - so an
- *   aborted or failed removal still ends signed out.
+ * - T5 Sign-in, sign-out and the start are decided by the session authority
+ *   (sessionAuthority.js; desktop: src-electron/session-authority.js). Only
+ *   it writes or deletes the auth keys; while it says signed out, getToken
+ *   is null. The previous version's marker "auth.signedOut" counts as signed
+ *   out there.
  */
 
 import { isElectron, isCapacitor, isIOS, isAndroid } from '../utils/platform';
+import { isSignedOut } from './sessionAuthority';
 
 // Storage keys
-const STORAGE_KEYS = {
+export const STORAGE_KEYS = {
   AUTH_TOKEN: 'authToken',
   REFRESH_TOKEN: 'refreshToken',
   USER_ID: 'userId',
@@ -41,8 +43,8 @@ const STORAGE_KEYS = {
 /** The five auth keys (keystore entries and legacy Preferences copies). */
 export const AUTH_KEYS = Object.freeze(Object.values(STORAGE_KEYS));
 
-/** Sign-out marker (localStorage). Not a secret: only "1" or absent. */
-export const SIGNED_OUT_MARKER = 'auth.signedOut';
+/** Sign-out marker of the previous version (localStorage): "1" = signed out. */
+export const LEGACY_SIGNED_OUT_MARKER = 'auth.signedOut';
 
 let keystore = null;
 let Preferences = null;
@@ -78,35 +80,6 @@ const reportKeystoreWriteFailure = (key, stage) => {
       tags: { keystore_write_stage: stage, keystore_key_group: group }
     }))
     .catch(() => { /* telemetry optional */ });
-};
-
-/** @returns {boolean} true while a sign-out has not been followed by a stored login. */
-export const isSignedOutMarked = () => {
-  try {
-    return localStorage.getItem(SIGNED_OUT_MARKER) === '1';
-  } catch {
-    return true; // cannot tell: treat as signed out (never restore blindly)
-  }
-};
-
-/** @returns {boolean} true when the marker is set */
-export const markSignedOut = () => {
-  try {
-    localStorage.setItem(SIGNED_OUT_MARKER, '1');
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-/** Clear the marker; only after a login was stored (storeSession). */
-export const clearSignedOutMarker = () => {
-  try {
-    localStorage.removeItem(SIGNED_OUT_MARKER);
-    return true;
-  } catch {
-    return false;
-  }
 };
 
 /**
@@ -228,39 +201,13 @@ export const removeSecureItem = async (key) => {
 };
 
 /**
- * Store authentication token securely
- * @param {string} token - The authentication token to store
- * @returns {Promise<{success: boolean, error?: string}>}
- */
-export const storeToken = async (token) => {
-  if (!token) {
-    return { success: false, error: 'Token is required' };
-  }
-
-  try {
-    if (isElectron()) {
-      // Desktop: OS keystore in the main process (token-vault.js)
-      return await window.electronAPI.auth.saveToken(token);
-    }
-
-    if (isCapacitor()) {
-      return await setSecureItem(STORAGE_KEYS.AUTH_TOKEN, token);
-    }
-
-    return { success: false, error: 'Unsupported platform' };
-  } catch (error) {
-    console.error('Error storing token:', error?.message || error);
-    return { success: false, error: error.message };
-  }
-};
-
-/**
  * Retrieve authentication token
  * @returns {Promise<string|null>} The stored token or null
  */
 export const getToken = async () => {
   try {
     if (isElectron()) {
+      // Main's session authority decides (null while signed out).
       const result = await window.electronAPI.auth.getToken();
       // The main handler returns the token string (older code expected { token }).
       if (typeof result === 'string') return result || null;
@@ -268,6 +215,8 @@ export const getToken = async () => {
     }
 
     if (isCapacitor()) {
+      // E6: the tombstone wins over a token left in the keystore.
+      if (isSignedOut()) return null;
       return await getSecureItem(STORAGE_KEYS.AUTH_TOKEN);
     }
 
@@ -275,134 +224,6 @@ export const getToken = async () => {
   } catch (error) {
     console.error('Error retrieving token:', error?.message || error);
     return null;
-  }
-};
-
-/**
- * Clear authentication token
- * @returns {Promise<{success: boolean, error?: string}>}
- */
-export const clearToken = async () => {
-  try {
-    if (isElectron()) {
-      return await window.electronAPI.auth.clearToken();
-    }
-
-    if (isCapacitor()) {
-      return await removeSecureItem(STORAGE_KEYS.AUTH_TOKEN);
-    }
-
-    return { success: false, error: 'Unsupported platform' };
-  } catch (error) {
-    console.error('Error clearing token:', error?.message || error);
-    return { success: false, error: error.message };
-  }
-};
-
-/**
- * Store refresh token securely
- * @param {string} token - The refresh token to store
- * @returns {Promise<{success: boolean, error?: string}>}
- */
-export const storeRefreshToken = async (token) => {
-  if (!token) {
-    return { success: false, error: 'Token is required' };
-  }
-
-  try {
-    if (isElectron()) {
-      if (window.electronAPI.auth.saveRefreshToken) {
-        return await window.electronAPI.auth.saveRefreshToken(token);
-      }
-      return { success: true }; // Desktop has no separate refresh token storage
-    }
-
-    if (isCapacitor()) {
-      return await setSecureItem(STORAGE_KEYS.REFRESH_TOKEN, token);
-    }
-
-    return { success: false, error: 'Unsupported platform' };
-  } catch (error) {
-    console.error('Error storing refresh token:', error?.message || error);
-    return { success: false, error: error.message };
-  }
-};
-
-/**
- * Retrieve refresh token
- * @returns {Promise<string|null>}
- */
-export const getRefreshToken = async () => {
-  try {
-    if (isElectron()) {
-      if (window.electronAPI.auth.getRefreshToken) {
-        const result = await window.electronAPI.auth.getRefreshToken();
-        return result.token || null;
-      }
-      return null;
-    }
-
-    if (isCapacitor()) {
-      return await getSecureItem(STORAGE_KEYS.REFRESH_TOKEN);
-    }
-
-    return null;
-  } catch (error) {
-    console.error('Error retrieving refresh token:', error?.message || error);
-    return null;
-  }
-};
-
-/**
- * Clear refresh token
- * @returns {Promise<{success: boolean, error?: string}>}
- */
-export const clearRefreshToken = async () => {
-  try {
-    if (isElectron()) {
-      if (window.electronAPI.auth.clearRefreshToken) {
-        return await window.electronAPI.auth.clearRefreshToken();
-      }
-      return { success: true };
-    }
-
-    if (isCapacitor()) {
-      return await removeSecureItem(STORAGE_KEYS.REFRESH_TOKEN);
-    }
-
-    return { success: false, error: 'Unsupported platform' };
-  } catch (error) {
-    console.error('Error clearing refresh token:', error?.message || error);
-    return { success: false, error: error.message };
-  }
-};
-
-/**
- * Store user credentials (email/id for display purposes)
- * @param {Object} credentials - User credentials
- * @param {string} credentials.userId - User ID
- * @param {string} credentials.email - User email
- * @returns {Promise<{success: boolean, error?: string}>}
- */
-export const storeUserCredentials = async (credentials) => {
-  try {
-    if (isElectron()) {
-      if (window.electronAPI.auth.saveUserInfo) {
-        return await window.electronAPI.auth.saveUserInfo(credentials);
-      }
-      return { success: true };
-    }
-
-    if (isCapacitor()) {
-      // The full user object only (the per-field keys of older versions
-      // are never written; the start purges their plaintext copies).
-      return await setSecureItem(STORAGE_KEYS.USER_INFO, JSON.stringify(credentials || {}));
-    }
-
-    return { success: false, error: 'Unsupported platform' };
-  } catch (error) {
-    console.error('Error storing user credentials:', error?.message || error);
-    return { success: false, error: error.message };
   }
 };
 
@@ -420,6 +241,7 @@ export const getUserCredentials = async () => {
     }
 
     if (isCapacitor()) {
+      if (isSignedOut()) return {};
       const raw = await getSecureItem(STORAGE_KEYS.USER_INFO);
       if (!raw) return {};
       try {
@@ -435,77 +257,6 @@ export const getUserCredentials = async () => {
     console.error('Error retrieving user credentials:', error?.message || error);
     return {};
   }
-};
-
-/**
- * Clear all stored credentials (sign-out). The sign-out marker is set FIRST
- * (T5): if a removal fails or the app is killed in between, the next start
- * restores nothing and removes again.
- * @returns {Promise<{success: boolean, error?: string}>}
- */
-export const clearAllCredentials = async () => {
-  markSignedOut();
-  try {
-    if (isElectron()) {
-      let ok = true;
-      const clearToken = await window.electronAPI.auth.clearToken();
-      if (clearToken && clearToken.success === false) ok = false;
-      if (window.electronAPI.auth.clearRefreshToken) {
-        const r = await window.electronAPI.auth.clearRefreshToken();
-        if (r && r.success === false) ok = false;
-      }
-      if (window.electronAPI.auth.clearUserInfo) {
-        const r = await window.electronAPI.auth.clearUserInfo();
-        if (r && r.success === false) ok = false;
-      }
-      return ok ? { success: true } : { success: false, error: 'Credentials not fully removed' };
-    }
-
-    if (isCapacitor()) {
-      let ok = true;
-      for (const key of AUTH_KEYS) {
-        const result = await removeSecureItem(key);
-        if (!result.success) ok = false;
-      }
-      if (!(await purgeLegacyAuthPreferences())) ok = false;
-      return ok ? { success: true } : { success: false, error: 'Keystore unavailable' };
-    }
-
-    return { success: false, error: 'Unsupported platform' };
-  } catch (error) {
-    console.error('Error clearing all credentials:', error?.message || error);
-    return { success: false, error: error.message };
-  }
-};
-
-/**
- * Store a login (token + user). Clears the sign-out marker only when both
- * were persisted (T5); otherwise the session lives in memory for this run
- * and the next start is signed out.
- * @returns {Promise<{success: boolean, persisted: boolean}>}
- */
-export const storeSession = async ({ token, user }) => {
-  const saved = await storeToken(token);
-  const info = await storeUserCredentials(user);
-  const persisted = !!(saved && saved.success && saved.persisted !== false && info && info.success !== false);
-  if (persisted) clearSignedOutMarker();
-  return { success: !!(saved && saved.success), persisted };
-};
-
-/**
- * Start: the stored session, or nothing. Purges the legacy plaintext copies
- * (T2) and honours the sign-out marker (T5).
- * @returns {Promise<{ token: string|null, userInfo: object|null, signedOut?: boolean }>}
- */
-export const loadStoredSession = async () => {
-  await purgeLegacyAuthPreferences();
-  if (isSignedOutMarked()) {
-    await clearAllCredentials();
-    return { token: null, userInfo: null, signedOut: true };
-  }
-  const token = await getToken();
-  const userInfo = await getUserCredentials();
-  return { token, userInfo };
 };
 
 /**

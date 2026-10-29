@@ -16,6 +16,9 @@
  * - T4 Saving encrypts first, then writes and reads back; on any failure the
  *   previous raw value is written back (a plaintext one is not: it is
  *   deleted instead). A failed save never removes the last good copy.
+ * - E6 The vault asks the session authority (session-authority.js) before it
+ *   returns anything: while signed out getToken is null, even with a token
+ *   still on disk or in memory. Only the authority saves and clears.
  *
  * The functions take the safeStorage module and the electron-store instance
  * as arguments so they can be unit tested without Electron.
@@ -64,8 +67,9 @@ function isInsecureBackend(safeStorage, platform) {
  * @param {object} deps.store - electron-store instance (get/set/delete)
  * @param {string} [deps.platform]
  * @param {(msg: string) => void} [deps.warn]
+ * @param {() => boolean} [deps.isAllowed] - the session authority's tokenAllowed()
  */
-function createTokenVault({ safeStorage, store, platform = process.platform, warn = () => {} }) {
+function createTokenVault({ safeStorage, store, platform = process.platform, warn = () => {}, isAllowed = () => true }) {
   // This run's token: set by a save (also when it could not be persisted)
   // and by a successful decrypt; it wins over the disk.
   let memoryToken = null;
@@ -90,11 +94,17 @@ function createTokenVault({ safeStorage, store, platform = process.platform, war
   /**
    * Persist a token. Returns { success, persisted }: persisted=false means
    * it is held in memory for this run only and the disk is unchanged.
+   * { persist: false }: memory only, and the disk copy (an older session's)
+   * is removed.
    */
-  function saveToken(token) {
+  function saveToken(token, { persist = true } = {}) {
     if (!token || typeof token !== 'string') return { success: false, persisted: false, error: 'Token is required' };
     memoryToken = token;
     dropInsecureCopy();
+    if (!persist) {
+      try { store.delete(TOKEN_KEY); } catch { /* deleted again at the next start */ }
+      return { success: true, persisted: false };
+    }
     if (!secure()) {
       warn('token-vault: no secure OS storage; token kept in memory for this session only');
       return { success: true, persisted: false };
@@ -128,6 +138,7 @@ function createTokenVault({ safeStorage, store, platform = process.platform, war
   /** @returns {string|null} */
   function getToken() {
     dropInsecureCopy();
+    if (!isAllowed()) return null;
     if (memoryToken) return memoryToken;
     let stored;
     try { stored = store.get(TOKEN_KEY); } catch { return null; }

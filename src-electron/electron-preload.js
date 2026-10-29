@@ -57,11 +57,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('auth:verifyTwoFactor', String(tempToken ?? ''), String(code ?? ''), isBackupCode === true),
     resendTwoFactorEmail: (tempToken) =>
       ipcRenderer.invoke('auth:resendTwoFactorEmail', String(tempToken ?? '')),
-    saveToken: (token) => ipcRenderer.invoke('auth:saveToken', token),
+    // Token and user are written only by main's session authority (with the
+    // ticket of the sign-in that produced them): no save API here.
     getToken: () => ipcRenderer.invoke('auth:getToken'),
-    clearToken: () => ipcRenderer.invoke('auth:clearToken'),
-    saveUserInfo: (userInfo) => ipcRenderer.invoke('auth:saveUserInfo', userInfo),
     getUserInfo: () => ipcRenderer.invoke('auth:getUserInfo'),
+    restoreSession: () => ipcRenderer.invoke('auth:restoreSession'),
+    currentSession: () => ipcRenderer.invoke('auth:currentSession'),
+    signOut: () => ipcRenderer.invoke('auth:signOut'),
     refreshToken: () => ipcRenderer.invoke('auth:refreshToken'),
     // Opens a web-app page signed in as this user; main keeps the hand-off.
     openWebWithSession: (pagePath) => ipcRenderer.invoke('auth:openWebWithSession', String(pagePath ?? '')),

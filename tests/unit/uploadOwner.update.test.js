@@ -137,7 +137,8 @@ describe('update from a version with the session in plaintext', () => {
 
     // Login A: the queue resumes for A only.
     net.uploadViaPresignedSas.mockImplementation(async ({ recordId }) => ({ mode: 'azure', success: true, verified: true, audioFileId: `f-${recordId}` }));
-    await store.loginWithSSO({ token: jwtFor('a', 'new'), user: { id: 'a' } });
+    const { sessionTicket } = await import('../../src/services/sessionAuthority');
+    await store.loginWithSSO({ token: jwtFor('a', 'new'), user: { id: 'a' } }, sessionTicket());
     store.stopTokenRefresh();
     await vi.waitFor(() => expect(net.uploadViaPresignedSas).toHaveBeenCalled());
     await vi.waitFor(() => expect(getMobileUploadQueue().map((i) => i.recordId)).toEqual(['rec-b', 'rec-u']));

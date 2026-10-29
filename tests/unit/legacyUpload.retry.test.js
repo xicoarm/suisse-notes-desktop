@@ -24,6 +24,8 @@ function fixture() {
     report: vi.fn(), direct: vi.fn().mockResolvedValue({ handled: false, reason: 'test fallback' }),
     eligibility: vi.fn().mockResolvedValue({ allowed: true }) };
   const snapshot = { size: 1234, mtimeMs: 5678 };
+  // The session ticket of the run; `signOut()` makes it stale (E7).
+  const session = { ticket: Object.freeze({ epoch: 1 }), signOut() { this.ticket = Object.freeze({ epoch: 2 }); } };
   class FormData {
     constructor() { this.fields = []; }
     append(...values) { this.fields.push(values); }
@@ -42,11 +44,15 @@ function fixture() {
     activeAbortControllers: new Map(), activeDirectAudioFileIds: new Map(), unsavedRecordingId: null,
     assessRecordingUpload: calls.eligibility, getRecordingsPath: () => '/synthetic',
     recordingLocks: new Map(), isRecordingInProgress: false,
+    sessionAuthority: { ticket: () => session.ticket, isCurrent: (t) => t === session.ticket, getToken: () => 'test-token' },
+    tokenFor: (t) => (t && t !== session.ticket ? null : 'test-token'),
+    sessionEndedFor: (t) => !!t && t !== session.ticket,
+    sessionEndedResult: () => ({ success: false, canDelete: false, canRetry: true, sessionEnded: true, error: 'Signed out' }),
   };
   const functions = vm.runInNewContext(uploadFunctions + '\n({ uploadWithRetry, uploadWithRetryLegacy });', context);
   const invoke = (retries = 3, controller = new AbortController()) => functions.uploadWithRetryLegacy(
     'record', '/synthetic/audio.webm', { duration: 45 }, retries, controller, 'owner', snapshot);
-  return { calls, snapshot, invoke, functions };
+  return { calls, snapshot, invoke, functions, session };
 }
 
 describe('legacy upload broken-pipe recovery', () => {
@@ -73,7 +79,7 @@ describe('legacy upload broken-pipe recovery', () => {
     expect(calls.source.mock.calls).toEqual([['/synthetic/audio.webm'], ['/synthetic/audio.webm']]);
     expect(calls.post.mock.calls[0][1]).not.toBe(calls.post.mock.calls[1][1]);
     expect(calls.verify).toHaveBeenCalledTimes(1);
-    expect(calls.verify).toHaveBeenCalledWith('record', '/synthetic/audio.webm', accepted.data, 'owner', true, snapshot);
+    expect(calls.verify).toHaveBeenCalledWith('record', '/synthetic/audio.webm', accepted.data, 'owner', true, snapshot, null);
     expect(calls.report).not.toHaveBeenCalled();
   });
 
@@ -106,14 +112,38 @@ describe('legacy upload broken-pipe recovery', () => {
   });
 
   it('verifies an existing accepted ID without replaying either upload transport', async () => {
-    const { calls, snapshot, functions } = fixture();
+    const { calls, snapshot, functions, session } = fixture();
     const receipt = { audioFileId: 'already-accepted', ownerId: 'owner', fileSize: snapshot.size, fileMtimeMs: snapshot.mtimeMs };
     calls.receipt.mockReturnValue(receipt);
     calls.verify.mockResolvedValue({ success: false, pendingVerification: true, canDelete: false });
     expect(await functions.uploadWithRetry('record', '/synthetic/audio.webm', {})).toMatchObject({ pendingVerification: true, canDelete: false });
     expect(calls.verify).toHaveBeenCalledTimes(1);
-    expect(calls.verify).toHaveBeenCalledWith('record', '/synthetic/audio.webm', receipt, 'owner', false);
+    expect(calls.verify).toHaveBeenCalledWith('record', '/synthetic/audio.webm', receipt, 'owner', false, null, session.ticket);
     expect(calls.post).not.toHaveBeenCalled();
     expect(calls.direct).not.toHaveBeenCalled();
+  });
+
+  // E7 (council decision 2): a sign-out during the retry sleep stops the
+  // upload - no further request, nothing deleted, the recording stays queued.
+  it('stops after a sign-out during the retry sleep without a further request', async () => {
+    const { calls, snapshot, functions, session } = fixture();
+    calls.post.mockRejectedValueOnce(brokenPipe()).mockResolvedValueOnce(accepted);
+    calls.sleep.mockImplementationOnce(async () => { session.signOut(); });
+    const ticket = { epoch: 1 };
+    session.ticket = ticket;
+    const result = await functions.uploadWithRetryLegacy('record', '/synthetic/audio.webm', { duration: 45 }, 3, new AbortController(), 'owner', snapshot, ticket);
+    expect(result).toMatchObject({ success: false, canDelete: false, sessionEnded: true });
+    expect(calls.post).toHaveBeenCalledTimes(1);
+    expect(calls.verify).not.toHaveBeenCalled();
+  });
+
+  it('the main upload path refuses to start for a stale ticket', async () => {
+    const { calls, functions, session } = fixture();
+    const stale = session.ticket;
+    session.signOut();
+    expect(await functions.uploadWithRetry('record', '/synthetic/audio.webm', {}, 3, stale)).toMatchObject({ success: false, sessionEnded: true });
+    expect(calls.post).not.toHaveBeenCalled();
+    expect(calls.direct).not.toHaveBeenCalled();
+    expect(calls.receipt).not.toHaveBeenCalled();
   });
 });
