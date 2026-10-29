@@ -6,18 +6,25 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const keystoreData = new Map();
 const prefsData = new Map();
+// Key rule of both native plugins (iOS and Android reject with INVALID_KEY).
+const checkKey = (key) => {
+  if (typeof key !== 'string' || key.length < 1 || key.length > 128 || !/^[A-Za-z0-9_.-]+$/.test(key)) throw new Error('INVALID_KEY');
+};
 const keystore = {
   failWrites: false,
   failAll: false,
   get: vi.fn(async ({ key }) => {
+    checkKey(key);
     if (keystore.failAll) throw new Error('KEYSTORE_READ_FAILED');
     return { value: keystoreData.has(key) ? keystoreData.get(key) : null };
   }),
   set: vi.fn(async ({ key, value }) => {
+    checkKey(key);
     if (keystore.failAll || keystore.failWrites) throw new Error('KEYSTORE_WRITE_FAILED');
     keystoreData.set(key, value);
   }),
   remove: vi.fn(async ({ key }) => {
+    checkKey(key);
     if (keystore.failAll) throw new Error('KEYSTORE_REMOVE_FAILED');
     keystoreData.delete(key);
   })
@@ -88,11 +95,67 @@ describe('secureStorage on mobile: keystore only', () => {
     expect(await storage.getUserCredentials()).toEqual({ id: 'u1', email: 'a@example.com' });
   });
 
+  it('a key the native plugins reject fails the save (nothing in plaintext)', async () => {
+    expect((await storage.setSecureItem('ble.appKey.legacyScoped:u1', 'x')).success).toBe(false);
+    expect(prefs.set).not.toHaveBeenCalled();
+  });
+
   it('exposes generic getSecureItem/setSecureItem/removeSecureItem', async () => {
     expect(await storage.setSecureItem('blePairingSecret', 's3cret')).toEqual({ success: true });
     expect(await storage.getSecureItem('blePairingSecret')).toBe('s3cret');
     await storage.removeSecureItem('blePairingSecret');
     expect(await storage.getSecureItem('blePairingSecret')).toBeNull();
+  });
+});
+
+describe('secureStorage on mobile: write order and aborts', () => {
+  it('save order: keystore write -> read back -> delete the plaintext copy', async () => {
+    prefsData.set('authToken', 'old.plain.token');
+    expect(await storage.storeToken('new.jwt.token')).toEqual({ success: true });
+    const write = keystore.set.mock.invocationCallOrder[0];
+    const readBack = keystore.get.mock.invocationCallOrder[0];
+    const del = prefs.remove.mock.invocationCallOrder[0];
+    expect(write).toBeLessThan(readBack);
+    expect(readBack).toBeLessThan(del);
+    expect(prefsData.has('authToken')).toBe(false);
+  });
+
+  it('an abort before the keystore write never leaves the key without a value', async () => {
+    prefsData.set('authToken', 'old.plain.token');
+    // The app is killed during the keystore write: nothing after it runs.
+    keystore.set.mockImplementationOnce(() => new Promise(() => {}));
+    void storage.storeToken('new.jwt.token');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(prefsData.get('authToken')).toBe('old.plain.token');
+  });
+
+  it('an abort after the keystore write (plaintext delete never ran) is cleaned up at the next read', async () => {
+    prefsData.set('authToken', 'old.plain.token');
+    // Killed right before the plaintext delete.
+    prefs.remove.mockImplementationOnce(() => new Promise(() => {}));
+    void storage.storeToken('new.jwt.token');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(keystoreData.get('authToken')).toBe('new.jwt.token');
+    expect(prefsData.get('authToken')).toBe('old.plain.token');
+    // Next app start: the keystore value is used and the plaintext copy removed.
+    vi.resetModules();
+    const restarted = await import('../../src/services/secureStorage');
+    expect(await restarted.getToken()).toBe('new.jwt.token');
+    expect(prefsData.has('authToken')).toBe(false);
+  });
+
+  it('same for an aborted migration (keystore written, plaintext left)', async () => {
+    keystoreData.set('authToken', 'legacy.jwt.token');
+    prefsData.set('authToken', 'legacy.jwt.token');
+    vi.resetModules();
+    const restarted = await import('../../src/services/secureStorage');
+    expect(await restarted.getToken()).toBe('legacy.jwt.token');
+    expect(prefsData.size).toBe(0);
+  });
+
+  it('a read-back mismatch fails the save', async () => {
+    keystore.get.mockResolvedValueOnce({ value: 'something.else' });
+    expect((await storage.storeToken('new.jwt.token')).success).toBe(false);
   });
 });
 

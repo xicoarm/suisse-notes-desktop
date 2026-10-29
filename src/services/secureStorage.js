@@ -15,7 +15,8 @@
  *
  * Migration (one time, per key): older versions kept these values in
  * Preferences. On the first read, a legacy value is copied into the
- * keystore, read back, and only then the plaintext copy is removed. If the
+ * keystore, read back, and only then the plaintext copy is removed (a copy
+ * left by an abort after the keystore write is removed at the next read). If the
  * keystore write fails, the legacy value is left in place and still returned
  * - the user is not signed out by the update - but it is never rewritten;
  * it is deleted at the next save of that key or at sign-out.
@@ -55,6 +56,9 @@ const getPreferences = async () => {
   return Preferences;
 };
 
+// Keys whose legacy plaintext copy is known to be gone in this app run.
+const legacyChecked = new Set();
+
 /** Remove a legacy plaintext copy; never throws. */
 const removeLegacy = async (key) => {
   try {
@@ -72,16 +76,27 @@ const removeLegacy = async (key) => {
 export const setSecureItem = async (key, value) => {
   if (!key || typeof value !== 'string') return { success: false, error: 'Key and string value are required' };
   if (!isCapacitor()) return { success: false, error: 'Unsupported platform' };
-  // A plaintext copy of an older value must never outlive a newer one.
-  await removeLegacy(key);
+  // Order: write -> read back -> only then delete the legacy plaintext copy,
+  // so an abort in between never leaves the key without any value. An abort
+  // after the write leaves a plaintext copy behind; getSecureItem removes it
+  // at the next read (keystore value present).
+  let result;
   try {
     const { plugin: store } = await getKeystore();
     await store.set({ key, value });
-    return { success: true };
+    const check = await store.get({ key });
+    result = check?.value === value
+      ? { success: true }
+      : { success: false, error: 'Keystore read-back mismatch' };
   } catch (error) {
     console.error('Secure storage: keystore write failed; not stored (no plaintext fallback)');
-    return { success: false, error: error?.message || 'Keystore unavailable' };
+    result = { success: false, error: error?.message || 'Keystore unavailable' };
   }
+  // A plaintext copy of an older value must never outlive a newer one (also
+  // when the keystore write failed: the old value is not used any more).
+  await removeLegacy(key);
+  if (result.success) legacyChecked.add(key);
+  return result;
 };
 
 /**
@@ -96,7 +111,16 @@ export const getSecureItem = async (key) => {
   try {
     const { plugin: store } = await getKeystore();
     const result = await store.get({ key });
-    if (result && typeof result.value === 'string') return result.value;
+    if (result && typeof result.value === 'string') {
+      // A migration or save that was aborted after the keystore write but
+      // before the plaintext delete left a legacy copy behind: remove it
+      // (once per key and app run).
+      if (!legacyChecked.has(key)) {
+        await removeLegacy(key);
+        legacyChecked.add(key);
+      }
+      return result.value;
+    }
   } catch {
     keystoreOk = false;
   }
@@ -112,12 +136,14 @@ export const getSecureItem = async (key) => {
   if (!legacy) return null;
 
   if (keystoreOk) {
+    // Migration: write -> read back -> delete the plaintext copy.
     try {
       const { plugin: store } = await getKeystore();
       await store.set({ key, value: legacy });
       const check = await store.get({ key });
       if (check?.value === legacy) {
         await removeLegacy(key);
+        legacyChecked.add(key);
       }
     } catch {
       // Keep the legacy value: the user stays signed in; it is never rewritten.

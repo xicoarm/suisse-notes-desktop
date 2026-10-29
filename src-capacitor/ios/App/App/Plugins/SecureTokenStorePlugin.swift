@@ -62,13 +62,20 @@ public class SecureTokenStorePlugin: CAPPlugin {
             call.reject("MISSING_VALUE")
             return
         }
-        // Delete + add, so the accessibility class is always the current one
-        // (an update would keep the attributes of an older item).
-        SecItemDelete(baseQuery(key) as CFDictionary)
-        var attributes = baseQuery(key)
-        attributes[kSecValueData as String] = data
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let status = SecItemAdd(attributes as CFDictionary, nil)
+        // Update in place (value and accessibility class), add only when there
+        // is no item yet. Never delete first: a failed write must leave the
+        // stored token intact (KeychainUpsert).
+        let query = baseQuery(key)
+        let changes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        var attributes = query
+        attributes.merge(changes) { _, new in new }
+        let status = KeychainUpsert.upsert(
+            update: { SecItemUpdate(query as CFDictionary, changes as CFDictionary) },
+            add: { SecItemAdd(attributes as CFDictionary, nil) }
+        )
         guard status == errSecSuccess else {
             call.reject("KEYSTORE_WRITE_FAILED", String(status))
             return
@@ -86,3 +93,19 @@ public class SecureTokenStorePlugin: CAPPlugin {
         call.resolve()
     }
 }
+
+// BEGIN KeychainUpsert (also compiled standalone by tests/native/keychain-upsert.test.mjs)
+/// Write strategy of SecureTokenStorePlugin.set: SecItemUpdate first; SecItemAdd
+/// only on errSecItemNotFound; if an item appeared in between (errSecDuplicateItem)
+/// update once more. There is no delete, so every failure leaves the previous
+/// value in the Keychain and is returned to the caller.
+enum KeychainUpsert {
+    static func upsert(update: () -> OSStatus, add: () -> OSStatus) -> OSStatus {
+        let updated = update()
+        if updated != errSecItemNotFound { return updated }
+        let added = add()
+        if added == errSecDuplicateItem { return update() }
+        return added
+    }
+}
+// END KeychainUpsert
