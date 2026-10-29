@@ -22,6 +22,8 @@ const SECRETS = [
   'synthetic-password-0003',
   'synthetic-state-0004',
   'synthetic-sas-0005',
+  'synthetic-authcode-0006',
+  'synthetic-appstate-0007',
   'alice.synthetic@example.com',
   'alicesynthuser'
 ];
@@ -77,6 +79,23 @@ describe('main-process Sentry redaction (real send path)', () => {
     expect(wire).toContain('u-1'); // opaque id stays
   });
 
+  it('secrets in a log line never reach the fingerprint, title, logLine or breadcrumb (message path)', async () => {
+    sent.length = 0;
+    const log = fakeLog();
+    const { sampler } = reporting.installLogReporting({ log, Sentry });
+    const line = 'SSO: callback rejected suissenotes://auth/callback?state=synthetic-appstate-0007&auth_code=synthetic-authcode-0006';
+    log.hooks[0]({ level: 'info', data: [line] }, { name: 'file' });
+    log.hooks[0]({ level: 'warn', data: [line] }, { name: 'file' });
+    log.hooks[0]({ level: 'error', data: [new Error(line)] }, { name: 'file' });
+    await Sentry.flush(2000);
+    const wire = sent.join('\n');
+    expect(wire).toContain('callback rejected');
+    expect(wire).toMatch(/"fingerprint":\["main-log","[^"]*callback rejected/);
+    for (const secret of SECRETS) expect(wire).not.toContain(secret);
+    // The sampler keys (fingerprints kept in memory) are redacted too.
+    for (const key of sampler.counts.keys()) for (const secret of SECRETS) expect(key).not.toContain(secret);
+  });
+
   it('redactEvent covers exception values, frames, extra, contexts, request and breadcrumbs', () => {
     const event = reporting.redactEvent({
       message: `x?token=${JWT}`,
@@ -85,6 +104,7 @@ describe('main-process Sentry redaction (real send path)', () => {
       contexts: { c: { authorization: 'Bearer x' } },
       request: { url: 'https://a.example/?session=synthetic-session-token-0001', headers: { cookie: 'auth-token=x', Authorization: 'Bearer y' } },
       breadcrumbs: [{ message: `state=synthetic-state-0004`, data: { sessionToken: 'synthetic-session-token-0001' } }],
+      fingerprint: ['x', 'auth_code=synthetic-authcode-0006'],
       user: { id: 'u-1', email: 'alice.synthetic@example.com', ip_address: '1.2.3.4' }
     });
     const text = JSON.stringify(event);

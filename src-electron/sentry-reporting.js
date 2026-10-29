@@ -125,6 +125,7 @@ function redactEvent(event) {
         if (frame.vars) frame.vars = redactDeep(frame.vars);
       }
     }
+    if (Array.isArray(event.fingerprint)) event.fingerprint = event.fingerprint.map((f) => (typeof f === 'string' ? redactText(f) : f));
     if (event.extra) event.extra = redactDeep(event.extra);
     if (event.contexts) event.contexts = redactDeep(event.contexts);
     if (event.tags) event.tags = redactDeep(event.tags);
@@ -161,7 +162,9 @@ function textOf(value) {
 function describe(data) {
   const parts = Array.isArray(data) ? data : [data];
   const error = parts.find(part => part instanceof Error) || null;
-  const message = scrub(parts.map(textOf).join(' ')).slice(0, MAX_MESSAGE);
+  // Fully redacted before anything is derived from it (title, fingerprint,
+  // extra logLine, breadcrumb): credentials, JWTs, secret query values.
+  const message = redactText(parts.map(textOf).join(' ')).slice(0, MAX_MESSAGE);
   return { error, message };
 }
 
