@@ -164,6 +164,41 @@ describe('desktop main SSO flow (src-electron/sso-flow.js)', () => {
     expect(store.hasPending()).toBe(false);
   });
 
+  it('S2: the flow survives a restart of the main process (same store), once, within 15 minutes', () => {
+    // electron-store stand-in: survives the "restart" (a new flow store instance).
+    const data = new Map();
+    const disk = { get: (k) => (data.has(k) ? JSON.parse(data.get(k)) : undefined), set: (k, v) => { data.set(k, JSON.stringify(v)); }, delete: (k) => { data.delete(k); } };
+    let t = 5000;
+    const flow = mainFlow.createSsoFlowStore({ now: () => t, storage: disk }).begin('microsoft');
+    // Cold start by the callback URL: a new instance on the same store.
+    const restarted = mainFlow.createSsoFlowStore({ now: () => t, storage: disk });
+    expect(restarted.hasPending()).toBe(true);
+    expect(restarted.consume({ token: 't' })).toEqual({ ok: false, reason: 'missing_state' });
+    expect(restarted.consume({ state: 'foreign', token: 't' })).toEqual({ ok: false, reason: 'state_mismatch' });
+    expect(restarted.consume({ state: flow.state, auth_code: 'c' })).toEqual({ ok: true, provider: 'microsoft', verifier: expect.any(String) });
+    // Consumed synchronously: gone from the store, a second consume (also after another restart) is refused.
+    expect(data.size).toBe(0);
+    expect(restarted.consume({ state: flow.state, token: 't' })).toEqual({ ok: false, reason: 'no_pending_flow' });
+    expect(mainFlow.createSsoFlowStore({ now: () => t, storage: disk }).consume({ state: flow.state, token: 't' }))
+      .toEqual({ ok: false, reason: 'no_pending_flow' });
+    // Expired after a restart.
+    const late = mainFlow.createSsoFlowStore({ now: () => t, storage: disk }).begin('google');
+    t += mainFlow.FLOW_TTL_MS + 1;
+    expect(mainFlow.createSsoFlowStore({ now: () => t, storage: disk }).consume({ state: late.state, error: 'canceled' }))
+      .toEqual({ ok: false, reason: 'no_pending_flow' });
+    expect(data.size).toBe(0);
+  });
+
+  it('S2: a new flow replaces the old one (also across a restart)', () => {
+    const data = new Map();
+    const disk = { get: (k) => data.get(k), set: (k, v) => { data.set(k, v); }, delete: (k) => { data.delete(k); } };
+    const first = mainFlow.createSsoFlowStore({ storage: disk }).begin('microsoft');
+    const second = mainFlow.createSsoFlowStore({ storage: disk }).begin('google');
+    const restarted = mainFlow.createSsoFlowStore({ storage: disk });
+    expect(restarted.consume({ state: first.state, token: 't' })).toEqual({ ok: false, reason: 'state_mismatch' });
+    expect(restarted.consume({ state: second.state, token: 't' })).toMatchObject({ ok: true, provider: 'google' });
+  });
+
   it('web hand-off: only a token the server confirms as bound is used', () => {
     expect(mainFlow.boundHandoffToken({ success: true, sessionToken: 's', expiresIn: 60, bound: true })).toBe('s');
     expect(mainFlow.boundHandoffToken({ success: true, sessionToken: 'legacy' })).toBeNull();

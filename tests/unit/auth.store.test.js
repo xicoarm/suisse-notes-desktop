@@ -37,6 +37,7 @@ describe('Auth Store', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     vi.clearAllMocks();
+    localStorage.clear(); // no sign-out marker from an earlier test
   });
 
   describe('initial state', () => {
@@ -256,6 +257,35 @@ describe('Auth Store', () => {
       expect(store.user).toEqual(mockUser);
       expect(store.isAuthenticated).toBe(true);
       expect(store.sessionChecked).toBe(true);
+    });
+
+    it('after a sign-out whose removal failed, the next start restores nothing and removes again (T5)', async () => {
+      const store = useAuthStore();
+      mockElectronAPI.auth.clearToken.mockResolvedValue({ success: false, error: 'EACCES' });
+      await store.logout();
+      expect(localStorage.getItem('auth.signedOut')).toBe('1');
+      setActivePinia(createPinia());
+      const next = useAuthStore();
+      mockElectronAPI.auth.getToken.mockResolvedValue('stored-token');
+      mockElectronAPI.auth.getUserInfo.mockResolvedValue({ id: '123' });
+      mockElectronAPI.auth.clearToken.mockClear();
+      await next.checkSession();
+      expect(next.isAuthenticated).toBe(false);
+      expect(next.token).toBeNull();
+      expect(mockElectronAPI.auth.clearToken).toHaveBeenCalled();
+    });
+
+    it('only a persisted login clears the sign-out marker', async () => {
+      localStorage.setItem('auth.signedOut', '1');
+      const store = useAuthStore();
+      mockElectronAPI.auth.saveToken.mockResolvedValue({ success: true, persisted: false });
+      mockElectronAPI.auth.saveUserInfo.mockResolvedValue({ success: true });
+      await store.loginWithSSO({ token: 'h.eyJ1c2VySWQiOiIxMjMifQ.s', user: { id: '123' } });
+      expect(localStorage.getItem('auth.signedOut')).toBe('1');
+      mockElectronAPI.auth.saveToken.mockResolvedValue({ success: true, persisted: true });
+      await store.loginWithSSO({ token: 'h.eyJ1c2VySWQiOiIxMjMifQ.s', user: { id: '123' } });
+      expect(localStorage.getItem('auth.signedOut')).toBeNull();
+      store.stopTokenRefresh();
     });
 
     it('should not authenticate without stored credentials', async () => {

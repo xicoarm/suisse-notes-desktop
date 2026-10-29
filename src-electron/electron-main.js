@@ -340,7 +340,9 @@ ipcMain.handle('auth:takePendingSSO', () => {
 });
 
 const ssoFlow = require('./sso-flow');
-const ssoFlows = ssoFlow.createSsoFlowStore();
+// The pending flow lives in configStore (survives a restart: the browser
+// sign-in may come back to a cold start); created below, after configStore.
+let ssoFlows = null;
 
 // Exchange a one-time SSO code for the session (PKCE, newer server contract).
 async function exchangeSsoCode(authCode, verifier, state) {
@@ -417,11 +419,8 @@ app.on('open-url', (event, url) => {
   handleSSOUrl(url).catch(() => {});
 });
 
-// Cold-start case (Win/Linux): URL is in our own argv
-{
-  const ssoUrl = process.argv.find(a => typeof a === 'string' && a.startsWith(`${SSO_PROTOCOL}://`));
-  if (ssoUrl) handleSSOUrl(ssoUrl).catch(() => {});
-}
+// Cold-start case (Win/Linux): the URL in our own argv is handled once
+// configStore (and with it the persisted SSO flow) exists, see below.
 
 // Configure auto-updater logging
 autoUpdater.logger = log;
@@ -521,12 +520,20 @@ const configStore = new Store({
 });
 
 // Session token: encrypted by the OS keystore only, never plaintext on disk
-// (see token-vault.js; a legacy plaintext token is migrated once).
+// (see token-vault.js; a legacy plaintext token is deleted, never adopted).
 const tokenVault = createTokenVault({
   safeStorage,
   store: configStore,
   warn: (msg) => log.warn(msg)
 });
+
+ssoFlows = ssoFlow.createSsoFlowStore({ storage: configStore });
+
+// Cold-start case (Win/Linux): URL is in our own argv
+{
+  const ssoUrl = process.argv.find(a => typeof a === 'string' && a.startsWith(`${SSO_PROTOCOL}://`));
+  if (ssoUrl) handleSSOUrl(ssoUrl).catch(() => {});
+}
 
 // Restore Sentry user context from stored session (so crash reports identify the user)
 try {
@@ -2297,7 +2304,9 @@ ipcMain.handle('auth:saveToken', async (event, token) => {
       });
     });
 
-    return { success: true };
+    // persisted=false: memory only for this run (the renderer then keeps
+    // the sign-out marker, so the next start does not restore an older copy).
+    return { success: true, persisted: saved.persisted !== false };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -2314,10 +2323,11 @@ ipcMain.handle('auth:getToken', async () => {
 
 ipcMain.handle('auth:clearToken', async () => {
   for (const controller of activeAbortControllers.values()) controller.abort();
-  tokenVault.clearToken();
-  configStore.delete('userInfo');  // Also clear user info on logout
+  const cleared = tokenVault.clearToken();
+  let userInfoCleared = true;
+  try { configStore.delete('userInfo'); } catch { userInfoCleared = false; }  // Also clear user info on logout
   Sentry.setUser(null);  // Clear Sentry user context on logout
-  return { success: true };
+  return cleared.success && userInfoCleared ? { success: true } : { success: false, error: cleared.error || 'User info not removed' };
 });
 
 // Save user info (for session restoration)

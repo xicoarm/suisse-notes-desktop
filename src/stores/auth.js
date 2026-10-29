@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { isElectron, isCapacitor, getPlatform } from '../utils/platform';
-import { storeToken, getToken, storeUserCredentials, getUserCredentials, clearAllCredentials } from '../services/secureStorage';
+import { storeToken, storeUserCredentials, storeSession, loadStoredSession, clearAllCredentials } from '../services/secureStorage';
 import { apiRequest, authenticatedRequest, API_ENDPOINTS, parseJsonSafe } from '../services/api';
 import { addBreadcrumb, captureException, captureMessage, setUser } from '../boot/sentry';
 import { i18n } from '../boot/i18n';
@@ -211,19 +211,15 @@ async function platformSaveToken(token) {
   return storeToken(token);
 }
 
-async function platformGetToken() {
-  if (isElectron()) {
-    const result = await window.electronAPI.auth.getToken();
-    return result?.token || result || null;
-  }
-  return getToken();
+// Sign-out on every platform: marker first, then remove (secureStorage T5).
+async function platformClearToken() {
+  return clearAllCredentials();
 }
 
-async function platformClearToken() {
-  if (isElectron()) {
-    return window.electronAPI.auth.clearToken();
-  }
-  return clearAllCredentials();
+// A login: token + user, and only when both were stored the sign-out marker
+// is cleared (otherwise the next start is signed out).
+async function platformPersistSession(token, user) {
+  return storeSession({ token, user });
 }
 
 async function platformSaveUserInfo(userInfo) {
@@ -231,14 +227,6 @@ async function platformSaveUserInfo(userInfo) {
     return window.electronAPI.auth.saveUserInfo(userInfo);
   }
   return storeUserCredentials(userInfo);
-}
-
-async function platformGetUserInfo() {
-  if (isElectron()) {
-    const result = await window.electronAPI.auth.getUserInfo();
-    return result || null;
-  }
-  return getUserCredentials();
 }
 
 // Token refresh interval: 30 minutes. The backend /api/auth/refresh route is
@@ -418,8 +406,7 @@ export const useAuthStore = defineStore('auth', {
       discardPendingSSO(this);
 
       // Save token and user info securely
-      await platformSaveToken(result.token);
-      await platformSaveUserInfo(result.user);
+      await platformPersistSession(result.token, result.user);
 
       // Set Sentry user context
       setUser(result.user);
@@ -559,8 +546,7 @@ export const useAuthStore = defineStore('auth', {
         this.error = null;
         this.twoFactor = null;
 
-        await platformSaveToken(token);
-        await platformSaveUserInfo(user);
+        await platformPersistSession(token, user);
 
         setUser(user);
         this.startTokenRefresh();
@@ -605,8 +591,8 @@ export const useAuthStore = defineStore('auth', {
      * @returns {Promise<{ success: boolean, cancelled?: boolean, reason?: string }>}
      */
     async completeSSO(payload) {
-      const provider = this.ssoProvider || 'unknown';
-      this.ssoProvider = null;
+      // An ignored result has no side effect at all (no store change, see
+      // boot/sso.js): nothing below the two checks runs for it.
       // Never switch or touch a signed-in session (see boot/sso.js).
       if (this.isAuthenticated) {
         addBreadcrumb({ category: 'sso', message: 'SSO result ignored: already signed in', level: 'warning' });
@@ -614,14 +600,15 @@ export const useAuthStore = defineStore('auth', {
       }
       // SECURITY: only a result of a sign-in this app started is applied.
       // A crafted suissenotes://auth/callback link (web page, message, QR
-      // code, another app) is dropped without a trace in the UI.
+      // code, another app) is dropped without a trace in the UI; a sign-in
+      // in progress keeps waiting for its real result.
       const binding = await bindSsoResult(payload);
       if (!binding.ok) {
         addBreadcrumb({ category: 'sso', message: `SSO result ignored: ${binding.reason}`, level: 'warning' });
-        // Keep waiting for the real result of a sign-in in progress.
-        this.ssoProvider = provider === 'unknown' ? null : provider;
         return { success: false, ignored: true, reason: binding.reason };
       }
+      const provider = this.ssoProvider || 'unknown';
+      this.ssoProvider = null;
       const seq = this.ssoOutcome.seq + 1;
 
       if (payload && !payload.error && !payload.code && payload.authCode && binding.verifier) {
@@ -678,8 +665,7 @@ export const useAuthStore = defineStore('auth', {
           discardPendingSSO(this);
 
           // Save token and user info securely
-          await platformSaveToken(result.token);
-          await platformSaveUserInfo(result.user);
+          await platformPersistSession(result.token, result.user);
 
           setUser(result.user);
 
@@ -784,8 +770,9 @@ export const useAuthStore = defineStore('auth', {
 
     async checkSession() {
       try {
-        const token = await platformGetToken();
-        const userInfo = await platformGetUserInfo();
+        // Purges legacy plaintext copies and honours the sign-out marker:
+        // after a sign-out (even a failed one) nothing is restored.
+        const { token, userInfo } = await loadStoredSession();
 
         // On mobile, getUserCredentials returns {} (empty object) when nothing is stored
         const hasUserInfo = userInfo && Object.keys(userInfo).length > 0;

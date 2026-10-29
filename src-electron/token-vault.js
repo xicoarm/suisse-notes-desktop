@@ -3,21 +3,19 @@
 /**
  * Desktop session token storage (main process).
  *
- * SECURITY: the token is only ever written to disk encrypted by the OS
- * keystore through Electron safeStorage (Windows DPAPI, macOS Keychain,
- * Linux Secret Service / KWallet). There is no plaintext fallback any more:
+ * SECURITY (review 10/2026, "option C"): the token is read only from
+ * ciphertext of a real OS keystore through Electron safeStorage (Windows
+ * DPAPI, macOS Keychain, Linux Secret Service / KWallet) or from memory.
  *
- * - When encryption is unavailable, or on Linux only the "basic_text"
- *   backend is available (a fixed, publicly known key: obfuscation, not
- *   protection), a new token is kept in memory for this run only and any
- *   plaintext copy on disk is deleted. The user signs in again after a
- *   restart on such a system.
- * - Older versions stored the token in plaintext when encryption was
- *   unavailable. Such a legacy value is recognised (a JWT contains '.',
- *   base64 ciphertext never does), migrated once to the encrypted form and
- *   the plaintext copy is replaced. If it cannot be migrated it is still read
- *   (so nobody is signed out by the update) but never rewritten; it is
- *   removed on the next save, refresh or sign-out.
+ * - T1 A plaintext token (older versions wrote one when encryption was
+ *   unavailable; a JWT contains '.', base64 ciphertext never does) and a
+ *   token encrypted with Linux "basic_text" (a fixed, public key) are never
+ *   returned and never re-encrypted: they are deleted from disk. The user
+ *   signs in once.
+ * - T3 Without a secure keystore a new token stays in memory for this run.
+ * - T4 Saving encrypts first, then writes and reads back; on any failure the
+ *   previous raw value is written back (a plaintext one is not: it is
+ *   deleted instead). A failed save never removes the last good copy.
  *
  * The functions take the safeStorage module and the electron-store instance
  * as arguments so they can be unit tested without Electron.
@@ -49,6 +47,17 @@ function isLegacyPlaintext(stored) {
   return typeof stored === 'string' && stored.includes('.');
 }
 
+/** Linux with the obfuscation-only backend: its ciphertext counts as plaintext. */
+function isInsecureBackend(safeStorage, platform) {
+  try {
+    return platform === 'linux'
+      && typeof safeStorage?.getSelectedStorageBackend === 'function'
+      && safeStorage.getSelectedStorageBackend() === 'basic_text';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * @param {object} deps
  * @param {object} deps.safeStorage - electron safeStorage
@@ -57,90 +66,95 @@ function isLegacyPlaintext(stored) {
  * @param {(msg: string) => void} [deps.warn]
  */
 function createTokenVault({ safeStorage, store, platform = process.platform, warn = () => {} }) {
-  // Session-only copy, used when the OS offers no secure storage.
+  // This run's token: set by a save (also when it could not be persisted)
+  // and by a successful decrypt; it wins over the disk.
   let memoryToken = null;
 
   const secure = () => isSecureStorageAvailable(safeStorage, platform);
 
-  const encryptToStore = (token) => {
-    const encrypted = safeStorage.encryptString(token).toString('base64');
-    store.set(TOKEN_KEY, encrypted);
-    // Read back: only a value that decrypts to the same token counts as stored.
-    const check = safeStorage.decryptString(Buffer.from(store.get(TOKEN_KEY), 'base64'));
-    if (check !== token) throw new Error('token read-back mismatch');
-  };
+  /** Delete what must never be read: plaintext, basic_text ciphertext. */
+  function dropInsecureCopy() {
+    let stored;
+    try { stored = store.get(TOKEN_KEY); } catch { return; }
+    if (!stored) return;
+    const plaintext = isLegacyPlaintext(stored);
+    if (!plaintext && !isInsecureBackend(safeStorage, platform)) return;
+    try {
+      store.delete(TOKEN_KEY);
+      warn(`token-vault: ${plaintext ? 'plaintext' : 'insecurely encrypted'} token removed from disk (sign-in required)`);
+    } catch (error) {
+      warn(`token-vault: removing the insecure token copy failed (${error?.message || error}); retried next start`);
+    }
+  }
 
   /**
    * Persist a token. Returns { success, persisted }: persisted=false means
-   * it is held in memory for this run only.
+   * it is held in memory for this run only and the disk is unchanged.
    */
   function saveToken(token) {
     if (!token || typeof token !== 'string') return { success: false, persisted: false, error: 'Token is required' };
     memoryToken = token;
+    dropInsecureCopy();
     if (!secure()) {
-      // Never write plaintext; drop any older plaintext copy.
-      if (store.get(TOKEN_KEY)) store.delete(TOKEN_KEY);
       warn('token-vault: no secure OS storage; token kept in memory for this session only');
       return { success: true, persisted: false };
     }
+    let previous;
+    try { previous = store.get(TOKEN_KEY); } catch { previous = undefined; }
+    let encrypted;
     try {
-      encryptToStore(token);
+      encrypted = safeStorage.encryptString(token).toString('base64');
+    } catch (error) {
+      // Nothing written: the previous value is untouched.
+      warn(`token-vault: encrypting the token failed (${error?.message || error}); kept in memory only`);
+      return { success: true, persisted: false };
+    }
+    try {
+      store.set(TOKEN_KEY, encrypted);
+      const check = safeStorage.decryptString(Buffer.from(store.get(TOKEN_KEY), 'base64'));
+      if (check !== token) throw new Error('token read-back mismatch');
       return { success: true, persisted: true };
     } catch (error) {
-      try { store.delete(TOKEN_KEY); } catch { /* ignore */ }
-      warn(`token-vault: encrypting the token failed (${error?.message || error}); kept in memory only`);
+      // Put the previous raw value back (never a plaintext one).
+      try {
+        if (previous && !isLegacyPlaintext(previous)) store.set(TOKEN_KEY, previous);
+        else store.delete(TOKEN_KEY);
+      } catch { /* the next save or start tries again */ }
+      warn(`token-vault: storing the token failed (${error?.message || error}); previous value kept, new one in memory only`);
       return { success: true, persisted: false };
     }
   }
 
   /** @returns {string|null} */
   function getToken() {
-    const stored = store.get(TOKEN_KEY);
-    if (!stored) return memoryToken;
-
-    if (isLegacyPlaintext(stored)) {
-      // Older versions wrote the raw token when encryption was unavailable.
-      if (secure()) {
-        try {
-          encryptToStore(stored);
-        } catch (error) {
-          warn(`token-vault: migrating the plaintext token failed (${error?.message || error})`);
-          // Ciphertext may be half written: put the legacy value back so the
-          // user stays signed in; it is removed on the next save or sign-out.
-          try { store.set(TOKEN_KEY, stored); } catch { /* ignore */ }
-        }
-      } else {
-        // No OS encryption: the token moves to memory for this run and the
-        // plaintext copy leaves the disk (same rule as saveToken: never
-        // plaintext on disk; the next start asks for a sign-in).
-        try { store.delete(TOKEN_KEY); } catch { /* ignore */ }
-        warn('token-vault: no secure OS storage; plaintext token removed from disk, kept in memory for this session only');
-      }
-      memoryToken = stored;
-      return stored;
-    }
-
+    dropInsecureCopy();
+    if (memoryToken) return memoryToken;
+    let stored;
+    try { stored = store.get(TOKEN_KEY); } catch { return null; }
+    if (!stored || isLegacyPlaintext(stored)) return null;
+    // Encryption unavailable right now (not ready, keystore locked): the
+    // ciphertext stays for a later run, nothing is returned.
+    if (!secure()) return null;
     try {
       const decrypted = safeStorage.decryptString(Buffer.from(stored, 'base64'));
+      if (!decrypted) return null;
       memoryToken = decrypted;
-      if (!secure()) {
-        // Written by an older version with an insecure backend (Linux
-        // basic_text: a fixed, public key - effectively plaintext). Same rule
-        // as for plaintext: memory for this run, off the disk.
-        try { store.delete(TOKEN_KEY); } catch { /* ignore */ }
-        warn('token-vault: token stored with an insecure backend removed from disk, kept in memory for this session only');
-      }
       return decrypted;
     } catch (error) {
       warn(`token-vault: decrypting the token failed (${error?.message || error})`);
-      return memoryToken;
+      return null;
     }
   }
 
+  /** @returns {{ success: boolean, error?: string }} success only when the disk copy is gone */
   function clearToken() {
     memoryToken = null;
-    store.delete(TOKEN_KEY);
-    return { success: true };
+    try {
+      store.delete(TOKEN_KEY);
+      return store.get(TOKEN_KEY) ? { success: false, error: 'Token still on disk' } : { success: true };
+    } catch (error) {
+      return { success: false, error: error?.message || 'Token could not be removed' };
+    }
   }
 
   return { saveToken, getToken, clearToken, isSecure: secure };

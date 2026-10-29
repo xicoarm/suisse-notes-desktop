@@ -8,19 +8,23 @@
  *   (src-capacitor/ios/App/App/Plugins/SecureTokenStorePlugin.swift,
  *   src-capacitor/android/.../SecureTokenStorePlugin.kt).
  *
- * SECURITY: there is NO plaintext fallback. If the keystore is unavailable,
- * storing fails ({ success: false }) and nothing is written to Capacitor
- * Preferences (UserDefaults / SharedPreferences, plaintext and part of the
- * iOS backup). The signed-in session then lasts for this run only.
- *
- * Migration (one time, per key): older versions kept these values in
- * Preferences. On the first read, a legacy value is copied into the
- * keystore, read back, and only then the plaintext copy is removed (a copy
- * left by an abort after the keystore write is removed at the next read). If the
- * keystore write fails, the legacy value is left in place and still returned
- * - the user is not signed out by the update - but it is never rewritten;
- * it is deleted after the next successful save (write + read-back) of that
- * key or at sign-out.
+ * Rules (security review 10/2026, "option C"):
+ * - T1 Values are read only from the keystore (or the auth store's memory).
+ *   Capacitor Preferences (UserDefaults / SharedPreferences: plaintext, part
+ *   of the iOS backup) is never a source - older versions kept the session
+ *   there; such a value is never adopted.
+ * - T2 Every start deletes the five auth keys from Preferences
+ *   (purgeLegacyAuthPreferences); done only when get() confirms they are
+ *   gone, otherwise again at the next start. The user signs in once after
+ *   the update. Pairing keys (bleAppKeys.js) are not touched here.
+ * - T3 Nothing is ever written in plaintext. Without a keystore the session
+ *   lives in memory for this run only.
+ * - T4 A failed save leaves the previous value in place (the native write is
+ *   atomic; a read-back mismatch puts the previous value back).
+ * - T5 Sign-out sets the marker "auth.signedOut" (localStorage, no secret)
+ *   BEFORE anything is removed; it is cleared only after a login was stored.
+ *   While it is set, a start restores no session and removes again - so an
+ *   aborted or failed removal still ends signed out.
  */
 
 import { isElectron, isCapacitor, isIOS, isAndroid } from '../utils/platform';
@@ -33,6 +37,12 @@ const STORAGE_KEYS = {
   USER_EMAIL: 'userEmail',
   USER_INFO: 'userInfo'
 };
+
+/** The five auth keys (keystore entries and legacy Preferences copies). */
+export const AUTH_KEYS = Object.freeze(Object.values(STORAGE_KEYS));
+
+/** Sign-out marker (localStorage). Not a secret: only "1" or absent. */
+export const SIGNED_OUT_MARKER = 'auth.signedOut';
 
 let keystore = null;
 let Preferences = null;
@@ -57,22 +67,71 @@ const getPreferences = async () => {
   return Preferences;
 };
 
-// Keys whose legacy plaintext copy is known to be gone in this app run.
-const legacyChecked = new Set();
+const isEmpty = (v) => v === null || v === undefined || v === '';
+
+// Telemetry counter «Keystore-Schreibfehler»: no key name, no value.
+const reportKeystoreWriteFailure = (key, stage) => {
+  const group = AUTH_KEYS.includes(key) ? 'auth' : 'other';
+  import('../boot/sentry')
+    .then(({ captureMessage }) => captureMessage(`secure-storage: keystore write failed (${stage})`, 'warning', {
+      fingerprint: ['keystore-write-failed', stage],
+      tags: { keystore_write_stage: stage, keystore_key_group: group }
+    }))
+    .catch(() => { /* telemetry optional */ });
+};
+
+/** @returns {boolean} true while a sign-out has not been followed by a stored login. */
+export const isSignedOutMarked = () => {
+  try {
+    return localStorage.getItem(SIGNED_OUT_MARKER) === '1';
+  } catch {
+    return true; // cannot tell: treat as signed out (never restore blindly)
+  }
+};
+
+/** @returns {boolean} true when the marker is set */
+export const markSignedOut = () => {
+  try {
+    localStorage.setItem(SIGNED_OUT_MARKER, '1');
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** Clear the marker; only after a login was stored (storeSession). */
+export const clearSignedOutMarker = () => {
+  try {
+    localStorage.removeItem(SIGNED_OUT_MARKER);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /**
- * Remove a legacy plaintext copy; never throws.
- * @returns {Promise<boolean>} true only when the copy is confirmed gone
+ * T2: delete the five auth keys from Preferences (mobile). Never reads a
+ * value for use, never throws.
+ * @returns {Promise<boolean>} true only when get() confirms every key is gone
  */
-const removeLegacy = async (key) => {
+export const purgeLegacyAuthPreferences = async () => {
+  if (!isCapacitor()) return true;
+  let prefs;
   try {
-    const { plugin: prefs } = await getPreferences();
-    await prefs.remove({ key });
-    const left = (await prefs.get({ key }))?.value;
-    return left === null || left === undefined || left === '';
+    ({ plugin: prefs } = await getPreferences());
   } catch {
-    return false; // Preferences unavailable: try again next time
+    return false;
   }
+  let done = true;
+  for (const key of AUTH_KEYS) {
+    try {
+      await prefs.remove({ key });
+      if (!isEmpty((await prefs.get({ key }))?.value)) done = false;
+    } catch {
+      done = false; // next start tries again
+    }
+  }
+  return done;
 };
 
 /**
@@ -84,92 +143,73 @@ const removeLegacy = async (key) => {
 export const setSecureItem = async (key, value) => {
   if (!key || typeof value !== 'string') return { success: false, error: 'Key and string value are required' };
   if (!isCapacitor()) return { success: false, error: 'Unsupported platform' };
-  // Order: write -> read back -> only then delete the legacy plaintext copy,
-  // so an abort in between never leaves the key without any value. An abort
-  // after the write leaves a plaintext copy behind; getSecureItem removes it
-  // at the next read (keystore value present).
-  let result;
+  let store;
   try {
-    const { plugin: store } = await getKeystore();
-    await store.set({ key, value });
-    const check = await store.get({ key });
-    result = check?.value === value
-      ? { success: true }
-      : { success: false, error: 'Keystore read-back mismatch' };
+    ({ plugin: store } = await getKeystore());
   } catch (error) {
-    console.error('Secure storage: keystore write failed; not stored (no plaintext fallback)');
-    result = { success: false, error: error?.message || 'Keystore unavailable' };
+    reportKeystoreWriteFailure(key, 'unavailable');
+    return { success: false, error: error?.message || 'Keystore unavailable' };
   }
-  // Only after a successful write AND read-back: then the keystore holds the
-  // value and the plaintext copy can go. After a failed write the legacy copy
-  // stays - it may be the last persistent copy of the session.
-  if (result.success && (await removeLegacy(key))) legacyChecked.add(key);
-  return result;
+  // Previous value, to put back if the read-back does not match (T4).
+  let previous;
+  let previousKnown = false;
+  try {
+    const before = (await store.get({ key }))?.value;
+    previous = typeof before === 'string' ? before : null;
+    previousKnown = true;
+  } catch { /* unknown: the write below decides */ }
+  try {
+    await store.set({ key, value });
+  } catch (error) {
+    // The native write is atomic: the previous value is unchanged.
+    console.error('Secure storage: keystore write failed; not stored (no plaintext fallback)');
+    reportKeystoreWriteFailure(key, 'write');
+    return { success: false, error: error?.message || 'Keystore unavailable' };
+  }
+  let check;
+  try {
+    check = (await store.get({ key }))?.value;
+  } catch { check = undefined; }
+  if (check === value) return { success: true };
+  if (previousKnown) {
+    try {
+      if (previous === null) await store.remove({ key });
+      else await store.set({ key, value: previous });
+    } catch { /* nothing more we can do; the session stays in memory */ }
+  }
+  reportKeystoreWriteFailure(key, 'readback');
+  return { success: false, error: 'Keystore read-back mismatch' };
 };
 
 /**
- * Read a secret from the platform keystore (mobile only), migrating a legacy
- * plaintext Preferences value once.
+ * Read a secret from the platform keystore (mobile only). Never from
+ * Preferences (T1).
  * @param {string} key
  * @returns {Promise<string|null>}
  */
 export const getSecureItem = async (key) => {
   if (!key || !isCapacitor()) return null;
-  let keystoreOk = true;
   try {
     const { plugin: store } = await getKeystore();
     const result = await store.get({ key });
-    if (result && typeof result.value === 'string') {
-      // A migration or save that was aborted after the keystore write but
-      // before the plaintext delete left a legacy copy behind: remove it
-      // (once per key and app run).
-      if (!legacyChecked.has(key) && (await removeLegacy(key))) {
-        legacyChecked.add(key);
-      }
-      return result.value;
-    }
+    return result && typeof result.value === 'string' && result.value !== '' ? result.value : null;
   } catch {
-    keystoreOk = false;
+    return null;
   }
-
-  // Legacy plaintext value from an older version?
-  let legacy = null;
-  try {
-    const { plugin: prefs } = await getPreferences();
-    legacy = (await prefs.get({ key }))?.value || null;
-  } catch {
-    legacy = null;
-  }
-  if (!legacy) return null;
-
-  if (keystoreOk) {
-    // Migration: write -> read back -> delete the plaintext copy.
-    try {
-      const { plugin: store } = await getKeystore();
-      await store.set({ key, value: legacy });
-      const check = await store.get({ key });
-      if (check?.value === legacy && (await removeLegacy(key))) {
-        legacyChecked.add(key);
-      }
-    } catch {
-      // Keep the legacy value: the user stays signed in; it is never rewritten.
-    }
-  }
-  return legacy;
 };
 
 /**
- * Remove a secret from the keystore and any legacy plaintext copy.
+ * Remove a secret from the keystore.
  * @param {string} key
- * @returns {Promise<{success: boolean, error?: string}>}
+ * @returns {Promise<{success: boolean, error?: string}>} success only when confirmed gone
  */
 export const removeSecureItem = async (key) => {
   if (!key || !isCapacitor()) return { success: false, error: 'Unsupported platform' };
-  await removeLegacy(key);
   try {
     const { plugin: store } = await getKeystore();
     await store.remove({ key });
-    return { success: true };
+    const left = (await store.get({ key }))?.value;
+    return isEmpty(left) ? { success: true } : { success: false, error: 'Keystore value still present' };
   } catch (error) {
     return { success: false, error: error?.message || 'Keystore unavailable' };
   }
@@ -342,12 +382,9 @@ export const storeUserCredentials = async (credentials) => {
     }
 
     if (isCapacitor()) {
-      // The full user object only; the separate userId/userEmail keys of
-      // older versions are not written any more (and removed if present).
-      const result = await setSecureItem(STORAGE_KEYS.USER_INFO, JSON.stringify(credentials || {}));
-      await removeLegacy(STORAGE_KEYS.USER_ID);
-      await removeLegacy(STORAGE_KEYS.USER_EMAIL);
-      return result;
+      // The full user object only (the per-field keys of older versions
+      // are never written; the start purges their plaintext copies).
+      return await setSecureItem(STORAGE_KEYS.USER_INFO, JSON.stringify(credentials || {}));
     }
 
     return { success: false, error: 'Unsupported platform' };
@@ -372,22 +409,13 @@ export const getUserCredentials = async () => {
 
     if (isCapacitor()) {
       const raw = await getSecureItem(STORAGE_KEYS.USER_INFO);
-      if (raw) {
-        try {
-          return JSON.parse(raw);
-        } catch {
-          // fall through to legacy keys
-        }
+      if (!raw) return {};
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+      } catch {
+        return {};
       }
-
-      // Oldest format: individual keys (migrated into the keystore on read)
-      const userId = await getSecureItem(STORAGE_KEYS.USER_ID);
-      const email = await getSecureItem(STORAGE_KEYS.USER_EMAIL);
-
-      return {
-        userId: userId || undefined,
-        email: email || undefined
-      };
     }
 
     return {};
@@ -398,29 +426,36 @@ export const getUserCredentials = async () => {
 };
 
 /**
- * Clear all stored credentials (logout): keystore entries and every legacy
- * plaintext copy.
+ * Clear all stored credentials (sign-out). The sign-out marker is set FIRST
+ * (T5): if a removal fails or the app is killed in between, the next start
+ * restores nothing and removes again.
  * @returns {Promise<{success: boolean, error?: string}>}
  */
 export const clearAllCredentials = async () => {
+  markSignedOut();
   try {
     if (isElectron()) {
-      await window.electronAPI.auth.clearToken();
+      let ok = true;
+      const clearToken = await window.electronAPI.auth.clearToken();
+      if (clearToken && clearToken.success === false) ok = false;
       if (window.electronAPI.auth.clearRefreshToken) {
-        await window.electronAPI.auth.clearRefreshToken();
+        const r = await window.electronAPI.auth.clearRefreshToken();
+        if (r && r.success === false) ok = false;
       }
       if (window.electronAPI.auth.clearUserInfo) {
-        await window.electronAPI.auth.clearUserInfo();
+        const r = await window.electronAPI.auth.clearUserInfo();
+        if (r && r.success === false) ok = false;
       }
-      return { success: true };
+      return ok ? { success: true } : { success: false, error: 'Credentials not fully removed' };
     }
 
     if (isCapacitor()) {
       let ok = true;
-      for (const key of Object.values(STORAGE_KEYS)) {
+      for (const key of AUTH_KEYS) {
         const result = await removeSecureItem(key);
         if (!result.success) ok = false;
       }
+      if (!(await purgeLegacyAuthPreferences())) ok = false;
       return ok ? { success: true } : { success: false, error: 'Keystore unavailable' };
     }
 
@@ -429,6 +464,36 @@ export const clearAllCredentials = async () => {
     console.error('Error clearing all credentials:', error?.message || error);
     return { success: false, error: error.message };
   }
+};
+
+/**
+ * Store a login (token + user). Clears the sign-out marker only when both
+ * were persisted (T5); otherwise the session lives in memory for this run
+ * and the next start is signed out.
+ * @returns {Promise<{success: boolean, persisted: boolean}>}
+ */
+export const storeSession = async ({ token, user }) => {
+  const saved = await storeToken(token);
+  const info = await storeUserCredentials(user);
+  const persisted = !!(saved && saved.success && saved.persisted !== false && info && info.success !== false);
+  if (persisted) clearSignedOutMarker();
+  return { success: !!(saved && saved.success), persisted };
+};
+
+/**
+ * Start: the stored session, or nothing. Purges the legacy plaintext copies
+ * (T2) and honours the sign-out marker (T5).
+ * @returns {Promise<{ token: string|null, userInfo: object|null, signedOut?: boolean }>}
+ */
+export const loadStoredSession = async () => {
+  await purgeLegacyAuthPreferences();
+  if (isSignedOutMarked()) {
+    await clearAllCredentials();
+    return { token: null, userInfo: null, signedOut: true };
+  }
+  const token = await getToken();
+  const userInfo = await getUserCredentials();
+  return { token, userInfo };
 };
 
 /**

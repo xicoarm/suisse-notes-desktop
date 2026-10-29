@@ -65,41 +65,38 @@ describe('token-vault (desktop session token)', () => {
     expect(store.data.authToken).toBeUndefined();
   });
 
-  it('migrates a legacy plaintext token once to the encrypted form', () => {
-    const store = memoryStore({ authToken: JWT });
-    const vault = createTokenVault({ safeStorage: fakeSafeStorage(), store, platform: 'win32' });
-    expect(vault.getToken()).toBe(JWT);
-    expect(store.data.authToken).not.toContain('.');
-    expect(fakeSafeStorage().decryptString(Buffer.from(store.data.authToken, 'base64'))).toBe(JWT);
-  });
-
-  it('keeps a legacy plaintext token readable when it cannot be migrated (no sign-out by the update)', () => {
-    const store = memoryStore({ authToken: JWT });
-    const vault = createTokenVault({ safeStorage: fakeSafeStorage({ failEncrypt: true }), store, platform: 'win32' });
-    expect(vault.getToken()).toBe(JWT);
-    expect(store.data.authToken).toBe(JWT);
-  });
-
-  it('without OS encryption a legacy plaintext token moves to memory and leaves the disk', () => {
-    for (const [platform, safe] of [['win32', fakeSafeStorage({ available: false })], ['linux', fakeSafeStorage({ backend: 'basic_text' })]]) {
+  it('a plaintext token of an older version is never returned and is deleted (all backends)', () => {
+    const cases = [
+      ['win32', fakeSafeStorage()],
+      ['win32', fakeSafeStorage({ failEncrypt: true })],
+      ['win32', fakeSafeStorage({ available: false })],
+      ['linux', fakeSafeStorage({ backend: 'basic_text' })]
+    ];
+    for (const [platform, safe] of cases) {
       const store = memoryStore({ authToken: JWT });
       const vault = createTokenVault({ safeStorage: safe, store, platform });
-      expect(vault.getToken()).toBe(JWT);
-      expect(store.data.authToken).toBeUndefined();
-      expect(vault.getToken()).toBe(JWT); // this run keeps working
-      const restarted = createTokenVault({ safeStorage: safe, store, platform });
-      expect(restarted.getToken()).toBeNull();
+      expect(vault.getToken()).toBeNull();
+      expect(store.data.authToken).toBeUndefined(); // deleted, not re-encrypted
+      expect(createTokenVault({ safeStorage: safe, store, platform }).getToken()).toBeNull();
     }
   });
 
-  it('update case: a token an older version encrypted with Linux basic_text leaves the disk after the RAM hand-over', () => {
+  it('a token an older version encrypted with Linux basic_text is never returned and is deleted', () => {
     const basic = fakeSafeStorage({ backend: 'basic_text' });
     const store = memoryStore({ authToken: basic.encryptString(JWT).toString('base64') });
     const vault = createTokenVault({ safeStorage: basic, store, platform: 'linux' });
-    expect(vault.getToken()).toBe(JWT);
+    expect(vault.getToken()).toBeNull();
     expect(store.data.authToken).toBeUndefined();
-    expect(vault.getToken()).toBe(JWT); // this run keeps working
     expect(createTokenVault({ safeStorage: basic, store, platform: 'linux' }).getToken()).toBeNull();
+  });
+
+  it('secure ciphertext stays on disk while encryption is unavailable, and is read again later', () => {
+    const safe = fakeSafeStorage();
+    const ciphertext = safe.encryptString(JWT).toString('base64');
+    const store = memoryStore({ authToken: ciphertext });
+    expect(createTokenVault({ safeStorage: fakeSafeStorage({ available: false }), store, platform: 'darwin' }).getToken()).toBeNull();
+    expect(store.data.authToken).toBe(ciphertext);
+    expect(createTokenVault({ safeStorage: safe, store, platform: 'darwin' }).getToken()).toBe(JWT);
   });
 
   it('a secure backend keeps its encrypted token on disk', () => {
@@ -109,10 +106,43 @@ describe('token-vault (desktop session token)', () => {
     expect(store.data.authToken).toBeDefined();
   });
 
-  it('a failed encryption on save leaves nothing on disk', () => {
+  it('a failed encryption on save leaves no plaintext on disk', () => {
     const store = memoryStore({ authToken: 'old.plain.token' });
     const vault = createTokenVault({ safeStorage: fakeSafeStorage({ failEncrypt: true }), store, platform: 'win32' });
     expect(vault.saveToken(JWT)).toEqual({ success: true, persisted: false });
+    expect(store.data.authToken).toBeUndefined();
+  });
+
+  it('a failed encryption keeps the previous ciphertext; the restart restores the previous token (T4)', () => {
+    const safe = fakeSafeStorage();
+    const OLD = 'old.jwt.token';
+    const store = memoryStore({ authToken: safe.encryptString(OLD).toString('base64') });
+    const vault = createTokenVault({ safeStorage: fakeSafeStorage({ failEncrypt: true }), store, platform: 'win32' });
+    expect(vault.saveToken(JWT)).toEqual({ success: true, persisted: false });
+    expect(vault.saveToken(JWT)).toEqual({ success: true, persisted: false }); // twice, same token
+    expect(vault.getToken()).toBe(JWT); // this run uses the new token
+    expect(createTokenVault({ safeStorage: safe, store, platform: 'win32' }).getToken()).toBe(OLD);
+  });
+
+  it('a read-back mismatch writes the previous raw value back; the restart restores it (T4)', () => {
+    const safe = fakeSafeStorage();
+    const OLD = 'old.jwt.token';
+    const oldRaw = safe.encryptString(OLD).toString('base64');
+    const store = memoryStore({ authToken: oldRaw });
+    // The disk returns something else than what was written (once).
+    const flaky = { ...store, set: (k, v) => { store.data[k] = k === 'authToken' && v !== oldRaw ? Buffer.from('enc:xxx').toString('base64') : v; } };
+    const vault = createTokenVault({ safeStorage: safe, store: flaky, platform: 'darwin' });
+    expect(vault.saveToken(JWT)).toEqual({ success: true, persisted: false });
+    expect(store.data.authToken).toBe(oldRaw);
+    expect(createTokenVault({ safeStorage: safe, store, platform: 'darwin' }).getToken()).toBe(OLD);
+  });
+
+  it('a read-back mismatch without a previous value leaves nothing on disk', () => {
+    const safe = fakeSafeStorage();
+    const store = memoryStore();
+    const flaky = { ...store, set: (k) => { store.data[k] = Buffer.from('enc:xxx').toString('base64'); } };
+    const vault = createTokenVault({ safeStorage: safe, store: flaky, platform: 'darwin' });
+    expect(vault.saveToken(JWT).persisted).toBe(false);
     expect(store.data.authToken).toBeUndefined();
   });
 
@@ -120,8 +150,17 @@ describe('token-vault (desktop session token)', () => {
     const store = memoryStore();
     const vault = createTokenVault({ safeStorage: fakeSafeStorage(), store, platform: 'darwin' });
     vault.saveToken(JWT);
-    vault.clearToken();
+    expect(vault.clearToken()).toEqual({ success: true });
     expect(store.data.authToken).toBeUndefined();
     expect(vault.getToken()).toBeNull();
+  });
+});
+
+describe('token-vault: clearToken reports a failed removal', () => {
+  it('success only when the disk copy is gone', () => {
+    const store = memoryStore();
+    const vault = createTokenVault({ safeStorage: fakeSafeStorage(), store: { ...store, delete: () => { throw new Error('EACCES'); } }, platform: 'darwin' });
+    vault.saveToken(JWT);
+    expect(vault.clearToken().success).toBe(false);
   });
 });
