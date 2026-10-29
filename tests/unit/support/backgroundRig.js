@@ -22,6 +22,7 @@ const require = createRequire(import.meta.url);
 const axios = require('axios');
 const FormData = require('form-data');
 const { createScopeRegistry } = require('../../../src-electron/session-scope.js');
+const { createDurableFiles } = require('../../../src-electron/durable-files.js');
 const { installApiResilience } = require('../../../src-electron/api-resilience.js');
 const { createBackground } = require('../../../src-electron/background/index.js');
 const { tokenUserId, canUploadForUser, verifiedUploadResult } = require('../../../src-electron/upload-safety.js');
@@ -69,8 +70,9 @@ function defaultAnswer(config) {
  *   (the answer was already on the wire): tests the late-result path
  * @param {object} [opts.read] overrides of main's read helpers
  * @param {object} [opts.ports] overrides of the ports
+ * @param {string} [opts.session] see below
  */
-export function createBackgroundRig({ recordings = ['r1'], lateAnswers = false, read: readOverrides = {}, ports: portOverrides = {}, history, queue, active } = {}) {
+export function createBackgroundRig({ session = 'signedIn', recordings = ['r1'], lateAnswers = false, read: readOverrides = {}, ports: portOverrides = {}, history, queue, active } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bg-rig-'));
   for (const id of recordings) {
     fs.mkdirSync(path.join(root, id), { recursive: true });
@@ -121,6 +123,7 @@ export function createBackgroundRig({ recordings = ['r1'], lateAnswers = false, 
       set: (k, v) => { effect(name, k); data[k] = JSON.parse(JSON.stringify(v)); },
     };
   }
+  const durable = createDurableFiles(countingFs);
   const stores = {
     history: memoryStore('history', 'recordings', history ?? recordings.map((id) => ({ id, userId: 'a', uploadStatus: 'pending' }))),
     queue: memoryStore('queue', 'pendingUploads', queue ?? []),
@@ -169,15 +172,32 @@ export function createBackgroundRig({ recordings = ['r1'], lateAnswers = false, 
     clearInterval: (h) => clearInterval(h),
   };
 
+  // The session at start: 'signedIn' (a), 'signedOut' (fresh install),
+  // 'tombstone' (a signed in, then out, restart), 'held' (a signed in, the
+  // record is not readable at this start), 'unreadable' (broken record).
   let scopes;
   const disk = createDisk();
+  if (session === 'tombstone' || session === 'held') {
+    const before = boot(disk);
+    before.passwordSignIn('a').apply();
+    if (session === 'tombstone') before.authority.signOut();
+  }
+  if (session === 'held') disk.failRecordRead = true;
+  if (session === 'unreadable') disk.record = '{broken';
   const s = boot(disk, { onAbort: () => scopes && scopes.abortAll() });
-  s.passwordSignIn('a').apply();
+  if (session === 'signedIn') s.passwordSignIn('a').apply();
 
   const ports = {
     probeDuration: async (filePath) => { spawns.push({ port: 'probeDuration', filePath, after: mark.changed }); return 45; },
     probeAudio: async (filePath) => { spawns.push({ port: 'probeAudio', filePath, after: mark.changed }); return { format: { duration: '45' } }; },
-    finalizeForRecovery: async (recordId) => { spawns.push({ port: 'finalizeForRecovery', recordId, after: mark.changed }); return { success: true }; },
+    // As main's finalizeRecording: media work writes temporary files, the
+    // output is published with a durable rename (publish gate of the scope).
+    finalizeForRecovery: async (recordId) => {
+      spawns.push({ port: 'finalizeForRecovery', recordId, after: mark.changed });
+      const outputPath = path.join(root, recordId, 'audio.webm');
+      await durable.writeFileAtomic(outputPath, Buffer.alloc(10, 2));
+      return { success: true, outputPath, duration: 45, fileSize: 10, fileSizeMb: '0.00' };
+    },
     ...portOverrides,
   };
   scopes = createScopeRegistry({
@@ -234,7 +254,7 @@ export function createBackgroundRig({ recordings = ['r1'], lateAnswers = false, 
   const filePath = (id = 'r1') => path.join(root, id, 'audio.webm');
 
   return {
-    root, disk, s, scopes, background, uploads: background.uploads, stores, http, answer, hooks, read, report,
+    root, fs: countingFs, disk, s, scopes, background, uploads: background.uploads, stores, http, answer, hooks, read, report,
     effects, requests, sent, sleeps, spawns, streams, mark,
     change, signOut, signInB, signOutThenB, signInA, refresh, cleanup, filePath,
     effectsAfter: () => effects.filter((e) => e.after),

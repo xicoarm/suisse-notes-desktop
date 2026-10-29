@@ -718,27 +718,10 @@ const background = createBackground({
 });
 
 /** Upload queue run (startup, after sign-in, periodic, manual retry). No session: nothing. */
-function processPendingUploads() {
-  const scope = scopes.open();
-  if (!scope) return Promise.resolve({ noSession: true });
-  return background.pending.run(scope);
-}
+const processPendingUploads = () => background.startQueue(scopes);
 
-/**
- * R-S4: recovery and then clean-up, only with a released session; started
- * again after the next sign-in (afterSessionApplied) and when a held start is
- * released. Once per session.
- */
-function startRecovery(reason) {
-  const scope = scopes.open();
-  if (!scope) {
-    log.info(`Recovery (${reason}): no released session - it runs after the next sign-in`);
-    return Promise.resolve({ noSession: true });
-  }
-  return background.recovery.runRecoveryAndCleanup(scope).catch(err => {
-    log.error('Error recovering orphaned recordings:', err);
-  });
-}
+/** R-S4: recovery, then clean-up; only with a released session, once per session. */
+const startRecovery = (reason) => background.startRecovery(scopes, reason);
 
 // Set FFmpeg path (cross-platform)
 if (app.isPackaged) {

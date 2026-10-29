@@ -42,7 +42,7 @@ function createRecovery({ read, pure, pending, report, config, log }) {
   let running = null;      // scope of the recovery in progress
   let completed = null;    // scope whose recovery completed (once per session)
 
-  /** @returns {Promise<{ completed: true } | { sessionEnded: true } | { skipped: true }>} */
+  /** @returns {Promise<{ completed: true } | { sessionEnded: true } | { skipped: true } | { failed: true }>} */
   async function recoverOrphanedRecordings(scope, { rescan = false } = {}) {
     if (running && running.alive()) {
       log.warn('Recovery already in progress, skipping');
@@ -60,9 +60,10 @@ function createRecovery({ read, pure, pending, report, config, log }) {
         log.info('Recovery ended by a session change; it runs again after the next sign-in');
         return { sessionEnded: true };
       }
+      // Not complete: no clean-up after it; the next start tries again.
       log.error('Error during orphaned recording recovery:', error);
       report.captureException(error);
-      return { completed: true };
+      return { failed: true };
     } finally {
       if (running === scope) running = null;
     }

@@ -29,6 +29,29 @@ function createBackground({ config, read, pure, report, hooks, log }) {
     uploads,
     pending,
     recovery,
+    /** Upload queue run (startup, after sign-in, periodic, manual retry). No released session: nothing. */
+    startQueue(registry) {
+      const scope = registry.open();
+      if (!scope) return Promise.resolve({ noSession: true });
+      return pending.run(scope);
+    },
+    /**
+     * R-S4: recovery and then clean-up, only with a released session (no
+     * tombstone, not held). Main starts it at startup and after every
+     * applied session (sign-in, SSO, release of a held start); once per
+     * session.
+     */
+    startRecovery(registry, reason) {
+      const scope = registry.open();
+      if (!scope) {
+        log.info(`Recovery (${reason}): no released session - it runs after the next sign-in`);
+        return Promise.resolve({ noSession: true });
+      }
+      return recovery.runRecoveryAndCleanup(scope).catch((err) => {
+        log.error('Error recovering orphaned recordings:', err);
+        return { failed: true };
+      });
+    },
     /** Blob clean-up after a user cancel, in the scope of the cancelled upload. */
     abortDirectUpload: (scope, { recordId, audioFileId }) => abortDirectUpload(scope, { apiBaseUrl: config.apiBaseUrl, recordId, audioFileId, log }),
   };
