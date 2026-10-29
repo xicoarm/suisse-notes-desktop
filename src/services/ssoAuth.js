@@ -56,19 +56,21 @@ export async function openSSO({ url, callbackScheme = 'suissenotes' }) {
         window.dispatchEvent(new CustomEvent('sso:callback', { detail: payload }));
       } else {
         captureMessage('sso: iOS callback URL did not parse as an SSO callback', 'warning');
-        window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: 'invalid_callback' } }));
+        window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: 'invalid_callback', local: true } }));
       }
     } catch (err) {
       const msg = err?.message || String(err);
+      // `local: true`: the browser session this app opened ended here (no URL
+      // involved); it ends the pending flow without a state (services/ssoFlow.js).
       // Treat user-cancel quietly (Android USER_CANCELED, iOS
       // ASWebAuthenticationSession error 1 = canceledLogin); everything else
       // surfaces as a warning.
       if (msg === 'USER_CANCELED' || /WebAuthenticationSession error 1\b|canceledLogin/i.test(msg)) {
         addBreadcrumb({ category: 'sso', message: 'SSOAuth.startAuth cancelled by user', level: 'info' });
-        window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: 'canceled' } }));
+        window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: 'canceled', local: true } }));
       } else {
         captureMessage(`sso: SSOAuth.startAuth rejected reason=${msg.slice(0, 200)}`, 'warning');
-        window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: msg } }));
+        window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: msg, local: true } }));
       }
     }
     return;

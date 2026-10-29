@@ -622,6 +622,11 @@ export const useAuthStore = defineStore('auth', {
         this.ssoProvider = provider === 'unknown' ? null : provider;
         return { success: false, ignored: true, reason: binding.reason };
       }
+      if (binding.legacy) {
+        // Server without the state echo: accepted only for the flow this app
+        // process started, until the first echo (services/ssoFlow.js).
+        addBreadcrumb({ category: 'sso', message: 'SSO result without state echo accepted (legacy fallback)', level: 'warning' });
+      }
       const seq = this.ssoOutcome.seq + 1;
 
       if (payload && !payload.error && !payload.code && payload.authCode && binding.verifier) {

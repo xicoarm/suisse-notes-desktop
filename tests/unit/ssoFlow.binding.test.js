@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createRequire } from 'node:module';
-import { beginSsoFlow, withFlowParams, consumeSsoFlow, hasPendingSsoFlow, clearSsoFlow, pkceChallenge, FLOW_TTL_MS } from '../../src/services/ssoFlow';
+import { beginSsoFlow, withFlowParams, consumeSsoFlow, hasPendingSsoFlow, clearSsoFlow, pkceChallenge, resetSsoStateEcho, FLOW_TTL_MS } from '../../src/services/ssoFlow';
 import { parseSSOCallbackUrl } from '../../src/utils/ssoCallback';
 
 const require = createRequire(import.meta.url);
@@ -9,7 +9,7 @@ const mainFlow = require('../../src-electron/sso-flow.js');
 const userB64 = Buffer.from(JSON.stringify({ id: 'u1' })).toString('base64url');
 
 describe('mobile SSO flow (state + PKCE)', () => {
-  beforeEach(() => clearSsoFlow());
+  beforeEach(() => { clearSsoFlow(); resetSsoStateEcho(); });
 
   it('adds state and an S256 challenge to the login URL', async () => {
     const flow = await beginSsoFlow('microsoft');
@@ -30,16 +30,43 @@ describe('mobile SSO flow (state + PKCE)', () => {
     expect(consumeSsoFlow(payload)).toEqual({ ok: false, reason: 'no_pending_flow' });
   });
 
-  it('a success without state or with a foreign state is ignored and the real flow stays pending', async () => {
+  it('a foreign state is ignored and the real flow stays pending', async () => {
     const flow = await beginSsoFlow('google');
-    expect(consumeSsoFlow(parseSSOCallbackUrl(`suissenotes://auth/callback?token=t&user=${userB64}`)))
-      .toEqual({ ok: false, reason: 'missing_state' });
     expect(consumeSsoFlow(parseSSOCallbackUrl(`suissenotes://auth/callback?state=other&token=t&user=${userB64}`)))
+      .toEqual({ ok: false, reason: 'state_mismatch' });
+    expect(consumeSsoFlow(parseSSOCallbackUrl('suissenotes://auth/callback?state=other&error=canceled')))
       .toEqual({ ok: false, reason: 'state_mismatch' });
     expect(hasPendingSsoFlow()).toBe(true);
     const ok = consumeSsoFlow(parseSSOCallbackUrl(`suissenotes://auth/callback?state=${flow.state}&auth_code=c1`));
-    expect(ok).toMatchObject({ ok: true, provider: 'google' });
-    expect(ok.verifier).toMatch(/^[A-Za-z0-9_-]{64}$/);
+    expect(ok).toEqual({ ok: true, provider: 'google', verifier: expect.stringMatching(/^[A-Za-z0-9_-]{64}$/) });
+  });
+
+  it('server without the state echo: success accepted for the flow this process started (legacy fallback)', async () => {
+    await beginSsoFlow('google');
+    const ok = consumeSsoFlow(parseSSOCallbackUrl(`suissenotes://auth/callback?token=t&user=${userB64}`));
+    expect(ok).toMatchObject({ ok: true, provider: 'google', legacy: true });
+    expect(hasPendingSsoFlow()).toBe(false);
+  });
+
+  it('after the first echo a callback without state is never accepted again (no downgrade)', async () => {
+    const first = await beginSsoFlow('google');
+    expect(consumeSsoFlow({ token: 't', user: {}, state: first.state })).toEqual(expect.objectContaining({ ok: true }));
+    await beginSsoFlow('google');
+    expect(consumeSsoFlow(parseSSOCallbackUrl(`suissenotes://auth/callback?token=t&user=${userB64}`)))
+      .toEqual({ ok: false, reason: 'missing_state' });
+    expect(consumeSsoFlow(parseSSOCallbackUrl('suissenotes://auth/callback?error=canceled')))
+      .toEqual({ ok: false, reason: 'missing_state' });
+    expect(hasPendingSsoFlow()).toBe(true);
+    expect(localStorage.getItem('sso.stateEcho.v1')).toBe('1');
+  });
+
+  it('legacy fallback refuses a flow restored from storage (not started in this process)', async () => {
+    await beginSsoFlow('google');
+    vi.resetModules();
+    const fresh = await import('../../src/services/ssoFlow');
+    expect(fresh.hasPendingSsoFlow()).toBe(true);
+    expect(fresh.consumeSsoFlow({ token: 't', user: {}, state: '' })).toEqual({ ok: false, reason: 'missing_state' });
+    expect(fresh.hasPendingSsoFlow()).toBe(true);
   });
 
   it('a flow is single-use', async () => {
@@ -56,9 +83,22 @@ describe('mobile SSO flow (state + PKCE)', () => {
     expect(consumeSsoFlow(payload, t0 + FLOW_TTL_MS + 1)).toEqual({ ok: false, reason: 'no_pending_flow' });
   });
 
-  it('an error/cancel ends a started sign-in even without state', async () => {
+  it('a local browser abort (set by the app, never by a URL) ends the flow', async () => {
+    const first = await beginSsoFlow('microsoft');
+    expect(consumeSsoFlow({ token: 't', user: {}, state: first.state }).ok).toBe(true);
     await beginSsoFlow('microsoft');
-    expect(consumeSsoFlow({ error: 'canceled' }).ok).toBe(true);
+    expect(consumeSsoFlow({ error: 'canceled', local: true }).ok).toBe(true);
+    expect(hasPendingSsoFlow()).toBe(false);
+  });
+
+  it('a URL cannot claim to be a local abort', () => {
+    expect(parseSSOCallbackUrl('suissenotes://auth/callback?error=canceled&local=true')).toEqual({ error: 'canceled', state: '' });
+  });
+
+  it('an error with the matching state ends the flow', async () => {
+    const flow = await beginSsoFlow('microsoft');
+    expect(consumeSsoFlow(parseSSOCallbackUrl(`suissenotes://auth/callback?state=${flow.state}&error=x&code=sso_cancelled`)).ok).toBe(true);
+    expect(hasPendingSsoFlow()).toBe(false);
   });
 
   it('a newer sign-in replaces the older one', async () => {
@@ -96,11 +136,48 @@ describe('desktop main SSO flow (src-electron/sso-flow.js)', () => {
     expect(url.searchParams.get('app_state')).toBe(flow.state);
     expect(store.consume(mainFlow.parseCallbackUrl(`suissenotes://auth/callback?state=bad&token=t&user=${userB64}`)))
       .toEqual({ ok: false, reason: 'state_mismatch' });
+    const ok = store.consume(mainFlow.parseCallbackUrl(`suissenotes://auth/callback?state=${flow.state}&token=t&user=${userB64}`));
+    expect(ok).toEqual({ ok: true, provider: 'microsoft', verifier: expect.any(String) });
+    expect(store.hasPending()).toBe(false);
+  });
+
+  it('server without the state echo: legacy fallback for the in-memory flow, until the first echo', () => {
+    let seen = false;
+    const echo = { seen: () => seen, markSeen: () => { seen = true; } };
+    const store = mainFlow.createSsoFlowStore({ echo });
+    store.begin('google');
+    expect(store.consume(mainFlow.parseCallbackUrl(`suissenotes://auth/callback?token=t&user=${userB64}`)))
+      .toMatchObject({ ok: true, legacy: true });
+    const flow = store.begin('google');
+    expect(store.consume({ state: flow.state, token: 't', user: {} }).ok).toBe(true);
+    expect(seen).toBe(true);
+    store.begin('google');
     expect(store.consume(mainFlow.parseCallbackUrl(`suissenotes://auth/callback?token=t&user=${userB64}`)))
       .toEqual({ ok: false, reason: 'missing_state' });
-    const ok = store.consume(mainFlow.parseCallbackUrl(`suissenotes://auth/callback?state=${flow.state}&token=t&user=${userB64}`));
-    expect(ok).toMatchObject({ ok: true, provider: 'microsoft' });
-    expect(store.hasPending()).toBe(false);
+    expect(store.hasPending()).toBe(true);
+    // A restarted app with the persisted flag refuses it too.
+    const restarted = mainFlow.createSsoFlowStore({ echo });
+    restarted.begin('google');
+    expect(restarted.consume({ token: 't', user: {}, state: '' })).toEqual({ ok: false, reason: 'missing_state' });
+  });
+
+  it('a foreign error without state cannot abort a sign-in once the echo is known', () => {
+    const store = mainFlow.createSsoFlowStore({ echo: { seen: () => true, markSeen: () => {} } });
+    const flow = store.begin('microsoft');
+    expect(store.consume(mainFlow.parseCallbackUrl('suissenotes://auth/callback?error=canceled')))
+      .toEqual({ ok: false, reason: 'missing_state' });
+    expect(store.consume(mainFlow.parseCallbackUrl('suissenotes://auth/callback?state=x&error=canceled')))
+      .toEqual({ ok: false, reason: 'state_mismatch' });
+    expect(store.hasPending()).toBe(true);
+    expect(store.consume(mainFlow.parseCallbackUrl(`suissenotes://auth/callback?state=${flow.state}&error=canceled`)).ok).toBe(true);
+  });
+
+  it('web hand-off: only a token the server confirms as bound is used', () => {
+    expect(mainFlow.boundHandoffToken({ success: true, sessionToken: 's', expiresIn: 60, bound: true })).toBe('s');
+    expect(mainFlow.boundHandoffToken({ success: true, sessionToken: 'legacy' })).toBeNull();
+    expect(mainFlow.boundHandoffToken({ success: true, sessionToken: 'legacy', bound: false })).toBeNull();
+    expect(mainFlow.boundHandoffToken({ success: true, bound: true })).toBeNull();
+    expect(mainFlow.boundHandoffToken(null)).toBeNull();
   });
 
   it('expires flows', () => {
