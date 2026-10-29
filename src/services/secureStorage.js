@@ -182,20 +182,32 @@ export const setSecureItem = async (key, value) => {
 };
 
 /**
- * Read a secret from the platform keystore (mobile only). Never from
- * Preferences (T1).
+ * Read a secret from the platform keystore (mobile only), telling a read
+ * failure apart from a missing entry (the native get() resolves null for a
+ * missing key and rejects on every failure). Never from Preferences (T1).
+ * @param {string} key
+ * @returns {Promise<{ ok: true, value: string|null } | { ok: false, error: string }>}
+ */
+export const readSecureItem = async (key) => {
+  if (!key || !isCapacitor()) return { ok: false, error: 'Unsupported platform' };
+  try {
+    const { plugin: store } = await getKeystore();
+    const result = await store.get({ key });
+    return { ok: true, value: result && typeof result.value === 'string' && result.value !== '' ? result.value : null };
+  } catch (error) {
+    return { ok: false, error: error?.message || 'Keystore unavailable' };
+  }
+};
+
+/**
+ * Read a secret (null when missing OR unreadable). Callers that must not
+ * treat a read failure as "missing" (pairing keys) use readSecureItem.
  * @param {string} key
  * @returns {Promise<string|null>}
  */
 export const getSecureItem = async (key) => {
-  if (!key || !isCapacitor()) return null;
-  try {
-    const { plugin: store } = await getKeystore();
-    const result = await store.get({ key });
-    return result && typeof result.value === 'string' && result.value !== '' ? result.value : null;
-  } catch {
-    return null;
-  }
+  const result = await readSecureItem(key);
+  return result.ok ? result.value : null;
 };
 
 /**

@@ -350,6 +350,9 @@ export const useAuthStore = defineStore('auth', {
     twoFactor: null,
     twoFactorResending: false,
     _refreshPromise: null,  // Mutex for token refresh (prevents concurrent stampede)
+    // Increments whenever a session starts or ends; an SSO result that was
+    // in flight across such a change is dropped (S4).
+    _sessionGen: 0,
     _tokenRefreshInterval: null,
   }),
 
@@ -397,6 +400,7 @@ export const useAuthStore = defineStore('auth', {
 
     /** Session from a password sign-in success (directly or after the second factor). */
     async _completePasswordLogin(result) {
+      this._sessionGen++;
       this.user = result.user;
       this.token = result.token;
       this.isAuthenticated = true;
@@ -540,6 +544,7 @@ export const useAuthStore = defineStore('auth', {
         return { success: false, error: this.error };
       }
       try {
+        this._sessionGen++;
         this.user = user;
         this.token = token;
         this.isAuthenticated = true;
@@ -602,14 +607,18 @@ export const useAuthStore = defineStore('auth', {
       // A crafted suissenotes://auth/callback link (web page, message, QR
       // code, another app) is dropped without a trace in the UI; a sign-in
       // in progress keeps waiting for its real result.
+      const gen = this._sessionGen;
+      // S4 after every await: a sign-in (password, 2FA, registration) or a
+      // sign-out that happened meanwhile wins; the result is dropped with no
+      // side effect.
+      const sessionChanged = () => this.isAuthenticated || this._sessionGen !== gen;
+      const dropped = (reason) => {
+        addBreadcrumb({ category: 'sso', message: `SSO result ignored: ${reason}`, level: 'warning' });
+        return { success: false, ignored: true, reason };
+      };
       const binding = await bindSsoResult(payload);
-      if (!binding.ok) {
-        addBreadcrumb({ category: 'sso', message: `SSO result ignored: ${binding.reason}`, level: 'warning' });
-        return { success: false, ignored: true, reason: binding.reason };
-      }
-      const provider = this.ssoProvider || 'unknown';
-      this.ssoProvider = null;
-      const seq = this.ssoOutcome.seq + 1;
+      if (!binding.ok) return dropped(binding.reason);
+      if (sessionChanged()) return dropped('session_changed');
 
       if (payload && !payload.error && !payload.code && payload.authCode && binding.verifier) {
         let exchanged = null;
@@ -618,8 +627,14 @@ export const useAuthStore = defineStore('auth', {
         } catch (error) {
           if (!isNetworkFailure(error)) captureException(error, { tags: { action: 'ssoExchange' } });
         }
+        if (sessionChanged()) return dropped('session_changed');
         payload = exchanged || { error: 'invalid_callback' };
       }
+      // From here on the result is applied: no await before loginWithSSO()
+      // sets the session.
+      const provider = this.ssoProvider || 'unknown';
+      this.ssoProvider = null;
+      const seq = this.ssoOutcome.seq + 1;
 
       if (!payload || payload.error || payload.code || !payload.token) {
         const outcome = classifySsoError(payload && (payload.error || payload.code)
@@ -659,6 +674,7 @@ export const useAuthStore = defineStore('auth', {
         const result = await platformRegister(email, password, name);
 
         if (result.success) {
+          this._sessionGen++;
           this.user = result.user;
           this.token = result.token;
           this.isAuthenticated = true;
@@ -711,6 +727,7 @@ export const useAuthStore = defineStore('auth', {
     },
 
     async logout() {
+      this._sessionGen++;
       // Disconnect BLE and clear device state BEFORE clearing user
       // (must happen while user.id is still available for scoped keys)
       try {

@@ -75,6 +75,24 @@ function writeFlow(flow) {
 }
 
 /**
+ * Consume the pending flow: delete it from storage and read back. Only a
+ * confirmed delete counts (S1: once) - otherwise the same state could be
+ * accepted again later.
+ * @returns {boolean}
+ */
+function deleteFlowConfirmed() {
+  memoryFlow = null;
+  const store = storage();
+  if (!store) return true;
+  try {
+    store.removeItem(STORAGE_KEY);
+    return store.getItem(STORAGE_KEY) === null;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Start a flow. Replaces any older pending one (only the newest sign-in may
  * complete).
  * @returns {Promise<{ state: string, codeChallenge: string }>}
@@ -136,11 +154,11 @@ export function consumeSsoFlow(payload, now = Date.now()) {
   const state = payload && typeof payload.state === 'string' ? payload.state : '';
   if (state) {
     if (!sameString(state, flow.state)) return { ok: false, reason: 'state_mismatch' };
-    writeFlow(null);
+    if (!deleteFlowConfirmed()) return { ok: false, reason: 'flow_not_cleared' };
     return { ok: true, verifier: flow.verifier, provider: flow.provider };
   }
   if (!isSuccess && payload && payload.local === true) {
-    writeFlow(null);
+    if (!deleteFlowConfirmed()) return { ok: false, reason: 'flow_not_cleared' };
     return { ok: true, verifier: flow.verifier, provider: flow.provider };
   }
   return { ok: false, reason: 'missing_state' };

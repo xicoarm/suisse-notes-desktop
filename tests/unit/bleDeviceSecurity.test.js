@@ -57,6 +57,10 @@ vi.mock('../../src/services/secureStorage', () => ({
     if (!nativeKeyOk(k)) { vault.rejectedKeys.push(k); return null; }
     return vault.map.has(k) ? vault.map.get(k) : null;
   },
+  readSecureItem: async (k) => {
+    if (!nativeKeyOk(k)) { vault.rejectedKeys.push(k); return { ok: false, error: 'INVALID_KEY' }; }
+    return { ok: true, value: vault.map.has(k) ? vault.map.get(k) : null };
+  },
   setSecureItem: async (k, v) => {
     if (!nativeKeyOk(k)) { vault.rejectedKeys.push(k); return { success: false, error: 'INVALID_KEY' }; }
     if (vault.failWrites) return { success: false };

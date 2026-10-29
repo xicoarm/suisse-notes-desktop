@@ -70,7 +70,8 @@ Storage.prototype.getItem = function (k) { if (k === MARKER) hit('marker'); retu
 Storage.prototype.removeItem = function (k) { if (k === MARKER) hit('marker'); return realRemove.call(this, k); };
 
 const DAY = 24 * 60 * 60 * 1000;
-const jwt = (userId, tag) => `h.${Buffer.from(JSON.stringify({ userId, tag, exp: Math.floor((Date.now() + 7 * DAY) / 1000) })).toString('base64url')}.s`;
+const EXP = Math.floor((Date.now() + 7 * DAY) / 1000);
+const jwt = (userId, tag) => `h.${Buffer.from(JSON.stringify({ userId, tag, exp: EXP })).toString('base64url')}.s`;
 const LEGACY = jwt('old', 'legacy');
 const A1 = jwt('a', 'login');
 const A2 = jwt('a', 'refresh');

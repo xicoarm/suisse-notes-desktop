@@ -52,12 +52,26 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const valid = (v) => typeof v === 'string' && UUID_RE.test(v);
 
 function secureApi() {
-  if (typeof secure.getSecureItem !== 'function' || typeof secure.setSecureItem !== 'function') {
+  if (typeof secure.readSecureItem !== 'function' || typeof secure.setSecureItem !== 'function') {
     const err = new Error('Secure storage is not available');
     err.code = 'BLE_SECRET_STORE_UNAVAILABLE';
     throw err;
   }
   return secure;
+}
+
+/**
+ * Read a pairing key. A read FAILURE is not a missing key (T6): it throws,
+ * so nothing is generated or overwritten and the next attempt reads again.
+ */
+async function readSecure(api, key) {
+  const res = await api.readSecureItem(key);
+  if (!res || !res.ok) {
+    const err = new Error('Could not read the pairing key; try again');
+    err.code = 'BLE_SECRET_STORE_UNAVAILABLE';
+    throw err;
+  }
+  return res.value;
 }
 
 async function storeSecure(api, key, value) {
@@ -82,10 +96,12 @@ export async function loadAppKeys({ userId = null, isNative }) {
   }
 
   const api = secureApi();
-  let install = await api.getSecureItem(SECURE_INSTALL_KEY);
-  let legacy = await api.getSecureItem(SECURE_LEGACY_KEY);
+  // T6: pairing keys are only migrated, never lost - every read must succeed
+  // before anything is written (a failed read throws here).
+  let install = await readSecure(api, SECURE_INSTALL_KEY);
+  let legacy = await readSecure(api, SECURE_LEGACY_KEY);
   const scopedKey = userId ? secureScopedKey(userId) : null;
-  let legacyScoped = scopedKey ? await api.getSecureItem(scopedKey) : null;
+  let legacyScoped = scopedKey ? await readSecure(api, scopedKey) : null;
 
   // One-time migration of the plaintext values from Preferences.
   const { Preferences } = await import('@capacitor/preferences');

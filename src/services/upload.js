@@ -123,27 +123,11 @@ export async function recoverQueueFromPreferences() {
  * With validation and recovery from _tmp key on corruption (V12)
  * @returns {Array<{recordId: string, filePath: string, metadata: Object, retries: number, addedAt: number}>}
  */
-// Drop items older than QUEUE_ITEM_MAX_AGE_MS so an unprocessed queue
-// can't grow unbounded. Returns the cleaned array AND, if anything was
-// dropped, persists the cleaned version back to storage so the GC is a
-// one-time pay on each load rather than recomputing every getQueue().
-function _gcStaleItems(items, persistBackKey = null) {
-  if (!Array.isArray(items) || items.length === 0) return items || [];
-  const now = Date.now();
-  const fresh = items.filter(item => {
-    if (!item || typeof item.addedAt !== 'number') return true; // keep if no timestamp
-    return (now - item.addedAt) <= QUEUE_ITEM_MAX_AGE_MS;
-  });
-  const dropped = items.length - fresh.length;
-  if (dropped > 0) {
-    console.warn(`Upload queue GC: dropped ${dropped} item(s) older than ${QUEUE_ITEM_MAX_AGE_MS / (24 * 3600 * 1000)} days`);
-    if (persistBackKey) {
-      try { localStorage.setItem(persistBackKey, JSON.stringify(fresh)); } catch { /* best-effort */ }
-    }
-  }
-  return fresh;
-}
-
+// No age cleanup on read (U4): reading the queue has no account context, so
+// it cannot tell a held item (another or an unknown owner, waiting for its
+// login or an explicit claim) from an abandoned one. Expired items of the
+// signed-in owner are removed by processMobileUploadQueue, which reports
+// them to the history.
 export function getMobileUploadQueue() {
   let mainCorrupt = false;
   try {
@@ -155,7 +139,7 @@ export function getMobileUploadQueue() {
         const valid = parsed.filter(item =>
           item && typeof item.recordId === 'string' && typeof item.filePath === 'string'
         );
-        return _gcStaleItems(valid, MOBILE_UPLOAD_QUEUE_KEY);
+        return valid;
       }
     }
   } catch {
@@ -173,14 +157,10 @@ export function getMobileUploadQueue() {
         const valid = parsed.filter(item =>
           item && typeof item.recordId === 'string' && typeof item.filePath === 'string'
         );
-        const fresh = _gcStaleItems(valid, MOBILE_UPLOAD_QUEUE_KEY);
-        // Restore main key from _tmp (already done by _gcStaleItems if it
-        // dropped anything; otherwise persist the recovered set explicitly).
-        if (fresh.length === valid.length) {
-          localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, JSON.stringify(fresh));
-        }
+        // Restore the main key from _tmp.
+        localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, JSON.stringify(valid));
         console.log('Upload queue recovered from _tmp key');
-        return fresh;
+        return valid;
       }
     }
   } catch {

@@ -68,7 +68,8 @@ const { useAuthStore } = await import('../../src/stores/auth');
 const { getMobileUploadQueue, uploadWithVerification } = upload;
 
 const DAY = 24 * 60 * 60 * 1000;
-const jwtFor = (userId, tag = '') => `h.${Buffer.from(JSON.stringify({ userId, tag, exp: Math.floor((Date.now() + 7 * DAY) / 1000) })).toString('base64url')}.s`;
+const EXP = Math.floor((Date.now() + 7 * DAY) / 1000);
+const jwtFor = (userId, tag = '') => `h.${Buffer.from(JSON.stringify({ userId, tag, exp: EXP })).toString('base64url')}.s`;
 const networkCalls = () => net.uploadViaPresignedSas.mock.calls.length + net.readBlobFromCapacitorPath.mock.calls.length + net.fetchWithTimeout.mock.calls.length;
 const tokensSent = () => net.uploadViaPresignedSas.mock.calls.map((c) => c[0].authToken);
 
@@ -85,14 +86,15 @@ describe('U1/U2: first upload without a queue item', () => {
   it('A starts, 401, the refresh returns B: no request with B, owner A, recording kept', async () => {
     net.uploadViaPresignedSas.mockResolvedValueOnce({ mode: 'azure', success: false, status: 401, error: 'Token expired' });
     const handleAuthError = vi.fn(async () => ({ success: true, token: jwtFor('b') }));
+    const tokenA = jwtFor('a');
     const res = await uploadWithVerification({
-      filePath: '/p/new.m4a', recordId: 'new', apiUrl: 'https://api.example', authToken: jwtFor('a'), metadata: {},
+      filePath: '/p/new.m4a', recordId: 'new', apiUrl: 'https://api.example', authToken: tokenA, metadata: {},
       getAuthStore: () => ({ handleAuthError })
     });
     expect(res.success).toBe(false);
     expect(res.canDelete).toBe(false);
     expect(handleAuthError).toHaveBeenCalled();
-    expect(tokensSent()).toEqual([jwtFor('a')]);
+    expect(tokensSent()).toEqual([tokenA]);
     expect(getMobileUploadQueue().map((i) => [i.recordId, i.ownerUserId])).toEqual([['new', 'a']]);
     expect(net.deleteFile).not.toHaveBeenCalled();
   });
@@ -141,6 +143,28 @@ describe('update from a version with the session in plaintext', () => {
     await vi.waitFor(() => expect(getMobileUploadQueue().map((i) => i.recordId)).toEqual(['rec-b', 'rec-u']));
     expect(net.uploadViaPresignedSas.mock.calls.map((c) => c[0].recordId)).toEqual(['rec-a']);
     expect(getMobileUploadQueue().map((i) => [i.recordId, i.ownerUserId])).toEqual([['rec-b', 'b'], ['rec-u', null]]);
+    expect(net.deleteFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('U4: old held entries survive the age cleanup', () => {
+  it('8-day-old entries of A, B and unknown owner stay through the banner, the signed-out read and a run under C', async () => {
+    const old = Date.now() - 8 * DAY;
+    const queue = [
+      { recordId: 'old-a', filePath: '/p/a.m4a', metadata: {}, retries: 0, addedAt: old, ownerUserId: 'a' },
+      { recordId: 'old-b', filePath: '/p/b.m4a', metadata: {}, retries: 0, addedAt: old + 1, ownerUserId: 'b' },
+      { recordId: 'old-u', filePath: '/p/u.m4a', metadata: {}, retries: 0, addedAt: old + 2, ownerUserId: null }
+    ];
+    localStorage.setItem('mobile_upload_queue', JSON.stringify(queue));
+    expect(getMobileUploadQueue()).toEqual(queue); // signed out
+    expect(upload.getHeldMobileUploads('c')).toEqual({ otherAccount: ['old-a', 'old-b'], ownerUnknown: ['old-u'] }); // banner
+    const asC = { user: { id: 'c' }, token: jwtFor('c'), isAuthenticated: true, isTokenExpiringSoon: () => false, handleAuthError: vi.fn(async () => ({ success: false })) };
+    const run = await upload.processMobileUploadQueue(asC, 'https://api.example');
+    expect(run.held.sort()).toEqual(['old-a', 'old-b', 'old-u']);
+    expect(run.purged).toEqual([]);
+    expect(getMobileUploadQueue()).toEqual(queue);
+    expect(JSON.parse(localStorage.getItem('mobile_upload_queue'))).toEqual(queue);
+    expect(networkCalls()).toBe(0);
     expect(net.deleteFile).not.toHaveBeenCalled();
   });
 });

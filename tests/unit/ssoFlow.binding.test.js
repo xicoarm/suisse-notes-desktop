@@ -76,6 +76,28 @@ describe('mobile SSO flow (state + PKCE)', () => {
     expect(restarted.hasPendingSsoFlow()).toBe(false);
   });
 
+  it('S1: a match is accepted only after a confirmed delete (failed removeItem), also across a restart', async () => {
+    const flow = await beginSsoFlow('microsoft');
+    const remove = vi.spyOn(Storage.prototype, 'removeItem').mockImplementationOnce(() => { throw new Error('QuotaExceeded'); });
+    expect(consumeSsoFlow({ state: flow.state, authCode: 'c' })).toEqual({ ok: false, reason: 'flow_not_cleared' });
+    remove.mockRestore();
+    vi.resetModules();
+    const restarted = await import('../../src/services/ssoFlow');
+    expect(restarted.consumeSsoFlow({ state: flow.state, authCode: 'c' }).ok).toBe(true);
+    vi.resetModules();
+    const again = await import('../../src/services/ssoFlow');
+    expect(again.consumeSsoFlow({ state: flow.state, authCode: 'c' })).toEqual({ ok: false, reason: 'no_pending_flow' });
+  });
+
+  it('S1: a delete that silently leaves the flow in storage is not a consume', async () => {
+    const flow = await beginSsoFlow('google');
+    const remove = vi.spyOn(Storage.prototype, 'removeItem').mockImplementationOnce(() => {});
+    expect(consumeSsoFlow({ state: flow.state, error: 'canceled' })).toEqual({ ok: false, reason: 'flow_not_cleared' });
+    remove.mockRestore();
+    expect(consumeSsoFlow({ state: flow.state, error: 'canceled' }).ok).toBe(true);
+    expect(consumeSsoFlow({ state: flow.state, error: 'canceled' })).toEqual({ ok: false, reason: 'no_pending_flow' });
+  });
+
   it('a flow is single-use', async () => {
     const flow = await beginSsoFlow('google');
     const payload = parseSSOCallbackUrl(`suissenotes://auth/callback?state=${flow.state}&token=t&user=${userB64}`);
