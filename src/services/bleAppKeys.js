@@ -34,11 +34,10 @@ const PREF_APP_UUID = 'ble_app_uuid';
 const SECURE_INSTALL_KEY = 'ble.appKey.install';
 const SECURE_LEGACY_KEY = 'ble.appKey.legacy';
 // Keystore keys must match ^[A-Za-z0-9_.-]{1,128}$ (both native plugins
-// reject anything else with INVALID_KEY), so the user id is hashed.
-export async function secureScopedKey(userId) {
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(userId)));
-  const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
-  return `ble.appKey.legacyScoped.${hex}`;
+// reject anything else with INVALID_KEY), so the user id is mapped to a
+// name-based UUID (synchronous SHA-1, only a storage key - not a secret).
+export function secureScopedKey(userId) {
+  return `ble.appKey.legacyScoped.${uuidv5(`ble-scoped-key|${userId}`, APP_UUID_NAMESPACE)}`;
 }
 
 const APP_UUID_NAMESPACE = '0c1f7a2e-9b6d-4e3a-8c5f-2d7e4b1a9c63';
@@ -85,7 +84,7 @@ export async function loadAppKeys({ userId = null, isNative }) {
   const api = secureApi();
   let install = await api.getSecureItem(SECURE_INSTALL_KEY);
   let legacy = await api.getSecureItem(SECURE_LEGACY_KEY);
-  const scopedKey = userId ? await secureScopedKey(userId) : null;
+  const scopedKey = userId ? secureScopedKey(userId) : null;
   let legacyScoped = scopedKey ? await api.getSecureItem(scopedKey) : null;
 
   // One-time migration of the plaintext values from Preferences.

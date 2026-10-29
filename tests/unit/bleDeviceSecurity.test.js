@@ -375,7 +375,7 @@ describe('pairing keys', () => {
       prefs.set(`ble_app_uuid:u${userId}`, scoped);
       const keys = await loadAppKeys({ userId, isNative: true });
       expect(keys.legacyScoped).toBe(scoped);
-      const scopedKey = await secureScopedKey(userId);
+      const scopedKey = secureScopedKey(userId);
       expect(scopedKey).toMatch(/^[A-Za-z0-9_.-]{1,128}$/);
       expect(vault.map.get(scopedKey)).toBe(scoped);
       // Migration complete: the plaintext copies are gone.
@@ -383,6 +383,7 @@ describe('pairing keys', () => {
       expect(prefs.has('ble_app_uuid')).toBe(false);
     }
     expect(vault.rejectedKeys).toEqual([]);
+    expect(secureScopedKey('a')).not.toBe(secureScopedKey('b'));
   });
 
   it('migrates the plaintext UUID of earlier versions once and removes the plaintext copy', async () => {
