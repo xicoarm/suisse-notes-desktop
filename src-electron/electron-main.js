@@ -108,6 +108,8 @@ function isTransientNetworkError(err, message) {
   return false;
 }
 
+const sentryReporting = require('./sentry-reporting');
+
 Sentry.init({
   enabled: process.env.SUISSE_E2E_HOOKS !== '1',
   dsn: 'https://185912b1585eb5138079ae189a6d41ec@o4510659364716544.ingest.de.sentry.io/4510659366748240',
@@ -144,7 +146,13 @@ Sentry.init({
       event.level = 'warning';
       event.tags = { ...(event.tags || {}), transient_network: 'true' };
     }
-    return event;
+    // Errors and log lines reach Sentry as raw objects (sentry-reporting.js
+    // captureException): redact message, exception values, stack, extra,
+    // contexts and breadcrumbs here, for every event of the main process.
+    return sentryReporting.redactEvent(event);
+  },
+  beforeBreadcrumb(crumb) {
+    return sentryReporting.redactBreadcrumb(crumb);
   }
 });
 
@@ -152,7 +160,7 @@ Sentry.init({
 // Sentry event, a warning becomes a warning-level event, and info lines become
 // breadcrumbs. Before this, a failed AudioTee start, a failed finalization or a
 // refused IPC call existed only in the user's local main.log.
-const sentryReporting = require('./sentry-reporting');
+// (sentryReporting is required above Sentry.init: beforeSend redacts with it.)
 const twoFactorAuth = require('./auth-two-factor');
 sentryReporting.installLogReporting({ log, Sentry });
 const windowReporting = sentryReporting.installWindowReporting({ Sentry, log });
