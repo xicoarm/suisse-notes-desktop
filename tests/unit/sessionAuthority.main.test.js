@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { boot, createDisk, jwt, userB64, ssoFlow } from './support/desktopSession';
+import { boot, createDisk, jwt, userB64, ssoFlow, encrypted } from './support/desktopSession';
 
 // Desktop session authority (src-electron/session-authority.js), security
 // review 10/2026 round 6: one record {epoch, signedOut} in main, every
@@ -132,14 +132,195 @@ describe('E1: one record; unreadable = signed out', () => {
     expect(boot(disk).authority.restore()).toMatchObject({ signedOut: true });
   });
 
-  it('the first start after the update (no record) is signed out and deletes the old token', () => {
+  it('a record lost after the migration counts as unreadable: signed out, the token is deleted', () => {
     const disk = createDisk();
     signedIn(disk, 'a');
     disk.record = null;
     const app = boot(disk);
     expect(app.authority.restore()).toMatchObject({ signedOut: true });
+    expect(app.authority.state()).toMatchObject({ unreadable: true });
     expect(disk.config.authToken).toBeUndefined();
     expect(disk.config.userInfo).toBeUndefined();
+  });
+});
+
+// E1 addendum (lead decision, review round 7): «unreadable» (present, read or
+// parse error) = signed out; «missing» = the first start after the update,
+// which takes over the previous version's session once (main only, in
+// startup(), before any renderer). Each test failed at a3c841fa.
+describe('E1 addendum: one-time migration of the previous version\'s session', () => {
+  const MARK = 'sessionAuthorityMigrated';
+  const OLD = jwt('old', 'legacy');
+  /** The previous version: encrypted token and its user, no record. */
+  function legacyDisk({ token = encrypted(OLD), user = { id: 'old', email: 'o@x.ch' } } = {}) {
+    const disk = createDisk();
+    disk.config.authToken = token;
+    disk.config.userInfo = user;
+    disk.queue = [{ recordId: 'r-old', filePath: '/r-old', userId: 'old', retryCount: 0 }];
+    return disk;
+  }
+
+  it('update start with the previous session: signed in, record {0,false}, mark set, uploads run', async () => {
+    const disk = legacyDisk();
+    const app = boot(disk);
+    expect(app.authority.state()).toMatchObject({ epoch: 0, signedOut: false });
+    expect(app.authority.restore()).toMatchObject({ signedOut: false, epoch: 0, token: OLD, user: { id: 'old' } });
+    expect(app.authority.getToken()).toBe(OLD);
+    expect(JSON.parse(disk.record)).toEqual({ epoch: 0, signedOut: false });
+    expect(disk.config[MARK]).toBe(true);
+    expect(disk.config.authToken).toBe(encrypted(OLD)); // never re-encrypted, never plaintext
+    // Record first, then the mark.
+    expect(disk.log.filter((l) => l.startsWith('record.write') || l === `config.set:${MARK}`)).toEqual([
+      'record.write:{"epoch":0,"signedOut":false}', `config.set:${MARK}`
+    ]);
+    await app.processPendingUploads();
+    expect(app.requests).toEqual([{ recordId: 'r-old', token: OLD }]);
+    // The next start just reads the record.
+    const log = disk.log.length;
+    expect(boot(disk).authority.restore()).toMatchObject({ signedOut: false, user: { id: 'old' } });
+    expect(disk.log.length).toBe(log);
+  });
+
+  it('a second start without record after the mark: no second migration, signed out, deleted', async () => {
+    const disk = legacyDisk();
+    boot(disk);
+    disk.record = null; // e.g. a clean-up tool removed the file
+    const app = boot(disk);
+    expect(app.authority.state()).toMatchObject({ signedOut: true, unreadable: true });
+    expect(app.authority.getToken()).toBeNull();
+    expect(app.authority.restore()).toMatchObject({ signedOut: true });
+    expect(disk.record).toBeNull();
+    expect(disk.config.authToken).toBeUndefined();
+    expect(disk.config.userInfo).toBeUndefined();
+    await app.processPendingUploads();
+    expect(app.requests).toEqual([]);
+  });
+
+  it('a signed-out session of an earlier round-6 build (record present, no mark) is never migrated', () => {
+    const disk = createDisk();
+    disk.record = JSON.stringify({ epoch: 4, signedOut: true });
+    disk.config.authToken = encrypted(OLD);
+    disk.config.userInfo = { id: 'old' };
+    const app = boot(disk);
+    expect(app.authority.restore()).toMatchObject({ signedOut: true });
+    expect(disk.config.authToken).toBeUndefined();
+    expect(disk.config[MARK]).toBe(true); // a later loss of the record is unreadable
+    disk.record = null;
+    disk.config.authToken = encrypted(OLD);
+    disk.config.userInfo = { id: 'old' };
+    expect(boot(disk).authority.restore()).toMatchObject({ signedOut: true });
+  });
+
+  const noPair = {
+    'a plaintext token': { token: OLD },
+    'a token of another user': { user: { id: 'other' } },
+    'a token without userId': { token: encrypted(jwt('', 'x')) },
+    'a user without id': { user: { email: 'o@x.ch' } },
+    'no user': { user: null },
+    'no token': { token: undefined },
+    'a token that does not decrypt': { token: 'Zm9vYmFy' }
+  };
+  for (const [name, legacy] of Object.entries(noPair)) {
+    it(`${name}: signed out as before, nothing adopted, deleted, decision kept`, async () => {
+      const disk = legacyDisk(legacy);
+      if (legacy.token === undefined) delete disk.config.authToken;
+      if (legacy.user === null) delete disk.config.userInfo;
+      const app = boot(disk);
+      expect(app.authority.state().signedOut).toBe(true);
+      expect(app.authority.getToken()).toBeNull();
+      expect(app.authority.restore()).toMatchObject({ signedOut: true });
+      expect(disk.config.authToken).toBeUndefined();
+      expect(disk.config.userInfo).toBeUndefined();
+      expect(JSON.parse(disk.record)).toMatchObject({ signedOut: true });
+      expect(disk.config[MARK]).toBe(true);
+      await app.processPendingUploads();
+      expect(app.requests).toEqual([]);
+    });
+  }
+
+  it('an unreadable or corrupt record with the previous session: signed out, never migrated', () => {
+    for (const fault of ['read', 'corrupt']) {
+      const disk = legacyDisk();
+      if (fault === 'read') disk.failRecordRead = true;
+      else disk.record = '{"epoch":';
+      const app = boot(disk);
+      expect(app.authority.state(), fault).toMatchObject({ signedOut: true, unreadable: true });
+      expect(app.authority.restore(), fault).toMatchObject({ signedOut: true });
+      expect(disk.log.some((l) => l.startsWith('record.write')), fault).toBe(false);
+      expect(disk.config.authToken, fault).toBeUndefined();
+    }
+  });
+
+  it('record not writable during the migration: RAM lock, previous session untouched, the next start migrates', async () => {
+    const disk = legacyDisk();
+    disk.failRecordWrite = true;
+    const app = boot(disk);
+    expect(app.authority.state().signedOut).toBe(true);
+    expect(app.authority.getToken()).toBeNull();
+    expect(app.authority.restore()).toMatchObject({ signedOut: true });
+    await app.processPendingUploads();
+    expect(app.requests).toEqual([]);
+    expect(disk.config.authToken).toBe(encrypted(OLD));
+    expect(disk.config.userInfo).toEqual({ id: 'old', email: 'o@x.ch' });
+    expect(disk.config[MARK]).toBeUndefined();
+    expect(disk.record).toBeNull();
+
+    disk.failRecordWrite = false;
+    const next = boot(disk);
+    expect(next.authority.restore()).toMatchObject({ signedOut: false, token: OLD, user: { id: 'old' } });
+    expect(disk.config[MARK]).toBe(true);
+  });
+
+  it('a mark that cannot be set: RAM lock, nothing deleted', () => {
+    const disk = legacyDisk();
+    disk.failSet = new Set([MARK]);
+    const app = boot(disk);
+    expect(app.authority.getToken()).toBeNull();
+    expect(app.authority.restore()).toMatchObject({ signedOut: true });
+    expect(disk.config.authToken).toBe(encrypted(OLD));
+    expect(disk.config.userInfo).toBeTruthy();
+    // The record {0,false} was confirmed: the next start reads it and sets the mark.
+    disk.failSet = new Set();
+    expect(boot(disk).authority.restore()).toMatchObject({ signedOut: false, user: { id: 'old' } });
+    expect(disk.config[MARK]).toBe(true);
+  });
+
+  it('a sign-in while the migration is held takes over; a sign-out deletes the previous session', () => {
+    const disk = legacyDisk();
+    disk.failRecordWrite = true;
+    const app = boot(disk);
+    disk.failRecordWrite = false;
+    expect(app.passwordSignIn('a').apply()).toMatchObject({ applied: true, persisted: true });
+    expect(boot(disk).authority.restore()).toMatchObject({ signedOut: false, user: { id: 'a' } });
+
+    const other = legacyDisk();
+    other.failRecordWrite = true;
+    const held = boot(other);
+    other.failRecordWrite = false;
+    expect(held.authority.signOut()).toMatchObject({ success: true });
+    expect(other.config.authToken).toBeUndefined();
+    expect(boot(other).authority.restore()).toMatchObject({ signedOut: true });
+  });
+
+  it('OS keystore not open yet (before app ready): held without deleting, migrated by the call at ready', () => {
+    const disk = legacyDisk();
+    disk.encryptionReady = false;
+    const app = boot(disk);
+    expect(app.authority.state()).toMatchObject({ signedOut: true, migrationPending: true });
+    expect(app.authority.getToken()).toBeNull();
+    expect(disk.config.authToken).toBe(encrypted(OLD));
+    expect(disk.record).toBeNull();
+    disk.encryptionReady = true;
+    expect(app.authority.startup()).toMatchObject({ signedOut: false, migrated: true });
+    expect(app.authority.restore()).toMatchObject({ signedOut: false, token: OLD, user: { id: 'old' } });
+    // Still not open at ready: held again, the next start tries again.
+    const late = legacyDisk();
+    late.encryptionReady = false;
+    const lateApp = boot(late);
+    expect(lateApp.authority.startup()).toMatchObject({ signedOut: true, migrationPending: true });
+    expect(late.config.authToken).toBe(encrypted(OLD));
+    late.encryptionReady = true;
+    expect(boot(late).authority.restore()).toMatchObject({ signedOut: false });
   });
 });
 
@@ -321,5 +502,54 @@ describe('SSO user of a result (main)', () => {
     const url = callback(`state=${flow.state}&token=${jwt('u1')}&user=${userB64({ id: 'evil' })}`);
     expect((await app.handleCallback(url)).delivered).toMatchObject({ error: 'invalid_callback' });
     expect(app.authority.getToken()).toBeNull();
+  });
+});
+
+// Review round 7: the r6 low findings on double storage faults (E9).
+// Each test failed at a3c841fa.
+describe('E9 double faults (r6 low findings)', () => {
+  it('invalidate(): flow delete and record write both fail -> marked unreadable, the flow is refused', async () => {
+    const disk = createDisk();
+    const app = boot(disk);
+    const flow = app.beginSso();
+    disk.failDelete = new Set(['ssoPendingFlow']);
+    disk.failRecordWrite = true;
+    expect((await app.handleCallback(legacy(flow.state, 'sso'))).ignored).toBe('flow_not_cleared');
+    expect(app.authority.state()).toMatchObject({ signedOut: true, unreadable: true });
+    expect((await app.handleCallback(legacy(flow.state, 'sso'))).ignored).toBeTruthy();
+    expect(app.authority.getToken()).toBeNull();
+  });
+
+  it('sign-in with the record not writable and the old token not deletable: refused, RAM lock, never the new session over the old record', () => {
+    const disk = createDisk();
+    const app = signedIn(disk, 'a');
+    disk.failRecordWrite = true;
+    disk.failDelete = new Set(['authToken']);
+    const result = app.passwordSignIn('b').apply();
+    expect(result).toEqual({ applied: false, reason: 'storage_unavailable' });
+    expect(app.authority.state().signedOut).toBe(true);
+    expect(app.authority.getToken()).toBeNull();
+    expect(app.authority.getUser()).toBeNull();
+    // The disk still holds the last confirmed state; b exists nowhere.
+    expect(disk.config.authToken).toBeTruthy();
+    expect(JSON.stringify(disk.config)).not.toContain('"b"');
+  });
+
+  it('sign-in with the record not writable and the old user not deletable: refused as well', () => {
+    const disk = createDisk();
+    const app = signedIn(disk, 'a');
+    disk.failRecordWrite = true;
+    disk.failDelete = new Set(['userInfo']);
+    expect(app.passwordSignIn('b').apply()).toEqual({ applied: false, reason: 'storage_unavailable' });
+    expect(app.authority.getToken()).toBeNull();
+  });
+
+  it('record not writable, deletes fine: the session still lives in memory (E8 unchanged)', () => {
+    const disk = createDisk();
+    const app = signedIn(disk, 'a');
+    disk.failRecordWrite = true;
+    expect(app.passwordSignIn('b').apply()).toMatchObject({ applied: true, persisted: false });
+    expect(app.authority.getToken()).toBe(jwt('b', 'pw'));
+    expect(disk.config.authToken).toBeUndefined();
   });
 });

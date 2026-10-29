@@ -164,3 +164,22 @@ describe('token-vault: clearToken reports a failed removal', () => {
     expect(vault.clearToken().success).toBe(false);
   });
 });
+
+// Review round 7 (r6 low finding): a memory-only save (session record not
+// writable) reports whether the older disk copy is really gone; the session
+// authority never lets a new session live in memory over an old one that a
+// restart would bring back. Failed at a3c841fa (the delete error was swallowed).
+describe('token-vault: saveToken(persist:false) reports the delete', () => {
+  it('deleted:true when the disk copy is gone, deleted:false when the delete fails', () => {
+    const store = memoryStore({ authToken: Buffer.from('enc:xxx').toString('base64') });
+    const vault = createTokenVault({ safeStorage: fakeSafeStorage(), store, platform: 'darwin' });
+    expect(vault.saveToken(JWT, { persist: false })).toEqual({ success: true, persisted: false, deleted: true });
+    expect(store.data.authToken).toBeUndefined();
+
+    const stuck = memoryStore({ authToken: Buffer.from('enc:xxx').toString('base64') });
+    const failing = createTokenVault({ safeStorage: fakeSafeStorage(), store: { ...stuck, delete: () => { throw new Error('EACCES'); } }, platform: 'darwin' });
+    expect(failing.saveToken(JWT, { persist: false })).toEqual({ success: true, persisted: false, deleted: false });
+    const silent = createTokenVault({ safeStorage: fakeSafeStorage(), store: { ...stuck, delete: () => {} }, platform: 'darwin' });
+    expect(silent.saveToken(JWT, { persist: false }).deleted).toBe(false);
+  });
+});

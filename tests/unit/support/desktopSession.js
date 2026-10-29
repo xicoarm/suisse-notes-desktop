@@ -6,7 +6,8 @@
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const { createSessionAuthority, configUserStore } = require('../../../src-electron/session-authority.js');
+const sessionAuthorityModule = require('../../../src-electron/session-authority.js');
+const { createSessionAuthority, configUserStore } = sessionAuthorityModule;
 const { createTokenVault } = require('../../../src-electron/token-vault.js');
 const ssoFlow = require('../../../src-electron/sso-flow.js');
 const { createPendingUploadProcessor } = require('../../../src-electron/pending-uploads.js');
@@ -17,10 +18,13 @@ export { ssoFlow };
 export const jwt = (userId, tag = '') => `h.${Buffer.from(JSON.stringify({ userId, tag })).toString('base64url')}.s`;
 export const userB64 = (user) => Buffer.from(JSON.stringify(user)).toString('base64url');
 
-/** safeStorage stand-in: reversible, no '.' in the ciphertext. */
-export function fakeSafeStorage() {
+/**
+ * safeStorage stand-in: reversible, no '.' in the ciphertext. `ready()`
+ * decides isEncryptionAvailable (Windows and Linux: false before app ready).
+ */
+export function fakeSafeStorage(ready = () => true) {
   return {
-    isEncryptionAvailable: () => true,
+    isEncryptionAvailable: () => ready(),
     getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: (s) => Buffer.from(`enc:${s.split('').reverse().join('')}`),
     decryptString: (buf) => {
@@ -30,6 +34,9 @@ export function fakeSafeStorage() {
     }
   };
 }
+
+/** A token as the previous version stored it with a real OS keystore. */
+export const encrypted = (token) => fakeSafeStorage().encryptString(token).toString('base64');
 
 /**
  * The persistent state of one machine. Faults:
@@ -44,6 +51,8 @@ export function createDisk() {
     queue: [],
     history: [],
     now: 1_000_000,
+    // false: the OS keystore is not open yet (before app ready).
+    encryptionReady: true,
     failRecordRead: false,
     failRecordWrite: false,
     failDelete: new Set(),
@@ -95,7 +104,7 @@ export function boot(disk, { exchange = async () => ({ error: 'invalid_callback'
   const config = configStore(disk);
   let authority;
   const vault = createTokenVault({
-    safeStorage: fakeSafeStorage(),
+    safeStorage: fakeSafeStorage(() => disk.encryptionReady !== false),
     store: config,
     platform: 'darwin',
     isAllowed: () => !!authority && authority.tokenAllowed()
@@ -106,6 +115,8 @@ export function boot(disk, { exchange = async () => ({ error: 'invalid_callback'
     recordStore: recordStore(disk),
     vault,
     userStore: configUserStore(config),
+    // Absent before the migration existed (fail-first run at a3c841fa).
+    migrationMark: sessionAuthorityModule.configMarkStore ? sessionAuthorityModule.configMarkStore(config) : undefined,
     flows,
     abortRequests: () => { counters.aborted++; },
     now: () => disk.now

@@ -335,7 +335,7 @@ let ssoDeliverySeq = 0;
 ipcMain.handle('auth:takePendingSSO', () => (sessionAuthority ? sessionAuthority.takePending() : null));
 
 const ssoFlow = require('./sso-flow');
-const { createSessionAuthority, fileRecordStore, configUserStore, tokenUserId: sessionTokenUserId, RECORD_FILE } = require('./session-authority');
+const { createSessionAuthority, fileRecordStore, configUserStore, configMarkStore, tokenUserId: sessionTokenUserId, RECORD_FILE } = require('./session-authority');
 // Created below, after configStore: the pending flow lives in configStore
 // (survives a restart: the browser sign-in may come back to a cold start).
 let ssoFlows = null;
@@ -521,6 +521,8 @@ sessionAuthority = createSessionAuthority({
   recordStore: fileRecordStore(path.join(app.getPath('userData'), RECORD_FILE)),
   vault: tokenVault,
   userStore: configUserStore(configStore),
+  // One-time migration of the previous version's session (E1 addendum).
+  migrationMark: configMarkStore(configStore),
   flows: ssoFlows,
   abortRequests: () => {
     for (const controller of activeAbortControllers.values()) {
@@ -529,6 +531,9 @@ sessionAuthority = createSessionAuthority({
   },
   warn: (msg) => log.warn(msg)
 });
+// Also the one-time migration of the previous version's session (record
+// missing): main alone, before any renderer exists. Held (RAM lock, nothing
+// deleted) while the OS keystore is not open yet - see app.whenReady.
 sessionAuthority.startup();
 
 handleSsoCallback = ssoFlow.createSsoCallbackHandler({
@@ -1456,6 +1461,14 @@ function createWindow() {
 
 // App ready
 app.whenReady().then(() => {
+  // Windows and Linux open the OS keystore (safeStorage) only at ready: a
+  // migration held at module load runs now, before the window and before any
+  // background upload. Still not possible: held, the next start tries again.
+  if (sessionAuthority.state().migrationPending) {
+    const migrated = sessionAuthority.startup();
+    if (migrated.signedOut === false) afterSessionApplied();
+  }
+
   // Set the App User Model ID for Windows notifications
   // This ensures notifications show "Suisse Meets" instead of "electron.app.electron".
   // The AUMID must keep matching appId (com.suisse-notes.desktop) — it is an
@@ -4550,7 +4563,11 @@ ipcMain.handle('upload:start', async (event, params) => {
 // Keep TUS-based upload for backward compatibility (if needed)
 ipcMain.handle('upload:startTUS', async (event, params) => {
   const { recordId, filePath, metadata } = params;
-  const authToken = await getAuthToken();
+  // E7: the session this upload belongs to; after a session change no
+  // request of it goes out any more.
+  const ticket = sessionAuthority.ticket();
+  const authToken = tokenFor(ticket);
+  if (!authToken) return { success: false, error: 'Not authenticated' };
 
   try {
     const fileStats = await fs.promises.stat(filePath);
@@ -4576,9 +4593,14 @@ ipcMain.handle('upload:startTUS', async (event, params) => {
         },
 
         // Auth headers
-        headers: authToken ? {
+        headers: {
           'Authorization': `Bearer ${authToken}`
-        } : {},
+        },
+
+        // Every request (also tus retries) only while the session is current.
+        onBeforeRequest: () => {
+          if (sessionEndedFor(ticket)) throw new Error('Signed out');
+        },
 
         // Upload size
         uploadSize: fileStats.size,
@@ -4655,8 +4677,11 @@ ipcMain.handle('upload:cancel', async (event, recordId) => {
   const audioFileId = activeDirectAudioFileIds.get(recordId);
   if (audioFileId) {
     activeDirectAudioFileIds.delete(recordId);
-    getAuthToken()
-      .then((token) => {
+    // E7: the clean-up belongs to the session of the cancel.
+    const ticket = sessionAuthority.ticket();
+    Promise.resolve()
+      .then(() => {
+        const token = tokenFor(ticket);
         if (!token) return;
         return abortDirectUpload({
           apiBaseUrl: API_BASE_URL,

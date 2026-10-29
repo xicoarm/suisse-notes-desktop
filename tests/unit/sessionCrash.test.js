@@ -9,6 +9,15 @@ import { createCrashPersistence, Crash, Fault } from './support/crashPersistence
 // the snapshot, in the last confirmed state or signed out: never an old or a
 // foreign session, never a consumed SSO state valid again; checked are E5,
 // E6, E8, E9 and T1-T5. Failed at 2349920b (no session authority).
+//
+// Review round 7 (E1 addendum of the lead): the desktop update start takes
+// the previous version's session over once (record missing + encrypted
+// token + user of the same userId). «update: [null]» became [null, old]:
+// the previous session is the last confirmed state until the first sign-in
+// or sign-out of the new version replaces it. Its operations (record write,
+// mark) are crashed like every other one; further start variants
+// (plaintext, other user, marker, record lost after the mark) never adopt
+// it. Failed at a3c841fa (the update start signed out and deleted it).
 
 vi.mock('../../src/utils/platform', () => ({
   isElectron: () => false, isCapacitor: () => true, isMobile: () => true, isIOS: () => false, isAndroid: () => true,
@@ -18,7 +27,7 @@ vi.mock('../../src/utils/platform', () => ({
 const require = createRequire(import.meta.url);
 // Hundreds of restarts with fresh modules: slow on a loaded CI runner.
 const HEAVY = 120_000;
-const { createSessionAuthority, configUserStore } = require('../../src-electron/session-authority.js');
+const { createSessionAuthority, configUserStore, configMarkStore } = require('../../src-electron/session-authority.js');
 const { createTokenVault } = require('../../src-electron/token-vault.js');
 const ssoFlow = require('../../src-electron/sso-flow.js');
 const { createPendingUploadProcessor } = require('../../src-electron/pending-uploads.js');
@@ -67,6 +76,8 @@ const encrypted = (token) => fakeSafeStorage().encryptString(token).toString('ba
 
 /** One desktop app start on persistence `p`. */
 function bootDesktop(p, { upload } = {}) {
+  // Absent before the migration existed (fail-first run at a3c841fa).
+  const markStore = (store) => (configMarkStore ? configMarkStore(store) : undefined);
   const config = p.kv('config');
   const queue = p.kv('queue');
   if (!p.state.record) p.state.record = {};
@@ -77,7 +88,7 @@ function bootDesktop(p, { upload } = {}) {
   let authority;
   const vault = createTokenVault({ safeStorage: fakeSafeStorage(), store: config, platform: 'darwin', isAllowed: () => !!authority && authority.tokenAllowed() });
   const flows = ssoFlow.createSsoFlowStore({ storage: config, now: () => 5000 });
-  authority = createSessionAuthority({ recordStore, vault, userStore: configUserStore(config), flows, now: () => 5000 });
+  authority = createSessionAuthority({ recordStore, vault, userStore: configUserStore(config), migrationMark: markStore(config), flows, now: () => 5000 });
   authority.startup();
   const handleCallback = ssoFlow.createSsoCallbackHandler({ authority, flows, exchange: async () => ({ error: 'invalid_callback' }), deliver: (x) => authority.setPending(x) });
   const requests = [];
@@ -130,7 +141,7 @@ async function desktopRestart(snapshot, ssoState) {
     const res = await app.handleCallback(`suissenotes://auth/callback?state=${ssoState}&token=${B1}&user=${userB64({ id: 'b' })}`);
     replayApplied = !!res.delivered?.applied;
   }
-  return { session, requests: app.requests, after, replayApplied, queue: p.state.queue?.items || [] };
+  return { session, requests: app.requests, after, replayApplied, queue: p.state.queue?.items || [], state: JSON.parse(JSON.stringify(p.state)) };
 }
 
 // The upload run needs the processor with a waiting upload: build it once per app.
@@ -181,8 +192,10 @@ async function desktopLifeWithRun(plan) {
 
 
 const DESKTOP_ALLOWED = {
-  update: [null],
-  login: [null, `a:${A1}`],
+  // The previous version's session, taken over by the migration.
+  update: [null, `old:${OLD}`],
+  // Until the sign-in's commit the migrated session is the last confirmed one.
+  login: [null, `old:${OLD}`, `a:${A1}`],
   refresh: [null, `a:${A1}`, `a:${A2}`],
   logout: [null, `a:${A2}`],
   sso: [null, `b:${B1}`],
@@ -194,16 +207,19 @@ function checkDesktop({ plan, phase, snapshot, restart, ssoState }) {
   const restored = sessionOf(restart.session);
   // E9: last confirmed state or signed out - never old or foreign.
   expect(DESKTOP_ALLOWED[phase], where).toContain(restored);
-  // E6: tombstone, missing or unreadable record -> nothing restored.
+  // E6: tombstone or unreadable record -> nothing restored; a missing record
+  // (crash before the migration's write) -> at most the previous session.
   const record = parseRecordText(snapshot.record?.text);
-  if (!record || record.signedOut) expect(restored, where).toBeNull();
+  if (snapshot.record?.text !== undefined && (!record || record.signedOut)) expect(restored, where).toBeNull();
+  if (snapshot.record?.text === undefined) expect([null, `old:${OLD}`], where).toContain(restored);
   // Token and user always of the same account.
   if (restart.session) expect(tokenUserId(restart.session.token), where).toBe(restart.session.user.id);
-  // T1/T3: never a plaintext token on disk; the legacy token is never used.
+  // T1/T3: never a plaintext token on disk; once the new version signed in
+  // or out, the previous session never comes back.
   for (const cfg of [snapshot.config, restart.after.config]) {
     if (cfg?.authToken) expect(String(cfg.authToken), where).not.toContain('.');
   }
-  expect(String(restored), where).not.toContain(OLD);
+  if (phase !== 'update' && phase !== 'login') expect(String(restored), where).not.toContain(OLD);
   // E5: a signed-out start deletes token and user again.
   if (!restart.session) {
     expect(restart.after.config.authToken, where).toBeUndefined();
@@ -340,6 +356,8 @@ describe('R5: crash at every storage operation - desktop (main)', () => {
     for (const name of ['record.write', 'config.set', 'config.delete', 'queue.set']) {
       expect(ops.map((o) => o.op), name).toContain(name);
     }
+    // The update start is the migration: record {0,false}, then the mark.
+    expect(ops.slice(0, 2)).toEqual([{ op: 'record.write', n: 1 }, { op: 'config.set', n: 1 }]);
     expect(ops.length).toBeGreaterThan(20);
     let checked = 0;
     const seen = new Set();
@@ -358,8 +376,46 @@ describe('R5: crash at every storage operation - desktop (main)', () => {
     }
     expect(checked).toBe(ops.length * 2);
     // The crash points really reach every confirmed state and the SSO replay.
-    expect([...seen].sort()).toEqual([null, `a:${A1}`, `a:${A2}`, `b:${B1}`, 'replay'].sort());
+    expect([...seen].sort()).toEqual([null, `old:${OLD}`, `a:${A1}`, `a:${A2}`, `b:${B1}`, 'replay'].sort());
   }, HEAVY);
+});
+
+describe('E1 addendum / E9: crash at every operation of the desktop update start', () => {
+  const MARK = 'sessionAuthorityMigrated';
+  const variants = {
+    // [start, sessions a restart may find]
+    legacy: [DESKTOP_START, [`old:${OLD}`]],
+    plaintext: [{ ...DESKTOP_START, config: { authToken: OLD, userInfo: { id: 'old' } } }, [null]],
+    otherUser: [{ ...DESKTOP_START, config: { authToken: encrypted(OLD), userInfo: { id: 'other' } } }, [null]],
+    recordLostAfterMark: [{ ...DESKTOP_START, config: { ...DESKTOP_START.config, [MARK]: true } }, [null]],
+    tombstoneOfRound6: [{ ...DESKTOP_START, record: { text: JSON.stringify({ epoch: 7, signedOut: true }) } }, [null]]
+  };
+  for (const [name, [start, allowed]] of Object.entries(variants)) {
+    it(`${name}: every crash point restarts into ${allowed.join(' / ')}`, async () => {
+      const boot1 = (plan) => {
+        const p = createCrashPersistence(start);
+        if (plan) p.crashAt(plan.op, plan.n, plan.when);
+        try { bootDesktop(p); } catch (e) { if (!(e instanceof Crash)) throw e; }
+        return p;
+      };
+      const ops = boot1(null).ops.map(({ op, n }) => ({ op, n }));
+      if (name === 'legacy') expect(ops.map((o) => o.op)).toEqual(['record.write', 'config.set']);
+      const plans = ops.flatMap(({ op, n }) => ['vor', 'nach'].map((when) => ({ op, n, when })));
+      for (const plan of [null, ...plans]) {
+        const p = boot1(plan);
+        const snapshot = plan ? p.snapshot() : JSON.parse(JSON.stringify(p.state));
+        const restart = await desktopRestart(snapshot);
+        const where = plan ? `${plan.when} ${plan.op}#${plan.n}` : 'no crash';
+        expect(allowed, where).toContain(sessionOf(restart.session));
+        if (!restart.session) {
+          expect(restart.after.config.authToken, where).toBeUndefined();
+          expect(restart.requests, where).toEqual([]);
+        }
+        // A third start finds the same.
+        expect(sessionOf((await desktopRestart(restart.state)).session), where).toBe(sessionOf(restart.session));
+      }
+    });
+  }
 });
 
 describe('R5: crash at every storage operation - mobile', () => {
@@ -397,18 +453,66 @@ describe('R5: crash at every storage operation - mobile', () => {
   }, HEAVY);
 });
 
+describe('E1 addendum / E9: crash at every operation of the mobile update start', () => {
+  beforeAll(() => {
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, get: () => mobileDisk.p.webStorage('ls') });
+  });
+  afterAll(() => {
+    Object.defineProperty(globalThis, 'localStorage', realLocalStorage);
+  });
+
+  const OLD_KS = { authToken: LEGACY, userInfo: JSON.stringify({ id: 'old' }) };
+  const variants = {
+    // An intermediate build with the session in the keystore and no record.
+    keystore: [{ prefs: {}, ks: { ...OLD_KS }, ls: {} }, [`old:${LEGACY}`]],
+    marker: [{ prefs: {}, ks: { ...OLD_KS }, ls: { 'auth.signedOut': '1' } }, [null]],
+    otherUser: [{ prefs: {}, ks: { ...OLD_KS, userInfo: JSON.stringify({ id: 'other' }) }, ls: {} }, [null]],
+    recordLostAfterMark: [{ prefs: {}, ks: { ...OLD_KS, 'auth.sessionMigrated': '1' }, ls: {} }, [null]],
+    release: [MOBILE_START, [null]]
+  };
+  for (const [name, [start, allowed]] of Object.entries(variants)) {
+    it(`${name}: every crash point restarts into ${allowed.join(' / ')}`, async () => {
+      const boot1 = async (plan) => {
+        const p = createCrashPersistence(start);
+        if (plan) p.crashAt(plan.op, plan.n, plan.when);
+        try {
+          const m = await mobileModules(p);
+          await m.authority.loadSession();
+        } catch (e) { if (!(e instanceof Crash)) throw e; }
+        return p;
+      };
+      const ops = (await boot1(null)).ops.map(({ op, n }) => ({ op, n }));
+      if (name === 'keystore') expect(ops.map((o) => o.op)).toEqual(expect.arrayContaining(['ls.set', 'ks.set']));
+      const plans = ops.flatMap(({ op, n }) => ['vor', 'nach'].map((when) => ({ op, n, when })));
+      for (const plan of [null, ...plans]) {
+        const p = await boot1(plan);
+        const snapshot = plan ? p.snapshot() : JSON.parse(JSON.stringify(p.state));
+        const where = plan ? `${plan.when} ${plan.op}#${plan.n}` : 'no crash';
+        expect(p.dead || !plan, where).toBe(true);
+        const restart = await mobileRestart(snapshot);
+        expect(allowed, where).toContain(sessionOf(restart.session));
+        expect(restart.token, where).toBe(restart.session ? restart.session.token : null);
+        if (!restart.session) expect(restart.after.ks?.authToken, where).toBeUndefined();
+        const third = await mobileRestart(restart.after);
+        expect(sessionOf(third.session), where).toBe(sessionOf(restart.session));
+      }
+    });
+  }
+});
+
 describe('R5 control: the snapshot is taken at the crash point', () => {
   it('a write after the crash point is missing in the snapshot; the dead instance changes nothing', async () => {
-    const before = await desktopLifeWithRun({ op: 'record.write', n: 1, when: 'vor' });
+    // record.write #1 is the migration of the update start, #2 the sign-in's tombstone.
+    const before = await desktopLifeWithRun({ op: 'record.write', n: 2, when: 'vor' });
     expect(before.phase).toBe('login');
-    expect(before.p.snapshot().record.text).toBeUndefined();
-    expect(before.p.snapshot().config.authToken).toBeUndefined(); // the update start had deleted the old one
+    expect(JSON.parse(before.p.snapshot().record.text)).toEqual({ epoch: 0, signedOut: false });
+    expect(before.p.snapshot().config.authToken).toBe(encrypted(OLD)); // the migrated session
 
-    const after = await desktopLifeWithRun({ op: 'record.write', n: 1, when: 'nach' });
+    const after = await desktopLifeWithRun({ op: 'record.write', n: 2, when: 'nach' });
     const snap = after.p.snapshot();
     expect(JSON.parse(snap.record.text)).toMatchObject({ signedOut: true });
     // The next operation of the sign-in (the token) never happened.
-    expect(snap.config.authToken).toBeUndefined();
+    expect(snap.config.authToken).toBe(encrypted(OLD));
     // The dead instance: every further operation is refused, nothing changes.
     expect(() => after.p.op('config.set', () => { throw new Error('must not run'); })).toThrow(Crash);
     expect(() => after.p.kv('config').get('authToken')).toThrow(Crash);

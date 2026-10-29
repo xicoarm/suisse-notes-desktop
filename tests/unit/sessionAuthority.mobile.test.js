@@ -311,3 +311,135 @@ describe('E8: no write failure counts as success', () => {
     expect(await authority.loadSession()).toEqual({ signedOut: true });
   });
 });
+
+// E1 addendum (lead decision, review round 7): «missing» record = first start
+// after the update. A keystore session (only intermediate builds have one;
+// the release kept the session in plaintext Preferences, which stays
+// discarded, T2) without the previous version's marker auth.signedOut=1 is
+// taken over once. Each test failed at a3c841fa.
+describe('E1 addendum: one-time migration of a keystore session (mobile)', () => {
+  const MARK = 'auth.sessionMigrated';
+  const OLD = jwt('old', 'legacy');
+  const legacy = (user = { id: 'old' }, token = OLD) => {
+    disk.ks.set('authToken', token);
+    disk.ks.set('userInfo', JSON.stringify(user));
+  };
+
+  it('keystore token and user, no record, no marker: signed in, record {0,false}, mark set', async () => {
+    legacy();
+    await restart();
+    expect(await authority.loadSession()).toEqual({ signedOut: false, token: OLD, user: { id: 'old' }, epoch: 0 });
+    expect(JSON.parse(localStorage.getItem(RECORD))).toEqual({ epoch: 0, signedOut: false });
+    expect(disk.ks.get(MARK)).toBe('1');
+    expect(await storage.getToken()).toBe(OLD);
+    await restart();
+    expect(await authority.loadSession()).toMatchObject({ signedOut: false, token: OLD });
+  });
+
+  it('a second start without record after the mark: no second migration, signed out, deleted', async () => {
+    legacy();
+    await restart();
+    await authority.loadSession();
+    localStorage.removeItem(RECORD); // e.g. web storage cleared, keystore kept (iOS reinstall)
+    await restart();
+    expect(await authority.loadSession()).toEqual({ signedOut: true });
+    expect(await storage.getToken()).toBeNull();
+    expect(disk.ks.has('authToken')).toBe(false);
+    expect(disk.ks.has('userInfo')).toBe(false);
+  });
+
+  it('with the previous version\'s marker, another user, no userId or a plaintext Preferences session: signed out', async () => {
+    const cases = {
+      marker: () => { legacy(); localStorage.setItem('auth.signedOut', '1'); },
+      otherUser: () => legacy({ id: 'other' }),
+      noUserId: () => legacy({ id: 'old' }, jwt('', 'x')),
+      noUser: () => disk.ks.set('authToken', OLD),
+      preferencesOnly: () => { disk.prefs.set('authToken', OLD); disk.prefs.set('userInfo', JSON.stringify({ id: 'old' })); }
+    };
+    for (const [name, arrange] of Object.entries(cases)) {
+      disk.ks.clear();
+      disk.prefs.clear();
+      localStorage.clear();
+      arrange();
+      await restart();
+      expect(await authority.loadSession(), name).toEqual({ signedOut: true });
+      expect(await storage.getToken(), name).toBeNull();
+      expect(disk.ks.has('authToken'), name).toBe(false);
+      expect(disk.prefs.has('authToken'), name).toBe(false);
+      expect(JSON.parse(localStorage.getItem(RECORD)), name).toMatchObject({ signedOut: true });
+      expect(disk.ks.get(MARK), name).toBe('1');
+    }
+  });
+
+  it('a corrupt record with a keystore session: signed out, never migrated', async () => {
+    legacy();
+    localStorage.setItem(RECORD, '{oops');
+    await restart();
+    expect(await authority.loadSession()).toEqual({ signedOut: true });
+    expect(localStorage.getItem(RECORD)).toBe('{oops');
+    expect(disk.ks.has('authToken')).toBe(false);
+  });
+
+  it('record not writable during the migration: RAM lock, keystore untouched, the next start migrates', async () => {
+    legacy();
+    await restart();
+    const set = vi.spyOn(Storage.prototype, 'setItem').mockImplementation((k) => { if (k === RECORD) throw new Error('QuotaExceeded'); });
+    expect(await authority.loadSession()).toEqual({ signedOut: true });
+    set.mockRestore();
+    expect(await storage.getToken()).toBeNull();
+    expect(authority.isSignedOut()).toBe(true);
+    expect(disk.ks.get('authToken')).toBe(OLD);
+    expect(disk.ks.has('userInfo')).toBe(true);
+    expect(disk.ks.has(MARK)).toBe(false);
+    await restart();
+    expect(await authority.loadSession()).toMatchObject({ signedOut: false, token: OLD });
+  });
+
+  it('keystore not readable during the migration: RAM lock, nothing deleted, the next start migrates', async () => {
+    legacy();
+    await restart();
+    const real = disk.ks.get.bind(disk.ks);
+    disk.ks.get = () => { throw new Error('KEYSTORE_LOCKED'); };
+    expect(await authority.loadSession()).toEqual({ signedOut: true });
+    disk.ks.get = real;
+    expect(disk.ks.get('authToken')).toBe(OLD);
+    await restart();
+    expect(await authority.loadSession()).toMatchObject({ signedOut: false, token: OLD });
+  });
+
+  it('mark not writable: RAM lock, nothing deleted; the confirmed record is read at the next start', async () => {
+    legacy();
+    await restart();
+    disk.failSet = true;
+    expect(await authority.loadSession()).toEqual({ signedOut: true });
+    disk.failSet = false;
+    expect(disk.ks.get('authToken')).toBe(OLD);
+    await restart();
+    expect(await authority.loadSession()).toMatchObject({ signedOut: false, token: OLD });
+    expect(disk.ks.get(MARK)).toBe('1');
+  });
+});
+
+describe('E9 double faults (mobile, r6 low findings)', () => {
+  it('invalidateTickets with the record not writable: marked unreadable', async () => {
+    const set = vi.spyOn(Storage.prototype, 'setItem').mockImplementation((k) => { if (k === RECORD) throw new Error('QuotaExceeded'); });
+    authority.invalidateTickets();
+    set.mockRestore();
+    expect(authority.isSignedOut()).toBe(true);
+    expect(authority.currentEpoch()).toBeGreaterThan(0);
+    const { unreadable } = authority.sessionState();
+    expect(unreadable).toBe(true);
+  });
+
+  it('sign-in with the record not writable and the old keystore session not deletable: refused, RAM lock', async () => {
+    await signIn('a');
+    const set = vi.spyOn(Storage.prototype, 'setItem').mockImplementation((k) => { if (k === RECORD) throw new Error('QuotaExceeded'); });
+    disk.failRemove = true;
+    expect(await signIn('b')).toEqual({ applied: false, reason: 'storage_unavailable' });
+    set.mockRestore();
+    disk.failRemove = false;
+    expect(authority.isSignedOut()).toBe(true);
+    expect(authority.memoryOnlySession()).toBeNull();
+    expect(await storage.getToken()).toBeNull();
+  });
+});

@@ -8,6 +8,9 @@
  * it starts and checks it before every request and after every await or
  * sleep. After a sign-out (or any session change) it stops at once: no further
  * request, and neither the queue nor the history is changed by this run.
+ * One run per ticket (review round 7): a run of an ended session no longer
+ * counts as «already running», so the run after the next sign-in starts at
+ * once instead of waiting for the periodic timer.
  *
  * Dependencies are injected so the loop can be tested without Electron.
  */
@@ -32,16 +35,17 @@
  * @param {{ info: Function, warn: Function, error: Function }} d.log
  */
 function createPendingUploadProcessor(d) {
-  let running = false;
+  // Ticket of the run in progress (null: none).
+  let running = null;
 
   return async function processPendingUploads() {
-    if (running) {
+    if (running && d.authority.isCurrent(running)) {
       d.log.info('Upload processing already in progress, skipping');
       return;
     }
-    running = true;
+    const ticket = d.authority.ticket();
+    running = ticket;
     try {
-      const ticket = d.authority.ticket();
       const current = () => d.authority.isCurrent(ticket);
       const token = () => (current() ? d.authority.getToken() : null);
 
@@ -130,7 +134,7 @@ function createPendingUploadProcessor(d) {
         if (!current()) return;
       }
     } finally {
-      running = false;
+      if (running === ticket) running = null;
     }
   };
 }

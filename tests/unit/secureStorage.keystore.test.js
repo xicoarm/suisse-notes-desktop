@@ -169,7 +169,8 @@ describe('secureStorage on mobile: plaintext copies of older versions are delete
     prefsData.set('ble_app_uuid', 'pairing-uuid');
     expect(await authority.loadSession()).toEqual({ signedOut: true });
     expect([...prefsData.keys()]).toEqual(['ble_app_uuid']);
-    expect(keystoreData.size).toBe(0);
+    // No auth key in the keystore; only the one-time migration mark (E1 addendum, round 7).
+    expect([...keystoreData.keys()]).toEqual(['auth.sessionMigrated']);
     expect(prefs.set).not.toHaveBeenCalled();
   });
 

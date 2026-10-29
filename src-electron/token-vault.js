@@ -95,15 +95,22 @@ function createTokenVault({ safeStorage, store, platform = process.platform, war
    * Persist a token. Returns { success, persisted }: persisted=false means
    * it is held in memory for this run only and the disk is unchanged.
    * { persist: false }: memory only, and the disk copy (an older session's)
-   * is removed.
+   * is removed; `deleted` tells whether that removal is confirmed (the
+   * session authority refuses the sign-in otherwise, E9).
    */
   function saveToken(token, { persist = true } = {}) {
     if (!token || typeof token !== 'string') return { success: false, persisted: false, error: 'Token is required' };
     memoryToken = token;
     dropInsecureCopy();
     if (!persist) {
-      try { store.delete(TOKEN_KEY); } catch { /* deleted again at the next start */ }
-      return { success: true, persisted: false };
+      let deleted;
+      try {
+        store.delete(TOKEN_KEY);
+        deleted = !store.get(TOKEN_KEY);
+      } catch {
+        deleted = false;
+      }
+      return { success: true, persisted: false, deleted };
     }
     if (!secure()) {
       warn('token-vault: no secure OS storage; token kept in memory for this session only');
@@ -157,6 +164,29 @@ function createTokenVault({ safeStorage, store, platform = process.platform, war
     }
   }
 
+  /**
+   * The previous version's token for the one-time migration of the session
+   * authority (E1 addendum). Not gated by isAllowed (the authority asks
+   * before it allows anything) and not cached. A plaintext or basic_text copy
+   * is never returned (T1).
+   * @returns {{ status: 'ok', token: string } | { status: 'none'|'insecure'|'invalid'|'unavailable'|'error' }}
+   */
+  function readStoredToken() {
+    let stored;
+    try { stored = store.get(TOKEN_KEY); } catch { return { status: 'error' }; }
+    if (!stored) return { status: 'none' };
+    if (typeof stored !== 'string' || isLegacyPlaintext(stored) || isInsecureBackend(safeStorage, platform)) return { status: 'insecure' };
+    // Not open yet (Windows, Linux: before app ready) or locked.
+    if (!secure()) return { status: 'unavailable' };
+    try {
+      const token = safeStorage.decryptString(Buffer.from(stored, 'base64'));
+      return token ? { status: 'ok', token } : { status: 'invalid' };
+    } catch (error) {
+      warn(`token-vault: decrypting the stored token failed (${error?.message || error})`);
+      return { status: 'invalid' };
+    }
+  }
+
   /** @returns {{ success: boolean, error?: string }} success only when the disk copy is gone */
   function clearToken() {
     memoryToken = null;
@@ -168,7 +198,7 @@ function createTokenVault({ safeStorage, store, platform = process.platform, war
     }
   }
 
-  return { saveToken, getToken, clearToken, isSecure: secure };
+  return { saveToken, getToken, clearToken, readStoredToken, isSecure: secure };
 }
 
 module.exports = { createTokenVault, isSecureStorageAvailable, isLegacyPlaintext, TOKEN_KEY };

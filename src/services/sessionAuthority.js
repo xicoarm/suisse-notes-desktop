@@ -5,9 +5,19 @@
  * (src-electron/session-authority.js); the renderer there only mirrors it.
  *
  * Rules (security review 10/2026, round 6):
- * - E1 One record {epoch, signedOut} in one localStorage entry. Missing or
- *   unreadable = signed out. The marker of the previous version
- *   (auth.signedOut=1) also counts as signed out.
+ * - E1 One record {epoch, signedOut} in one localStorage entry. Unreadable
+ *   (present, but a read or parse error) = signed out. The marker of the
+ *   previous version (auth.signedOut=1) also counts as signed out.
+ * - E1 addendum of the lead (review round 7): a MISSING record is the first
+ *   start after the update. loadSession() takes a keystore session over ONCE
+ *   when there is no marker auth.signedOut=1 and token and user carry the
+ *   same, present userId: {epoch:0, signedOut:false} written and read back,
+ *   then the one-time mark (in the keystore, so it outlives web storage),
+ *   then released. Any error: RAM lock only, nothing deleted, the next start
+ *   tries again. A record missing after the mark counts as unreadable. Only
+ *   intermediate builds have a keystore session: the release kept it in
+ *   plaintext Preferences, which stays discarded (T2) - those users sign in
+ *   once after the update.
  * - E2 Every asynchronous sign-in takes a ticket (the epoch) when it starts;
  *   token and user are written only by applySession(ticket, result).
  * - E3 applySession and signOut run one after the other (mutex). A stale
@@ -34,6 +44,8 @@ import {
 import { clearSsoFlowConfirmed, peekSsoFlow } from './ssoFlow';
 
 export const RECORD_KEY = 'auth.session.v1';
+/** One-time migration mark (keystore entry). */
+export const MIGRATION_MARK_KEY = 'auth.sessionMigrated';
 
 function storage() {
   try { return globalThis.localStorage || null; } catch { return null; }
@@ -66,7 +78,9 @@ function readRecord() {
   try {
     const legacyMarker = store.getItem(LEGACY_SIGNED_OUT_MARKER) === '1';
     const text = store.getItem(RECORD_KEY);
-    if (text === null) return { epoch: 0, signedOut: true, missing: true };
+    // Missing: the first start after the update (loadSession decides);
+    // with the previous version's marker it is a sign-out.
+    if (text === null) return legacyMarker ? { epoch: 0, signedOut: true, missing: true, legacyMarker: true } : { epoch: 0, signedOut: true, missing: true };
     const rec = parseRecord(text);
     if (!rec) return { epoch: -1, signedOut: true, unreadable: true };
     return legacyMarker ? { epoch: rec.epoch, signedOut: true } : rec;
@@ -186,8 +200,14 @@ export function applySession(ticket, result, { kind } = {}) {
       if (saved.success && info.success) persisted = persist(epoch, false);
     } else {
       // E8: memory only, and nothing of an older session stays restorable.
-      for (const key of AUTH_KEYS) await removeSecureItem(key);
+      let removed = true;
+      for (const key of AUTH_KEYS) {
+        if (!(await removeSecureItem(key)).success) removed = false;
+      }
       if (state().epoch !== epoch) return { applied: false, reason: 'session_changed' };
+      // E9 (r6 low finding): the old keystore session could come back under
+      // this one after a restart - RAM lock instead, nothing new.
+      if (!removed) return { applied: false, reason: 'storage_unavailable' };
     }
     if (!persisted) memorySession = { token, user };
     ram = { epoch, signedOut: false };
@@ -228,8 +248,54 @@ export function signOut() {
  */
 export function invalidateTickets() {
   const epoch = nextEpoch();
-  const written = state().signedOut ? persist(epoch, true) : false;
-  ram = { ...state(), epoch, unreadable: !!state().unreadable && !written };
+  if (state().signedOut) {
+    // E9 (r6 low finding): not written - treated as unreadable from here on.
+    ram = { epoch, signedOut: true, unreadable: !persist(epoch, true) };
+  } else {
+    ram = { ...state(), epoch };
+  }
+}
+
+/** Copy of the RAM state (tests, diagnostics). */
+export function sessionState() {
+  const { epoch, signedOut, unreadable, migrationPending } = state();
+  return { epoch, signedOut, unreadable: !!unreadable, migrationPending: !!migrationPending };
+}
+
+const sameUserPair = (token, user) => {
+  const uid = tokenUserId(token);
+  // Strict: both ids present and the same (string or number, as elsewhere).
+  return !!uid && !!user && typeof user === 'object' && !Array.isArray(user)
+    && (typeof user.id === 'string' || typeof user.id === 'number') && String(user.id) === uid;
+};
+
+/**
+ * E1 addendum: the one-time migration (see the header). Runs inside the
+ * mutex, record missing.
+ * @returns {Promise<{ outcome: 'migrated', token: string, user: object } | { outcome: 'none', tombstone: boolean } | { outcome: 'held' | 'unreadable' }>}
+ */
+async function migrate(current) {
+  const mark = await readSecureItem(MIGRATION_MARK_KEY);
+  if (!mark.ok) return { outcome: 'held' };
+  if (mark.value !== null) return { outcome: 'unreadable' };
+  let token = null;
+  let user = null;
+  if (!current.legacyMarker) {
+    const tokenRead = await readSecureItem(STORAGE_KEYS.AUTH_TOKEN);
+    const userRead = await readSecureItem(STORAGE_KEYS.USER_INFO);
+    if (!tokenRead.ok || !userRead.ok) return { outcome: 'held' };
+    token = tokenRead.value;
+    try { user = userRead.value ? JSON.parse(userRead.value) : null; } catch { user = null; }
+  }
+  if (!token || !sameUserPair(token, user)) {
+    // Signed out as before; the decision is kept (tombstone, mark).
+    const tombstone = persist(0, true);
+    await setSecureItem(MIGRATION_MARK_KEY, '1');
+    return { outcome: 'none', tombstone };
+  }
+  if (!persist(0, false)) return { outcome: 'held' };
+  if (!(await setSecureItem(MIGRATION_MARK_KEY, '1')).success) return { outcome: 'held' };
+  return { outcome: 'migrated', token, user };
 }
 
 /**
@@ -241,7 +307,30 @@ export function invalidateTickets() {
 export function loadSession() {
   return serialized(async () => {
     await purgeLegacyAuthPreferences();
-    const current = state();
+    let current = state();
+    if (current.missing) {
+      const result = await migrate(current);
+      // A sign-in or sign-out meanwhile wins.
+      if (state() !== current) return { signedOut: true };
+      if (result.outcome === 'migrated') {
+        ram = { epoch: 0, signedOut: false };
+        return { signedOut: false, token: result.token, user: result.user, epoch: 0 };
+      }
+      if (result.outcome === 'held') {
+        // RAM lock only; nothing deleted, the next start tries again.
+        ram = { ...current, migrationPending: true };
+        return { signedOut: true };
+      }
+      if (result.outcome === 'unreadable') ram = { epoch: -1, signedOut: true, unreadable: true };
+      else if (result.tombstone) ram = { epoch: 0, signedOut: true };
+      current = state();
+    } else if (!current.unreadable) {
+      // A record of an earlier build without the mark: from now on a missing
+      // record is never the first start after the update.
+      const mark = await readSecureItem(MIGRATION_MARK_KEY);
+      if (mark.ok && mark.value === null) await setSecureItem(MIGRATION_MARK_KEY, '1');
+      if (state() !== current) return { signedOut: true };
+    }
     if (current.signedOut) {
       for (const key of AUTH_KEYS) await removeSecureItem(key);
       const flow = peekSsoFlow();

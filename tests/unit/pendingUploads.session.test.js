@@ -85,3 +85,43 @@ describe('E7: sign-out while main uploads in the background', () => {
     expect(disk.queue.map((i) => i.recordId)).toEqual(['other']);
   });
 });
+
+// Review round 7 (r6 low finding): the run belongs to its ticket. A run of an
+// ended session no longer blocks the run after the next sign-in (it used to
+// stay «already running» through the 5 s pause, so the queue waited for the
+// 5-minute timer). Failed at a3c841fa.
+describe('E7: one run per session ticket', () => {
+  it('sign-out and sign-in during the pause: the run after the sign-in is not skipped', async () => {
+    const disk = createDisk();
+    disk.queue = [item('r1'), item('r2')];
+    const pause = deferred();
+    const app = signedIn(disk, { wait: () => pause.promise });
+    const first = app.processPendingUploads();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(app.requests.map((r) => r.recordId)).toEqual(['r1']);
+    app.authority.signOut();
+    app.passwordSignIn('a', 'again').apply();
+    // afterSessionApplied: the run of the new session starts at once.
+    const second = app.processPendingUploads();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(app.requests.map((r) => r.recordId)).toEqual(['r1', 'r2']);
+    pause.resolve();
+    await Promise.all([first, second]);
+    expect(app.requests.map((r) => r.recordId)).toEqual(['r1', 'r2']);
+    expect(disk.queue).toEqual([]);
+  });
+
+  it('a second call in the same session is still skipped', async () => {
+    const disk = createDisk();
+    disk.queue = [item('r1'), item('r2')];
+    const pause = deferred();
+    const app = signedIn(disk, { wait: () => pause.promise });
+    const first = app.processPendingUploads();
+    await new Promise((r) => setTimeout(r, 0));
+    await app.processPendingUploads();
+    expect(app.requests.map((r) => r.recordId)).toEqual(['r1']);
+    pause.resolve();
+    await first;
+    expect(app.requests.map((r) => r.recordId)).toEqual(['r1', 'r2']);
+  });
+});
