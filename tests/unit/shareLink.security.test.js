@@ -24,7 +24,8 @@ vi.mock('../../src/boot/sentry', () => ({ captureMessage: vi.fn(), addBreadcrumb
 const browser = vi.hoisted(() => ({ open: vi.fn(async () => {}), close: vi.fn() }));
 vi.mock('@capacitor/browser', () => ({ Browser: browser }));
 
-const { useShareLink, buildMeetingUrl, handoffQuery } = await import('../../src/composables/useShareLink');
+const { useShareLink, buildMeetingUrl, handoffUrl } = await import('../../src/composables/useShareLink');
+const { pkceChallenge } = await import('../../src/services/ssoFlow');
 
 describe('buildMeetingUrl', () => {
   it('is the plain meeting URL', () => {
@@ -37,17 +38,16 @@ describe('buildMeetingUrl', () => {
   });
 });
 
-describe('handoffQuery', () => {
-  it('prefers the bound one-time code over a session token', () => {
-    expect(handoffQuery({ success: true, handoffCode: 'c1', sessionToken: 's1' })).toBe('handoff=c1');
+describe('handoffUrl (bound hand-off, server contract 10/2026)', () => {
+  const plain = 'https://app.suisse-meets.ch/meeting/audio/m1';
+  it('token in the query, verifier only in the fragment', () => {
+    expect(handoffUrl(plain, { success: true, sessionToken: 's/1' }, 'v1')).toBe(`${plain}?session=s%2F1#hv=v1`);
   });
-  it('falls back to today\'s session token', () => {
-    expect(handoffQuery({ success: true, sessionToken: 's/1' })).toBe('session=s%2F1');
-  });
-  it('is empty for failures', () => {
-    expect(handoffQuery(null)).toBe('');
-    expect(handoffQuery({ success: false, sessionToken: 's' })).toBe('');
-    expect(handoffQuery({ success: true })).toBe('');
+  it('plain URL on any failure', () => {
+    expect(handoffUrl(plain, null, 'v')).toBe(plain);
+    expect(handoffUrl(plain, { success: false, sessionToken: 's' }, 'v')).toBe(plain);
+    expect(handoffUrl(plain, { success: true }, 'v')).toBe(plain);
+    expect(handoffUrl(plain, { success: true, sessionToken: 's' }, '')).toBe(plain);
   });
 });
 
@@ -116,15 +116,31 @@ describe('openInBrowser', () => {
     vi.unstubAllGlobals();
   });
 
-  it('mobile: the hand-off goes only into the browser it opens', async () => {
+  it('mobile: bound hand-off — challenge to the server, verifier only in the opened URL\'s fragment', async () => {
     platform.capacitor = true;
     api.fetchWithTimeout.mockResolvedValue({ ok: true });
-    api.parseJsonSafe.mockResolvedValue({ success: true, handoffCode: 'one-time' });
+    api.parseJsonSafe.mockResolvedValue({ success: true, sessionToken: 'one-time' });
     const writeText = vi.fn();
     vi.stubGlobal('navigator', { clipboard: { writeText } });
     await useShareLink().openInBrowser('m6');
-    expect(browser.open).toHaveBeenCalledWith({ url: 'https://app.suisse-meets.ch/meeting/audio/m6?handoff=one-time' });
+    const body = JSON.parse(api.fetchWithTimeout.mock.calls[0][1].body);
+    expect(body.codeChallengeMethod).toBe('S256');
+    const opened = browser.open.mock.calls[0][0].url;
+    const m = opened.match(/^https:\/\/app\.suisse-meets\.ch\/meeting\/audio\/m6\?session=one-time#hv=([A-Za-z0-9_-]{43})$/);
+    expect(m).not.toBeNull();
+    expect(await pkceChallenge(m[1])).toBe(body.codeChallenge);
+    expect(JSON.stringify(api.fetchWithTimeout.mock.calls)).not.toContain(m[1]);
     expect(writeText).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+
+  it('mobile: 400 HANDOFF_BINDING_REQUIRED opens the plain URL', async () => {
+    // The double-tap guard of the previous open is released after 1.5 s.
+    await new Promise((r) => setTimeout(r, 1600));
+    platform.capacitor = true;
+    api.fetchWithTimeout.mockResolvedValue({ ok: false, status: 400 });
+    api.parseJsonSafe.mockResolvedValue({ error: 'HANDOFF_BINDING_REQUIRED' });
+    await useShareLink().openInBrowser('m7');
+    expect(browser.open).toHaveBeenCalledWith({ url: 'https://app.suisse-meets.ch/meeting/audio/m7' });
   });
 });

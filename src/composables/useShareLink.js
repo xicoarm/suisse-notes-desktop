@@ -4,6 +4,7 @@ import { isElectron, isCapacitor, isAndroid } from '../utils/platform';
 import { useAuthStore } from '../stores/auth';
 import { getApiUrlSync, fetchWithTimeout, parseJsonSafe } from '../services/api';
 import { captureMessage, addBreadcrumb } from '../boot/sentry';
+import { randomToken, pkceChallenge } from '../services/ssoFlow';
 
 // Shared across every card/page: one in-app browser open at a time. A second
 // launch while one is starting kills the just-opened Custom Tab and, on
@@ -60,22 +61,23 @@ export function buildMeetingUrl(audioFileId) {
 }
 
 /**
- * Hand-off query for the signed-in user's own «open in browser» action only.
- * Prefers the bound one-time code (`handoffCode`) once the server returns it;
- * until then the short-lived `sessionToken` of today's contract. The result is
- * opened in the browser and never copied, shared, logged or returned to UI.
+ * URL for the signed-in user's own «open in browser» action only (server
+ * contract of the bound hand-off, 10/2026): the single-use, 60-second session
+ * token goes into the query, the PKCE verifier into the fragment (`#hv=`),
+ * which the web page posts itself — it never reaches a server, a log or a
+ * Referer. A copied URL without the verifier is refused by the server. The
+ * result is opened in the browser and never copied, shared, logged or
+ * returned to the UI.
+ * @param {string} plainUrl - from buildMeetingUrl
  * @param {object} data - create-web-session response body
- * @returns {string} '' when the response holds neither
+ * @param {string} verifier - the verifier whose challenge was sent
+ * @returns {string} the plain URL when the response holds no token
  */
-export function handoffQuery(data) {
-  if (!data || data.success === false) return '';
-  if (typeof data.handoffCode === 'string' && data.handoffCode) {
-    return `handoff=${encodeURIComponent(data.handoffCode)}`;
+export function handoffUrl(plainUrl, data, verifier) {
+  if (!data || data.success === false || typeof data.sessionToken !== 'string' || !data.sessionToken || !verifier) {
+    return plainUrl;
   }
-  if (typeof data.sessionToken === 'string' && data.sessionToken) {
-    return `session=${encodeURIComponent(data.sessionToken)}`;
-  }
-  return '';
+  return `${plainUrl}?session=${encodeURIComponent(data.sessionToken)}#hv=${encodeURIComponent(verifier)}`;
 }
 
 /**
@@ -99,17 +101,21 @@ export function useShareLink() {
   const mobileHandoffUrl = async (url) => {
     if (!authStore.token) return url;
     try {
+      // Bound hand-off: the server stores the challenge; only the browser
+      // we open gets the verifier (in the URL fragment).
+      const verifier = randomToken(32);
+      const codeChallenge = await pkceChallenge(verifier);
       const response = await fetchWithTimeout(`${getApiUrlSync()}/api/auth/desktop/create-web-session`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${authStore.token}`
         },
-        body: JSON.stringify({ purpose: 'open_in_browser' })
+        body: JSON.stringify({ codeChallenge, codeChallengeMethod: 'S256' })
       });
       const data = await parseJsonSafe(response);
-      const query = response.ok ? handoffQuery(data) : '';
-      return query ? `${url}?${query}` : url;
+      // 400 HANDOFF_BINDING_REQUIRED or any failure: the plain URL.
+      return response.ok ? handoffUrl(url, data, verifier) : url;
     } catch (error) {
       console.warn('Could not create web session for mobile:', error?.message || 'unknown');
       return url;

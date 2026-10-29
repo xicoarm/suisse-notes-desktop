@@ -2352,20 +2352,21 @@ ipcMain.handle('auth:openWebWithSession', async (_event, pagePath) => {
     return { success: false, error: 'path_not_allowed' };
   }
   const plainUrl = `${WEB_HANDOFF_ORIGIN}${path}`;
-  let query = '';
+  let target = plainUrl;
   try {
-    const session = await createWebSessionInMain();
+    // Bound hand-off (server contract 10/2026): single-use 60 s token in the
+    // query, PKCE verifier in the fragment (#hv=, never sent to a server).
+    const verifier = require('crypto').randomBytes(32).toString('base64url');
+    const session = await createWebSessionInMain(ssoFlow.pkceChallenge(verifier));
     if (session.success) {
-      query = session.handoffCode
-        ? `handoff=${encodeURIComponent(session.handoffCode)}`
-        : `session=${encodeURIComponent(session.sessionToken)}`;
+      target = `${plainUrl}?session=${encodeURIComponent(session.sessionToken)}#hv=${encodeURIComponent(verifier)}`;
     }
   } catch (error) {
     log.warn(`Web hand-off could not be created: ${error?.message || 'unknown'}`);
   }
   try {
-    await shell.openExternal(query ? `${plainUrl}?${query}` : plainUrl);
-    return { success: true, signedIn: !!query };
+    await shell.openExternal(target);
+    return { success: true, signedIn: target !== plainUrl };
   } catch (error) {
     log.warn(`Could not open the browser: ${error?.message || 'unknown'}`);
     return { success: false, error: 'open_failed' };
@@ -2374,7 +2375,7 @@ ipcMain.handle('auth:openWebWithSession', async (_event, pagePath) => {
 
 // Create web session token for seamless web login (main process only).
 // SECURITY: Verifies token matches stored user to prevent authentication as wrong user
-async function createWebSessionInMain() {
+async function createWebSessionInMain(codeChallenge) {
   try {
     const authToken = await getAuthToken();
     if (!authToken) {
@@ -2410,7 +2411,7 @@ async function createWebSessionInMain() {
       }
     }
 
-    const response = await axios.post(`${API_BASE_URL}/api/auth/desktop/create-web-session`, { purpose: 'open_in_browser' }, {
+    const response = await axios.post(`${API_BASE_URL}/api/auth/desktop/create-web-session`, { codeChallenge, codeChallengeMethod: 'S256' }, {
       headers: {
         'Authorization': `Bearer ${authToken}`,
         'Content-Type': 'application/json'
@@ -2418,14 +2419,10 @@ async function createWebSessionInMain() {
       timeout: 30000
     });
 
-    // `handoffCode`: the bound one-time code of the newer server contract;
-    // `sessionToken`: today's short-lived session.
-    if (response.data && response.data.success && (response.data.handoffCode || response.data.sessionToken)) {
-      return {
-        success: true,
-        handoffCode: typeof response.data.handoffCode === 'string' ? response.data.handoffCode : null,
-        sessionToken: response.data.sessionToken
-      };
+    // Single-use 60 s token bound to codeChallenge (400 HANDOFF_BINDING_REQUIRED
+    // from servers that refuse it ends up in catch: the plain URL is opened).
+    if (response.data && response.data.success && typeof response.data.sessionToken === 'string' && response.data.sessionToken) {
+      return { success: true, sessionToken: response.data.sessionToken };
     }
 
     return { success: false, error: 'Failed to create web session' };

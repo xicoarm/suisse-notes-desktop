@@ -60,12 +60,12 @@ describe('telemetry privacy', () => {
       message: 'open https://app.suisse-meets.ch/meeting/audio/x?session=abc.def.ghi',
       data: {
         from: '/a?state=s1',
-        to: '/meeting?handoff=one-time',
+        to: '/meeting?session=one-time#hv=verifier-x',
         url: 'suissenotes://auth/callback?auth_code=c1&token=eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOiJ1MSJ9.sig-sig-sig'
       }
     });
     const text = JSON.stringify(bc);
-    for (const secret of ['abc.def.ghi', 's1', 'one-time', 'c1', 'eyJhbGciOiJIUzI1NiJ9']) expect(text).not.toContain(secret);
+    for (const secret of ['abc.def.ghi', 's1', 'one-time', 'verifier-x', 'c1', 'eyJhbGciOiJIUzI1NiJ9']) expect(text).not.toContain(secret);
   });
 
   it('the main process never sends the e-mail to telemetry', () => {

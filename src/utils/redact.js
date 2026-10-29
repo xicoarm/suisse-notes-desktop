@@ -9,7 +9,7 @@
  */
 
 const SECRET_QUERY_KEYS = ['token', 'access_token', 'refresh_token', 'id_token', 'session', 'user', 'auth', 'code', 'password',
-  'auth_code', 'handoff', 'state', 'app_state', 'code_verifier', 'code_challenge'];
+  'auth_code', 'handoff', 'hv', 'state', 'app_state', 'code_verifier', 'code_challenge'];
 
 const SECRET_QUERY_RE = new RegExp(`([?&#]|^)(${SECRET_QUERY_KEYS.join('|')})=([^&#\\s'"]+)`, 'gi');
 // Bare JWTs (three base64url segments) — they are recognizable without a key.
