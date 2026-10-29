@@ -28,10 +28,13 @@ vi.mock('../../src/services/api', () => ({
 }));
 
 // Device storage: keystore (with faults and a gate to hold a write), Preferences.
-const disk = vi.hoisted(() => ({ ks: new Map(), prefs: new Map(), failRemove: false, failSet: false, gate: null }));
+const disk = vi.hoisted(() => ({ ks: new Map(), prefs: new Map(), failRemove: false, failSet: false, failGet: false, gate: null }));
 vi.mock('@capacitor/core', () => {
   const keystore = {
-    get: async ({ key }) => ({ value: disk.ks.has(key) ? disk.ks.get(key) : null }),
+    get: async ({ key }) => {
+      if (disk.failGet) throw new Error('KEYSTORE_READ_FAILED');
+      return { value: disk.ks.has(key) ? disk.ks.get(key) : null };
+    },
     set: async ({ key, value }) => {
       if (disk.gate) await disk.gate;
       if (disk.failSet) throw new Error('KEYSTORE_WRITE_FAILED');
@@ -86,6 +89,7 @@ beforeEach(async () => {
   disk.prefs.clear();
   disk.failRemove = false;
   disk.failSet = false;
+  disk.failGet = false;
   disk.gate = null;
   device.onLogout = null;
   net.calls.length = 0;
@@ -441,5 +445,120 @@ describe('E9 double faults (mobile, r6 low findings)', () => {
     expect(authority.isSignedOut()).toBe(true);
     expect(authority.memoryOnlySession()).toBeNull();
     expect(await storage.getToken()).toBeNull();
+  });
+});
+
+// R-S5 (review round 9, council 3; r8-MITTEL): a released session (RAM
+// signedOut:false of the current epoch, also a memory-only session) gives
+// token and user on EVERY further loadSession(), with the same read and
+// userId check; loadSession().signedOut === isSignedOut(). The store's
+// checkSession() after a sign-in therefore keeps the user signed in. Each
+// test failed at 7c121955 (the second call answered «signed out»).
+describe('R-S5: loadSession() of a released session', () => {
+  const twice = async () => [await authority.loadSession(), await authority.loadSession()];
+  const expectSignedIn = (results, token, userId) => {
+    for (const r of results) {
+      expect(r).toMatchObject({ signedOut: false, token, user: { id: userId } });
+      expect(r.signedOut).toBe(authority.isSignedOut());
+    }
+    expect(results[0]).toEqual(results[1]);
+  };
+
+  // The store applies password, 2FA and registration results through
+  // _applySignIn with kind 'login' (src/stores/auth.js), SSO with 'sso'.
+  it.each([['password', 'pw'], ['2FA', '2fa'], ['registration', 'reg']])('directly after a %s sign-in: twice the same session', async (_, tag) => {
+    expect(await signIn('a', tag)).toMatchObject({ applied: true, persisted: true });
+    expectSignedIn(await twice(), jwt('a', tag), 'a');
+  });
+
+  it('directly after SSO: twice the same session', async () => {
+    expect(await signIn('s', 'sso', 'sso')).toMatchObject({ applied: true });
+    expectSignedIn(await twice(), jwt('s', 'sso'), 's');
+  });
+
+  it('after a refresh: the refreshed token, twice', async () => {
+    await signIn('a');
+    const ticket = authority.sessionTicket({ userId: 'a' });
+    expect(await authority.applySession(ticket, { token: jwt('a', 'refreshed'), user: { id: 'a' } }, { kind: 'refresh' })).toMatchObject({ applied: true });
+    expectSignedIn(await twice(), jwt('a', 'refreshed'), 'a');
+  });
+
+  it('after a restart: released once, then the same session on every call', async () => {
+    await signIn('a');
+    await restart();
+    expectSignedIn([await authority.loadSession(), await authority.loadSession(), await authority.loadSession()].slice(1), jwt('a', 'pw'), 'a');
+  });
+
+  it('after a migration: the same session on the next call', async () => {
+    disk.ks.set('authToken', jwt('old', 'legacy'));
+    disk.ks.set('userInfo', JSON.stringify({ id: 'old' }));
+    await restart();
+    expectSignedIn(await twice(), jwt('old', 'legacy'), 'old');
+  });
+
+  it('a memory-only session (record not writable at sign-in): twice, without a keystore read', async () => {
+    const set = vi.spyOn(Storage.prototype, 'setItem').mockImplementation((k) => { if (k === RECORD) throw new Error('QuotaExceeded'); });
+    expect(await signIn('a')).toMatchObject({ applied: true, persisted: false });
+    set.mockRestore();
+    disk.failGet = true;
+    expectSignedIn(await twice(), jwt('a', 'pw'), 'a');
+  });
+
+  it('a read error: held (signed out, nothing deleted); the next readable call gives the session again', async () => {
+    await signIn('a');
+    disk.failGet = true;
+    const held = await authority.loadSession();
+    expect(held).toEqual({ signedOut: true });
+    expect(authority.isSignedOut()).toBe(true);
+    expect(authority.sessionState().migrationPending).toBe(true);
+    disk.failGet = false;
+    expect(disk.ks.get('authToken')).toBe(jwt('a', 'pw'));
+    expectSignedIn(await twice(), jwt('a', 'pw'), 'a');
+  });
+
+  it('a read error after invalidateTickets: the old tickets stay invalid once the session is read again', async () => {
+    await signIn('a');
+    const old = authority.sessionTicket();
+    authority.invalidateTickets();
+    disk.failGet = true;
+    expect(await authority.loadSession()).toEqual({ signedOut: true });
+    disk.failGet = false;
+    expect(await authority.loadSession()).toMatchObject({ signedOut: false });
+    expect(authority.isCurrentTicket(old)).toBe(false);
+  });
+
+  it('keystore token gone or of another user: signed out without deleting anything, invariant holds', async () => {
+    await signIn('a');
+    disk.ks.set('userInfo', JSON.stringify({ id: 'b' }));
+    const mismatch = await authority.loadSession();
+    expect(mismatch).toMatchObject({ signedOut: true, mismatch: true });
+    expect(authority.isSignedOut()).toBe(true);
+    expect(disk.ks.get('authToken')).toBe(jwt('a', 'pw'));
+    disk.ks.delete('authToken');
+    disk.ks.set('userInfo', JSON.stringify({ id: 'a' }));
+    expect(await authority.loadSession()).toEqual({ signedOut: true });
+    expect(authority.isSignedOut()).toBe(true);
+  });
+
+  it('a sign-out wins over a running loadSession', async () => {
+    await signIn('a');
+    const pending = authority.loadSession();
+    const out = authority.signOut();
+    const result = await pending;
+    await out;
+    expect(result).toEqual({ signedOut: true });
+    expect(authority.isSignedOut()).toBe(true);
+    expect(await authority.loadSession()).toEqual({ signedOut: true });
+  });
+
+  it('store: checkSession() right after a sign-in keeps the user signed in', async () => {
+    const store = useAuthStore();
+    const token = `h.${Buffer.from(JSON.stringify({ userId: 'a', exp: Math.floor(Date.now() / 1000) + 7 * 86400 })).toString('base64url')}.s`;
+    expect(await authority.applySession(authority.sessionTicket(), { token, user: { id: 'a' } }, { kind: 'login' })).toMatchObject({ applied: true });
+    await store.checkSession();
+    await store.checkSession();
+    expect(store.isAuthenticated).toBe(true);
+    expect(store.token).toBe(token);
+    store.stopTokenRefresh?.();
   });
 });

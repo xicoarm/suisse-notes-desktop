@@ -331,13 +331,59 @@ async function migrate(current) {
  * restored (E6); a stored SSO flow survives only with the current epoch.
  * @returns {Promise<{ signedOut: true } | { signedOut: false, token: string, user: object, epoch: number }>}
  */
+/** Token and user from the keystore, with the userId check. Nothing is deleted. */
+async function readStoredSession() {
+  const tokenRead = await readSecureItem(STORAGE_KEYS.AUTH_TOKEN);
+  const userRead = await readSecureItem(STORAGE_KEYS.USER_INFO);
+  if (!tokenRead.ok || !userRead.ok) return { held: true };
+  if (!tokenRead.value || !userRead.value) return { signedOut: true };
+  let user = null;
+  try { user = JSON.parse(userRead.value); } catch { user = null; }
+  if (!user || typeof user !== 'object' || Array.isArray(user)) return { signedOut: true };
+  const uid = tokenUserId(tokenRead.value);
+  if (uid && String(user.id ?? '') !== uid) return { signedOut: true, mismatch: true };
+  return { token: tokenRead.value, user };
+}
+
+/**
+ * R-S5 (review round 9): a session released in this run (sign-in, SSO,
+ * refresh, migration, an earlier loadSession, also memory only) gives token
+ * and user on every call, read and checked like at the release. A read
+ * error holds (signed out in RAM, nothing deleted, the next call reads
+ * again); a missing or mismatching keystore session returns to «release
+ * pending» (signed out in RAM, nothing deleted). Invariant:
+ * loadSession().signedOut === isSignedOut().
+ */
+async function loadReleased(current) {
+  if (memorySession) return { signedOut: false, token: memorySession.token, user: memorySession.user, epoch: current.epoch };
+  const read = await readStoredSession();
+  // A sign-out meanwhile wins; invalidateTickets keeps the session (new epoch).
+  const now = state();
+  if (now.signedOut) return { signedOut: true };
+  if (read.held) {
+    ram = { epoch: now.epoch, signedOut: true, held: true };
+    return { signedOut: true };
+  }
+  if (read.signedOut) {
+    ram = { epoch: now.epoch, signedOut: true, release: true };
+    return read;
+  }
+  return { signedOut: false, token: read.token, user: read.user, epoch: now.epoch };
+}
+
 export function loadSession() {
   return serialized(async () => {
     await purgeLegacyAuthPreferences();
-    // Held before (a read or write failed): read again.
-    if (state().held) ram = readRecord();
+    // Held before (a read or write failed): read again. An epoch this run
+    // already moved past (invalidateTickets) never comes back.
+    if (state().held) {
+      const before = state().epoch;
+      ram = readRecord();
+      if (ram.release && ram.epoch < before) ram = { ...ram, epoch: before };
+    }
     let current = state();
     if (current.held) return { signedOut: true };
+    if (!current.signedOut) return loadReleased(current);
     if (current.missing) {
       const result = await migrate(current);
       // A sign-in or sign-out meanwhile wins.
@@ -365,22 +411,16 @@ export function loadSession() {
           ram = { ...current, held: true };
           return { signedOut: true };
         }
-        const tokenRead = await readSecureItem(STORAGE_KEYS.AUTH_TOKEN);
-        const userRead = await readSecureItem(STORAGE_KEYS.USER_INFO);
+        const read = await readStoredSession();
         if (state() !== current) return { signedOut: true };
         // A read error: held, nothing deleted, the next start reads again.
-        if (!tokenRead.ok || !userRead.ok) {
+        if (read.held) {
           ram = { ...current, held: true };
           return { signedOut: true };
         }
-        if (!tokenRead.value || !userRead.value) return { signedOut: true };
-        let user = null;
-        try { user = JSON.parse(userRead.value); } catch { user = null; }
-        if (!user || typeof user !== 'object' || Array.isArray(user)) return { signedOut: true };
-        const uid = tokenUserId(tokenRead.value);
-        if (uid && String(user.id ?? '') !== uid) return { signedOut: true, mismatch: true };
+        if (read.signedOut) return read;
         ram = { epoch: current.epoch, signedOut: false };
-        return { signedOut: false, token: tokenRead.value, user, epoch: current.epoch };
+        return { signedOut: false, token: read.token, user: read.user, epoch: current.epoch };
       }
     }
     if (current.signedOut) {
