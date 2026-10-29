@@ -340,14 +340,7 @@ ipcMain.handle('auth:takePendingSSO', () => {
 });
 
 const ssoFlow = require('./sso-flow');
-// `echo`: persistent «server echoes state» flag (configStore is defined below;
-// the callbacks only run when a callback arrives).
-const ssoFlows = ssoFlow.createSsoFlowStore({
-  echo: {
-    seen: () => configStore.get('ssoStateEchoSeen') === true,
-    markSeen: () => configStore.set('ssoStateEchoSeen', true)
-  }
-});
+const ssoFlows = ssoFlow.createSsoFlowStore();
 
 // Exchange a one-time SSO code for the session (PKCE, newer server contract).
 async function exchangeSsoCode(authCode, verifier, state) {
@@ -376,9 +369,6 @@ async function handleSSOUrl(url) {
   if (!binding.ok) {
     log.warn(`SSO: callback ignored (${binding.reason})`);
     return;
-  }
-  if (binding.legacy) {
-    log.warn('SSO: server did not echo state; accepted for the sign-in this app started (legacy fallback)');
   }
   let payload;
   if (parsed.authCode) {

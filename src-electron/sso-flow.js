@@ -65,23 +65,8 @@ function parseCallbackUrl(url) {
   return { state, error: 'invalid_callback' };
 }
 
-/**
- * @param {object} [opts]
- * @param {{ seen: () => boolean, markSeen: () => void }} [opts.echo] - persistent
- *   flag "the server has echoed state at least once on this device". After the
- *   first echo a callback without state is never accepted again (no downgrade).
- */
-function createSsoFlowStore({ now = () => Date.now(), randomBytes = crypto.randomBytes, echo = null } = {}) {
+function createSsoFlowStore({ now = () => Date.now(), randomBytes = crypto.randomBytes } = {}) {
   let pending = null;
-  let echoSeenMemory = false;
-  const echoSeen = () => {
-    if (echoSeenMemory) return true;
-    try { return !!(echo && echo.seen()); } catch { return false; }
-  };
-  const markEchoSeen = () => {
-    echoSeenMemory = true;
-    try { if (echo) echo.markSeen(); } catch { /* memory flag still holds */ }
-  };
 
   return {
     /** Start a flow (replaces an older one) and return the URL parameters. */
@@ -99,14 +84,10 @@ function createSsoFlowStore({ now = () => Date.now(), randomBytes = crypto.rando
     clear() { pending = null; },
 
     /**
-     * Decide about a parsed callback.
-     * - state present: must equal the pending state (success and error);
-     * - no state (server without the echo, before backend «SSO state echo»):
-     *   accepted only while no echo was ever seen on this device - legacy
-     *   fallback, still bound to the in-memory flow this process started,
-     *   reported as `legacy: true`. Otherwise ignored and the flow keeps
-     *   waiting, so a foreign `error=canceled` link cannot abort the sign-in.
-     * @returns {{ ok: true, verifier: string, provider: string, legacy?: boolean } | { ok: false, reason: string }}
+     * Decide about a parsed callback: success and error need the pending
+     * state (server «SSO state echo»). Anything else is ignored and the flow
+     * keeps waiting, so a crafted link can neither sign in nor abort.
+     * @returns {{ ok: true, verifier: string, provider: string } | { ok: false, reason: string }}
      */
     consume(result) {
       if (!pending || now() - pending.createdAt > FLOW_TTL_MS) {
@@ -114,16 +95,11 @@ function createSsoFlowStore({ now = () => Date.now(), randomBytes = crypto.rando
         return { ok: false, reason: 'no_pending_flow' };
       }
       const state = result && typeof result.state === 'string' ? result.state : '';
+      if (!state) return { ok: false, reason: 'missing_state' };
+      if (!sameString(state, pending.state)) return { ok: false, reason: 'state_mismatch' };
       const { verifier, provider } = pending;
-      if (state) {
-        if (!sameString(state, pending.state)) return { ok: false, reason: 'state_mismatch' };
-        markEchoSeen();
-        pending = null;
-        return { ok: true, verifier, provider };
-      }
-      if (echoSeen()) return { ok: false, reason: 'missing_state' };
       pending = null;
-      return { ok: true, verifier, provider, legacy: true };
+      return { ok: true, verifier, provider };
     }
   };
 }

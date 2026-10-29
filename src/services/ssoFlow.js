@@ -21,9 +21,8 @@
  *   exchange: POST /api/auth/sso/exchange { authCode, codeVerifier, state }
  *             -> { success, token, user }
  *
- * Servers without the state echo (before backend PR "SSO state echo"): see
- * consumeSsoFlow - a stateless result is accepted only for a flow started in
- * this app process and only until the first echo was seen on this device.
+ * The server must echo `state` (backend «SSO state echo»); without it no SSO
+ * result is accepted. The app release ships only after that server change.
  *
  * The pending flow is kept in localStorage so an Android process death while
  * the browser is in front does not lose it; it holds no credential (the
@@ -115,43 +114,17 @@ function sameString(a, b) {
 }
 
 /**
- * The server echoes `state` (backend contract 10/2026). Once one echo has been
- * seen on this device, a callback without state is never accepted again
- * (no downgrade to the unbound legacy behaviour).
- */
-const ECHO_KEY = 'sso.stateEcho.v1';
-let memoryEchoSeen = false;
-function echoSeen() {
-  if (memoryEchoSeen) return true;
-  const store = storage();
-  try { return !!store && store.getItem(ECHO_KEY) === '1'; } catch { return false; }
-}
-function markEchoSeen() {
-  memoryEchoSeen = true;
-  const store = storage();
-  try { if (store) store.setItem(ECHO_KEY, '1'); } catch { /* memory flag still holds */ }
-}
-
-/** Test helper: forget the echo flag (memory and storage). */
-export function resetSsoStateEcho() {
-  memoryEchoSeen = false;
-  const store = storage();
-  try { if (store) store.removeItem(ECHO_KEY); } catch { /* ignore */ }
-}
-
-/**
  * Decide whether a callback payload belongs to the pending flow, and consume
  * the flow if it does.
- * - state present: must equal the pending flow's state (success and error);
+ * - state present: must equal the pending flow's state (success and error).
+ *   The flow is read from storage, so this also works after an Android
+ *   process restart while the browser was in front;
  * - local abort (`local: true`, set only by this app's own code for a browser
  *   the user closed, never by a URL): ends the pending flow;
- * - no state (server without the echo): accepted only while this device has
- *   never seen an echo AND the flow was started in this app process
- *   (in-memory nonce, not one restored from storage) - legacy fallback,
- *   reported as `legacy: true`. Otherwise ignored and the flow keeps waiting,
- *   so a foreign `error=canceled` link cannot abort the sign-in.
- * Anything else is unsolicited and must be ignored.
- * @returns {{ ok: true, verifier: string, provider: string, legacy?: boolean } | { ok: false, reason: string }}
+ * - anything else (no state, foreign state) is ignored and the flow keeps
+ *   waiting: a crafted link can neither sign the app in nor abort a sign-in.
+ * Requires the server to echo `state` (backend «SSO state echo»).
+ * @returns {{ ok: true, verifier: string, provider: string } | { ok: false, reason: string }}
  */
 export function consumeSsoFlow(payload, now = Date.now()) {
   const flow = readFlow();
@@ -163,7 +136,6 @@ export function consumeSsoFlow(payload, now = Date.now()) {
   const state = payload && typeof payload.state === 'string' ? payload.state : '';
   if (state) {
     if (!sameString(state, flow.state)) return { ok: false, reason: 'state_mismatch' };
-    markEchoSeen();
     writeFlow(null);
     return { ok: true, verifier: flow.verifier, provider: flow.provider };
   }
@@ -171,8 +143,5 @@ export function consumeSsoFlow(payload, now = Date.now()) {
     writeFlow(null);
     return { ok: true, verifier: flow.verifier, provider: flow.provider };
   }
-  const inMemory = !!memoryFlow && sameString(memoryFlow.state, flow.state);
-  if (echoSeen() || !inMemory) return { ok: false, reason: 'missing_state' };
-  writeFlow(null);
-  return { ok: true, verifier: flow.verifier, provider: flow.provider, legacy: true };
+  return { ok: false, reason: 'missing_state' };
 }

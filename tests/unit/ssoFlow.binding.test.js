@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createRequire } from 'node:module';
-import { beginSsoFlow, withFlowParams, consumeSsoFlow, hasPendingSsoFlow, clearSsoFlow, pkceChallenge, resetSsoStateEcho, FLOW_TTL_MS } from '../../src/services/ssoFlow';
+import { beginSsoFlow, withFlowParams, consumeSsoFlow, hasPendingSsoFlow, clearSsoFlow, pkceChallenge, FLOW_TTL_MS } from '../../src/services/ssoFlow';
 import { parseSSOCallbackUrl } from '../../src/utils/ssoCallback';
 
 const require = createRequire(import.meta.url);
@@ -9,7 +9,7 @@ const mainFlow = require('../../src-electron/sso-flow.js');
 const userB64 = Buffer.from(JSON.stringify({ id: 'u1' })).toString('base64url');
 
 describe('mobile SSO flow (state + PKCE)', () => {
-  beforeEach(() => { clearSsoFlow(); resetSsoStateEcho(); });
+  beforeEach(() => clearSsoFlow());
 
   it('adds state and an S256 challenge to the login URL', async () => {
     const flow = await beginSsoFlow('microsoft');
@@ -41,32 +41,39 @@ describe('mobile SSO flow (state + PKCE)', () => {
     expect(ok).toEqual({ ok: true, provider: 'google', verifier: expect.stringMatching(/^[A-Za-z0-9_-]{64}$/) });
   });
 
-  it('server without the state echo: success accepted for the flow this process started (legacy fallback)', async () => {
-    await beginSsoFlow('google');
-    const ok = consumeSsoFlow(parseSSOCallbackUrl(`suissenotes://auth/callback?token=t&user=${userB64}`));
-    expect(ok).toMatchObject({ ok: true, provider: 'google', legacy: true });
-    expect(hasPendingSsoFlow()).toBe(false);
-  });
-
-  it('after the first echo a callback without state is never accepted again (no downgrade)', async () => {
-    const first = await beginSsoFlow('google');
-    expect(consumeSsoFlow({ token: 't', user: {}, state: first.state })).toEqual(expect.objectContaining({ ok: true }));
-    await beginSsoFlow('google');
+  it('a callback without state is never accepted (success or error), the flow keeps waiting', async () => {
+    const flow = await beginSsoFlow('google');
     expect(consumeSsoFlow(parseSSOCallbackUrl(`suissenotes://auth/callback?token=t&user=${userB64}`)))
+      .toEqual({ ok: false, reason: 'missing_state' });
+    expect(consumeSsoFlow(parseSSOCallbackUrl('suissenotes://auth/callback?auth_code=c')))
       .toEqual({ ok: false, reason: 'missing_state' });
     expect(consumeSsoFlow(parseSSOCallbackUrl('suissenotes://auth/callback?error=canceled')))
       .toEqual({ ok: false, reason: 'missing_state' });
+    expect(consumeSsoFlow(parseSSOCallbackUrl('suissenotes://auth/callback?code=sso_cancelled')))
+      .toEqual({ ok: false, reason: 'missing_state' });
     expect(hasPendingSsoFlow()).toBe(true);
-    expect(localStorage.getItem('sso.stateEcho.v1')).toBe('1');
+    expect(consumeSsoFlow({ token: 't', user: {}, state: flow.state }).ok).toBe(true);
   });
 
-  it('legacy fallback refuses a flow restored from storage (not started in this process)', async () => {
-    await beginSsoFlow('google');
+  it('Android process restart during SSO: the restored flow accepts the echoed state', async () => {
+    const flow = await beginSsoFlow('microsoft');
     vi.resetModules();
-    const fresh = await import('../../src/services/ssoFlow');
-    expect(fresh.hasPendingSsoFlow()).toBe(true);
-    expect(fresh.consumeSsoFlow({ token: 't', user: {}, state: '' })).toEqual({ ok: false, reason: 'missing_state' });
-    expect(fresh.hasPendingSsoFlow()).toBe(true);
+    const restarted = await import('../../src/services/ssoFlow');
+    expect(restarted.hasPendingSsoFlow()).toBe(true);
+    // A crafted stateless link after the restart is still ignored ...
+    expect(restarted.consumeSsoFlow({ token: 't', user: {}, state: '' })).toEqual({ ok: false, reason: 'missing_state' });
+    // ... the real callback with the echoed state completes the sign-in.
+    const ok = restarted.consumeSsoFlow(parseSSOCallbackUrl(`suissenotes://auth/callback?state=${flow.state}&token=t&user=${userB64}`));
+    expect(ok).toEqual({ ok: true, provider: 'microsoft', verifier: expect.stringMatching(/^[A-Za-z0-9_-]{64}$/) });
+    expect(restarted.hasPendingSsoFlow()).toBe(false);
+  });
+
+  it('Android process restart: an echoed error ends the restored flow', async () => {
+    const flow = await beginSsoFlow('google');
+    vi.resetModules();
+    const restarted = await import('../../src/services/ssoFlow');
+    expect(restarted.consumeSsoFlow(parseSSOCallbackUrl(`suissenotes://auth/callback?state=${flow.state}&code=sso_cancelled`)).ok).toBe(true);
+    expect(restarted.hasPendingSsoFlow()).toBe(false);
   });
 
   it('a flow is single-use', async () => {
@@ -84,8 +91,6 @@ describe('mobile SSO flow (state + PKCE)', () => {
   });
 
   it('a local browser abort (set by the app, never by a URL) ends the flow', async () => {
-    const first = await beginSsoFlow('microsoft');
-    expect(consumeSsoFlow({ token: 't', user: {}, state: first.state }).ok).toBe(true);
     await beginSsoFlow('microsoft');
     expect(consumeSsoFlow({ error: 'canceled', local: true }).ok).toBe(true);
     expect(hasPendingSsoFlow()).toBe(false);
@@ -141,35 +146,22 @@ describe('desktop main SSO flow (src-electron/sso-flow.js)', () => {
     expect(store.hasPending()).toBe(false);
   });
 
-  it('server without the state echo: legacy fallback for the in-memory flow, until the first echo', () => {
-    let seen = false;
-    const echo = { seen: () => seen, markSeen: () => { seen = true; } };
-    const store = mainFlow.createSsoFlowStore({ echo });
-    store.begin('google');
-    expect(store.consume(mainFlow.parseCallbackUrl(`suissenotes://auth/callback?token=t&user=${userB64}`)))
-      .toMatchObject({ ok: true, legacy: true });
-    const flow = store.begin('google');
-    expect(store.consume({ state: flow.state, token: 't', user: {} }).ok).toBe(true);
-    expect(seen).toBe(true);
-    store.begin('google');
-    expect(store.consume(mainFlow.parseCallbackUrl(`suissenotes://auth/callback?token=t&user=${userB64}`)))
-      .toEqual({ ok: false, reason: 'missing_state' });
-    expect(store.hasPending()).toBe(true);
-    // A restarted app with the persisted flag refuses it too.
-    const restarted = mainFlow.createSsoFlowStore({ echo });
-    restarted.begin('google');
-    expect(restarted.consume({ token: 't', user: {}, state: '' })).toEqual({ ok: false, reason: 'missing_state' });
-  });
-
-  it('a foreign error without state cannot abort a sign-in once the echo is known', () => {
-    const store = mainFlow.createSsoFlowStore({ echo: { seen: () => true, markSeen: () => {} } });
+  it('a callback without state is never accepted; a foreign error cannot abort the sign-in', () => {
+    const store = mainFlow.createSsoFlowStore();
     const flow = store.begin('microsoft');
-    expect(store.consume(mainFlow.parseCallbackUrl('suissenotes://auth/callback?error=canceled')))
-      .toEqual({ ok: false, reason: 'missing_state' });
+    for (const url of [
+      `suissenotes://auth/callback?token=t&user=${userB64}`,
+      'suissenotes://auth/callback?auth_code=c',
+      'suissenotes://auth/callback?error=canceled',
+      'suissenotes://auth/callback?code=sso_cancelled'
+    ]) {
+      expect(store.consume(mainFlow.parseCallbackUrl(url))).toEqual({ ok: false, reason: 'missing_state' });
+    }
     expect(store.consume(mainFlow.parseCallbackUrl('suissenotes://auth/callback?state=x&error=canceled')))
       .toEqual({ ok: false, reason: 'state_mismatch' });
     expect(store.hasPending()).toBe(true);
     expect(store.consume(mainFlow.parseCallbackUrl(`suissenotes://auth/callback?state=${flow.state}&error=canceled`)).ok).toBe(true);
+    expect(store.hasPending()).toBe(false);
   });
 
   it('web hand-off: only a token the server confirms as bound is used', () => {
