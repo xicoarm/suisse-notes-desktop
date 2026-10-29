@@ -41,13 +41,19 @@ describe('buildMeetingUrl', () => {
 describe('handoffUrl (bound hand-off, server contract 10/2026)', () => {
   const plain = 'https://app.suisse-meets.ch/meeting/audio/m1';
   it('token in the query, verifier only in the fragment', () => {
-    expect(handoffUrl(plain, { success: true, sessionToken: 's/1' }, 'v1')).toBe(`${plain}?session=s%2F1#hv=v1`);
+    expect(handoffUrl(plain, { success: true, sessionToken: 's/1', bound: true }, 'v1')).toBe(`${plain}?session=s%2F1#hv=v1`);
   });
   it('plain URL on any failure', () => {
     expect(handoffUrl(plain, null, 'v')).toBe(plain);
     expect(handoffUrl(plain, { success: false, sessionToken: 's' }, 'v')).toBe(plain);
     expect(handoffUrl(plain, { success: true }, 'v')).toBe(plain);
-    expect(handoffUrl(plain, { success: true, sessionToken: 's' }, '')).toBe(plain);
+    expect(handoffUrl(plain, { success: true, sessionToken: 's', bound: true }, '')).toBe(plain);
+  });
+  it('legacy 200 (server without binding: unbound, reusable token) -> plain URL', () => {
+    expect(handoffUrl(plain, { success: true, sessionToken: 'legacy-5min' }, 'v')).toBe(plain);
+    expect(handoffUrl(plain, { success: true, sessionToken: 'legacy-5min', expiresIn: 300 }, 'v')).toBe(plain);
+    expect(handoffUrl(plain, { success: true, sessionToken: 's', bound: false }, 'v')).toBe(plain);
+    expect(handoffUrl(plain, { success: true, sessionToken: 's', bound: 'true' }, 'v')).toBe(plain);
   });
 });
 
@@ -119,7 +125,7 @@ describe('openInBrowser', () => {
   it('mobile: bound hand-off — challenge to the server, verifier only in the opened URL\'s fragment', async () => {
     platform.capacitor = true;
     api.fetchWithTimeout.mockResolvedValue({ ok: true });
-    api.parseJsonSafe.mockResolvedValue({ success: true, sessionToken: 'one-time' });
+    api.parseJsonSafe.mockResolvedValue({ success: true, sessionToken: 'one-time', expiresIn: 60, bound: true });
     const writeText = vi.fn();
     vi.stubGlobal('navigator', { clipboard: { writeText } });
     await useShareLink().openInBrowser('m6');
@@ -142,5 +148,15 @@ describe('openInBrowser', () => {
     api.parseJsonSafe.mockResolvedValue({ error: 'HANDOFF_BINDING_REQUIRED' });
     await useShareLink().openInBrowser('m7');
     expect(browser.open).toHaveBeenCalledWith({ url: 'https://app.suisse-meets.ch/meeting/audio/m7' });
+  });
+
+  it('mobile: legacy 200 without `bound` (old server) opens the plain URL, token unused', async () => {
+    await new Promise((r) => setTimeout(r, 1600));
+    platform.capacitor = true;
+    api.fetchWithTimeout.mockResolvedValue({ ok: true, status: 200 });
+    api.parseJsonSafe.mockResolvedValue({ success: true, sessionToken: 'legacy-reusable' });
+    await useShareLink().openInBrowser('m8');
+    expect(browser.open).toHaveBeenCalledWith({ url: 'https://app.suisse-meets.ch/meeting/audio/m8' });
+    expect(JSON.stringify(browser.open.mock.calls)).not.toContain('legacy-reusable');
   });
 });

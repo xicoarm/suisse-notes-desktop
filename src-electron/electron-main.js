@@ -2431,8 +2431,11 @@ async function createWebSessionInMain(codeChallenge) {
 
     // Single-use 60 s token bound to codeChallenge (400 HANDOFF_BINDING_REQUIRED
     // from servers that refuse it ends up in catch: the plain URL is opened).
-    if (response.data && response.data.success && typeof response.data.sessionToken === 'string' && response.data.sessionToken) {
-      return { success: true, sessionToken: response.data.sessionToken };
+    // `bound: true` confirms the challenge was stored; an older server's 200
+    // with an unbound, reusable token is not used (plain URL instead).
+    const sessionToken = ssoFlow.boundHandoffToken(response.data);
+    if (sessionToken) {
+      return { success: true, sessionToken };
     }
 
     return { success: false, error: 'Failed to create web session' };

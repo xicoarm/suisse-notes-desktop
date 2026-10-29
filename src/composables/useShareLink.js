@@ -71,10 +71,14 @@ export function buildMeetingUrl(audioFileId) {
  * @param {string} plainUrl - from buildMeetingUrl
  * @param {object} data - create-web-session response body
  * @param {string} verifier - the verifier whose challenge was sent
- * @returns {string} the plain URL when the response holds no token
+ * @returns {string} the plain URL when the response holds no bound token
  */
 export function handoffUrl(plainUrl, data, verifier) {
-  if (!data || data.success === false || typeof data.sessionToken !== 'string' || !data.sessionToken || !verifier) {
+  // `bound: true` confirms the server stored the challenge (backend 10/2026).
+  // An older server answers 200 with an unbound, reusable token: never put
+  // that into a URL - open the plain URL (normal login) instead.
+  if (!data || data.success === false || data.bound !== true
+    || typeof data.sessionToken !== 'string' || !data.sessionToken || !verifier) {
     return plainUrl;
   }
   return `${plainUrl}?session=${encodeURIComponent(data.sessionToken)}#hv=${encodeURIComponent(verifier)}`;
