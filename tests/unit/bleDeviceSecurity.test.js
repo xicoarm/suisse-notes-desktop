@@ -47,11 +47,27 @@ vi.mock('@capacitor/preferences', () => ({ Preferences: {
   async set({ key, value }) { prefs.set(key, value); },
   async remove({ key }) { prefs.delete(key); }
 } }));
-const vault = vi.hoisted(() => ({ map: new Map(), failWrites: false }));
+// Behaves like src/services/secureStorage.js over the native plugins: both
+// reject keys outside ^[A-Za-z0-9_.-]{1,128}$ (INVALID_KEY); the JS layer
+// turns that into { success: false } / null.
+const vault = vi.hoisted(() => ({ map: new Map(), failWrites: false, rejectedKeys: [] }));
+const nativeKeyOk = (k) => typeof k === 'string' && k.length >= 1 && k.length <= 128 && /^[A-Za-z0-9_.-]+$/.test(k);
 vi.mock('../../src/services/secureStorage', () => ({
-  getSecureItem: async (k) => (vault.map.has(k) ? vault.map.get(k) : null),
-  setSecureItem: async (k, v) => { if (vault.failWrites) return { success: false }; vault.map.set(k, v); return { success: true }; },
-  removeSecureItem: async (k) => { vault.map.delete(k); return { success: true }; }
+  getSecureItem: async (k) => {
+    if (!nativeKeyOk(k)) { vault.rejectedKeys.push(k); return null; }
+    return vault.map.has(k) ? vault.map.get(k) : null;
+  },
+  setSecureItem: async (k, v) => {
+    if (!nativeKeyOk(k)) { vault.rejectedKeys.push(k); return { success: false, error: 'INVALID_KEY' }; }
+    if (vault.failWrites) return { success: false };
+    vault.map.set(k, v);
+    return { success: true };
+  },
+  removeSecureItem: async (k) => {
+    if (!nativeKeyOk(k)) { vault.rejectedKeys.push(k); return { success: false, error: 'INVALID_KEY' }; }
+    vault.map.delete(k);
+    return { success: true };
+  }
 }));
 
 const h = vi.hoisted(() => {
@@ -110,7 +126,7 @@ import {
 } from '../../src/utils/deviceFileSafety';
 import * as storage from '../../src/services/storage';
 import { BleDeviceManager, crc16Compute } from '../../src/services/bleService';
-import { loadAppKeys, keyForRecord, userAppUuid } from '../../src/services/bleAppKeys';
+import { loadAppKeys, keyForRecord, userAppUuid, secureScopedKey } from '../../src/services/bleAppKeys';
 import { useDeviceStore } from '../../src/stores/device';
 import { setActivePinia, createPinia } from 'pinia';
 
@@ -333,6 +349,7 @@ describe('pairing keys', () => {
     prefs.clear();
     vault.map.clear();
     vault.failWrites = false;
+    vault.rejectedKeys.length = 0;
     setActivePinia(createPinia());
     ble.connectCalls.length = 0;
     ble.connectImpl = null;
@@ -346,6 +363,26 @@ describe('pairing keys', () => {
     expect([...prefs.keys()].filter((k) => k.startsWith('ble_app_uuid'))).toEqual([]);
     const again = await loadAppKeys({ userId: 'u1', isNative: true });
     expect(again.install).toBe(keys.install);
+  });
+
+  it('the per-user scoped key of the migration period is stored under a key both native plugins accept', async () => {
+    const scoped = '99999999-2222-4333-8444-555555555555';
+    const install = '11111111-2222-4333-8444-555555555555';
+    for (const userId of ['u1', 'user:with:colons', 'ü/ä 42']) {
+      prefs.clear();
+      vault.map.clear();
+      prefs.set('ble_app_uuid', install);
+      prefs.set(`ble_app_uuid:u${userId}`, scoped);
+      const keys = await loadAppKeys({ userId, isNative: true });
+      expect(keys.legacyScoped).toBe(scoped);
+      const scopedKey = await secureScopedKey(userId);
+      expect(scopedKey).toMatch(/^[A-Za-z0-9_.-]{1,128}$/);
+      expect(vault.map.get(scopedKey)).toBe(scoped);
+      // Migration complete: the plaintext copies are gone.
+      expect(prefs.has(`ble_app_uuid:u${userId}`)).toBe(false);
+      expect(prefs.has('ble_app_uuid')).toBe(false);
+    }
+    expect(vault.rejectedKeys).toEqual([]);
   });
 
   it('migrates the plaintext UUID of earlier versions once and removes the plaintext copy', async () => {

@@ -134,10 +134,22 @@ function installBridge(cfg) {
   const Browser = { open: async (o) => { state.browserOpens.push(o); return {}; }, close: async () => ({}) };
   const SSOAuth = { startAuth: async () => { throw err('USER_CANCELED'); } };
   const SECURE_PREFIX = 'E2E.SecureTokenStore.';
+  // Same key rule as both native plugins (iOS/Android reject anything else
+  // with INVALID_KEY).
+  const secureKey = (key) => {
+    if (typeof key !== 'string' || key.length < 1 || key.length > 128 || !/^[A-Za-z0-9_.-]+$/.test(key)) {
+      throw new Error('INVALID_KEY');
+    }
+    return SECURE_PREFIX + key;
+  };
   const SecureTokenStore = {
-    get: async ({ key }) => ({ value: localStorage.getItem(SECURE_PREFIX + key) }),
-    set: async ({ key, value }) => { localStorage.setItem(SECURE_PREFIX + key, String(value)); return {}; },
-    remove: async ({ key }) => { localStorage.removeItem(SECURE_PREFIX + key); return {}; }
+    get: async ({ key }) => ({ value: localStorage.getItem(secureKey(key)) }),
+    set: async ({ key, value }) => {
+      if (typeof value !== 'string') throw new Error('MISSING_VALUE');
+      localStorage.setItem(secureKey(key), value);
+      return {};
+    },
+    remove: async ({ key }) => { localStorage.removeItem(secureKey(key)); return {}; }
   };
   const BackgroundRecording = {
     startForegroundService: async () => ({}), stopForegroundService: async () => ({}),
