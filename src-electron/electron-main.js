@@ -19,7 +19,6 @@ const { pathToFileURL } = require('url');
 const axios = require('axios');
 const Store = require('electron-store');
 const ffmpeg = require('fluent-ffmpeg');
-const { Upload } = require('tus-js-client');
 const { autoUpdater } = require('electron-updater');
 const { createUpdateChecks, isPersistentDownloadError, UPDATE_CHECK_INTERVAL_MS, UPDATE_CHECK_AFTER_WAKE_MS, UPDATE_CHECK_MIN_GAP_MS } = require('./update-checks');
 const log = require('electron-log');
@@ -1145,9 +1144,6 @@ if (app.isPackaged) {
     console.warn('Could not load ffmpeg-installer:', e.message);
   }
 }
-
-// Active uploads map for pause/resume/cancel
-const activeUploads = new Map();
 
 // AbortControllers for axios-based uploads (used by upload:cancel)
 const activeAbortControllers = new Map();
@@ -4622,108 +4618,6 @@ ipcMain.handle('upload:start', async (event, params) => {
   }
 });
 
-// Keep TUS-based upload for backward compatibility (if needed)
-ipcMain.handle('upload:startTUS', async (event, params) => {
-  const { recordId, filePath, metadata } = params;
-  // E7: the session this upload belongs to; after a session change no
-  // request of it goes out any more.
-  const ticket = sessionAuthority.ticket();
-  const authToken = tokenFor(ticket);
-  if (!authToken) return { success: false, error: 'Not authenticated' };
-
-  try {
-    const fileStats = await fs.promises.stat(filePath);
-    if (sessionEndedFor(ticket)) return { success: false, error: 'Signed out' };
-    const fileStream = fs.createReadStream(filePath);
-
-    return new Promise((resolve, reject) => {
-      const upload = new Upload(fileStream, {
-        endpoint: `${API_BASE_URL}/upload`,
-
-        // Chunk size: 25MB
-        chunkSize: 25 * 1024 * 1024,
-
-        // Retry configuration
-        retryDelays: [0, 1000, 3000, 5000],
-
-        // Metadata to send with upload
-        metadata: {
-          filename: path.basename(filePath),
-          filetype: 'audio/webm',
-          recordId: recordId,
-          duration: metadata?.duration?.toString() || '0',
-          ...metadata
-        },
-
-        // Auth headers
-        headers: {
-          'Authorization': `Bearer ${authToken}`
-        },
-
-        // Every request (also tus retries) only while the session is current.
-        onBeforeRequest: () => {
-          if (sessionEndedFor(ticket)) throw new Error('Signed out');
-        },
-
-        // Upload size
-        uploadSize: fileStats.size,
-
-        // Progress callback
-        onProgress: (bytesUploaded, bytesTotal) => {
-          const progress = Math.round((bytesUploaded / bytesTotal) * 100);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('upload:progress', {
-              recordId,
-              progress,
-              bytesUploaded,
-              bytesTotal
-            });
-          }
-        },
-
-        // Success callback
-        onSuccess: () => {
-          activeUploads.delete(recordId);
-          resolve({ success: true, url: upload.url });
-        },
-
-        // Error callback
-        onError: (error) => {
-          activeUploads.delete(recordId);
-          reject(error);
-        }
-      });
-
-      // Store reference for pause/cancel
-      activeUploads.set(recordId, upload);
-
-      // Start upload
-      upload.start();
-    });
-  } catch (error) {
-    if (sessionEndedFor(ticket)) return { success: false, error: 'Signed out' };
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('upload:pause', async (event, recordId) => {
-  const upload = activeUploads.get(recordId);
-  if (upload) {
-    upload.abort();
-    return { success: true };
-  }
-  return { success: false, error: 'Upload not found' };
-});
-
-ipcMain.handle('upload:resume', async (event, recordId) => {
-  const upload = activeUploads.get(recordId);
-  if (upload) {
-    upload.start();
-    return { success: true };
-  }
-  return { success: false, error: 'Upload not found' };
-});
-
 ipcMain.handle('upload:cancel', async (event, recordId) => {
   // Mark as cancelled so upload:start suppresses the completion event
   cancelledUploads.add(recordId);
@@ -4754,17 +4648,6 @@ ipcMain.handle('upload:cancel', async (event, recordId) => {
         });
       })
       .catch((e) => log.warn(`[upload:cancel] abort cleanup failed for ${recordId}:`, e?.message));
-  }
-
-  // Also handle legacy TUS-based uploads
-  const upload = activeUploads.get(recordId);
-  if (upload) {
-    try {
-      await upload.abort(true); // E7: user cancel (foreground) - the recording leaves the queue in any session
-    } catch (e) { // E7: user cancel (foreground), see above
-      console.warn('Error aborting upload:', e);
-    }
-    activeUploads.delete(recordId);
   }
 
   // Remove from persistent upload queue

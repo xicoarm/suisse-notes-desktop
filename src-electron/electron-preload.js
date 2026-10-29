@@ -205,8 +205,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Upload
   upload: {
     start: (params) => ipcRenderer.invoke('upload:start', params),
-    pause: (recordId) => ipcRenderer.invoke('upload:pause', recordId),
-    resume: (recordId) => ipcRenderer.invoke('upload:resume', recordId),
     cancel: (recordId) => ipcRenderer.invoke('upload:cancel', recordId),
     // Upload queue methods (for offline persistence)
     getPendingQueue: () => ipcRenderer.invoke('upload:getPendingQueue'),

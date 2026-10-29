@@ -18,7 +18,7 @@ const MAIN_BACKGROUND = ['refreshMainAuthToken', 'pollServerStatus', 'pollMeetin
 describe('E7 static audit', () => {
   it('electron-main.js: every await, catch and callback of ticketed or background work checks the ticket', () => {
     const { findings, audited } = auditSource(read('src-electron/electron-main.js'), { functions: MAIN_BACKGROUND });
-    for (const name of [...MAIN_BACKGROUND, 'upload:start', 'upload:startTUS', 'upload:cancel']) expect(audited, name).toContain(name);
+    for (const name of [...MAIN_BACKGROUND, 'upload:start', 'upload:cancel']) expect(audited, name).toContain(name);
     expect(findings).toEqual([]);
   });
 
