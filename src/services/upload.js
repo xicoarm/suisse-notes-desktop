@@ -201,15 +201,56 @@ export function getMobileUploadQueue() {
 // --- Queue ownership (security) ---
 // Every queued recording belongs to the account that recorded it. The queue
 // uploads an item only while that same account is signed in; otherwise the
-// item is held (never uploaded under another account). Items queued before
-// owners were recorded are claimed once by the account whose session the
-// update found (QUEUE_OWNER_MIGRATED_KEY); an item whose owner is still
-// unknown later is held until the signed-in user explicitly claims it.
-const QUEUE_OWNER_MIGRATED_KEY = MOBILE_UPLOAD_QUEUE_KEY + '_owner_migrated';
+// item is held (never uploaded under another account).
+// Items queued by app versions before owners were recorded (no `ownerUserId`
+// field) get their owner from the recording metadata: the per-account
+// recording history on this device (`recordings_history_cache_<userId>`).
+// Found in exactly one account's history -> that account; otherwise the owner
+// stays unknown (null) and the item is held until the signed-in user claims
+// it explicitly (HistoryPage). Never assigned to whoever happens to be signed
+// in.
+const HISTORY_CACHE_PREFIX = 'recordings_history_cache_';
+// Items enqueued by this app process (for completing a missing owner, below).
+const _enqueuedThisProcess = new Set();
 
 function _currentUserId(authStore) {
   const id = authStore?.user?.id;
   return id === undefined || id === null || id === '' ? null : String(id);
+}
+
+function _normOwner(id) {
+  return id === undefined || id === null || id === '' ? null : String(id);
+}
+
+/** userId claim of a session JWT (unverified; only to label the queue item). */
+export function tokenUserId(token) {
+  try {
+    if (typeof token !== 'string') return null;
+    const part = token.split('.')[1];
+    if (!part) return null;
+    const json = atob(part.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(part.length / 4) * 4, '='));
+    const claims = JSON.parse(json);
+    return _normOwner(claims && (claims.userId ?? claims.sub ?? claims.id));
+  } catch {
+    return null;
+  }
+}
+
+/** Owner of a recording per the per-account history on this device, or null. */
+export function ownerFromRecordingHistory(recordId) {
+  const owners = new Set();
+  try {
+    for (let k = 0; k < localStorage.length; k++) {
+      const key = localStorage.key(k);
+      if (!key || !key.startsWith(HISTORY_CACHE_PREFIX)) continue;
+      const uid = key.slice(HISTORY_CACHE_PREFIX.length);
+      if (!uid || uid === 'null' || uid === 'undefined') continue;
+      let list;
+      try { list = JSON.parse(localStorage.getItem(key) || '[]'); } catch { continue; }
+      if (Array.isArray(list) && list.some((r) => r && (r.id === recordId || r.recordId === recordId))) owners.add(uid);
+    }
+  } catch { /* no storage */ }
+  return owners.size === 1 ? [...owners][0] : null;
 }
 
 /**
@@ -222,20 +263,22 @@ export function queueItemOwnership(item, currentUserId) {
   return String(item.ownerUserId) === String(currentUserId) ? 'owner' : 'other_account';
 }
 
-/** One-time claim of items queued before owners were recorded. */
-function _migrateUnownedQueueItems(userId) {
-  if (!userId) return;
+/**
+ * Items from app versions without owners: owner from the recording history,
+ * else explicitly unknown (null = held until claimed). Idempotent.
+ */
+function _resolveLegacyQueueOwners() {
   try {
-    if (localStorage.getItem(QUEUE_OWNER_MIGRATED_KEY)) return;
     const queue = getMobileUploadQueue();
     let changed = false;
     for (const item of queue) {
-      if (item.ownerUserId === undefined) { item.ownerUserId = userId; changed = true; }
+      if (item.ownerUserId !== undefined) continue;
+      item.ownerUserId = ownerFromRecordingHistory(item.recordId);
+      changed = true;
     }
     if (changed) _safeWriteQueue(queue);
-    localStorage.setItem(QUEUE_OWNER_MIGRATED_KEY, '1');
   } catch (e) {
-    console.warn('Upload queue owner migration failed:', e?.message || e);
+    console.warn('Upload queue owner resolution failed:', e?.message || e);
   }
 }
 
@@ -247,6 +290,7 @@ export function getHeldMobileUploads(currentUserId) {
   const held = { otherAccount: [], ownerUnknown: [] };
   const uid = currentUserId ? String(currentUserId) : null;
   if (!uid) return held;
+  _resolveLegacyQueueOwners();
   for (const item of getMobileUploadQueue()) {
     const ownership = queueItemOwnership(item, uid);
     if (ownership === 'other_account') held.otherAccount.push(item.recordId);
@@ -284,10 +328,21 @@ export function claimUnownedMobileUploads(userId, recordIds = null) {
 export function addToMobileUploadQueue(recordId, filePath, metadata, ownerUserId = null) {
   try {
     const queue = getMobileUploadQueue();
-    // Don't add duplicates
-    if (queue.some(item => item.recordId === recordId)) return;
-    const owner = ownerUserId === undefined || ownerUserId === null || ownerUserId === '' ? null : String(ownerUserId);
+    const owner = _normOwner(ownerUserId);
+    // Don't add duplicates. An item this process enqueued without a known
+    // owner gets the owner of a later enqueue of the same recording; an
+    // owner is never replaced, and items from earlier runs are never
+    // assigned here (only by claimUnownedMobileUploads).
+    const existing = queue.find(item => item.recordId === recordId);
+    if (existing) {
+      if (owner && !_normOwner(existing.ownerUserId) && _enqueuedThisProcess.has(recordId)) {
+        existing.ownerUserId = owner;
+        _safeWriteQueue(queue);
+      }
+      return;
+    }
     queue.push({ recordId, filePath, metadata, retries: 0, addedAt: Date.now(), ownerUserId: owner });
+    _enqueuedThisProcess.add(recordId);
     _safeWriteQueue(queue);
   } catch (e) {
     console.warn('Failed to add to mobile upload queue:', e);
@@ -388,8 +443,7 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
   if (queue.length === 0) return { processed: 0, succeeded: 0, failed: 0, purged: [], unrecoverable: [] };
 
   const apiUrl = typeof getApiUrl === 'function' ? getApiUrl() : getApiUrl;
-  const currentUserId = _currentUserId(authStore);
-  _migrateUnownedQueueItems(currentUserId);
+  _resolveLegacyQueueOwners();
   let succeeded = 0;
   let failed = 0;
   const purgedRecordIds = [];        // Stale / over-budget items removed silently
@@ -859,6 +913,7 @@ const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts 
  * @param {Function} options.onProgress - Progress callback (0-100)
  * @param {Function} options.onStatusChange - Status change callback
  * @param {Function} options.getAuthStore - Function to get auth store for token refresh
+ * @param {string} [options.ownerUserId] - account that recorded it (default: user of authToken)
  * @returns {Promise<{success: boolean, audioFileId?: string, canDelete: boolean, error?: string}>}
  */
 export const uploadWithVerification = async (options) => {
@@ -871,7 +926,8 @@ export const uploadWithVerification = async (options) => {
     metadata = {},
     onProgress = () => {},
     onStatusChange = () => {},
-    getAuthStore = null // For token refresh
+    getAuthStore = null, // For token refresh
+    ownerUserId = null // account that recorded it (default: the token's user)
   } = options;
 
   // A missing recordId would upload to "recordings/null/…" and register a
@@ -904,8 +960,10 @@ export const uploadWithVerification = async (options) => {
   // next launch / network-online / foreground. Idempotent (dedupes by
   // recordId) and removed on confirmed success below. Only for Capacitor
   // file-path uploads; a picked File object has no resumable path.
+  // The owner is the account whose token this upload uses (or the caller's
+  // explicit owner): a retry later runs only under that same account.
   if (isCapacitor() && filePath && recordId) {
-    addToMobileUploadQueue(recordId, filePath, metadata);
+    addToMobileUploadQueue(recordId, filePath, metadata, ownerUserId || tokenUserId(authToken));
   }
 
   if (!_beginMobileUpload(recordId)) {

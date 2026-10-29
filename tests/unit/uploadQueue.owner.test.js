@@ -25,9 +25,11 @@ vi.mock('../../src/services/integrity', () => ({ calculateUploadChecksum: vi.fn(
 vi.mock('@capacitor/preferences', () => ({ Preferences: { set: vi.fn(async () => {}), get: vi.fn(async () => ({ value: null })) } }));
 
 const upload = await import('../../src/services/upload');
-const { addToMobileUploadQueue, getMobileUploadQueue, processMobileUploadQueue, queueItemOwnership, getHeldMobileUploads, claimUnownedMobileUploads } = upload;
+const { addToMobileUploadQueue, getMobileUploadQueue, processMobileUploadQueue, queueItemOwnership, getHeldMobileUploads, claimUnownedMobileUploads, uploadWithVerification, tokenUserId } = upload;
 
-const store = (id) => ({ user: id ? { id } : null, token: 't', isAuthenticated: !!id, isTokenExpiringSoon: () => false, handleAuthError: vi.fn(async () => ({ success: false })) });
+const jwtFor = (userId) => `h.${Buffer.from(JSON.stringify({ userId, type: 'session' })).toString('base64url')}.s`;
+
+const store = (id) => ({ user: id ? { id } : null, token: id ? jwtFor(id) : null, isAuthenticated: !!id, isTokenExpiringSoon: () => false, handleAuthError: vi.fn(async () => ({ success: false })) });
 const networkCalls = () => net.uploadViaPresignedSas.mock.calls.length + net.readBlobFromCapacitorPath.mock.calls.length + net.fetchWithTimeout.mock.calls.length;
 
 describe('upload queue ownership', () => {
@@ -51,7 +53,6 @@ describe('upload queue ownership', () => {
   });
 
   it('never uploads another account\'s recordings and reports them as held', async () => {
-    localStorage.setItem('mobile_upload_queue_owner_migrated', '1');
     addToMobileUploadQueue('mine', '/p/mine.m4a', {}, 'bob');
     addToMobileUploadQueue('alices', '/p/a.m4a', {}, 'alice');
     addToMobileUploadQueue('unknown', '/p/u.m4a', {}, null);
@@ -65,7 +66,6 @@ describe('upload queue ownership', () => {
   });
 
   it('uploads the owner\'s own item (attempted), holds the rest', async () => {
-    localStorage.setItem('mobile_upload_queue_owner_migrated', '1');
     addToMobileUploadQueue('mine', '/p/mine.m4a', {}, 'bob');
     addToMobileUploadQueue('alices', '/p/a.m4a', {}, 'alice');
     const result = await processMobileUploadQueue(store('bob'), 'https://api.example');
@@ -73,19 +73,78 @@ describe('upload queue ownership', () => {
     expect(networkCalls()).toBeGreaterThan(0);
   });
 
-  it('items queued before the update are claimed once by the account the update found', async () => {
-    localStorage.setItem('mobile_upload_queue', JSON.stringify([{ recordId: 'old', filePath: '/p/o.m4a', metadata: {}, retries: 0, addedAt: Date.now() }]));
-    await processMobileUploadQueue(store('bob'), 'https://api.example');
-    expect(getMobileUploadQueue()[0].ownerUserId).toBe('bob');
-    expect(localStorage.getItem('mobile_upload_queue_owner_migrated')).toBe('1');
+  it('items queued by older versions get the owner from the recording history, never the signed-in user', async () => {
+    localStorage.setItem('recordings_history_cache_alice', JSON.stringify([{ id: 'alices-old' }]));
+    localStorage.setItem('recordings_history_cache_bob', JSON.stringify([{ id: 'bobs-old' }]));
+    localStorage.setItem('mobile_upload_queue', JSON.stringify([
+      { recordId: 'alices-old', filePath: '/p/a.m4a', metadata: {}, retries: 0, addedAt: Date.now() },
+      { recordId: 'bobs-old', filePath: '/p/b.m4a', metadata: {}, retries: 0, addedAt: Date.now() + 1 },
+      { recordId: 'nobodys', filePath: '/p/n.m4a', metadata: {}, retries: 0, addedAt: Date.now() + 2 }
+    ]));
+    const before = networkCalls();
+    const result = await processMobileUploadQueue(store('bob'), 'https://api.example');
+    const owners = Object.fromEntries(getMobileUploadQueue().map(i => [i.recordId, i.ownerUserId]));
+    expect(owners).toEqual({ 'alices-old': 'alice', 'bobs-old': 'bob', nobodys: null });
+    // Alice's recording and the unresolved one are held, not uploaded with Bob's token.
+    expect(result.held.sort()).toEqual(['alices-old', 'nobodys']);
+    expect(networkCalls()).toBeGreaterThan(before); // only bobs-old was attempted
+    const tokensUsed = JSON.stringify(net.fetchWithTimeout.mock.calls) + JSON.stringify(net.uploadViaPresignedSas.mock.calls);
+    expect(tokensUsed).not.toContain('/p/a.m4a');
+    expect(tokensUsed).not.toContain('/p/n.m4a');
   });
 
-  it('nothing is claimed while signed out', async () => {
+  it('a recording in two accounts\' histories stays unknown (held until claimed)', async () => {
+    localStorage.setItem('recordings_history_cache_alice', JSON.stringify([{ id: 'shared' }]));
+    localStorage.setItem('recordings_history_cache_bob', JSON.stringify([{ id: 'shared' }]));
+    localStorage.setItem('mobile_upload_queue', JSON.stringify([{ recordId: 'shared', filePath: '/p/s.m4a', metadata: {}, retries: 0, addedAt: Date.now() }]));
+    const before = networkCalls();
+    const result = await processMobileUploadQueue(store('bob'), 'https://api.example');
+    expect(result.held).toEqual(['shared']);
+    expect(getMobileUploadQueue()[0].ownerUserId).toBeNull();
+    expect(networkCalls()).toBe(before);
+  });
+
+  it('nothing is assigned while signed out', async () => {
     localStorage.setItem('mobile_upload_queue', JSON.stringify([{ recordId: 'old', filePath: '/p/o.m4a', metadata: {}, retries: 0, addedAt: Date.now() }]));
     const result = await processMobileUploadQueue(store(null), 'https://api.example');
     expect(result.held).toEqual(['old']);
-    expect(getMobileUploadQueue()[0].ownerUserId).toBeUndefined();
-    expect(localStorage.getItem('mobile_upload_queue_owner_migrated')).toBeNull();
+    expect(getMobileUploadQueue()[0].ownerUserId).toBeNull();
+  });
+
+  it('central upload path: the first enqueue already carries the owner (token user); retry flow stays with that account', async () => {
+    const res = await uploadWithVerification({ filePath: '/p/rec.m4a', recordId: 'rec', apiUrl: 'https://api.example', authToken: jwtFor('bob'), metadata: {} });
+    expect(res.success).toBe(false);
+    expect(getMobileUploadQueue().map(i => [i.recordId, i.ownerUserId])).toEqual([['rec', 'bob']]);
+    // A later caller adding the same recording does not change it.
+    addToMobileUploadQueue('rec', '/p/rec.m4a', {}, 'alice');
+    expect(getMobileUploadQueue()[0].ownerUserId).toBe('bob');
+    // Retry under another account: held, no network.
+    let before = networkCalls();
+    expect((await processMobileUploadQueue(store('alice'), 'https://api.example')).held).toEqual(['rec']);
+    expect(networkCalls()).toBe(before);
+    // Retry under the owner: attempted.
+    before = networkCalls();
+    await processMobileUploadQueue(store('bob'), 'https://api.example');
+    expect(networkCalls()).toBeGreaterThan(before);
+  });
+
+  it('central upload path: an explicit owner wins; a missing owner is completed only for items of this process', async () => {
+    await uploadWithVerification({ filePath: '/p/x.m4a', recordId: 'x', apiUrl: 'https://api.example', authToken: 'not-a-jwt', metadata: {} });
+    expect(getMobileUploadQueue()[0].ownerUserId).toBeNull();
+    addToMobileUploadQueue('x', '/p/x.m4a', {}, 'bob');
+    expect(getMobileUploadQueue()[0].ownerUserId).toBe('bob');
+    await uploadWithVerification({ filePath: '/p/y.m4a', recordId: 'y', apiUrl: 'https://api.example', authToken: jwtFor('bob'), metadata: {}, ownerUserId: 'carol' });
+    expect(getMobileUploadQueue().find(i => i.recordId === 'y').ownerUserId).toBe('carol');
+    // An unknown-owner item from an earlier run is never completed by an enqueue.
+    localStorage.setItem('mobile_upload_queue', JSON.stringify([{ recordId: 'earlier', filePath: '/p/e.m4a', metadata: {}, retries: 0, addedAt: Date.now(), ownerUserId: null }]));
+    addToMobileUploadQueue('earlier', '/p/e.m4a', {}, 'bob');
+    expect(getMobileUploadQueue()[0].ownerUserId).toBeNull();
+  });
+
+  it('tokenUserId reads the userId claim only', () => {
+    expect(tokenUserId(jwtFor('u-1'))).toBe('u-1');
+    expect(tokenUserId('garbage')).toBeNull();
+    expect(tokenUserId(null)).toBeNull();
   });
 
   it('an explicit claim takes only items without an owner', () => {
