@@ -14,6 +14,8 @@
  *   BackgroundRecording (foreground service + chunk combiner) → device server
  *   BluetoothLe      → the virtual recorder (installVirtualRecorder)
  *   SSOAuth          → cancelled sign-in
+ *   SecureTokenStore → localStorage under its own prefix (stands in for the
+ *                      Keychain / Android Keystore; survives a relaunch)
  *
  * No production code path is bypassed: platform detection, storage layout
  * (Directory.External on Android, Documents on iOS), the upload readBlob
@@ -131,6 +133,12 @@ function installBridge(cfg) {
   const Share = { canShare: async () => ({ value: true }), share: async (o) => { state.shares.push(o); return { activityType: 'harness' }; } };
   const Browser = { open: async (o) => { state.browserOpens.push(o); return {}; }, close: async () => ({}) };
   const SSOAuth = { startAuth: async () => { throw err('USER_CANCELED'); } };
+  const SECURE_PREFIX = 'E2E.SecureTokenStore.';
+  const SecureTokenStore = {
+    get: async ({ key }) => ({ value: localStorage.getItem(SECURE_PREFIX + key) }),
+    set: async ({ key, value }) => { localStorage.setItem(SECURE_PREFIX + key, String(value)); return {}; },
+    remove: async ({ key }) => { localStorage.removeItem(SECURE_PREFIX + key); return {}; }
+  };
   const BackgroundRecording = {
     startForegroundService: async () => ({}), stopForegroundService: async () => ({}),
     startRecording: async () => ({}), stopRecording: async () => ({}), pauseRecording: async () => ({}), resumeRecording: async () => ({}),
@@ -150,7 +158,7 @@ function installBridge(cfg) {
     return fn.call(r.plugin, options);
   } });
 
-  const impls = { Filesystem, Preferences, Device, App, Network, StatusBar, LocalNotifications, Share, Browser, SSOAuth, BackgroundRecording, BluetoothLe };
+  const impls = { Filesystem, Preferences, Device, App, Network, StatusBar, LocalNotifications, Share, Browser, SSOAuth, SecureTokenStore, BackgroundRecording, BluetoothLe };
   const methodNames = {
     Filesystem: ['writeFile', 'appendFile', 'readFile', 'deleteFile', 'mkdir', 'rmdir', 'readdir', 'stat', 'rename', 'copy', 'getUri', 'checkPermissions', 'requestPermissions', 'downloadFile'],
     Preferences: ['configure', 'get', 'set', 'remove', 'keys', 'clear', 'migrate', 'removeOld'],
@@ -162,6 +170,7 @@ function installBridge(cfg) {
     Share: ['canShare', 'share'],
     Browser: ['open', 'close'],
     SSOAuth: ['startAuth'],
+    SecureTokenStore: ['get', 'set', 'remove'],
     BackgroundRecording: ['startForegroundService', 'stopForegroundService', 'startRecording', 'stopRecording', 'pauseRecording', 'resumeRecording', 'getStatus', 'isBatteryOptimized', 'requestBatteryOptimizationExemption', 'openAppSettings', 'combineChunks'],
     BluetoothLe: ['initialize', 'isEnabled', 'requestEnable', 'isLocationEnabled', 'setDisplayStrings', 'startEnabledNotifications', 'stopEnabledNotifications', 'requestLEScan', 'stopLEScan', 'getDevices', 'getConnectedDevices', 'connect', 'disconnect', 'startNotifications', 'stopNotifications', 'writeWithoutResponse', 'write', 'read', 'readRssi', 'requestConnectionPriority', 'getMtu', 'discoverServices', 'getServices', 'createBond', 'isBonded', 'openAppSettings', 'openBluetoothSettings', 'openLocationSettings', 'requestDevice']
   };

@@ -35,18 +35,22 @@ const STORAGE_KEYS = {
 let keystore = null;
 let Preferences = null;
 
+// Returns a holder, never the plugin itself: a Capacitor plugin proxy answers
+// every property, including `then`, so resolving a promise with it calls a
+// native "then" method that does not exist and the await never settles.
 const getKeystore = async () => {
   if (!keystore) {
     const { registerPlugin } = await import('@capacitor/core');
-    keystore = registerPlugin('SecureTokenStore');
+    keystore = { plugin: registerPlugin('SecureTokenStore') };
   }
   return keystore;
 };
 
+// Same rule as getKeystore: hand out a holder, never the plugin proxy.
 const getPreferences = async () => {
   if (!Preferences) {
     const module = await import('@capacitor/preferences');
-    Preferences = module.Preferences;
+    Preferences = { plugin: module.Preferences };
   }
   return Preferences;
 };
@@ -54,7 +58,7 @@ const getPreferences = async () => {
 /** Remove a legacy plaintext copy; never throws. */
 const removeLegacy = async (key) => {
   try {
-    const prefs = await getPreferences();
+    const { plugin: prefs } = await getPreferences();
     await prefs.remove({ key });
   } catch { /* nothing to remove or Preferences unavailable */ }
 };
@@ -71,7 +75,7 @@ export const setSecureItem = async (key, value) => {
   // A plaintext copy of an older value must never outlive a newer one.
   await removeLegacy(key);
   try {
-    const store = await getKeystore();
+    const { plugin: store } = await getKeystore();
     await store.set({ key, value });
     return { success: true };
   } catch (error) {
@@ -90,7 +94,7 @@ export const getSecureItem = async (key) => {
   if (!key || !isCapacitor()) return null;
   let keystoreOk = true;
   try {
-    const store = await getKeystore();
+    const { plugin: store } = await getKeystore();
     const result = await store.get({ key });
     if (result && typeof result.value === 'string') return result.value;
   } catch {
@@ -100,7 +104,7 @@ export const getSecureItem = async (key) => {
   // Legacy plaintext value from an older version?
   let legacy = null;
   try {
-    const prefs = await getPreferences();
+    const { plugin: prefs } = await getPreferences();
     legacy = (await prefs.get({ key }))?.value || null;
   } catch {
     legacy = null;
@@ -109,7 +113,7 @@ export const getSecureItem = async (key) => {
 
   if (keystoreOk) {
     try {
-      const store = await getKeystore();
+      const { plugin: store } = await getKeystore();
       await store.set({ key, value: legacy });
       const check = await store.get({ key });
       if (check?.value === legacy) {
@@ -131,7 +135,7 @@ export const removeSecureItem = async (key) => {
   if (!key || !isCapacitor()) return { success: false, error: 'Unsupported platform' };
   await removeLegacy(key);
   try {
-    const store = await getKeystore();
+    const { plugin: store } = await getKeystore();
     await store.remove({ key });
     return { success: true };
   } catch (error) {

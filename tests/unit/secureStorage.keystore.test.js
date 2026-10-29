@@ -34,8 +34,16 @@ vi.mock('../../src/utils/platform', () => ({
   isIOS: () => false,
   isAndroid: () => true
 }));
-vi.mock('@capacitor/core', () => ({ registerPlugin: (name) => (name === 'SecureTokenStore' ? keystore : {}) }));
-vi.mock('@capacitor/preferences', () => ({ Preferences: prefs }));
+// Like Capacitor's registerPlugin: a proxy that answers EVERY property with a
+// native method wrapper, including `then`. Resolving a promise with it would
+// call the unimplemented native "then" and never settle (regression guard).
+const capacitorProxy = (impl) => new Proxy({}, {
+  get: (_, prop) => (typeof prop === 'string' && typeof impl[prop] === 'function'
+    ? impl[prop]
+    : () => new Promise(() => {}))
+});
+vi.mock('@capacitor/core', () => ({ registerPlugin: (name) => capacitorProxy(name === 'SecureTokenStore' ? keystore : {}) }));
+vi.mock('@capacitor/preferences', () => ({ Preferences: capacitorProxy(prefs) }));
 
 const storage = await import('../../src/services/secureStorage');
 
