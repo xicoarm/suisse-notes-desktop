@@ -109,6 +109,12 @@ function createTokenVault({ safeStorage, store, platform = process.platform, war
           // user stays signed in; it is removed on the next save or sign-out.
           try { store.set(TOKEN_KEY, stored); } catch { /* ignore */ }
         }
+      } else {
+        // No OS encryption: the token moves to memory for this run and the
+        // plaintext copy leaves the disk (same rule as saveToken: never
+        // plaintext on disk; the next start asks for a sign-in).
+        try { store.delete(TOKEN_KEY); } catch { /* ignore */ }
+        warn('token-vault: no secure OS storage; plaintext token removed from disk, kept in memory for this session only');
       }
       memoryToken = stored;
       return stored;

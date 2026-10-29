@@ -80,6 +80,18 @@ describe('token-vault (desktop session token)', () => {
     expect(store.data.authToken).toBe(JWT);
   });
 
+  it('without OS encryption a legacy plaintext token moves to memory and leaves the disk', () => {
+    for (const [platform, safe] of [['win32', fakeSafeStorage({ available: false })], ['linux', fakeSafeStorage({ backend: 'basic_text' })]]) {
+      const store = memoryStore({ authToken: JWT });
+      const vault = createTokenVault({ safeStorage: safe, store, platform });
+      expect(vault.getToken()).toBe(JWT);
+      expect(store.data.authToken).toBeUndefined();
+      expect(vault.getToken()).toBe(JWT); // this run keeps working
+      const restarted = createTokenVault({ safeStorage: safe, store, platform });
+      expect(restarted.getToken()).toBeNull();
+    }
+  });
+
   it('a failed encryption on save leaves nothing on disk', () => {
     const store = memoryStore({ authToken: 'old.plain.token' });
     const vault = createTokenVault({ safeStorage: fakeSafeStorage({ failEncrypt: true }), store, platform: 'win32' });
