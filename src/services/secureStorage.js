@@ -19,7 +19,8 @@
  * left by an abort after the keystore write is removed at the next read). If the
  * keystore write fails, the legacy value is left in place and still returned
  * - the user is not signed out by the update - but it is never rewritten;
- * it is deleted at the next save of that key or at sign-out.
+ * it is deleted after the next successful save (write + read-back) of that
+ * key or at sign-out.
  */
 
 import { isElectron, isCapacitor, isIOS, isAndroid } from '../utils/platform';
@@ -59,12 +60,19 @@ const getPreferences = async () => {
 // Keys whose legacy plaintext copy is known to be gone in this app run.
 const legacyChecked = new Set();
 
-/** Remove a legacy plaintext copy; never throws. */
+/**
+ * Remove a legacy plaintext copy; never throws.
+ * @returns {Promise<boolean>} true only when the copy is confirmed gone
+ */
 const removeLegacy = async (key) => {
   try {
     const { plugin: prefs } = await getPreferences();
     await prefs.remove({ key });
-  } catch { /* nothing to remove or Preferences unavailable */ }
+    const left = (await prefs.get({ key }))?.value;
+    return left === null || left === undefined || left === '';
+  } catch {
+    return false; // Preferences unavailable: try again next time
+  }
 };
 
 /**
@@ -92,10 +100,10 @@ export const setSecureItem = async (key, value) => {
     console.error('Secure storage: keystore write failed; not stored (no plaintext fallback)');
     result = { success: false, error: error?.message || 'Keystore unavailable' };
   }
-  // A plaintext copy of an older value must never outlive a newer one (also
-  // when the keystore write failed: the old value is not used any more).
-  await removeLegacy(key);
-  if (result.success) legacyChecked.add(key);
+  // Only after a successful write AND read-back: then the keystore holds the
+  // value and the plaintext copy can go. After a failed write the legacy copy
+  // stays - it may be the last persistent copy of the session.
+  if (result.success && (await removeLegacy(key))) legacyChecked.add(key);
   return result;
 };
 
@@ -115,8 +123,7 @@ export const getSecureItem = async (key) => {
       // A migration or save that was aborted after the keystore write but
       // before the plaintext delete left a legacy copy behind: remove it
       // (once per key and app run).
-      if (!legacyChecked.has(key)) {
-        await removeLegacy(key);
+      if (!legacyChecked.has(key) && (await removeLegacy(key))) {
         legacyChecked.add(key);
       }
       return result.value;
@@ -141,8 +148,7 @@ export const getSecureItem = async (key) => {
       const { plugin: store } = await getKeystore();
       await store.set({ key, value: legacy });
       const check = await store.get({ key });
-      if (check?.value === legacy) {
-        await removeLegacy(key);
+      if (check?.value === legacy && (await removeLegacy(key))) {
         legacyChecked.add(key);
       }
     } catch {

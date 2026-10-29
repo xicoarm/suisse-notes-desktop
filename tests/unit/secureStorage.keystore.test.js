@@ -79,10 +79,37 @@ describe('secureStorage on mobile: keystore only', () => {
     expect(prefsData.size).toBe(0);
   });
 
-  it('a new save removes an older plaintext copy even when the keystore fails', async () => {
+  it('a failed save keeps the plaintext copy (it may be the last persistent copy)', async () => {
     prefsData.set('authToken', 'old.plain.token');
     keystore.failWrites = true;
-    await storage.storeToken('new.jwt.token');
+    expect((await storage.storeToken('new.jwt.token')).success).toBe(false);
+    expect(prefsData.get('authToken')).toBe('old.plain.token');
+  });
+
+  it('failed migration followed by a failed save (same token) keeps the last persistent copy', async () => {
+    prefsData.set('authToken', 'legacy.jwt.token');
+    keystore.failWrites = true;
+    expect(await storage.getToken()).toBe('legacy.jwt.token'); // migration fails
+    expect((await storage.storeToken('legacy.jwt.token')).success).toBe(false); // save fails too
+    expect(prefsData.get('authToken')).toBe('legacy.jwt.token');
+    expect(await storage.getToken()).toBe('legacy.jwt.token');
+  });
+
+  it('a successful save (write + read-back) removes the older plaintext copy', async () => {
+    prefsData.set('authToken', 'old.plain.token');
+    expect((await storage.storeToken('new.jwt.token')).success).toBe(true);
+    expect(prefsData.has('authToken')).toBe(false);
+  });
+
+  it('a failed plaintext delete is not marked as cleaned up: the next read tries again', async () => {
+    keystoreData.set('authToken', 'k.jwt.token');
+    prefsData.set('authToken', 'old.plain.token');
+    prefs.remove.mockImplementationOnce(async () => { throw new Error('PREFS_UNAVAILABLE'); });
+    vi.resetModules();
+    const fresh = await import('../../src/services/secureStorage');
+    expect(await fresh.getToken()).toBe('k.jwt.token');
+    expect(prefsData.get('authToken')).toBe('old.plain.token');
+    expect(await fresh.getToken()).toBe('k.jwt.token');
     expect(prefsData.has('authToken')).toBe(false);
   });
 
