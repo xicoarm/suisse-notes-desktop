@@ -483,8 +483,12 @@ async function uploadViaPresignedSas(opts) {
               `[uploadDirect] Re-init returned a new audioFileId ` +
                 `(${audioFileId} -> ${reinit.audioFileId}); restarting upload from block 0`
             );
+            // Aborted meanwhile (cancel, or main's session change): no request.
+            if (abortController?.signal?.aborted) {
+              return { mode: 'azure', success: false, cancelled: true, canRetry: false };
+            }
             try {
-              await abortDirectUpload({ apiBaseUrl, authToken, recordId, audioFileId });
+              await abortDirectUpload({ apiBaseUrl, authToken, recordId, audioFileId, signal: abortController?.signal });
             } catch (e) {
               log.warn('[uploadDirect] Abort of stale session failed (non-fatal):', e?.message);
             }
@@ -643,7 +647,7 @@ async function uploadViaPresignedSas(opts) {
  * Best-effort abort: deletes the staged blob server-side so it doesn't
  * accumulate orphans. Safe to call when the blob doesn't exist.
  */
-async function abortDirectUpload({ apiBaseUrl, authToken, recordId, audioFileId }) {
+async function abortDirectUpload({ apiBaseUrl, authToken, recordId, audioFileId, signal }) {
   if (!audioFileId) return { success: true };
   try {
     await axios.post(
@@ -652,6 +656,9 @@ async function abortDirectUpload({ apiBaseUrl, authToken, recordId, audioFileId 
       {
         headers: { Authorization: `Bearer ${authToken}` },
         timeout: 15_000,
+        // Main aborts it on a session change (the upload's own controller);
+        // the user cancel passes none (its controller is already aborted).
+        signal,
       }
     );
     return { success: true };

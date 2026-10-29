@@ -168,7 +168,9 @@ function createTokenVault({ safeStorage, store, platform = process.platform, war
    * The previous version's token for the one-time migration of the session
    * authority (E1 addendum). Not gated by isAllowed (the authority asks
    * before it allows anything) and not cached. A plaintext or basic_text copy
-   * is never returned (T1).
+   * is never returned (T1). A keystore that refuses to decrypt is a read
+   * error ('error': the migration holds, round 8), not «no token»; only a
+   * value that decrypts to nothing is 'invalid'.
    * @returns {{ status: 'ok', token: string } | { status: 'none'|'insecure'|'invalid'|'unavailable'|'error' }}
    */
   function readStoredToken() {
@@ -183,7 +185,7 @@ function createTokenVault({ safeStorage, store, platform = process.platform, war
       return token ? { status: 'ok', token } : { status: 'invalid' };
     } catch (error) {
       warn(`token-vault: decrypting the stored token failed (${error?.message || error})`);
-      return { status: 'invalid' };
+      return { status: 'error' };
     }
   }
 

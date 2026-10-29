@@ -118,7 +118,10 @@ describe('E1: one record; unreadable = signed out', () => {
     signedIn(disk, 'a');
     disk.failRecordRead = true;
     const app = boot(disk);
-    expect(app.authority.state()).toMatchObject({ signedOut: true, unreadable: true });
+    // Review round 8: a read error is held (signed out in RAM, nothing
+    // deleted, read again by the next startup()); a corrupt record below is
+    // unreadable.
+    expect(app.authority.state()).toMatchObject({ signedOut: true, migrationPending: true });
     expect(app.authority.getToken()).toBeNull();
     expect(app.authority.restore()).toMatchObject({ signedOut: true });
     await app.processPendingUploads();
@@ -218,7 +221,10 @@ describe('E1 addendum: one-time migration of the previous version\'s session', (
     'a user without id': { user: { email: 'o@x.ch' } },
     'no user': { user: null },
     'no token': { token: undefined },
-    'a token that does not decrypt': { token: 'Zm9vYmFy' }
+    // Review round 8: a token the keystore refuses to decrypt is a read
+    // error (held, see sessionMigrationMatrix.main.test.js); one that
+    // decrypts to nothing is content, a decision.
+    'a token that decrypts to nothing': { token: encrypted('') }
   };
   for (const [name, legacy] of Object.entries(noPair)) {
     it(`${name}: signed out as before, nothing adopted, deleted, decision kept`, async () => {
@@ -238,17 +244,25 @@ describe('E1 addendum: one-time migration of the previous version\'s session', (
     });
   }
 
-  it('an unreadable or corrupt record with the previous session: signed out, never migrated', () => {
-    for (const fault of ['read', 'corrupt']) {
-      const disk = legacyDisk();
-      if (fault === 'read') disk.failRecordRead = true;
-      else disk.record = '{"epoch":';
-      const app = boot(disk);
-      expect(app.authority.state(), fault).toMatchObject({ signedOut: true, unreadable: true });
-      expect(app.authority.restore(), fault).toMatchObject({ signedOut: true });
-      expect(disk.log.some((l) => l.startsWith('record.write')), fault).toBe(false);
-      expect(disk.config.authToken, fault).toBeUndefined();
-    }
+  it('a corrupt record with the previous session: signed out, never migrated', () => {
+    const disk = legacyDisk();
+    disk.record = '{"epoch":';
+    const app = boot(disk);
+    expect(app.authority.state()).toMatchObject({ signedOut: true, unreadable: true });
+    expect(app.authority.restore()).toMatchObject({ signedOut: true });
+    expect(disk.log.some((l) => l.startsWith('record.write'))).toBe(false);
+    expect(disk.config.authToken).toBeUndefined();
+  });
+
+  it('a record read error with the previous session (review round 8): held - signed out in RAM, nothing written or deleted', () => {
+    const disk = legacyDisk();
+    disk.failRecordRead = true;
+    const app = boot(disk);
+    expect(app.authority.state()).toMatchObject({ signedOut: true, migrationPending: true });
+    expect(app.authority.restore()).toMatchObject({ signedOut: true });
+    expect(app.authority.getToken()).toBeNull();
+    expect(disk.log.some((l) => l.startsWith('record.write'))).toBe(false);
+    expect(disk.config.authToken).toBe(encrypted(OLD));
   });
 
   it('record not writable during the migration: RAM lock, previous session untouched, the next start migrates', async () => {
@@ -410,10 +424,11 @@ describe('E5: sign-out order and outcome', () => {
     const disk = createDisk();
     const app = signedIn(disk, 'a');
     disk.log.length = 0;
+    const before = app.counters.aborted; // the sign-in aborted too (round 8)
     expect(app.authority.signOut()).toMatchObject({ success: true });
     expect(disk.log[0]).toMatch(/^record\.write:.*"signedOut":true/);
     expect(disk.log.slice(1)).toEqual(expect.arrayContaining(['config.delete:authToken', 'config.delete:userInfo']));
-    expect(app.counters.aborted).toBe(1);
+    expect(app.counters.aborted - before).toBe(1);
   });
 
   it('record not writable and deletes failing: reported, RAM lock holds', () => {
@@ -551,5 +566,28 @@ describe('E9 double faults (r6 low findings)', () => {
     expect(app.passwordSignIn('b').apply()).toMatchObject({ applied: true, persisted: false });
     expect(app.authority.getToken()).toBe(jwt('b', 'pw'));
     expect(disk.config.authToken).toBeUndefined();
+  });
+});
+
+// Review round 8 (E7): main aborts its in-flight requests (uploads with the
+// abort signal, upload-direct.js) on EVERY session change, not only at the
+// sign-out - a request of the previous session never completes under the new
+// one. Failed at 82ab3187.
+describe('E7: in-flight requests are aborted on every session change', () => {
+  it('sign-in, SSO sign-in, sign-out and invalidate() abort; a refresh does not', () => {
+    const disk = createDisk();
+    const app = boot(disk);
+    const aborted = () => app.counters.aborted;
+    expect(app.passwordSignIn('a').apply()).toMatchObject({ applied: true });
+    expect(aborted()).toBe(1);
+    const ticket = app.authority.ticket({ userId: 'a' });
+    expect(app.authority.applySession(ticket, { token: jwt('a', 'r') }, { kind: 'refresh' })).toMatchObject({ applied: true });
+    expect(aborted()).toBe(1);
+    app.authority.invalidate();
+    expect(aborted()).toBe(2);
+    app.authority.signOut();
+    expect(aborted()).toBe(3);
+    expect(app.authority.applySession(app.authority.ticket(), { token: jwt('b', 'sso'), user: { id: 'b' } }, { kind: 'sso' })).toMatchObject({ applied: true });
+    expect(aborted()).toBe(4);
   });
 });

@@ -209,7 +209,8 @@ describe('secureStorage on mobile: plaintext copies of older versions are delete
     expect(await authority.signOut()).toMatchObject({ success: true });
     expect(setItem).toHaveBeenCalledWith(RECORD, expect.stringContaining('"signedOut":true'));
     expect(setItem.mock.invocationCallOrder[0]).toBeLessThan(keystore.remove.mock.invocationCallOrder[0]);
-    expect(keystoreData.size).toBe(0);
+    // Only the one-time migration mark stays (set at the sign-in, round 8).
+    expect([...keystoreData.keys()]).toEqual(['auth.sessionMigrated']);
     expect(prefsData.size).toBe(0);
     setItem.mockRestore();
   });
@@ -221,7 +222,8 @@ describe('secureStorage on mobile: plaintext copies of older versions are delete
     expect(keystoreData.get('authToken')).toBe('k.jwt.token');
     expect(await storage.getToken()).toBeNull();
     await restart();
-    expect(await authority.loadSession()).toEqual({ signedOut: true });
+    // The delete is still not confirmed: reported, retried at the next start.
+    expect(await authority.loadSession()).toEqual({ signedOut: true, deleteIncomplete: true });
     expect(await storage.getToken()).toBeNull();
     keystore.remove.mockReset();
     keystore.remove.mockImplementation(async ({ key }) => { checkKey(key); keystoreData.delete(key); });

@@ -25,6 +25,16 @@
  *   background work), nothing of the previous session is deleted, the next
  *   start tries again. Without such a pair: signed out as before. A record
  *   missing AFTER the mark counts as unreadable (never a second migration).
+ * - Migration error matrix (review round 8): every storage operation of the
+ *   migration (record read, mark read, token read, user read, record write
+ *   and read-back, mark write and read-back) has three outcomes: ok, missing,
+ *   read error / throw. Only a CONFIRMED missing (or confirmed invalid) pair
+ *   is a decision: tombstone + mark + delete. Every read or write error is
+ *   «held»: RAM lock (getToken null, no background work), nothing deleted,
+ *   nothing marked, retried by the next startup() (app ready, next start).
+ *   A signed-in record is released only once the mark is confirmed too -
+ *   also a record that already exists (r7 left {0,false} without the mark
+ *   when the mark failed); until then it is held.
  * - E2 Every asynchronous sign-in takes a ticket (the epoch) when it starts.
  *   Token and user are written only by applySession(ticket, result).
  * - E3 applySession is compare-and-set and runs synchronously in main, so it
@@ -114,6 +124,15 @@ function configUserStore(store, key = 'userInfo') {
     get() {
       try { return store.get(key) || null; } catch { return null; }
     },
+    /**
+     * For the migration: a read error is never «missing» (review round 8).
+     * @returns {{ status: 'ok', user: any } | { status: 'none' } | { status: 'error' }}
+     */
+    read() {
+      let value;
+      try { value = store.get(key); } catch { return { status: 'error' }; }
+      return value === undefined || value === null ? { status: 'none' } : { status: 'ok', user: value };
+    },
     set(user) {
       try {
         store.set(key, user);
@@ -179,21 +198,26 @@ function createSessionAuthority({ recordStore, vault, userStore, flows, migratio
   // SSO result waiting for the renderer (auth:takePendingSSO).
   let pending = null;
 
+  /**
+   * The record as the RAM state. Signed in only after startup() (the mark is
+   * confirmed there): until then `release` waits. A read error is «held»
+   * (round 8): signed out in RAM, nothing deleted, startup() reads again.
+   */
   function load() {
     let text;
     try {
       text = recordStore.read();
     } catch (error) {
-      warn(`session-authority: record unreadable (${error?.message || error}); signed out`);
-      return { epoch: -1, signedOut: true, unreadable: true };
+      warn(`session-authority: record not readable (${error?.message || error}); held, nothing deleted`);
+      return { epoch: -1, signedOut: true, held: true };
     }
     if (text === null || text === undefined) {
       let marked;
       try {
         marked = migrationMark.get();
       } catch (error) {
-        warn(`session-authority: migration mark unreadable (${error?.message || error}); signed out`);
-        return { epoch: -1, signedOut: true, unreadable: true };
+        warn(`session-authority: migration mark not readable (${error?.message || error}); held, nothing deleted`);
+        return { epoch: 0, signedOut: true, held: true };
       }
       if (marked) {
         warn('session-authority: record missing after the migration; signed out');
@@ -207,7 +231,7 @@ function createSessionAuthority({ recordStore, vault, userStore, flows, migratio
       warn('session-authority: record invalid; signed out');
       return { epoch: -1, signedOut: true, unreadable: true };
     }
-    return rec;
+    return rec.signedOut ? rec : { epoch: rec.epoch, signedOut: true, release: true };
   }
 
   // After an unreadable record the old epoch is unknown: continue far above it.
@@ -233,27 +257,41 @@ function createSessionAuthority({ recordStore, vault, userStore, flows, migratio
 
   const refuse = (reason) => ({ applied: false, reason });
 
+  /** E7: main's in-flight requests end at every session change. */
+  function abortAll() {
+    try { abortRequests(); } catch { /* best effort */ }
+  }
+
   /**
    * E1 addendum: the previous version's session, once (see the header).
    * @returns {'migrated'|'held'|'none'}
    */
   function migrate() {
     const stored = vault.readStoredToken();
-    if (stored.status === 'unavailable' || stored.status === 'error') {
-      // The OS keystore is not open (yet): Windows and Linux open it at app
-      // ready; nothing is decided and nothing is deleted.
+    // Round 8: the OS keystore not open (Windows and Linux open it at app
+    // ready), the token not readable or not decryptable, the user not
+    // readable - nothing is decided, nothing deleted, nothing marked.
+    if (stored.status === 'unavailable' || stored.status === 'error') return 'held';
+    const userRead = typeof userStore.read === 'function' ? userStore.read() : { status: 'ok', user: userStore.get() };
+    if (userRead.status === 'error') {
+      warn('session-authority: user not readable during the migration; held, nothing deleted');
       return 'held';
     }
-    const user = userStore.get();
+    const user = userRead.status === 'ok' ? userRead.user : null;
     const uid = stored.status === 'ok' ? tokenUserId(stored.token) : null;
     // Strict: both ids present and the same (string or number, as elsewhere).
     const paired = !!uid && !!user && typeof user === 'object' && !Array.isArray(user)
       && (typeof user.id === 'string' || typeof user.id === 'number') && String(user.id) === uid;
     if (!paired) {
-      // Signed out as before (startup deletes). The decision is kept: a
-      // tombstone and the mark, so no later start adopts anything.
-      if (persist(0, true)) ram = { epoch: 0, signedOut: true };
-      migrationMark.set();
+      // A confirmed missing or invalid pair: signed out as before (startup
+      // deletes). The decision is kept - tombstone, then the mark - so no
+      // later start adopts anything. Either write not confirmed: held.
+      if (!persist(0, true)) return 'held';
+      ram = { epoch: 0, signedOut: true };
+      if (!migrationMark.set()) {
+        warn('session-authority: migration mark not set; held, nothing deleted in this run');
+        return 'held';
+      }
       return 'none';
     }
     if (!persist(0, false)) {
@@ -261,13 +299,29 @@ function createSessionAuthority({ recordStore, vault, userStore, flows, migratio
       return 'held';
     }
     if (!migrationMark.set()) {
-      // The record {0,false} is confirmed: the next start reads it.
+      // The record {0,false} is confirmed, the mark is not: held until a
+      // later startup() confirms the mark (round 8).
       warn('session-authority: migration mark not set; RAM lock, retried at the next start');
       return 'held';
     }
     ram = { epoch: 0, signedOut: false };
     warn('session-authority: session of the previous version taken over (one-time migration)');
     return 'migrated';
+  }
+
+  /**
+   * The one-time mark, confirmed: read, or written and read back.
+   * @returns {boolean}
+   */
+  function confirmMark() {
+    try {
+      if (migrationMark.get()) return true;
+    } catch (error) {
+      // Unreadable: not written blindly either (held, round 8).
+      warn(`session-authority: migration mark unreadable (${error?.message || error})`);
+      return false;
+    }
+    return migrationMark.set() === true;
   }
 
   const authority = {
@@ -286,7 +340,7 @@ function createSessionAuthority({ recordStore, vault, userStore, flows, migratio
     },
 
     state() {
-      return { epoch: ram.epoch, signedOut: ram.signedOut, unreadable: !!ram.unreadable, migrationPending: !!ram.migrationPending };
+      return { epoch: ram.epoch, signedOut: ram.signedOut, unreadable: !!ram.unreadable, migrationPending: !!ram.held };
     },
 
     /** E6: the token for main's requests (null while signed out). */
@@ -324,8 +378,8 @@ function createSessionAuthority({ recordStore, vault, userStore, flows, migratio
           return { applied: true, epoch: ram.epoch, persisted: false };
         }
         const saved = vault.saveToken(token);
-        if (user && String(user.id ?? '') === uid) userStore.set(user);
-        return { applied: true, epoch: ram.epoch, persisted: saved.persisted !== false };
+        const userSaved = user && String(user.id ?? '') === uid ? userStore.set(user) : true;
+        return { applied: true, epoch: ram.epoch, persisted: saved.persisted !== false && userSaved === true };
       }
 
       if (kind !== 'login' && kind !== 'sso') return refuse('invalid_kind');
@@ -339,6 +393,8 @@ function createSessionAuthority({ recordStore, vault, userStore, flows, migratio
       ram = { epoch, signedOut: true };
       memoryUser = null;
       dropFlowAndPending();
+      // E7 (round 8): requests of the previous session end here.
+      abortAll();
 
       let persisted = false;
       if (pre) {
@@ -346,6 +402,9 @@ function createSessionAuthority({ recordStore, vault, userStore, flows, migratio
         const userSaved = userStore.set(user);
         if (saved.success && saved.persisted !== false && userSaved) persisted = persist(epoch, false);
         if (!persisted) memoryUser = user;
+        // A missing record is never the first start after the update any
+        // more; without a confirmed mark the next start holds (round 8).
+        else if (!confirmMark()) warn('session-authority: migration mark not set at sign-in; the next start holds until it is');
       } else {
         // E8: the record cannot be written - this session lives in memory
         // only and nothing of it (or of an older one) stays on disk.
@@ -375,7 +434,7 @@ function createSessionAuthority({ recordStore, vault, userStore, flows, migratio
       ram = { epoch, signedOut: true };
       memoryUser = null;
       const recordOk = persist(epoch, true);
-      try { abortRequests(); } catch { /* best effort */ }
+      abortAll();
       const tokenOk = vault.clearToken().success === true;
       const userOk = userStore.delete();
       const flowOk = dropFlowAndPending() !== false;
@@ -401,35 +460,55 @@ function createSessionAuthority({ recordStore, vault, userStore, flows, migratio
         ram = { ...ram, epoch };
       }
       pending = null;
+      // E7 (round 8): every ticket is stale - their requests end too.
+      abortAll();
     },
 
     /**
      * Start: a missing record runs the one-time migration (E1 addendum).
      * While signed out (tombstone or unreadable record) the deletes run
      * again (E5) and nothing is restored (E6). A flow survives only with the
-     * current epoch (SSO cold start). While the migration is held (keystore
-     * not open, a write failed) nothing is deleted; main calls startup()
-     * again at app ready.
+     * current epoch (SSO cold start). While held (keystore not open, any
+     * read or write error of the matrix, round 8) nothing is deleted; main
+     * calls startup() again at app ready.
      */
     startup() {
+      // Held (a read or write failed before): read again - main calls this
+      // at app ready, every start calls it at module load.
+      if (ram.held) ram = load();
       if (ram.missing) {
         const outcome = migrate();
         if (outcome === 'migrated') return { signedOut: false, migrated: true };
         if (outcome === 'held') {
-          ram = { epoch: 0, signedOut: true, missing: true, migrationPending: true };
+          ram = { epoch: 0, signedOut: true, missing: true, held: true };
           return { signedOut: true, migrationPending: true };
         }
-        if (ram.missing) ram = { epoch: 0, signedOut: true, missing: true };
+      } else if (ram.held) {
+        return { signedOut: true, migrationPending: true };
       } else if (!ram.unreadable) {
-        // A record of an earlier build without the mark: from now on a
-        // missing record is never the first start after the update.
-        try { if (!migrationMark.get()) migrationMark.set(); } catch { /* next start */ }
+        // From now on a missing record is never the first start after the
+        // update: the mark, confirmed. A signed-in record is released only
+        // with it (round 8); a tombstone deletes in any case (E5).
+        const marked = confirmMark();
+        if (ram.release) {
+          if (!marked) {
+            warn('session-authority: migration mark not confirmed; signed-in record held, nothing deleted');
+            ram = { epoch: ram.epoch, signedOut: true, release: true, held: true };
+            return { signedOut: true, migrationPending: true };
+          }
+          ram = { epoch: ram.epoch, signedOut: false };
+          return { signedOut: false };
+        }
       }
       if (!ram.signedOut) return { signedOut: false };
-      vault.clearToken();
-      userStore.delete();
+      const tokenGone = vault.clearToken().success === true;
+      const userGone = userStore.delete() === true;
       const flow = flows.peek();
       if (flow && (ram.unreadable || flow.epoch !== ram.epoch)) flows.clear();
+      if (!tokenGone || !userGone) {
+        warn(`session-authority: deleting the signed-out session incomplete (token=${tokenGone} user=${userGone}); retried at the next start`);
+        return { signedOut: true, deleteIncomplete: true };
+      }
       return { signedOut: true };
     },
 

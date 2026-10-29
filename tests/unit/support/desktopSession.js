@@ -22,12 +22,13 @@ export const userB64 = (user) => Buffer.from(JSON.stringify(user)).toString('bas
  * safeStorage stand-in: reversible, no '.' in the ciphertext. `ready()`
  * decides isEncryptionAvailable (Windows and Linux: false before app ready).
  */
-export function fakeSafeStorage(ready = () => true) {
+export function fakeSafeStorage(ready = () => true, decryptFails = () => false) {
   return {
     isEncryptionAvailable: () => ready(),
     getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: (s) => Buffer.from(`enc:${s.split('').reverse().join('')}`),
     decryptString: (buf) => {
+      if (decryptFails()) throw new Error('keychain access denied');
       const s = buf.toString();
       if (!s.startsWith('enc:')) throw new Error('bad ciphertext');
       return s.slice(4).split('').reverse().join('');
@@ -43,6 +44,11 @@ export const encrypted = (token) => fakeSafeStorage().encryptString(token).toStr
  * - failRecordRead / failRecordWrite: the record file
  * - failDelete: set of config keys whose delete throws
  * - failSet: set of config keys whose set throws
+ * - failGet: set of config keys whose get throws (review round 8)
+ * - dropSet: set of config keys whose set is silently lost (read-back differs)
+ * - dropRecordWrite: the record write is silently lost
+ * - failRecordReadAfterWrite: every record read throws once a record exists
+ * - failDecrypt: the OS keystore refuses to decrypt
  */
 export function createDisk() {
   return {
@@ -57,6 +63,11 @@ export function createDisk() {
     failRecordWrite: false,
     failDelete: new Set(),
     failSet: new Set(),
+    failGet: new Set(),
+    dropSet: new Set(),
+    dropRecordWrite: false,
+    failRecordReadAfterWrite: false,
+    failDecrypt: false,
     log: []
   };
 }
@@ -64,9 +75,13 @@ export function createDisk() {
 function configStore(disk) {
   const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
   return {
-    get: (k, d) => (k in disk.config ? clone(disk.config[k]) : d),
+    get: (k, d) => {
+      if (disk.failGet && disk.failGet.has(k)) throw new Error(`EIO get ${k}`);
+      return k in disk.config ? clone(disk.config[k]) : d;
+    },
     set: (k, v) => {
       if (disk.failSet.has(k)) throw new Error(`EACCES set ${k}`);
+      if (disk.dropSet && disk.dropSet.has(k)) { disk.log.push(`config.lost:${k}`); return; }
       disk.log.push(`config.set:${k}`);
       disk.config[k] = clone(v);
     },
@@ -82,10 +97,12 @@ function recordStore(disk) {
   return {
     read: () => {
       if (disk.failRecordRead) throw new Error('EIO read');
+      if (disk.failRecordReadAfterWrite && disk.record !== null) throw new Error('EIO read');
       return disk.record;
     },
     write: (text) => {
       if (disk.failRecordWrite) throw new Error('EROFS write');
+      if (disk.dropRecordWrite) { disk.log.push(`record.lost:${text}`); return; }
       disk.log.push(`record.write:${text}`);
       disk.record = text;
     }
@@ -104,7 +121,7 @@ export function boot(disk, { exchange = async () => ({ error: 'invalid_callback'
   const config = configStore(disk);
   let authority;
   const vault = createTokenVault({
-    safeStorage: fakeSafeStorage(() => disk.encryptionReady !== false),
+    safeStorage: fakeSafeStorage(() => disk.encryptionReady !== false, () => disk.failDecrypt === true),
     store: config,
     platform: 'darwin',
     isAllowed: () => !!authority && authority.tokenAllowed()

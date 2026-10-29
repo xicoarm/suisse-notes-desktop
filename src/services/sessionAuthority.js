@@ -18,6 +18,12 @@
  *   intermediate builds have a keystore session: the release kept it in
  *   plaintext Preferences, which stays discarded (T2) - those users sign in
  *   once after the update.
+ * - Migration error matrix (review round 8, as on desktop): only a CONFIRMED
+ *   missing (or invalid) pair is a decision (tombstone + mark + delete);
+ *   every read or write error of record, mark, token or user is «held»: RAM
+ *   lock, nothing deleted, nothing marked, the next start tries again. A
+ *   signed-in record is released by loadSession() only with a confirmed mark
+ *   and a readable session - until then the state is signed out.
  * - E2 Every asynchronous sign-in takes a ticket (the epoch) when it starts;
  *   token and user are written only by applySession(ticket, result).
  * - E3 applySession and signOut run one after the other (mutex). A stale
@@ -72,9 +78,15 @@ function parseRecord(text) {
   }
 }
 
+/**
+ * The record as the RAM state. Signed in only through loadSession() (mark
+ * confirmed, session readable): until then `release` waits. Web storage
+ * missing or a read error: held (round 8) - signed out in RAM, nothing
+ * deleted, loadSession() reads again.
+ */
 function readRecord() {
   const store = storage();
-  if (!store) return { epoch: -1, signedOut: true, unreadable: true };
+  if (!store) return { epoch: -1, signedOut: true, held: true };
   try {
     const legacyMarker = store.getItem(LEGACY_SIGNED_OUT_MARKER) === '1';
     const text = store.getItem(RECORD_KEY);
@@ -83,9 +95,10 @@ function readRecord() {
     if (text === null) return legacyMarker ? { epoch: 0, signedOut: true, missing: true, legacyMarker: true } : { epoch: 0, signedOut: true, missing: true };
     const rec = parseRecord(text);
     if (!rec) return { epoch: -1, signedOut: true, unreadable: true };
-    return legacyMarker ? { epoch: rec.epoch, signedOut: true } : rec;
+    if (legacyMarker || rec.signedOut) return { epoch: rec.epoch, signedOut: true };
+    return { epoch: rec.epoch, signedOut: true, release: true };
   } catch {
-    return { epoch: -1, signedOut: true, unreadable: true };
+    return { epoch: -1, signedOut: true, held: true };
   }
 }
 
@@ -198,6 +211,10 @@ export function applySession(ticket, result, { kind } = {}) {
       // A sign-out while the keystore was written wins (E3).
       if (state().epoch !== epoch) return { applied: false, reason: 'session_changed' };
       if (saved.success && info.success) persisted = persist(epoch, false);
+      // A missing record is never the first start after the update any more;
+      // without a confirmed mark the next start holds (round 8).
+      if (persisted) await confirmMark();
+      if (state().epoch !== epoch) return { applied: false, reason: 'session_changed' };
     } else {
       // E8: memory only, and nothing of an older session stays restorable.
       let removed = true;
@@ -258,8 +275,16 @@ export function invalidateTickets() {
 
 /** Copy of the RAM state (tests, diagnostics). */
 export function sessionState() {
-  const { epoch, signedOut, unreadable, migrationPending } = state();
-  return { epoch, signedOut, unreadable: !!unreadable, migrationPending: !!migrationPending };
+  const { epoch, signedOut, unreadable, held } = state();
+  return { epoch, signedOut, unreadable: !!unreadable, migrationPending: !!held };
+}
+
+/** The one-time mark, confirmed: read, or written and read back. An unreadable mark is not written blindly. */
+async function confirmMark() {
+  const mark = await readSecureItem(MIGRATION_MARK_KEY);
+  if (!mark.ok) return false;
+  if (mark.value !== null) return true;
+  return (await setSecureItem(MIGRATION_MARK_KEY, '1')).success === true;
 }
 
 const sameUserPair = (token, user) => {
@@ -288,10 +313,12 @@ async function migrate(current) {
     try { user = userRead.value ? JSON.parse(userRead.value) : null; } catch { user = null; }
   }
   if (!token || !sameUserPair(token, user)) {
-    // Signed out as before; the decision is kept (tombstone, mark).
-    const tombstone = persist(0, true);
-    await setSecureItem(MIGRATION_MARK_KEY, '1');
-    return { outcome: 'none', tombstone };
+    // A confirmed missing or invalid pair: signed out as before; the
+    // decision is kept (tombstone, then mark). Either write not confirmed:
+    // held, nothing deleted (round 8).
+    if (!persist(0, true)) return { outcome: 'held' };
+    if (!(await setSecureItem(MIGRATION_MARK_KEY, '1')).success) return { outcome: 'held' };
+    return { outcome: 'none', tombstone: true };
   }
   if (!persist(0, false)) return { outcome: 'held' };
   if (!(await setSecureItem(MIGRATION_MARK_KEY, '1')).success) return { outcome: 'held' };
@@ -307,7 +334,10 @@ async function migrate(current) {
 export function loadSession() {
   return serialized(async () => {
     await purgeLegacyAuthPreferences();
+    // Held before (a read or write failed): read again.
+    if (state().held) ram = readRecord();
     let current = state();
+    if (current.held) return { signedOut: true };
     if (current.missing) {
       const result = await migrate(current);
       // A sign-in or sign-out meanwhile wins.
@@ -318,34 +348,51 @@ export function loadSession() {
       }
       if (result.outcome === 'held') {
         // RAM lock only; nothing deleted, the next start tries again.
-        ram = { ...current, migrationPending: true };
+        ram = { epoch: 0, signedOut: true, missing: true, held: true };
         return { signedOut: true };
       }
       if (result.outcome === 'unreadable') ram = { epoch: -1, signedOut: true, unreadable: true };
       else if (result.tombstone) ram = { epoch: 0, signedOut: true };
       current = state();
     } else if (!current.unreadable) {
-      // A record of an earlier build without the mark: from now on a missing
-      // record is never the first start after the update.
-      const mark = await readSecureItem(MIGRATION_MARK_KEY);
-      if (mark.ok && mark.value === null) await setSecureItem(MIGRATION_MARK_KEY, '1');
+      // From now on a missing record is never the first start after the
+      // update: the mark, confirmed. A signed-in record is released only
+      // with it (round 8); a tombstone deletes in any case (E5).
+      const marked = await confirmMark();
       if (state() !== current) return { signedOut: true };
+      if (current.release) {
+        if (!marked) {
+          ram = { ...current, held: true };
+          return { signedOut: true };
+        }
+        const tokenRead = await readSecureItem(STORAGE_KEYS.AUTH_TOKEN);
+        const userRead = await readSecureItem(STORAGE_KEYS.USER_INFO);
+        if (state() !== current) return { signedOut: true };
+        // A read error: held, nothing deleted, the next start reads again.
+        if (!tokenRead.ok || !userRead.ok) {
+          ram = { ...current, held: true };
+          return { signedOut: true };
+        }
+        if (!tokenRead.value || !userRead.value) return { signedOut: true };
+        let user = null;
+        try { user = JSON.parse(userRead.value); } catch { user = null; }
+        if (!user || typeof user !== 'object' || Array.isArray(user)) return { signedOut: true };
+        const uid = tokenUserId(tokenRead.value);
+        if (uid && String(user.id ?? '') !== uid) return { signedOut: true, mismatch: true };
+        ram = { epoch: current.epoch, signedOut: false };
+        return { signedOut: false, token: tokenRead.value, user, epoch: current.epoch };
+      }
     }
     if (current.signedOut) {
-      for (const key of AUTH_KEYS) await removeSecureItem(key);
+      let deleted = true;
+      for (const key of AUTH_KEYS) {
+        if (!(await removeSecureItem(key)).success) deleted = false;
+      }
       const flow = peekSsoFlow();
       if (flow && (current.unreadable || flow.epoch !== current.epoch)) clearSsoFlowConfirmed();
-      return { signedOut: true };
+      // Not confirmed: the next start deletes again (E5).
+      return deleted ? { signedOut: true } : { signedOut: true, deleteIncomplete: true };
     }
-    const tokenRead = await readSecureItem(STORAGE_KEYS.AUTH_TOKEN);
-    const userRead = await readSecureItem(STORAGE_KEYS.USER_INFO);
-    if (state() !== current) return { signedOut: true };
-    if (!tokenRead.ok || !userRead.ok || !tokenRead.value || !userRead.value) return { signedOut: true };
-    let user = null;
-    try { user = JSON.parse(userRead.value); } catch { user = null; }
-    if (!user || typeof user !== 'object' || Array.isArray(user)) return { signedOut: true };
-    const uid = tokenUserId(tokenRead.value);
-    if (uid && String(user.id ?? '') !== uid) return { signedOut: true, mismatch: true };
-    return { signedOut: false, token: tokenRead.value, user, epoch: current.epoch };
+    return { signedOut: true };
   });
 }

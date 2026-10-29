@@ -45,22 +45,23 @@ function fixture() {
     assessRecordingUpload: calls.eligibility, getRecordingsPath: () => '/synthetic',
     recordingLocks: new Map(), isRecordingInProgress: false,
     sessionAuthority: { ticket: () => session.ticket, isCurrent: (t) => t === session.ticket, getToken: () => 'test-token' },
-    tokenFor: (t) => (t && t !== session.ticket ? null : 'test-token'),
-    sessionEndedFor: (t) => !!t && t !== session.ticket,
+    // As in main (round 8): work without the current ticket has no session.
+    tokenFor: (t) => (t === session.ticket ? 'test-token' : null),
+    sessionEndedFor: (t) => t !== session.ticket,
     sessionEndedResult: () => ({ success: false, canDelete: false, canRetry: true, sessionEnded: true, error: 'Signed out' }),
   };
   const functions = vm.runInNewContext(uploadFunctions + '\n({ uploadWithRetry, uploadWithRetryLegacy });', context);
   const invoke = (retries = 3, controller = new AbortController()) => functions.uploadWithRetryLegacy(
-    'record', '/synthetic/audio.webm', { duration: 45 }, retries, controller, 'owner', snapshot);
+    'record', '/synthetic/audio.webm', { duration: 45 }, retries, controller, 'owner', snapshot, session.ticket);
   return { calls, snapshot, invoke, functions, session };
 }
 
 describe('legacy upload broken-pipe recovery', () => {
   it('blocks both upload transports and accepted-receipt resume while saved sources require finalization', async () => {
-    const { calls, functions } = fixture();
+    const { calls, functions, session } = fixture();
     calls.eligibility.mockResolvedValue({ allowed: false, requiresFinalization: true, error: 'Combine the saved sources first' });
     calls.receipt.mockReturnValue({ audioFileId: 'stale-accepted-id' });
-    expect(await functions.uploadWithRetry('record', '/synthetic/audio.webm', {})).toMatchObject({
+    expect(await functions.uploadWithRetry('record', '/synthetic/audio.webm', {}, 3, session.ticket)).toMatchObject({
       success: false, canDelete: false, requiresFinalization: true, error: 'Combine the saved sources first',
     });
     expect(calls.receipt).not.toHaveBeenCalled();
@@ -71,7 +72,7 @@ describe('legacy upload broken-pipe recovery', () => {
   });
 
   it('reopens the source for EPIPE retry and verifies the accepted response once', async () => {
-    const { calls, snapshot, invoke } = fixture();
+    const { calls, snapshot, invoke, session } = fixture();
     calls.post.mockRejectedValueOnce(brokenPipe()).mockResolvedValueOnce(accepted);
     expect(await invoke()).toMatchObject({ success: true, canDelete: false });
     expect(calls.post).toHaveBeenCalledTimes(2);
@@ -79,7 +80,7 @@ describe('legacy upload broken-pipe recovery', () => {
     expect(calls.source.mock.calls).toEqual([['/synthetic/audio.webm'], ['/synthetic/audio.webm']]);
     expect(calls.post.mock.calls[0][1]).not.toBe(calls.post.mock.calls[1][1]);
     expect(calls.verify).toHaveBeenCalledTimes(1);
-    expect(calls.verify).toHaveBeenCalledWith('record', '/synthetic/audio.webm', accepted.data, 'owner', true, snapshot, null);
+    expect(calls.verify).toHaveBeenCalledWith('record', '/synthetic/audio.webm', accepted.data, 'owner', true, snapshot, session.ticket);
     expect(calls.report).not.toHaveBeenCalled();
   });
 
@@ -116,7 +117,7 @@ describe('legacy upload broken-pipe recovery', () => {
     const receipt = { audioFileId: 'already-accepted', ownerId: 'owner', fileSize: snapshot.size, fileMtimeMs: snapshot.mtimeMs };
     calls.receipt.mockReturnValue(receipt);
     calls.verify.mockResolvedValue({ success: false, pendingVerification: true, canDelete: false });
-    expect(await functions.uploadWithRetry('record', '/synthetic/audio.webm', {})).toMatchObject({ pendingVerification: true, canDelete: false });
+    expect(await functions.uploadWithRetry('record', '/synthetic/audio.webm', {}, 3, session.ticket)).toMatchObject({ pendingVerification: true, canDelete: false });
     expect(calls.verify).toHaveBeenCalledTimes(1);
     expect(calls.verify).toHaveBeenCalledWith('record', '/synthetic/audio.webm', receipt, 'owner', false, null, session.ticket);
     expect(calls.post).not.toHaveBeenCalled();

@@ -76,7 +76,7 @@ function createPendingUploadProcessor(d) {
         }
 
         let exists = true;
-        try { await d.access(item.filePath); } catch { exists = false; }
+        try { await d.access(item.filePath); } catch { if (!current()) return; exists = false; }
         if (!current()) return;
         if (!exists) {
           d.log.warn(`File not found for ${item.recordId}, removing from queue`);
@@ -93,6 +93,7 @@ function createPendingUploadProcessor(d) {
         try {
           result = await d.upload(item.recordId, item.filePath, item.metadata, 2, ticket);
         } catch (e) {
+          if (!current()) return;
           d.log.error(`Failed to upload ${item.recordId}:`, e?.message);
           result = null;
         } finally {
