@@ -37,7 +37,7 @@ function rig(opts = {}) {
 
 const kinds = (list, kind, target) => list.filter((e) => e.kind === kind && (!target || e.target === target));
 // Own unpublished temp files of an interrupted durable write may be removed.
-const notTemp = (list) => list.filter((e) => !(e.kind === 'unlink' && /\.[0-9a-f-]{36}\.tmp$/.test(e.target)));
+const notTemp = (list) => list.filter((e) => !e.own);
 const start = (r, reason = 'startup') => r.background.startRecovery(r.scopes, reason);
 
 describe('R-S4: no recovery and no clean-up without a released session', () => {

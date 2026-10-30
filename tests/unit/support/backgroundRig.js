@@ -85,11 +85,11 @@ let compiled = null;
 const mainChain = () => (compiled || (compiled = compileMainChain()));
 
 /** Default server: direct upload accepted, status COMPLETED, refresh ok. */
-function defaultAnswer(config) {
+function defaultAnswer(config, blockSize) {
   const url = String(config.url);
   const method = String(config.method).toLowerCase();
   if (method === 'post' && url.endsWith('/api/uploads/init')) {
-    return { status: 200, data: { mode: 'azure', sasUrl: 'https://blob.test/c/r?sig=1', audioFileId: 'audio-1', blockSize: 4 * 1024 * 1024, blobName: 'b' } };
+    return { status: 200, data: { mode: 'azure', sasUrl: 'https://blob.test/c/r?sig=1', audioFileId: 'audio-1', blockSize: blockSize || 4 * 1024 * 1024, blobName: 'b' } };
   }
   if (method === 'put' && url.startsWith('https://blob.test/')) return { status: 201, data: '' };
   if (method === 'post' && url.endsWith('/api/uploads/complete')) return { status: 200, data: { success: true, audioFileId: 'audio-1' } };
@@ -114,12 +114,14 @@ function defaultAnswer(config) {
  * @param {(source: string) => string} [opts.mainTransform] a mutation of main's source (compiled per rig)
  * @param {object} [opts.disk] the persistent state of an earlier rig (a restart; with session 'persisted')
  * @param {string} [opts.root] the recordings folder of an earlier rig (a restart; `keepRoot` on its cleanup)
+ * @param {number} [opts.blockSize] the server's block size; with it the transport READS the blocks and keeps the
+ *   object each accepted upload committed (`completedUploads`), in place of a body nobody reads
  * @param {string} [opts.session] see below
  */
 export function createBackgroundRig({
   session = 'signedIn', recordings = ['r1'], lateAnswers = false, read: readOverrides = {}, ports: portOverrides = {},
   history, queue, active, renameBusy = 0, registryFactory = createScopeRegistry, realRead = false, media = 'stub',
-  ffmpegFails = null, mainTransform = null, disk: givenDisk = null, root: givenRoot = null,
+  ffmpegFails = null, mainTransform = null, disk: givenDisk = null, root: givenRoot = null, blockSize = null,
 } = {}) {
   const root = givenRoot || fs.mkdtempSync(path.join(os.tmpdir(), 'bg-rig-'));
   // Round 13: files outside the recordings folder (a log, the settings): in the
@@ -178,10 +180,17 @@ export function createBackgroundRig({
   };
   let busy = renameBusy;
   const intervals = new Set();
+  // Round 14 (F16): what this run proved its own, by the exact string (the snapshot's only exceptions).
+  const wxPaths = new Set();
+  const scratchDirs = new Set();
+  const running = new Set();
   const recorder = {
     root,
     canary,
     intervals,
+    running,
+    earnedTemp: (file) => { if (!paused) wxPaths.add(file); },
+    madeScratch: (dir) => { if (!paused) scratchDirs.add(dir); },
     media,
     effect,
     after,
@@ -214,19 +223,44 @@ export function createBackgroundRig({
     active: memoryStore('active', 'activeSession', active ?? null),
   };
 
+  // Round 14 (F15), with `blockSize`: the blob store of the server. Blocks by id,
+  // the object as the block list names them, the object of each accepted upload.
+  const blocks = new Map();
+  let committed = null;
+  const completedUploads = [];
+  const blobStore = (entry, config) => {
+    if (!blockSize) return null;
+    const id = /[?&]comp=block&blockid=([^&]+)/.exec(entry.url);
+    if (entry.method === 'put' && id) {
+      const parts = [];
+      return new Promise((done, fail) => {
+        config.signal?.addEventListener('abort', () => config.data.destroy(), { once: true });
+        config.data.on('data', (d) => parts.push(d));
+        config.data.on('error', fail);
+        config.data.on('close', () => { blocks.set(decodeURIComponent(id[1]), Buffer.concat(parts)); done(); });
+      });
+    }
+    if (entry.method === 'put' && /[?&]comp=blocklist/.test(entry.url)) {
+      committed = Buffer.concat([...String(config.data).matchAll(/<Latest>([^<]*)<\/Latest>/g)].map((m) => blocks.get(m[1]) || Buffer.alloc(0)));
+    }
+    if (entry.method === 'post' && entry.url.endsWith('/api/uploads/complete')) completedUploads.push(committed);
+    return null;
+  };
+
   // HTTP: real axios + api-resilience, routed transport.
   const overrides = [];
   const http = axios.create({
     adapter: (config) => {
       const entry = { method: String(config.method).toLowerCase(), url: String(config.url), auth: config.headers?.Authorization || null, body: config.data, after: mark.changed };
-      // A real transport consumes the body; this one never reads it - a
-      // stream body must not raise an unhandled error (file gone later).
+      // A real transport consumes the body; this one never reads it (unless
+      // `blockSize`) - a stream body must not raise an unhandled error (file gone later).
       if (config.data && typeof config.data.on === 'function') config.data.on('error', () => {});
       requests.push(entry);
       if (config.signal?.aborted && !lateAnswers) return Promise.reject(new axios.CanceledError('canceled', null, config));
       const i = overrides.findIndex((o) => o.match(entry, config));
-      const next = i >= 0 ? overrides.splice(i, 1)[0].answer : defaultAnswer;
-      const pending = Promise.resolve(typeof next === 'function' ? next(config) : next);
+      const next = i >= 0 ? overrides.splice(i, 1)[0].answer : (c) => defaultAnswer(c, blockSize);
+      const stored = blobStore(entry, config);
+      const pending = Promise.resolve(stored).then(() => (typeof next === 'function' ? next(config) : next));
       const settled = after('http', pending).then((a) => {
         if (a instanceof Error) throw a;
         const response = { data: a.data, status: a.status, statusText: String(a.status), headers: { 'content-type': 'application/json' }, config, request: {} };
@@ -389,7 +423,7 @@ export function createBackgroundRig({
   const filePath = (id = 'r1') => path.join(root, id, 'audio.webm');
 
   return {
-    root, canary, intervals, disk, s, scopes, background, uploads: background.uploads, stores, http, answer, hooks, read, report, chain,
+    root, canary, intervals, wxPaths, scratchDirs, running, completedUploads, disk, s, scopes, background, uploads: background.uploads, stores, http, answer, hooks, read, report, chain,
     effects, requests, sent, sleeps, spawns, streams, reports, mark, points, sweep, timers,
     inflight: () => inflight,
     change, signOut, signInB, signOutThenB, signInA, refresh, cleanup, filePath, quietly,

@@ -98,8 +98,14 @@ function install() {
     if (name === 'unlink' && typeof args[0] === 'string' && ownTemps.delete(args[0])) return effect(c.kind, c.target, { own: true });
     return effect(c.kind, c.target);
   }
-  function settled(name, args) {
-    if (name === 'open' && changesFile(args[1]) && exclusive(args[1]) && typeof args[0] === 'string') ownTemps.add(args[0]);
+  // Round 14 (F16): the same proof for the snapshot of the bound run - the exact
+  // string an exclusive open succeeded on, the exact folder a mkdtemp returned.
+  function settled(name, args, value) {
+    if (name === 'open' && changesFile(args[1]) && exclusive(args[1]) && typeof args[0] === 'string') {
+      ownTemps.add(args[0]);
+      state.rec?.earnedTemp?.(args[0]);
+    }
+    if (name === 'mkdtemp' && typeof value === 'string') state.rec?.madeScratch?.(value);
     if (name === 'rename') ownTemps.delete(args[0]);
   }
 
@@ -154,7 +160,7 @@ function install() {
       if (c.kind) count(base, c, args);
       if (c.ours && base === 'rename' && state.rec.busy()) throw Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' });
       const result = within(base, args, () => orig.apply(this, args));
-      settled(base, args);
+      settled(base, args, result);
       if (base === 'open') remember(result, args[0]);
       if (base === 'close') fdPaths.delete(args[0]);
       return result;
@@ -174,7 +180,7 @@ function install() {
       const book = (res) => {
         if (name === 'open' && !res[0]) remember(res[1], target);
         if (name === 'close') fdPaths.delete(target);
-        if (!res[0]) settled(name, args);
+        if (!res[0]) settled(name, args, res[1]);
       };
       const c = rec ? classify(name, args) : null;
       if (c && c.kind) count(name, c, args);
@@ -224,7 +230,7 @@ function install() {
       if (inside.getStore()) return orig.apply(this, args);
       const c = rec ? classify(name, args) : null;
       if (c && c.kind) count(name, c, args);
-      const book = (value) => { settled(name, args); return name === 'open' ? rememberHandle(value, args[0]) : value; };
+      const book = (value) => { settled(name, args, value); return name === 'open' ? rememberHandle(value, args[0]) : value; };
       if (!c || !c.ours) return (c && c.kind ? within(name, args, () => orig.apply(this, args)) : orig.apply(this, args)).then(book);
       if (name === 'rename' && rec.busy()) return rec.after('fs.rename', Promise.reject(Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' })), asPath(c.target));
       return rec.after(`fs.${name}`, within(name, args, () => orig.apply(this, args)).then(book), asPath(c.target));
@@ -287,8 +293,12 @@ function install() {
         const child = orig.call(this, realBinary(file), ...rest);
         const emit = child.emit.bind(child);
         let held = null;
+        // Round 14 (F16): which process runs when the session changes, and on what.
+        const running = { args };
+        rec.running?.add(running);
         child.emit = (event, ...payload) => {
           if (event !== 'exit' && event !== 'close') return emit(event, ...payload);
+          rec.running?.delete(running);
           if (!held) held = new Promise((done) => rec.waitThen(`spawn:${path.basename(file)}`, done, args.join(' ')));
           held.then(() => emit(event, ...payload));
           return true;

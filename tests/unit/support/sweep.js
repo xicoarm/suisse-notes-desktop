@@ -12,7 +12,8 @@ import path from 'node:path';
 import { createBackgroundRig, flush } from './backgroundRig.js';
 
 export const ended = (res) => res?.sessionEnded === true;
-// Names of the temp files of a durable write (comparison and snapshot only).
+// Random part of a durable write's temp name: normalizes labels of the refresh
+// comparison (`shape`), never a filter (round 14, F16).
 export const TEMP = /\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/;
 // R-S7.7, by the oracle's own books: the one removal an exclusive open earned.
 export const notTemp = (effects) => effects.filter((e) => !e.own);
@@ -24,13 +25,14 @@ export const notTemp = (effects) => effects.filter((e) => !e.own);
  */
 export async function quiet(entry, r) {
   const mark = () => (r ? `${r.points.length}/${r.effects.length}/${r.requests.length}/${r.spawns.length}` : '');
+  const working = () => r && (r.inflight() || r.running.size); // a real child process counts as work
   let last = null;
   let stable = 0;
-  for (let round = 0; round < 200 && stable < 3; round++) {
+  for (let round = 0; round < (entry.rounds || 200) && stable < 3; round++) {
     for (let i = 0; i < 20; i++) await flush();
     await new Promise((res) => setTimeout(res, entry.slow ? 60 : 5));
     const now = mark();
-    stable = now === last && !(r && r.inflight()) ? stable + 1 : 0;
+    stable = now === last && !working() ? stable + 1 : 0;
     last = now;
   }
 }
@@ -79,10 +81,6 @@ export function afterChange(r, label) {
   return out;
 }
 
-// Scratch folders of native finalization: a child process already running at
-// the change may still write there (council 3: temporary files only).
-const SCRATCH = /(^|[/\\])native-finalization-[^/\\]*([/\\]|$)/;
-
 /** Every file of the recordings root and the external canary folder: bytes, mode and mtime (read past the counters). */
 export function snapshot(r) {
   const files = new Map();
@@ -97,25 +95,41 @@ export function snapshot(r) {
     }
   };
   r.quietly(() => { for (const dir of [r.root, r.canary]) if (fs.existsSync(dir)) walk(dir); });
+  // The processes that run at this moment (contentAfter: they may still write their output).
+  files.running = [...r.running].map((child) => child.args.map(String));
   return files;
+}
+
+/**
+ * Round 14 (F16, R-S7.7): no exception by name. Exempt is only what this run
+ * proved: the exact path an exclusive open of this run succeeded on, and a file
+ * in the exact folder a mkdtemp of this run returned while a process that was
+ * running at the change names that folder (council 3: a running media process
+ * is not killed and writes temporary files only).
+ */
+function provedOwn(r, before, file) {
+  if (r.wxPaths.has(file)) return true;
+  const scratch = [...r.scratchDirs].find((dir) => file.startsWith(`${dir}${path.sep}`));
+  return !!scratch && before.running.some((args) => args.some((arg) => arg.includes(scratch)));
 }
 
 /**
  * Round 11 (F7): independent of how the counters classify a call, the
  * files themselves - every file that existed at the change has the same
- * bytes before the resumption, and no new file appeared (own temp files and
- * the scratch of a running child process aside). Round 12 (F10): and the
+ * bytes before the resumption, and no new file appeared. Round 12 (F10): and the
  * same mode and mtime (fchmod, futimes, chmod through a descriptor opened
  * for reading). Removals are counted effects (an rm admitted before the
  * change may still walk its tree).
  */
 export function contentAfter(r, before, label) {
   const now = snapshot(r);
-  const own = (p) => TEMP.test(p) || SCRATCH.test(path.relative(r.root, p));
+  const own = (p) => provedOwn(r, before, p);
+  // The real name in the report: `where` would shorten a foreign temp name.
+  const named = (p) => (path.isAbsolute(p) ? path.relative(r.root, p) : p).replace(/\\/g, '/');
   const kept = [...before].filter(([p]) => !own(p) && now.has(p));
-  const changed = kept.filter(([p, was]) => !now.get(p).bytes.equals(was.bytes)).map(([p]) => where(r, p));
-  const attrs = kept.filter(([p, was]) => now.get(p).attrs !== was.attrs).map(([p]) => where(r, p));
-  const created = [...now.keys()].filter((p) => !own(p) && !before.has(p)).map((p) => where(r, p));
+  const changed = kept.filter(([p, was]) => !now.get(p).bytes.equals(was.bytes)).map(([p]) => named(p));
+  const attrs = kept.filter(([p, was]) => now.get(p).attrs !== was.attrs).map(([p]) => named(p));
+  const created = [...now.keys()].filter((p) => !own(p) && !before.has(p)).map((p) => named(p));
   const out = [];
   if (changed.length) out.push(`${label}: content changed after the change: ${JSON.stringify(changed)}`);
   if (attrs.length) out.push(`${label}: attributes changed after the change: ${JSON.stringify(attrs)}`);

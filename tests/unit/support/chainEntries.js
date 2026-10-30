@@ -29,22 +29,25 @@ function webmRecording(r, id, { pcm = false } = {}) {
 // A native recording (one microphone source, real Opus), made once with the
 // bundled ffmpeg (no rig bound: not counted) and copied into each rig.
 let nativeTemplate;
-/** Makes the native template once (call before the native entry runs). */
-export async function makeNativeTemplate() {
+/** Makes the native template once (call before the native entry runs); `source`: real media of `seconds` of the caller. */
+export async function makeNativeTemplate({ source = null, seconds = 1 } = {}) {
   if (nativeTemplate) return;
   const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'sweep-native-'));
   const webm = path.join(work, 'mic.webm');
-  await new Promise((done, fail) => require('node:child_process').execFile(ffmpegPath,
-    ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=1', '-c:a', 'libopus', '-y', webm],
-    (error) => (error ? fail(error) : done())));
+  if (source) fs.copyFileSync(source, webm);
+  else {
+    await new Promise((done, fail) => require('node:child_process').execFile(ffmpegPath,
+      ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=1', '-c:a', 'libopus', '-y', webm],
+      (error) => (error ? fail(error) : done())));
+  }
   nativeTemplate = path.join(work, 'n1');
   fs.mkdirSync(nativeTemplate);
   const sourceId = '3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90';
   await nativeSources.beginSource(nativeTemplate, { sourceId, kind: 'microphone', startOffsetMs: 0, mimeType: 'audio/webm;codecs=opus', settings: { channelCount: 1 } });
   await nativeSources.markSourceStarted(nativeTemplate, sourceId, { startOffsetMs: 0 });
   await nativeSources.saveSourceChunk(nativeTemplate, sourceId, fs.readFileSync(webm), 0);
-  await nativeSources.endSource(nativeTemplate, sourceId, { endOffsetMs: 1000, chunkCount: 1, reason: 'stopped' });
+  await nativeSources.endSource(nativeTemplate, sourceId, { endOffsetMs: seconds * 1000, chunkCount: 1, reason: 'stopped' });
   fs.writeFileSync(path.join(nativeTemplate, 'metadata.json'), JSON.stringify({ userId: 'a', startedAt: '2026-10-01T10:00:00.000Z' }));
 }
 export function removeNativeTemplate() {

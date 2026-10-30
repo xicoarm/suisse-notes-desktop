@@ -42,9 +42,11 @@ jobs:
         env:
           # The session sweeps run every point on Linux and macOS; Windows
           # (about seven times slower per run) a fixed-seed sample of the
-          # points, always the first and last two. Mutants, named points and
-          # unit probes are never sampled (tests/unit/support/sweep.js).
-          SWEEP_SAMPLE: ${{ matrix.os == 'windows-latest' && '0.15' || '' }}
+          # points, always the first and last two. Mutants, named points,
+          # unit probes and the real-media flows (first, middle and last point
+          # on all three systems) are never sampled (tests/unit/support/sweep.js);
+          # the sample makes room for those flows in the 25 minutes of this job.
+          SWEEP_SAMPLE: ${{ matrix.os == 'windows-latest' && '0.1' || '' }}
 
   build-validation:
     runs-on: ubuntu-latest
