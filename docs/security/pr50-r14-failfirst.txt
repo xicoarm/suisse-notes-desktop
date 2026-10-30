@@ -1,0 +1,38 @@
+PR #50, review round 14: fail-first at f5a233c (no product code changed in this round)
+New probes against the checks of round 13, each restored only for this run; rig additions (ledger of the exact open, blob store) stay in place.
+Run: 2026-10-30 UTC
+
+== F16: tests/unit/sweepSnapshot.main.test.js with contentAfter of f5a233c (temp and scratch hidden by name pattern)
+⎯⎯⎯⎯⎯⎯ Failed Tests 15 ⎯⎯⎯⎯⎯⎯⎯
+   a foreign file, root folder > a changed foreign temp name is reported, under its real name
+   a foreign file, canary folder > a changed foreign temp name is reported, under its real name
+   a foreign file, root folder > changed attributes of a foreign temp name are reported
+   a foreign file, canary folder > changed attributes of a foreign temp name are reported
+   a foreign file, root folder > a new file with a temp name is reported
+   a foreign file, canary folder > a new file with a temp name is reported
+   a foreign file, root folder > a file named like the scratch of finalization is reported
+   a foreign file, canary folder > a file named like the scratch of finalization is reported
+   what the run proved, and only that > control: a file an exclusive open created after the change is its own (the gate decide
+   what the run proved, and only that > the proof is for the exact string: the same name beside it stays foreign
+   what the run proved, and only that > a failed exclusive open proves nothing
+   what the run proved, and only that > an open that is not exclusive proves nothing
+   what the run proved, and only that > scratch > no process at the change: a write into the scratch is reported
+   what the run proved, and only that > scratch > a process that names another folder proves nothing
+   what the run proved, and only that > scratch > a folder of the same name no mkdtemp of this run returned proves nothing
+      Tests  15 failed | 3 passed (18)
+
+The three not red there: the exact open may change (control), a process running at the change writes into the folder it names (control), what a temp was published to is no temp.
+
+== F15: tests/unit/sessionSweep.media.main.test.js, group «mutants», with the check of round 13 (four EBML bytes) as the judge
+The file damaged on real media, the recording short from the chain, the chunk lost: no problem found by it. The new judge: every one red, the control green.
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+   truncated recording: EBML still there, the samples are not
+   corrupted recording: bytes overwritten in the middle
+   the chain itself publishes a short recording: valid, receipted, and short
+   a chunk lost from the sources: the recording misses it
+   encoded again: a window lost is seen
+      Tests  5 failed | 2 passed | 8 skipped (15)
+
+The flows themselves (upload, rename retry, finalization, re-scan, merge, native sources, long recording) were green with the decoder at once: no data loss at f5a233c, the gap was the proof. Two of the fixes on the way were in the rig: `resume` now starts the queue as well, as main does after a sign-in (`afterSessionApplied`); `quiet` waits for a real child process.
+
+== F14: not built here (lead measurement); no measurement workflow or threshold touched.

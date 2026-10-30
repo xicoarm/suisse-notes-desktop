@@ -311,7 +311,21 @@ Buffer, URL, FD, Handle} x effect x API x target {recording, external}: in the
 ended context all refused, nothing counted, nothing changed; the same matrix alive
 and without a context: all through. `tests/unit/sessionSweep.data.main.test.js`
 (P5): logout, login B and A at every point, then a restart: sources byte-identical,
-playable, no false receipt, one resumption, no failed attempt.
+recording published, no false receipt, one resumption, no failed attempt, on stub
+media. `tests/unit/sessionSweep.media.main.test.js` (P5, round 14, F15): the same
+runs at the first, middle and last point of upload, rename retry, finalization,
+re-scan, system audio merge and native sources and of a 10-minute recording in 300
+chunks, with valid media, the real ffmpeg/ffprobe in the chain and the decoder as
+the judge: samples and their hash against the source (recordings encoded again:
+length and eight correlated windows), stated duration, and the object of the
+accepted upload is the file. Mutants: truncated, corrupted, short from the chain
+itself, chunk lost, wrong object.
+
+Round 14 (F16): the snapshot hides nothing by name, not in the recordings folder
+and not in the external canary folder. Exempt is only what the run proved: the
+exact path of a successful exclusive open, and a file in the exact folder a mkdtemp
+of the run returned while a process that was running at the change names it
+(`tests/unit/sweepSnapshot.main.test.js`).
 
 Limits that remain (documented, not blocking): a mechanism ruled out statically
 without a caller; an external process; an effect already handed to the system.
