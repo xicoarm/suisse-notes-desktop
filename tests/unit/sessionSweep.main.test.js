@@ -3,7 +3,8 @@ import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import Module from 'node:module';
-import { createBackgroundRig, flush } from './support/backgroundRig.js';
+import { createBackgroundRig, webmChunk } from './support/backgroundRig.js';
+import { ended, baseline, sweptRun, refreshRun } from './support/sweep.js';
 
 // Review round 9 (council 3, required test 2): dynamic sweep N=1..max over
 // every background entry of main. The REAL session authority, scope
@@ -26,22 +27,27 @@ const SCOPE_FILE = path.resolve('src-electron/session-scope.js');
 const OLD = (Date.now() - 10 * 24 * 3600 * 1000) / 1000;
 
 const queued = (r, id = 'r1') => [{ recordId: id, filePath: r.filePath(id), metadata: {}, userId: 'a', addedAt: '2026-10-29T10:00:00.000Z', retryCount: 0 }];
-const ended = (res) => res?.sessionEnded === true;
 
+// Round 10: a real first WebM chunk; main's real finalization chain runs.
 function chunkDir(r, id, { fresh = false } = {}) {
   const dir = path.join(r.root, id);
-  fs.mkdirSync(path.join(dir, 'chunks'), { recursive: true });
-  const chunk = path.join(dir, 'chunks', 'chunk_0');
-  fs.writeFileSync(chunk, Buffer.alloc(10, 3));
-  if (!fresh) fs.utimesSync(chunk, OLD, OLD);
-  fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ userId: 'a', startedAt: '2026-10-01T10:00:00.000Z' }));
+  r.quietly(() => {
+    fs.mkdirSync(path.join(dir, 'chunks'), { recursive: true });
+    const chunk = path.join(dir, 'chunks', 'chunk_0.webm');
+    fs.writeFileSync(chunk, webmChunk());
+    if (!fresh) fs.utimesSync(chunk, OLD, OLD);
+    fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ userId: 'a', startedAt: '2026-10-01T10:00:00.000Z' }));
+  });
   return dir;
 }
 function emptyOrphan(r, id) {
   const dir = path.join(r.root, id);
-  fs.mkdirSync(path.join(dir, 'chunks'), { recursive: true });
-  fs.utimesSync(dir, OLD, OLD);
+  r.quietly(() => {
+    fs.mkdirSync(path.join(dir, 'chunks'), { recursive: true });
+    fs.utimesSync(dir, OLD, OLD);
+  });
 }
+const chunkSource = (r) => [path.join(r.root, 'c1', 'chunks', 'chunk_0.webm')];
 
 /**
  * Entries: `opts` for the rig, `prepare(r)` (answers, files; may set
@@ -134,18 +140,18 @@ const ENTRIES = [
     opts: { recordings: [], history: [] },
     prepare: (r) => { chunkDir(r, 'c1'); },
     run: (r, scope) => r.background.recovery.recoverOrphanedRecordings(scope),
-    ended, min: 8, recovery: true,
+    ended, min: 8, recovery: true, sources: chunkSource,
   },
   {
     name: 'recovery re-scan',
     opts: { recordings: [], history: [] },
     prepare: (r) => {
       const dir = chunkDir(r, 'c1', { fresh: true });
-      r.timerHook = (ms) => { if (ms === 120000) fs.utimesSync(path.join(dir, 'chunks', 'chunk_0'), OLD, OLD); };
+      r.timerHook = (ms) => { if (ms === 120000) r.quietly(() => fs.utimesSync(path.join(dir, 'chunks', 'chunk_0.webm'), OLD, OLD)); };
     },
     run: (r, scope) => r.background.recovery.recoverOrphanedRecordings(scope),
     // The first pass completes; the change may land in the re-scan.
-    ended: (res) => res?.completed === true || res?.sessionEnded === true, min: 8, recovery: true,
+    ended: (res) => res?.completed === true || res?.sessionEnded === true, min: 8, recovery: true, sources: chunkSource,
   },
   {
     name: 'clean-up',
@@ -162,134 +168,6 @@ const ENTRIES = [
     ended, min: 1,
   },
 ];
-
-async function quiet(entry) {
-  for (let i = 0; i < 40; i++) await flush();
-  if (entry.slow) {
-    await new Promise((res) => setTimeout(res, 400));
-    for (let i = 0; i < 20; i++) await flush();
-  }
-}
-
-function makeRig(entry, extra = {}) {
-  const r = createBackgroundRig({ ...(entry.opts || {}), ...extra });
-  if (entry.prepare) entry.prepare(r);
-  r.hooks.onTimer = (ms) => { if (r.timerHook) r.timerHook(ms); };
-  return r;
-}
-
-/** Effects as a comparable multiset (temp names without their random part). */
-const shape = (r) => ({
-  effects: r.effects.map((e) => `${e.kind}:${path.basename(e.target).replace(/\.[0-9a-f-]{36}\.tmp$/, '.tmp')}`).sort(),
-  requests: r.requests.map((q) => `${q.method} ${q.url.replace(/^https?:\/\/[^/]+/, '')}`).sort(),
-  sent: r.sent.map((e) => e.channel).sort(),
-});
-
-async function baseline(entry, extra) {
-  const r = makeRig(entry, extra);
-  try {
-    const scope = r.scopes.open();
-    const result = await entry.run(r, scope);
-    await quiet(entry);
-    return { result, max: r.points.length, shape: shape(r) };
-  } finally {
-    await r.cleanup();
-  }
-}
-
-/** One swept run; returns the list of violations (empty: passed). */
-async function sweptRun(entry, n, variant, extra) {
-  const r = makeRig(entry, extra);
-  const violations = [];
-  const fail = (what) => violations.push(`${entry.name} N=${n} ${variant}: ${what}`);
-  let b = null;
-  r.sweep.at = n;
-  r.sweep.action = () => {
-    r.signOut();
-    if (variant === 'B') {
-      r.signInB();
-      // B's own registrations, made right at the change.
-      b = { scope: r.scopes.open(), controller: new AbortController() };
-      b.claimed = b.scope.claim('r1');
-      b.scope.registerCancel('r1', b.controller);
-    }
-  };
-  try {
-    const scope = r.scopes.open();
-    let resultBeforeChange = false;
-    const result = await entry.run(r, scope).then((value) => { resultBeforeChange = !r.sweep.fired; return value; });
-    await quiet(entry);
-    if (!r.sweep.fired) { fail('the change never fired'); return violations; }
-    // Own unpublished temp files may be removed; nothing else.
-    const effects = r.effectsAfter().filter((e) => !(e.kind === 'unlink' && /\.tmp$/.test(e.target)));
-    if (effects.length) fail(`effects after the change: ${JSON.stringify(effects)}`);
-    if (r.requestsAfter().length) fail(`requests after the change: ${JSON.stringify(r.requestsAfter().map((q) => q.url))}`);
-    if (r.sentAfter().length) fail(`events after the change: ${JSON.stringify(r.sentAfter().map((e) => e.channel))}`);
-    if (r.spawnsAfter().length) fail(`child processes after the change: ${JSON.stringify(r.spawnsAfter())}`);
-    const timersAfter = r.sleeps.filter((s) => s.after);
-    if (timersAfter.length) fail(`timers after the change: ${JSON.stringify(timersAfter)}`);
-    if (JSON.stringify(r.stores.queue.data) !== r.sweep.queueAtChange) fail('queue changed after the change');
-    // A result settled before the change (the change landed in follow-up
-    // work: queue kick, re-scan) need not be sessionEnded.
-    if (!resultBeforeChange && !entry.ended(result)) fail(`result not sessionEnded: ${JSON.stringify(result)}`);
-    const left = r.stores.queue.data.pendingUploads.find((u) => u.recordId === 'r1');
-    if (entry.name === 'queue run' && ended(result) && left && left.retryCount !== 0) {
-      fail('an attempt ended by the session change was counted as a retry');
-    }
-    if (variant === 'B') {
-      if (!b.claimed || !r.scopes.inFlight.has('r1')) fail('B lost its claim');
-      const cancel = r.scopes.cancelUpload('r1');
-      if (!cancel || cancel.scope !== b.scope) fail('B lost its cancel handle');
-      if (r.s.authority.getUser()?.id !== 'b' || !b.scope.alive()) fail('B session not intact');
-      b.scope.release('r1');
-    }
-    if (entry.resumes) {
-      // Owner A signs in again; main runs the queue (afterSessionApplied).
-      if (variant === 'B') r.signOut();
-      r.signInA();
-      const mark = r.requests.length;
-      await r.background.startQueue(r.scopes);
-      await quiet(entry);
-      const transfers = r.requests.slice(mark).filter((q) => q.url.endsWith('/api/uploads/complete') || q.url.endsWith('/api/desktop/upload'));
-      const rec = r.stores.history.data.recordings.find((x) => x.id === 'r1');
-      if (transfers.length > 1) fail(`resumption uploaded ${transfers.length} times`);
-      if (rec?.uploadStatus !== 'uploaded') fail(`no resumption (history ${rec?.uploadStatus})`);
-      if (r.stores.queue.data.pendingUploads.some((u) => u.recordId === 'r1')) fail('still queued after the resumption');
-    }
-    if (entry.recovery) {
-      if (variant === 'B') r.signOut();
-      r.signInA();
-      const outcome = await r.background.startRecovery(r.scopes, 'sign-in');
-      await quiet(entry);
-      if (!outcome?.completed && !outcome?.skipped) fail(`recovery did not run again: ${JSON.stringify(outcome)}`);
-      if (!fs.existsSync(path.join(r.root, 'c1', 'chunks', 'chunk_0'))) fail('chunks deleted');
-    }
-  } catch (error) {
-    fail(`threw ${error?.stack || error}`);
-  } finally {
-    await r.cleanup();
-  }
-  return violations;
-}
-
-/** The control: a refresh of the same session at point N changes nothing. */
-async function refreshRun(entry, n, base) {
-  const r = makeRig(entry);
-  try {
-    r.sweep.at = n;
-    r.sweep.action = () => { r.refresh(); };
-    const scope = r.scopes.open();
-    const result = await entry.run(r, scope);
-    await quiet(entry);
-    const problems = [];
-    if (JSON.stringify(result) !== JSON.stringify(base.result)) problems.push(`result ${JSON.stringify(result)} != ${JSON.stringify(base.result)}`);
-    if (JSON.stringify(shape(r)) !== JSON.stringify(base.shape)) problems.push(`effects differ: ${JSON.stringify(shape(r))} vs ${JSON.stringify(base.shape)}`);
-    if (!scope.alive()) problems.push('scope ended by a refresh');
-    return problems.map((p) => `${entry.name} refresh N=${n}: ${p}`);
-  } finally {
-    await r.cleanup();
-  }
-}
 
 /** A copy of session-scope.js without alive() in commit and/or the publish gate. */
 const CUT_COMMIT = ['    function commit(fn) {\n      assertAlive();', '    function commit(fn) {'];

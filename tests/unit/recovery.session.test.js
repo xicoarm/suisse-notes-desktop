@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { createBackgroundRig, flush, until } from './support/backgroundRig.js';
+import { createBackgroundRig, flush, until, webmChunk } from './support/backgroundRig.js';
 
 // Review round 9 (council 3, R-S4, r8-MITTEL recovery): crash recovery and
 // the clean-up of old empty folders start only with a released session, end
@@ -22,17 +22,22 @@ function rig(opts = {}) {
   const r = createBackgroundRig({ recordings: [], history: [], ...opts });
   rigs.push(r);
   const dir = path.join(r.root, 'c1');
-  fs.mkdirSync(path.join(dir, 'chunks'), { recursive: true });
-  fs.writeFileSync(path.join(dir, 'chunks', 'chunk_0'), Buffer.alloc(10, 3));
-  fs.utimesSync(path.join(dir, 'chunks', 'chunk_0'), OLD, OLD);
-  fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ userId: 'a', startedAt: '2026-10-01T10:00:00.000Z' }));
   const orphan = path.join(r.root, 'old1');
-  fs.mkdirSync(path.join(orphan, 'chunks'), { recursive: true });
-  fs.utimesSync(orphan, OLD, OLD);
+  // Round 10: a real first WebM chunk - main's real finalization chain runs.
+  r.quietly(() => {
+    fs.mkdirSync(path.join(dir, 'chunks'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'chunks', 'chunk_0.webm'), webmChunk());
+    fs.utimesSync(path.join(dir, 'chunks', 'chunk_0.webm'), OLD, OLD);
+    fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ userId: 'a', startedAt: '2026-10-01T10:00:00.000Z' }));
+    fs.mkdirSync(path.join(orphan, 'chunks'), { recursive: true });
+    fs.utimesSync(orphan, OLD, OLD);
+  });
   return { r, dir, orphan };
 }
 
-const kinds = (list, kind) => list.filter((e) => e.kind === kind);
+const kinds = (list, kind, target) => list.filter((e) => e.kind === kind && (!target || e.target === target));
+// Own unpublished temp files of an interrupted durable write may be removed.
+const notTemp = (list) => list.filter((e) => !(e.kind === 'unlink' && /\.[0-9a-f-]{36}\.tmp$/.test(e.target)));
 const start = (r, reason = 'startup') => r.background.startRecovery(r.scopes, reason);
 
 describe('R-S4: no recovery and no clean-up without a released session', () => {
@@ -98,20 +103,19 @@ describe('R-S4: a session change ends the recovery without a further effect', ()
     expect(r.spawnsAfter()).toEqual([]);
     expect(r.stores.history.data.recordings).toEqual([]);
     expect(r.stores.queue.data.pendingUploads).toEqual([]);
-    expect(fs.existsSync(path.join(r.root, 'c1', 'chunks', 'chunk_0'))).toBe(true);
+    expect(fs.existsSync(path.join(r.root, 'c1', 'chunks', 'chunk_0.webm'))).toBe(true);
     expect(fs.existsSync(orphan)).toBe(true);
   });
 
   it('sign-out while the finalized output is being published: no rename, no history, no queue', async () => {
     const { r, orphan } = rig();
-    r.hooks.onEffect = (kind) => { if (kind === 'open') { r.hooks.onEffect = null; r.signOutThenB(); } };
+    // main's publishFile opens the built output for its fsync, then renames it.
+    r.hooks.onEffect = (kind, target) => { if (kind === 'open' && target.endsWith('audio_building.webm')) { r.hooks.onEffect = null; r.signOutThenB(); } };
     expect(await start(r)).toEqual({ sessionEnded: true });
     await flush();
-    expect(kinds(r.effects, 'rename')).toEqual([]);
+    expect(kinds(r.effects, 'rename', path.join(r.root, 'c1', 'audio.webm'))).toEqual([]);
     expect(fs.existsSync(path.join(r.root, 'c1', 'audio.webm'))).toBe(false);
-    // The only effect after the change: the own unpublished temp file is removed.
-    expect(r.effectsAfter()).toEqual([{ kind: 'unlink', target: expect.stringMatching(/audio\.webm\.[0-9a-f-]+\.tmp$/), after: true }]);
-    expect(fs.readdirSync(path.join(r.root, 'c1')).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+    expect(notTemp(r.effectsAfter())).toEqual([]);
     expect(r.stores.history.data.recordings).toEqual([]);
     expect(r.stores.queue.data.pendingUploads).toEqual([]);
     expect(fs.existsSync(orphan)).toBe(true);
@@ -143,7 +147,7 @@ describe('R-S4: a session change ends the recovery without a further effect', ()
 
   it('the re-scan of fresh chunks runs only while the session is alive', async () => {
     const { r, dir } = rig();
-    fs.utimesSync(path.join(dir, 'chunks', 'chunk_0'), new Date(), new Date());
+    fs.utimesSync(path.join(dir, 'chunks', 'chunk_0.webm'), new Date(), new Date());
     r.hooks.onTimer = (ms) => { if (ms === 120000) { r.hooks.onTimer = null; r.signOut(); } };
     expect(await start(r)).toEqual({ completed: true });
     for (let i = 0; i < 20; i++) await flush();
@@ -153,10 +157,10 @@ describe('R-S4: a session change ends the recovery without a further effect', ()
 
   it('control: the re-scan of fresh chunks runs in the same session', async () => {
     const { r, dir } = rig();
-    fs.utimesSync(path.join(dir, 'chunks', 'chunk_0'), new Date(), new Date());
+    fs.utimesSync(path.join(dir, 'chunks', 'chunk_0.webm'), new Date(), new Date());
     let rescans = 0;
     r.hooks.onTimer = (ms) => {
-      if (ms === 120000 && rescans++ === 0) fs.utimesSync(path.join(dir, 'chunks', 'chunk_0'), OLD, OLD);
+      if (ms === 120000 && rescans++ === 0) r.quietly(() => fs.utimesSync(path.join(dir, 'chunks', 'chunk_0.webm'), OLD, OLD));
     };
     await start(r);
     await until(() => r.spawns.some((s) => s.port === 'finalizeForRecovery'));
@@ -169,20 +173,20 @@ describe('R-S4: clean-up only after a complete recovery in the same scope', () =
     const { r, orphan } = rig();
     await start(r);
     expect(fs.existsSync(orphan)).toBe(false);
-    expect(kinds(r.effects, 'rm')).toHaveLength(1);
+    expect(kinds(r.effects, 'rm', orphan)).toHaveLength(1);
   });
 
   it('recovery ended by a session change: no clean-up', async () => {
     const { r, orphan } = rig({ ports: { finalizeForRecovery: async () => { rigs.at(-1).signOut(); return { success: false } } } });
     expect(await start(r)).toEqual({ sessionEnded: true });
     expect(fs.existsSync(orphan)).toBe(true);
-    expect(kinds(r.effects, 'rm')).toEqual([]);
+    expect(kinds(r.effects, 'rm', orphan)).toEqual([]);
   });
 
   it('recovery that failed unexpectedly: no clean-up', async () => {
     const { r, orphan } = rig({ read: { recordingInProgress: () => { throw new Error('boom'); } } });
     const dir = path.join(r.root, 'c1');
-    fs.utimesSync(path.join(dir, 'chunks', 'chunk_0'), new Date(), new Date());
+    fs.utimesSync(path.join(dir, 'chunks', 'chunk_0.webm'), new Date(), new Date());
     expect(await start(r)).toEqual({ failed: true });
     expect(fs.existsSync(orphan)).toBe(true);
   });
@@ -190,11 +194,11 @@ describe('R-S4: clean-up only after a complete recovery in the same scope', () =
   it('a session change during the clean-up: no rm after it', async () => {
     const { r, orphan } = rig({ recordings: [] });
     const second = path.join(r.root, 'old2');
-    fs.mkdirSync(path.join(second, 'chunks'), { recursive: true });
-    fs.utimesSync(second, OLD, OLD);
-    r.hooks.onEffect = (kind) => { if (kind === 'rm') { r.hooks.onEffect = null; r.signOut(); } };
+    r.quietly(() => { fs.mkdirSync(path.join(second, 'chunks'), { recursive: true }); fs.utimesSync(second, OLD, OLD); });
+    const dirs = [orphan, second];
+    r.hooks.onEffect = (kind, target) => { if (kind === 'rm' && dirs.includes(target)) { r.hooks.onEffect = null; r.signOut(); } };
     expect(await start(r)).toEqual({ sessionEnded: true });
-    expect(kinds(r.effects, 'rm')).toHaveLength(1);
+    expect(r.effects.filter((e) => e.kind === 'rm' && dirs.includes(e.target))).toHaveLength(1);
     expect(r.effectsAfter()).toEqual([]);
     expect([fs.existsSync(orphan), fs.existsSync(second)].filter(Boolean)).toHaveLength(1);
   });

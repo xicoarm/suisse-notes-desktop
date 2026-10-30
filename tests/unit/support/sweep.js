@@ -1,0 +1,171 @@
+// The sweep of rounds 9 and 10 (council 3, required test 2), shared by the
+// sweep tests and the mutation probe (support/sweepProbe.js runs it in a
+// child process): at the N-th suspension point the session changes, (a)
+// sign-out, (b) sign-out and sign-in B. Expected after the change: no
+// request, no write, no event, no timer, no child process; the queue
+// byte-identical; the result `sessionEnded`; B's registrations intact; after
+// owner A signs in again exactly one resumption. Control: a refresh of the
+// same session at point N changes nothing. No test framework in here.
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { createBackgroundRig, flush } from './backgroundRig.js';
+
+export const ended = (res) => res?.sessionEnded === true;
+// Own unpublished temp files of an interrupted durable write may be removed.
+export const TEMP = /\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/;
+export const notTemp = (effects) => effects.filter((e) => !(e.kind === 'unlink' && TEMP.test(e.target)));
+
+export async function quiet(entry) {
+  for (let i = 0; i < 40; i++) await flush();
+  if (entry.slow) {
+    await new Promise((res) => setTimeout(res, 400));
+    for (let i = 0; i < 20; i++) await flush();
+  }
+}
+
+export async function makeRig(entry, extra = {}) {
+  const r = createBackgroundRig({ ...(entry.opts || {}), ...extra });
+  if (entry.prepare) await entry.prepare(r);
+  r.hooks.onTimer = (ms) => { if (r.timerHook) r.timerHook(ms); };
+  return r;
+}
+
+/** Effects as a comparable multiset (temp names and scratch folders without their random part). */
+const where = (r, target) => (path.isAbsolute(target) ? path.relative(r.root, target) : target)
+  .replace(TEMP, '.tmp').replace(/native-finalization-[^/\\]*/, 'native-finalization-X').replace(/source-chunks([/\\])\d+/, 'source-chunks$1N').replace(/\\/g, '/');
+export const shape = (r) => ({
+  effects: r.effects.map((e) => `${e.kind}:${where(r, e.target)}`).sort(),
+  requests: r.requests.map((q) => `${q.method} ${q.url.replace(/^https?:\/\/[^/]+/, '')}`).sort(),
+  sent: r.sent.map((e) => e.channel).sort(),
+});
+
+export async function baseline(entry, extra) {
+  const r = await makeRig(entry, extra);
+  try {
+    const scope = r.scopes.open();
+    const result = await entry.run(r, scope);
+    await quiet(entry);
+    return { result, max: r.points.length, shape: shape(r), labels: [...r.points] };
+  } finally {
+    await r.cleanup();
+  }
+}
+
+/** Every violation of the rules after the change, from the counters of the rig. */
+export function afterChange(r, label) {
+  const out = [];
+  const effects = notTemp(r.effectsAfter());
+  if (effects.length) out.push(`${label}: effects after the change: ${JSON.stringify(effects.map((e) => `${e.kind}:${where(r, e.target)}`))}`);
+  if (r.requestsAfter().length) out.push(`${label}: requests after the change: ${JSON.stringify(r.requestsAfter().map((q) => q.url))}`);
+  if (r.sentAfter().length) out.push(`${label}: events after the change: ${JSON.stringify(r.sentAfter().map((e) => e.channel))}`);
+  if (r.spawnsAfter().length) out.push(`${label}: child processes after the change: ${JSON.stringify(r.spawnsAfter().map((s) => s.port || `${s.file} ${s.args.slice(0, 6).join(' ')}`))}`);
+  const timersAfter = r.sleeps.filter((s) => s.after);
+  if (timersAfter.length) out.push(`${label}: timers after the change: ${JSON.stringify(timersAfter)}`);
+  if (JSON.stringify(r.stores.queue.data) !== r.sweep.queueAtChange) out.push(`${label}: queue changed after the change`);
+  return out;
+}
+
+/**
+ * One swept run; returns the list of violations (empty: passed).
+ * `at` is N, or a predicate (label, target) for the point of the change.
+ */
+export async function sweptRun(entry, at, variant, extra) {
+  const r = await makeRig(entry, extra);
+  const name = `${entry.name} ${typeof at === 'function' ? 'at the named point' : `N=${at}`} ${variant}`;
+  const violations = [];
+  const fail = (what) => violations.push(`${name}: ${what}`);
+  let b = null;
+  if (typeof at === 'function') r.sweep.when = at;
+  else r.sweep.at = at;
+  r.sweep.action = () => {
+    r.signOut();
+    if (variant === 'B') {
+      r.signInB();
+      // B's own registrations, made right at the change.
+      b = { scope: r.scopes.open(), controller: new AbortController() };
+      b.claimed = b.scope.claim('r1');
+      b.scope.registerCancel('r1', b.controller);
+    }
+  };
+  try {
+    const scope = r.scopes.open();
+    let resultBeforeChange = false;
+    const result = await entry.run(r, scope).then((value) => { resultBeforeChange = !r.sweep.fired; return value; });
+    await quiet(entry);
+    if (!r.sweep.fired) { fail('the change never fired'); return violations; }
+    violations.push(...afterChange(r, name));
+    // A result settled before the change (the change landed in follow-up
+    // work: queue kick, re-scan) need not be sessionEnded.
+    if (!resultBeforeChange && !entry.ended(result)) fail(`result not sessionEnded: ${JSON.stringify(result)}`);
+    const left = r.stores.queue.data.pendingUploads.find((u) => u.recordId === 'r1');
+    if (entry.name === 'queue run' && ended(result) && left && left.retryCount !== 0) {
+      fail('an attempt ended by the session change was counted as a retry');
+    }
+    if (variant === 'B') {
+      if (!b.claimed || !r.scopes.inFlight.has('r1')) fail('B lost its claim');
+      const cancel = r.scopes.cancelUpload('r1');
+      if (!cancel || cancel.scope !== b.scope) fail('B lost its cancel handle');
+      if (r.s.authority.getUser()?.id !== 'b' || !b.scope.alive()) fail('B session not intact');
+      b.scope.release('r1');
+    }
+    if (entry.resumes) {
+      // Owner A signs in again; main runs the queue (afterSessionApplied).
+      if (variant === 'B') r.signOut();
+      r.signInA();
+      const mark = r.requests.length;
+      await r.background.startQueue(r.scopes);
+      await quiet(entry);
+      const transfers = r.requests.slice(mark).filter((q) => q.url.endsWith('/api/uploads/complete') || q.url.endsWith('/api/desktop/upload'));
+      const rec = r.stores.history.data.recordings.find((x) => x.id === 'r1');
+      if (transfers.length > 1) fail(`resumption uploaded ${transfers.length} times`);
+      if (rec?.uploadStatus !== 'uploaded') fail(`no resumption (history ${rec?.uploadStatus})`);
+      if (r.stores.queue.data.pendingUploads.some((u) => u.recordId === 'r1')) fail('still queued after the resumption');
+    }
+    if (entry.recovery) {
+      if (variant === 'B') r.signOut();
+      r.signInA();
+      const outcome = await r.background.startRecovery(r.scopes, 'sign-in');
+      await quiet(entry);
+      if (!outcome?.completed && !outcome?.skipped) fail(`recovery did not run again: ${JSON.stringify(outcome)}`);
+      for (const source of entry.sources ? entry.sources(r) : []) if (!fs.existsSync(source)) fail(`source deleted: ${path.relative(r.root, source)}`);
+      if (entry.afterResume) for (const problem of entry.afterResume(r)) fail(problem);
+    }
+  } catch (error) {
+    fail(`threw ${error?.stack || error}`);
+  } finally {
+    await r.cleanup();
+  }
+  return violations;
+}
+
+/** The control: a refresh of the same session at point N changes nothing. */
+export async function refreshRun(entry, n, base) {
+  const r = await makeRig(entry);
+  try {
+    r.sweep.at = n;
+    r.sweep.action = () => { r.refresh(); };
+    const scope = r.scopes.open();
+    const result = await entry.run(r, scope);
+    await quiet(entry);
+    const problems = [];
+    if (JSON.stringify(result) !== JSON.stringify(base.result)) problems.push(`result ${JSON.stringify(result)} != ${JSON.stringify(base.result)}`);
+    if (JSON.stringify(shape(r)) !== JSON.stringify(base.shape)) problems.push(`effects differ: ${JSON.stringify(shape(r))} vs ${JSON.stringify(base.shape)}`);
+    if (!scope.alive()) problems.push('scope ended by a refresh');
+    return problems.map((p) => `${entry.name} refresh N=${n}: ${p}`);
+  } finally {
+    await r.cleanup();
+  }
+}
+
+/** The whole sweep of one entry: N=1..max, variants A and B, the refresh control. */
+export async function sweepEntry(entry, { variants = ['A', 'B'], control = true, extra } = {}) {
+  const base = await baseline(entry, extra);
+  const violations = [];
+  let runs = 0;
+  for (let n = 1; n <= base.max; n++) {
+    for (const variant of variants) { violations.push(...await sweptRun(entry, n, variant, extra)); runs++; }
+    if (control) { violations.push(...await refreshRun(entry, n, base)); runs++; }
+  }
+  return { base, violations, runs };
+}
