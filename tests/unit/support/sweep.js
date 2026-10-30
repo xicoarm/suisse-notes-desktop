@@ -76,6 +76,42 @@ export function afterChange(r, label) {
   return out;
 }
 
+// Scratch folders of native finalization: a child process already running at
+// the change may still write there (council 3: temporary files only).
+const SCRATCH = /(^|[/\\])native-finalization-[^/\\]*([/\\]|$)/;
+
+/** Every file of the recordings root and its bytes (read past the counters). */
+export function snapshot(r) {
+  const files = new Map();
+  const walk = (dir) => {
+    for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, d.name);
+      if (d.isDirectory()) walk(p);
+      else if (d.isFile()) files.set(p, fs.readFileSync(p));
+    }
+  };
+  r.quietly(() => { if (fs.existsSync(r.root)) walk(r.root); });
+  return files;
+}
+
+/**
+ * Round 11 (F7): independent of how the counters classify a call, the
+ * files themselves - every file that existed at the change has the same
+ * bytes before the resumption, and no new file appeared (own temp files and
+ * the scratch of a running child process aside). Removals are counted
+ * effects (an rm admitted before the change may still walk its tree).
+ */
+export function contentAfter(r, before, label) {
+  const now = snapshot(r);
+  const own = (p) => TEMP.test(p) || SCRATCH.test(path.relative(r.root, p));
+  const changed = [...before].filter(([p, bytes]) => !own(p) && now.has(p) && !now.get(p).equals(bytes)).map(([p]) => where(r, p));
+  const created = [...now.keys()].filter((p) => !own(p) && !before.has(p)).map((p) => where(r, p));
+  const out = [];
+  if (changed.length) out.push(`${label}: content changed after the change: ${JSON.stringify(changed)}`);
+  if (created.length) out.push(`${label}: files created after the change: ${JSON.stringify(created)}`);
+  return out;
+}
+
 /**
  * One swept run; returns the list of violations (empty: passed).
  * `at` is N, or a predicate (label, target) for the point of the change.
@@ -88,7 +124,9 @@ export async function sweptRun(entry, at, variant, extra) {
   let b = null;
   if (typeof at === 'function') r.sweep.when = at.fresh ? at.fresh() : at;
   else r.sweep.at = at;
+  let atChange = null;
   r.sweep.action = () => {
+    atChange = snapshot(r);
     r.signOut();
     if (variant === 'B') {
       r.signInB();
@@ -105,6 +143,7 @@ export async function sweptRun(entry, at, variant, extra) {
     await quiet(entry, r);
     if (!r.sweep.fired) { fail('the change never fired'); return violations; }
     violations.push(...afterChange(r, name));
+    violations.push(...contentAfter(r, atChange, name));
     // A result settled before the change (the change landed in follow-up
     // work: queue kick, re-scan) need not be sessionEnded.
     if (!resultBeforeChange && !entry.ended(result)) fail(`result not sessionEnded: ${JSON.stringify(result)}`);

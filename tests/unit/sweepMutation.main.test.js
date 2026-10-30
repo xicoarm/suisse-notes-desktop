@@ -66,6 +66,8 @@ describe('mutants of the sinks: the sweep turns red', () => {
     expect(all(result)).toEqual([]);
     const base = result.baselines['recovery, real chain with the system audio merge'];
     expect(base.effects).toContain('write:c1/merge-note.txt');
+    // Round 11 (F7): a numeric O_WRONLY|O_CREAT|O_TRUNC open is counted.
+    expect(base.effects).toContain('open:c1/merge-open.txt');
     expect(base.spawns.some((s) => /ffprobe -version/.test(s))).toBe(true);
     expect(base.sent).toContain('system:capture-warning');
   }, 600000);
@@ -78,6 +80,7 @@ describe('mutants of the sinks: the sweep turns red', () => {
       // eslint-disable-next-line no-console
       console.log(`[sweep:mutant] ${name}: ${violations.length} violations\n  ${violations.slice(0, 4).join('\n  ')}`);
       expect(violations.some((v) => KIND_PATTERN[mutant.kind].test(v)), `${name}: ${JSON.stringify(violations.slice(0, 6))}`).toBe(true);
+      for (const pattern of mutant.also || []) expect(violations.some((v) => pattern.test(v)), `${name}: ${pattern} in ${JSON.stringify(violations.slice(0, 6))}`).toBe(true);
     }, 600000);
   }
 });
