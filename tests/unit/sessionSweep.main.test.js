@@ -296,7 +296,7 @@ const CUT_COMMIT = ['    function commit(fn) {\n      assertAlive();', '    func
 const CUT_GATE = ['return publishGate.run({ assertAlive }, fn);', 'return publishGate.run({ assertAlive: () => {} }, fn);'];
 
 function mutantRegistry(cuts = [CUT_COMMIT, CUT_GATE]) {
-  let src = fs.readFileSync(SCOPE_FILE, 'utf8');
+  let src = fs.readFileSync(SCOPE_FILE, 'utf8').replace(/\r\n/g, '\n'); // Windows checkout: CRLF
   for (const [from, to] of cuts) {
     if (!src.includes(from)) throw new Error(`mutation anchor missing: ${from}`);
     src = src.replace(from, to);
