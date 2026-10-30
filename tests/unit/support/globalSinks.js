@@ -326,7 +326,7 @@ function install() {
   // installed its gate (counted here, not gated): the bypass mutants
   // (support/mutants.js) use them.
   globalThis.__sweepPreGate = {
-    fs: { writeFileSync: fs.writeFileSync, mkdirSync: fs.mkdirSync, unlinkSync: fs.unlinkSync, renameSync: fs.renameSync, openSync: fs.openSync, closeSync: fs.closeSync },
+    fs: { writeFileSync: fs.writeFileSync, mkdirSync: fs.mkdirSync, unlinkSync: fs.unlinkSync, renameSync: fs.renameSync, openSync: fs.openSync, closeSync: fs.closeSync, utimesSync: fs.utimesSync },
     cp: { execFile: childProcess.execFile, spawn: childProcess.spawn },
   };
 

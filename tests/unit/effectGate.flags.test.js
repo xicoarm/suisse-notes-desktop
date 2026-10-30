@@ -314,3 +314,198 @@ describe('provenance: descriptors and handles opened outside a gated context', (
     }
   });
 });
+
+// Review round 12: fail-closed in the ended context - a call passes only when
+// it is proven that it does not reach the folder.
+describe('round 12, F8: a path resolved as the system resolves it', () => {
+  function link(target, at, type) {
+    try { fs.symlinkSync(target, at, type); return at; } catch { return null; }
+  }
+
+  it.skipIf(process.platform === 'win32')('a symlink plus «..» (the link first, then up from its target): refused, content unchanged', async (ctx) => {
+    fs.mkdirSync(path.join(root, 'c1', 'sub'));
+    const at = link(path.join(root, 'c1', 'sub'), path.join(outside, 'link'), 'dir');
+    if (!at) return ctx.skip();
+    const dotted = [at, '..', 'metadata.json'].join(path.sep);
+    const result = await gated(async (end) => {
+      end();
+      return {
+        open: await outcome(() => fs.closeSync(fs.openSync(dotted, O_WRONLY | O_CREAT | O_TRUNC))),
+        writeFile: await outcome(() => fs.writeFileSync(dotted, 'X')),
+        promise: await outcome(() => fs.promises.truncate(dotted, 0)),
+      };
+    });
+    expect({ ...result, content: content() }).toEqual({ open: 'refused', writeFile: 'refused', promise: 'refused', content: CONTENT });
+  });
+
+  it('a path that cannot be decided (a link loop) is refused after the end, and fails by itself before it', async (ctx) => {
+    const loop = link('loop', path.join(outside, 'loop'), 'file');
+    if (!loop) return ctx.skip();
+    const target = path.join(loop, 'x.txt');
+    const after = await gated(async (end) => { end(); return outcome(() => fs.writeFileSync(target, 'X')); });
+    const before = await gated(() => outcome(() => fs.writeFileSync(target, 'X')));
+    expect({ after, before: before === 'refused' ? 'refused' : 'system error' }).toEqual({ after: 'refused', before: 'system error' });
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('a folder without access on the way is refused after the end (not decidable)', async () => {
+    const locked = path.join(outside, 'locked');
+    fs.mkdirSync(locked);
+    fs.chmodSync(locked, 0o000);
+    try {
+      const result = await gated(async (end) => { end(); return outcome(() => fs.writeFileSync(path.join(locked, 'inner', 'x.txt'), 'X')); });
+      expect(result).toBe('refused');
+    } finally {
+      fs.chmodSync(locked, 0o755);
+    }
+  });
+
+  it('a hard link to a file of the folder: writing through it is refused, removing the link itself passes', async (ctx) => {
+    const hard = path.join(outside, 'hard.json');
+    try { fs.linkSync(meta, hard); } catch { return ctx.skip(); }
+    const result = await gated(async (end) => {
+      end();
+      return {
+        writeFile: await outcome(() => fs.writeFileSync(hard, 'X')),
+        chmod: await outcome(() => fs.chmodSync(hard, 0o444)),
+        unlink: await outcome(() => fs.unlinkSync(hard)),
+      };
+    });
+    expect({ ...result, content: content(), writable: (fs.statSync(meta).mode & 0o200) === 0o200 }).toEqual({ writeFile: 'refused', chmod: 'refused', unlink: 'ok', content: CONTENT, writable: true });
+  });
+
+  it('controls: a link outside plus «..» back outside, and a sibling folder named like the folder, pass', async (ctx) => {
+    const logs = path.join(outside, 'logs');
+    fs.mkdirSync(logs);
+    const at = link(logs, path.join(outside, 'logdir'), 'dir');
+    if (!at) return ctx.skip();
+    const sibling = `${root}-old`;
+    fs.mkdirSync(sibling);
+    const result = await gated(async (end) => {
+      end();
+      return {
+        dotted: await outcome(() => fs.writeFileSync([at, '..', 'logs', 'app.log'].join(path.sep), 'x')),
+        sibling: await outcome(() => fs.writeFileSync(path.join(sibling, 'settings.json'), '{}')),
+      };
+    });
+    expect(result).toEqual({ dotted: 'ok', sibling: 'ok' });
+  });
+});
+
+describe('round 12, F9: what the open found is held until the close', () => {
+  function link(target, at, type) {
+    try { fs.symlinkSync(target, at, type); return at; } catch { return null; }
+  }
+  const ALIVE = { assertAlive() {} };
+
+  for (const after of ['removed', 'renamed']) {
+    it(`a descriptor and a handle opened in the foreground through a link, the link then ${after}: refused after logout and after login B`, async (ctx) => {
+      const alias = link(meta, path.join(outside, 'meta-link.json'), 'file');
+      if (!alias) return ctx.skip();
+      const fd = fs.openSync(alias, 'r+');
+      const handle = await fs.promises.open(alias, 'r+');
+      if (after === 'removed') fs.unlinkSync(alias);
+      else fs.renameSync(alias, `${alias}.old`);
+      try {
+        // Logout: the context of A ended. Login B: A's context still ended,
+        // B's alive - B's own work passes, A's does not.
+        const afterLogout = await gated(async (end) => {
+          end();
+          return { fd: await outcome(() => fs.writeSync(fd, 'X', 0)), handle: await outcome(() => handle.write('X', 0)) };
+        });
+        const afterLoginB = await gated(async (end) => {
+          end();
+          const a = { fd: await outcome(() => fs.writeSync(fd, 'X', 0)), handle: await outcome(() => handle.truncate(0)) };
+          const b = await publishGate.run(ALIVE, async () => ({ fd: await outcome(() => fs.fsyncSync(fd)) }));
+          return { a, b };
+        });
+        expect({ afterLogout, afterLoginB, content: content() }).toEqual({
+          afterLogout: { fd: 'refused', handle: 'refused' },
+          afterLoginB: { a: { fd: 'refused', handle: 'refused' }, b: { fd: 'ok' } },
+          content: CONTENT,
+        });
+      } finally {
+        fs.closeSync(fd);
+        await handle.close();
+      }
+    });
+  }
+
+  it('a descriptor of the folder whose file was renamed out of the folder stays held', async () => {
+    const fd = fs.openSync(meta, 'r+');
+    const moved = path.join(outside, 'moved.json');
+    fs.renameSync(meta, moved);
+    try {
+      const result = await gated(async (end) => { end(); return outcome(() => fs.writeSync(fd, 'X', 0)); });
+      expect({ result, content: content(moved) }).toEqual({ result: 'refused', content: CONTENT });
+    } finally {
+      fs.closeSync(fd);
+    }
+  });
+});
+
+describe('round 12, F10: reading opens and attributes', () => {
+  const mode = () => fs.statSync(meta).mode;
+  const mtime = () => fs.statSync(meta).mtimeMs;
+  const PAST = new Date('2020-01-01T00:00:00Z');
+
+  it('a descriptor opened for reading (foreground and ended context): fchmod, futimes, fchown refused after the end', async () => {
+    const before = { mode: mode(), mtime: mtime() };
+    const foreground = fs.openSync(meta, 'r');
+    try {
+      const result = await gated(async (end) => {
+        const own = fs.openSync(meta, O_RDONLY);
+        end();
+        const r = {};
+        for (const [name, fd] of [['foreground', foreground], ['own', own]]) {
+          r[name] = {
+            fchmod: await outcome(() => fs.fchmodSync(fd, 0o000)),
+            futimes: await outcome(() => viaCallback((cb) => fs.futimes(fd, PAST, PAST, cb))),
+            fchown: await outcome(() => fs.fchownSync(fd, process.getuid?.() ?? 0, process.getgid?.() ?? 0)),
+          };
+        }
+        fs.closeSync(own);
+        return r;
+      });
+      const refused = { fchmod: 'refused', futimes: 'refused', fchown: 'refused' };
+      expect({ ...result, mode: mode(), mtime: mtime() }).toEqual({ foreground: refused, own: refused, ...before });
+    } finally {
+      fs.closeSync(foreground);
+    }
+  });
+
+  it('a handle opened for reading: chmod, utimes, chown refused after the end; path chmod and utimes too', async () => {
+    const before = { mode: mode(), mtime: mtime() };
+    const handle = await fs.promises.open(meta, 'r');
+    try {
+      const result = await gated(async (end) => {
+        end();
+        return {
+          chmod: await outcome(() => handle.chmod(0o000)),
+          utimes: await outcome(() => handle.utimes(PAST, PAST)),
+          chown: await outcome(() => handle.chown(process.getuid?.() ?? 0, process.getgid?.() ?? 0)),
+          pathChmod: await outcome(() => fs.promises.chmod(meta, 0o000)),
+          pathUtimes: await outcome(() => fs.utimesSync(meta, PAST, PAST)),
+        };
+      });
+      expect({ ...result, mode: mode(), mtime: mtime() }).toEqual({ chmod: 'refused', utimes: 'refused', chown: 'refused', pathChmod: 'refused', pathUtimes: 'refused', ...before });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('controls: reading itself passes after the end; attributes of a file outside pass', async () => {
+    const other = path.join(outside, 'log.txt');
+    fs.writeFileSync(other, 'x');
+    const result = await gated(async (end) => {
+      end();
+      const fd = fs.openSync(meta, 'r');
+      const read = await outcome(() => fs.readSync(fd, Buffer.alloc(4), 0, 4, 0));
+      fs.closeSync(fd);
+      const out = fs.openSync(other, 'r');
+      const attr = await outcome(() => { fs.fchmodSync(out, 0o644); fs.futimesSync(out, PAST, PAST); });
+      fs.closeSync(out);
+      return { read, attr };
+    });
+    expect(result).toEqual({ read: 'ok', attr: 'ok' });
+  });
+});

@@ -93,3 +93,77 @@ describe('the oracle sees aliases and earlier descriptors', () => {
     expect(counted()).toEqual(['write:c1/metadata.json']);
   });
 });
+
+// Review round 12: the oracle reads a path as the system does (its own
+// resolution: the system's realpath of the raw path), holds what an open
+// found, and counts attributes; independent of the gate's resolution.
+describe('round 12: where a call really lands', () => {
+  const link = (target, at, type) => { try { fs.symlinkSync(target, at, type); return at; } catch { return null; } };
+
+  it.skipIf(process.platform === 'win32')('F8: a write through a symlink plus «..» is an effect on the folder', (ctx) => {
+    fs.mkdirSync(path.join(root, 'c1', 'sub'));
+    const at = link(path.join(root, 'c1', 'sub'), path.join(base, 'link'), 'dir');
+    if (!at) return ctx.skip();
+    bound(() => fs.writeFileSync([at, '..', 'metadata.json'].join(path.sep), 'X'));
+    expect(counted()).toEqual(['write:c1/metadata.json']);
+  });
+
+  it('F8: a write through a chain of links and to a dangling link into the folder is an effect', (ctx) => {
+    const second = link(path.join(root, 'c1'), path.join(base, 'l2'), 'dir');
+    const first = second && link('l2', path.join(base, 'l1'), 'dir');
+    const hang = link(path.join(root, 'c1', 'later.json'), path.join(base, 'hang'), 'file');
+    if (!first || !hang) return ctx.skip();
+    bound(() => { fs.writeFileSync(path.join(first, 'metadata.json'), 'X'); fs.writeFileSync(hang, 'X'); });
+    expect(counted()).toEqual(['write:c1/metadata.json', 'write:c1/later.json']);
+  });
+
+  it('F8: a write through a hard link to a file of the folder is an effect; removing the link is not', (ctx) => {
+    const hard = path.join(base, 'hard.json');
+    try { fs.linkSync(meta, hard); } catch { return ctx.skip(); }
+    bound(() => { fs.writeFileSync(hard, 'X'); fs.unlinkSync(hard); });
+    expect(counted()).toEqual(['write:c1/metadata.json']);
+  });
+
+  it('F9: a descriptor and a handle opened through a link, the link then removed: their writes are effects', async (ctx) => {
+    const alias = link(meta, path.join(base, 'meta-link.json'), 'file');
+    if (!alias) return ctx.skip();
+    const fd = fs.openSync(alias, 'r+');
+    const handle = await fs.promises.open(alias, 'r+');
+    fs.unlinkSync(alias);
+    sinks.bind(rec);
+    fs.writeSync(fd, 'X', 0);
+    await handle.write('Y', 0);
+    await fs.promises.writeFile(handle, 'Z');
+    sinks.unbind(rec);
+    fs.closeSync(fd);
+    await handle.close();
+    expect(counted()).toEqual(['write:c1/metadata.json', 'write:c1/metadata.json', 'write:c1/metadata.json']);
+  });
+
+  it('F10: attributes through a descriptor or handle opened for reading are effects', async () => {
+    const fd = fs.openSync(meta, 'r');
+    const handle = await fs.promises.open(meta, 'r');
+    sinks.bind(rec);
+    fs.fchmodSync(fd, 0o644);
+    fs.futimesSync(fd, new Date(), new Date());
+    await handle.chmod(0o644);
+    await handle.utimes(new Date(), new Date());
+    sinks.unbind(rec);
+    fs.closeSync(fd);
+    await handle.close();
+    expect(counted()).toEqual(['attr:c1/metadata.json', 'attr:c1/metadata.json', 'attr:c1/metadata.json', 'attr:c1/metadata.json']);
+  });
+
+  it('controls: a link outside plus «..» back outside, and reading through a link into the folder, are no effect', (ctx) => {
+    fs.mkdirSync(path.join(base, 'logs'));
+    const at = link(path.join(base, 'logs'), path.join(base, 'logdir'), 'dir');
+    const alias = link(path.join(root, 'c1'), path.join(base, 'alias'), 'dir');
+    if (!at || !alias) return ctx.skip();
+    bound(() => {
+      fs.writeFileSync([at, '..', 'logs', 'app.log'].join(path.sep), 'x');
+      fs.readFileSync(path.join(alias, 'metadata.json'));
+      fs.closeSync(fs.openSync(path.join(alias, 'metadata.json'), 'r'));
+    });
+    expect(counted()).toEqual([]);
+  });
+});

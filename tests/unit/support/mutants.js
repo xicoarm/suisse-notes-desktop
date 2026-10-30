@@ -27,6 +27,9 @@ const PATH_SPAWN_BYPASS = "    globalThis.__sweepPreGate.cp.execFile(resolveBund
 const PATH_OPEN = "    { const fd = fs.openSync(path.join(recordPath, 'merge-open.txt'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC); fs.writeSync(fd, 'merged'); fs.closeSync(fd); }";
 const PATH_OPEN_TRUNC_BYPASS = "    { const pre = globalThis.__sweepPreGate.fs; pre.closeSync(pre.openSync(path.join(recordPath, 'metadata.json'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC)); }";
 const PATH_OPEN_CREAT_BYPASS = "    { const pre = globalThis.__sweepPreGate.fs; pre.closeSync(pre.openSync(path.join(recordPath, 'merge-created.txt'), fs.constants.O_WRONLY | fs.constants.O_CREAT)); }";
+// Round 12 (F10): an attribute past the gate - the mtime of metadata.json
+// set back (no byte changes); the oracle counts it and the snapshot sees it.
+const PATH_ATTR_BYPASS = "    globalThis.__sweepPreGate.fs.utimesSync(path.join(recordPath, 'metadata.json'), new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'));";
 const PATH_SEND = "    sendToRenderer('system:capture-warning', { kind: 'merged', recordId });";
 const PATH_SEND_BYPASS = "    mainWindow.webContents.send('system:capture-warning', { kind: 'merged', recordId });";
 
@@ -65,6 +68,7 @@ export const MUTANTS = {
   // own (F7) - the content check before the resumption must see them too.
   'fs-open-flags-string-only': { kind: 'fs', edits: { [GATE]: OPEN_FLAGS_STRING_ONLY, [MAIN]: [after(PATH_OPEN)] }, cases: ['PATH'] },
   'fs-open-trunc-bypass': { kind: 'fs', also: [/content changed after the change: .*c1\/metadata\.json/], edits: { [MAIN]: [after(PATH_OPEN_TRUNC_BYPASS)] }, cases: ['PATH'] },
+  'fs-attr-bypass': { kind: 'fs', also: [/attributes changed after the change: .*c1\/metadata\.json/], edits: { [MAIN]: [after(PATH_ATTR_BYPASS)] }, cases: ['PATH'] },
   'fs-open-creat-bypass': { kind: 'fs', also: [/files created after the change: .*c1\/merge-created\.txt/], edits: { [MAIN]: [after(PATH_OPEN_CREAT_BYPASS)] }, cases: ['PATH'] },
   // Child processes
   'spawn-gate-off': { kind: 'spawn', edits: { [GATE]: SPAWN_GATE_OFF }, cases: ['F3 ffprobe', 'F3 read'] },
