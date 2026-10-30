@@ -243,15 +243,20 @@ describe('class probe: argument form x effect x API x target', () => {
   it('no effect: reading, reading opens, fsync and close pass after the end', async () => {
     fresh();
     const file = path.join(folderOf('recording'), 'data.json');
+    // fsync on descriptors opened for writing before the end: Windows refuses it on a reading one.
+    const fd = fs.openSync(file, 'r+');
+    const handle = await fs.promises.open(file, 'r+');
     const s = session();
     s.end();
     const r = await runInSession(s, async () => ({
       read: await outcome(() => fs.readFileSync(file)),
-      open: await outcome(() => { const fd = fs.openSync(file, 'r'); fs.fsyncSync(fd); fs.closeSync(fd); }),
-      promise: await outcome(async () => { const h = await fs.promises.open(file, 'r'); await h.sync(); await h.close(); }),
+      open: await outcome(() => fs.closeSync(fs.openSync(file, 'r'))),
+      promiseOpen: await outcome(async () => (await fs.promises.open(file, 'r')).close()),
+      fsync: await outcome(() => { fs.fsyncSync(fd); fs.closeSync(fd); }),
+      handle: await outcome(async () => { await handle.sync(); await handle.close(); }),
       stat: await outcome(() => fs.statSync(file)),
     }));
-    expect(r).toEqual({ read: 'ok', open: 'ok', promise: 'ok', stat: 'ok' });
+    expect(r).toEqual({ read: 'ok', open: 'ok', promiseOpen: 'ok', fsync: 'ok', handle: 'ok', stat: 'ok' });
   });
 });
 
