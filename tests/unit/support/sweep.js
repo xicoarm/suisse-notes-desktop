@@ -17,9 +17,9 @@ export const TEMP = /\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 export const notTemp = (effects) => effects.filter((e) => !(e.kind === 'unlink' && TEMP.test(e.target)));
 
 /**
- * Waits until the background work is quiet: no new suspension point, effect
- * or request over three rounds (a fixed number of flushes was too short
- * under load: the re-scan's late points were missed).
+ * Waits until the background work is quiet: no call in flight and no new
+ * suspension point, effect or request over three rounds (a fixed number of
+ * flushes was too short under load: the re-scan's late points were missed).
  */
 export async function quiet(entry, r) {
   const mark = () => (r ? `${r.points.length}/${r.effects.length}/${r.requests.length}/${r.spawns.length}` : '');
@@ -29,7 +29,7 @@ export async function quiet(entry, r) {
     for (let i = 0; i < 20; i++) await flush();
     await new Promise((res) => setTimeout(res, entry.slow ? 60 : 5));
     const now = mark();
-    stable = now === last ? stable + 1 : 0;
+    stable = now === last && !(r && r.inflight()) ? stable + 1 : 0;
     last = now;
   }
 }

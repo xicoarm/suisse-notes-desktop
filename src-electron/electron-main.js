@@ -29,7 +29,7 @@ const { createUpdateChecks, isPersistentDownloadError, UPDATE_CHECK_INTERVAL_MS,
 const log = require('electron-log');
 const Sentry = require('@sentry/electron/main');
 const { machineIdSync } = require('node-machine-id');
-const { createScopeRegistry } = require('./session-scope');
+const { createScopeRegistry, isSessionEnded } = require('./session-scope');
 const { createBackground } = require('./background');
 const queueOps = require('./background/queue-ops');
 
@@ -263,7 +263,7 @@ app.on('child-process-gone', (event, details) => {
   if (details.serviceName === 'audio.mojom.AudioService' && details.reason === 'crashed') {
     log.warn('Audio Service crashed — notifying renderer to recover system audio');
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('system:audio-service-crashed', {
+      sendToRenderer('system:audio-service-crashed', {
         reason: details.reason,
         exitCode: details.exitCode
       });
@@ -374,7 +374,7 @@ function deliverSsoResult(payload) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
-    mainWindow.webContents.send('auth:ssoCallback', payload);
+    sendToRenderer('auth:ssoCallback', payload);
   }
   if (payload.applied) afterSessionApplied();
 }
@@ -664,9 +664,7 @@ scopes = createScopeRegistry({
   authority: sessionAuthority,
   http: axios,
   stores: { history: historyStore, queue: uploadQueueStore, active: activeRecordingStore },
-  send: (channel, payload) => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
-  },
+  send: sendToRenderer,
   // Mixed helpers (docs/security/pr50-senken.md): called only while the
   // scope is alive, inside its publish gate.
   ports: {
@@ -781,6 +779,16 @@ function updateRecordingPowerBlocker() {
 let isProcessingRecording = false;
 
 let mainWindow;
+
+// The ONE sink for renderer events (security review 10/2026, round 10): in
+// background work of a session that has ended (publish gate of its scope)
+// nothing reaches the renderer; the check is synchronous, right before the
+// send. Every event of main goes through here (static rule in
+// sessionSweep.static.test.js).
+function sendToRenderer(channel, payload) {
+  assertPublishAllowed();
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+}
 let tray = null;
 let recordingTrayInterval = null;
 
@@ -1149,7 +1157,7 @@ app.whenReady().then(() => {
           });
         });
 
-        mainWindow.webContents.send('recording:suspend', {
+        sendToRenderer('recording:suspend', {
           reason: 'system_suspend',
           timestamp: Date.now()
         });
@@ -1193,7 +1201,7 @@ app.whenReady().then(() => {
 
       // Notify renderer about the recovery need
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('recording:resume', {
+        sendToRenderer('recording:resume', {
           recordId: activeSession.recordId,
           suspendedAt: activeSession.suspendedAt,
           needsRecovery: true,
@@ -1216,7 +1224,7 @@ app.whenReady().then(() => {
     log.info('Screen locked');
     // Optionally notify renderer about screen lock
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('system:screen-locked');
+      sendToRenderer('system:screen-locked');
     }
   });
 
@@ -1224,7 +1232,7 @@ app.whenReady().then(() => {
     log.info('Screen unlocked');
     // Optionally notify renderer about screen unlock
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('system:screen-unlocked');
+      sendToRenderer('system:screen-unlocked');
     }
   });
 
@@ -1250,7 +1258,7 @@ app.whenReady().then(() => {
         });
       });
 
-      mainWindow.webContents.send('recording:suspend', {
+      sendToRenderer('recording:suspend', {
         reason,
         timestamp: Date.now()
       });
@@ -1424,7 +1432,7 @@ autoUpdater.on('update-available', (info) => {
   // A newer release found mid-download does not relabel the running download.
   if (!updateDownload) updateDownload = { version: info.version, percent: 0 };
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update:available', { version: updateDownload.version });
+    sendToRenderer('update:available', { version: updateDownload.version });
   }
 });
 
@@ -1436,7 +1444,7 @@ autoUpdater.on('download-progress', (progressObj) => {
   log.info(`Download progress: ${progressObj.percent.toFixed(1)}%`);
   if (!pendingUpdateInfo && updateDownload) updateDownload.percent = progressObj.percent;
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update:progress', { version: updateDownload?.version || null, percent: progressObj.percent });
+    sendToRenderer('update:progress', { version: updateDownload?.version || null, percent: progressObj.percent });
   }
 });
 
@@ -1454,7 +1462,7 @@ function handleUpdateDownloadFailure(error) {
   const persistent = isPersistentDownloadError(error);
   log.warn(`Update ${updateDownload.version} download failed (${persistent ? 'retry in 4 h' : 'retry at next check'}): ${error?.message || error}`);
   if (persistent) updateChecks.downloadFailed();
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:failed', { version: updateDownload.version });
+  if (mainWindow && !mainWindow.isDestroyed()) sendToRenderer('update:failed', { version: updateDownload.version });
   updateDownload = null;
 }
 
@@ -1479,7 +1487,7 @@ autoUpdater.on('update-downloaded', (info) => {
   autoUpdater.autoDownload = false;
   // Will auto-install on app quit due to autoInstallOnAppQuit = true
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update:downloaded', { version: info.version });
+    sendToRenderer('update:downloaded', { version: info.version });
   }
 });
 
@@ -1974,7 +1982,7 @@ async function createWebSessionInMain(codeChallenge) {
             // Sign out to force re-login (the renderer follows on auth:expired)
             sessionAuthority.signOut();
             if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('auth:expired', { message: 'Session mismatch detected. Please log in again for security.' });
+              sendToRenderer('auth:expired', { message: 'Session mismatch detected. Please log in again for security.' });
             }
             return {
               success: false,
@@ -2379,7 +2387,7 @@ function checkForTruncation(recordId, producedSec, expectedSec) {
     log.error(`Recording truncated: ${recordId} — ${detail}`);
     Sentry.captureMessage(`recording: combined file is SHORT — ${detail} (recordId=${recordId})`, 'error');
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('system:capture-warning', {
+      sendToRenderer('system:capture-warning', {
         kind: 'recording-truncated',
         recordId,
         producedSeconds: Math.round(producedSec),
@@ -2714,7 +2722,11 @@ function recordCaptureWarning(recordId, kind) {
     const metadata = fs.existsSync(metadataPath) ? JSON.parse(fs.readFileSync(metadataPath, 'utf8')) : { recordId };
     metadata.captureWarnings = [...new Set([...(metadata.captureWarnings || []), kind])];
     writeFileWithSync(metadataPath, JSON.stringify(metadata, null, 2));
-  } catch (error) { log.error('Could not persist capture warning:', error.message); }
+  } catch (error) {
+    // The session of this background work ended: never swallowed (round 10, F2).
+    if (isSessionEnded(error)) throw error;
+    log.error('Could not persist capture warning:', error.message);
+  }
 }
 
 // Tell the renderer (and Sentry, once) that captured system audio could NOT be
@@ -2722,6 +2734,7 @@ function recordCaptureWarning(recordId, kind) {
 // warn — the user uploaded a "complete" meeting whose participants were simply
 // missing (field evidence: ELECTRON-1Y, ffmpeg unavailable on 2 machines).
 function notifyMergeDegraded(recordId, reason, detail) {
+  assertPublishAllowed();
   recordCaptureWarning(recordId, 'merge-degraded');
   log.warn(`System audio merge degraded for ${recordId}: ${reason} (${detail || 'no detail'})`);
   Sentry.captureMessage(`System audio merge degraded: ${reason}`, {
@@ -2729,9 +2742,7 @@ function notifyMergeDegraded(recordId, reason, detail) {
     tags: { operation: 'merge-degraded', recordId },
     extra: { detail },
   });
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('system:capture-warning', { kind: 'merge-degraded', recordId, reason, detail });
-  }
+  sendToRenderer('system:capture-warning', { kind: 'merge-degraded', recordId, reason, detail });
 }
 
 // Merge system audio (PCM) with mic recording using FFmpeg amix
@@ -2802,6 +2813,9 @@ async function mergeSystemAudio(micPath, recordId) {
     await publishFile(mergedPath, micPath);
     log.info('System audio merged successfully');
   } catch (err) {
+    // A session change is not a degraded merge: passed on at once, no warning,
+    // no clean-up, no event (round 10, F2).
+    if (isSessionEnded(err)) throw err;
     notifyMergeDegraded(recordId, err.mergeReason || 'merge-failed', err.message);
     try { if (fs.existsSync(mergedPath)) fs.unlinkSync(mergedPath); } catch (e) { /* ignore */ }
     // Returning the mic file here lets finalize() publish a success receipt and
@@ -3135,6 +3149,7 @@ function updateRecordingMetadataOnCompletion(recordId, duration, hasAudioFile) {
     }
     log.info('Recording metadata updated on completion:', recordId);
   } catch (error) {
+    if (isSessionEnded(error)) throw error;
     log.error('Failed to update recording metadata on completion:', error);
     // Don't throw - this is non-critical
   }
@@ -3251,6 +3266,8 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
     if (getActiveRecording()?.recordId === recordId) clearActiveRecording();
     return result;
   } catch (error) {
+    // The session of the recovery ended: the scope settles it (round 10, F2).
+    if (isSessionEnded(error)) throw error;
     log.error('Recording finalization failed; all source batches retained:', error);
     const diskFull = error.code === 'ENOSPC' || /no space left|not enough space|disk full/i.test(error.message || '');
     return { success: false, diskFull, requiresRecovery: error.code === 'PCM_CAPTURE_RECOVERY_REQUIRED', error: error.message, code: error.code || null };
@@ -4014,7 +4031,7 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
     monitor.reset(Date.now());
     const report = verdict => {
       if (!verdict) return;
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('system:capture-warning', {
+      if (mainWindow && !mainWindow.isDestroyed()) sendToRenderer('system:capture-warning', {
         kind: verdict === 'warn' ? 'system-audio-silent' : 'system-audio-restored',
         recordId, silentSeconds: monitor.state(Date.now()).silentSeconds, platform: process.platform,
       });
@@ -4022,7 +4039,7 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
     // The Record page's system-audio meter: what the capture really hears, live.
     const sendLevel = level => {
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('systemAudio:level', { recordId, percent: meterPercent(level.rms) });
+        sendToRenderer('systemAudio:level', { recordId, percent: meterPercent(level.rms) });
       }
     };
     const levelMeter = createLevelMeter({ intervalMs: 150, onLevel: sendLevel });
@@ -4068,7 +4085,7 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
       onFailure: error => {
         log.error('System audio capture failed:', error.message);
         recordCaptureWarning(recordId, 'system-audio-interrupted');
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('system:capture-warning', { kind: 'system-audio-interrupted', recordId });
+        if (mainWindow && !mainWindow.isDestroyed()) sendToRenderer('system:capture-warning', { kind: 'system-audio-interrupted', recordId });
         capture.stop().catch(err => log.warn('System audio cleanup failed:', err.message));
       },
       onClosed: () => {

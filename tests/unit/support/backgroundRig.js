@@ -149,10 +149,16 @@ export function createBackgroundRig({
   // `hooks.hold(label)` may return a promise: the edge then waits for it
   // (a delayed system call) before the waiting code continues.
   const held = async (label, target) => { const h = hooks.hold && hooks.hold(label, target); if (h) await h; };
-  const after = (label, promise, target = null) => Promise.resolve(promise).then(
-    async (value) => { await held(label, target); hit(label, target); return value; },
-    async (error) => { await held(label, target); hit(label, target); throw error; }
-  );
+  // Calls handed to the system and not completed yet (the sweep's quiescence
+  // waits for them: an fsync under load can take longer than any fixed wait).
+  let inflight = 0;
+  const after = (label, promise, target = null) => {
+    inflight++;
+    return Promise.resolve(promise).then(
+      async (value) => { inflight--; await held(label, target); hit(label, target); return value; },
+      async (error) => { inflight--; await held(label, target); hit(label, target); throw error; }
+    );
+  };
   // Fixture writes of the test itself (r.quietly) are no effects.
   let paused = false;
   const quietly = (fn) => { paused = true; try { return fn(); } finally { paused = false; } };
@@ -373,6 +379,7 @@ export function createBackgroundRig({
   return {
     root, disk, s, scopes, background, uploads: background.uploads, stores, http, answer, hooks, read, report, chain,
     effects, requests, sent, sleeps, spawns, streams, reports, mark, points, sweep, timers,
+    inflight: () => inflight,
     change, signOut, signInB, signOutThenB, signInA, refresh, cleanup, filePath, quietly,
     effectsAfter: () => effects.filter((e) => e.after),
     requestsAfter: () => requests.filter((r) => r.after),
