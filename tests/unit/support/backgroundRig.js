@@ -88,6 +88,7 @@ export function createBackgroundRig({
   const sleeps = [];
   const spawns = [];
   const streams = [];
+  const openStreams = [];
   const hooks = { onTimer: null, onEffect: null, hold: null };
   // Suspension points (sweep): every asynchronous edge counts once, right
   // before the waiting code continues - HTTP answers, timers, fs promises
@@ -137,7 +138,7 @@ export function createBackgroundRig({
     unlinkSync: (f) => { effect('unlink', f); return fs.unlinkSync(f); },
     rmSync: (f, o) => { effect('rm', f); return fs.rmSync(f, o); },
     createWriteStream: (f, o) => { effect('open', f); return fs.createWriteStream(f, o); },
-    createReadStream: (f, o) => { streams.push(String(f)); return fs.createReadStream(f, o); },
+    createReadStream: (f, o) => { streams.push(String(f)); const st = fs.createReadStream(f, o); openStreams.push(st); return st; },
     promises: {
       ...p,
       ...promised,
@@ -174,6 +175,9 @@ export function createBackgroundRig({
   const http = axios.create({
     adapter: (config) => {
       const entry = { method: String(config.method).toLowerCase(), url: String(config.url), auth: config.headers?.Authorization || null, body: config.data, after: mark.changed };
+      // A real transport consumes the body; this one never reads it - a
+      // stream body must not raise an unhandled error (file gone later).
+      if (config.data && typeof config.data.on === 'function') config.data.on('error', () => {});
       requests.push(entry);
       if (config.signal?.aborted && !lateAnswers) return Promise.reject(new axios.CanceledError('canceled', null, config));
       const i = overrides.findIndex((o) => o.match(entry, config));
@@ -298,7 +302,15 @@ export function createBackgroundRig({
   const signOutThenB = () => { signOut(); signInB(); };
   const signInA = () => s.passwordSignIn('a').apply();
   const refresh = () => s.authority.applySession(s.authority.ticket({ userId: 'a' }), { token: jwt('a', 'refreshed'), user: { id: 'a' } }, { kind: 'refresh' });
-  const cleanup = () => fs.rmSync(root, { recursive: true, force: true });
+  /** Ends every scope, lets the work settle, then removes the recordings root. */
+  const cleanup = async () => {
+    scopes.abortAll();
+    for (let i = 0; i < 20; i++) await flush();
+    // Windows keeps a folder with an open handle: close every source stream
+    // the rig opened before removing the root.
+    await Promise.all(openStreams.map((st) => (st.closed ? null : new Promise((done) => { st.once('close', done); st.destroy(); }))));
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  };
   const filePath = (id = 'r1') => path.join(root, id, 'audio.webm');
 
   return {

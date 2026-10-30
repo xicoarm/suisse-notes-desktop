@@ -51,6 +51,27 @@ describe('main background moved into src-electron/background (round 9, P3)', () 
 const BACKGROUND_DIR = path.resolve('src-electron/background');
 const FILES = fs.readdirSync(BACKGROUND_DIR).filter((f) => f.endsWith('.js'));
 
+describe('IPC channels after the move (round 9)', () => {
+  // The move must not drop a channel the preload still exposes (CI caught
+  // recording:isRecoveryRunning missing: the renderer could not start a
+  // recording). Only the TUS channels are deleted on purpose (P1).
+  const channels = (src) => new Set([...src.matchAll(/ipcMain\.(?:handle|on|once)\(['"]([^'"]+)['"]/g)].map((m) => m[1]));
+  const invoked = (src) => new Set([...src.matchAll(/ipcRenderer\.(?:invoke|send|sendSync)\(['"]([^'"]+)['"]/g)].map((m) => m[1]));
+
+  it('every channel the preload invokes or sends has a handler in main', () => {
+    const preload = fs.readFileSync(path.resolve('src-electron/electron-preload.js'), 'utf8');
+    const handled = new Set();
+    for (const f of fs.readdirSync(path.resolve('src-electron'), { recursive: true })) {
+      if (String(f).endsWith('.js')) for (const c of channels(fs.readFileSync(path.resolve('src-electron', String(f)), 'utf8'))) handled.add(c);
+    }
+    // Registered in a loop: for (const operation of [...]) ipcMain.handle(`recording:${operation}`, ...)
+    for (const m of MAIN.matchAll(/for \(const operation of \[([^\]]+)\]\) \{\s*ipcMain\.handle\(`recording:\$\{operation\}`/g)) {
+      for (const name of m[1].matchAll(/'([^']+)'/g)) handled.add(`recording:${name[1]}`);
+    }
+    expect([...invoked(preload)].filter((c) => !handled.has(c))).toEqual([]);
+  });
+});
+
 describe('ban list for src-electron/background/** (R-S2)', () => {
   it('the folder holds the moved modules', () => {
     expect(FILES.sort()).toEqual(['ended.js', 'index.js', 'pending-uploads.js', 'queue-ops.js', 'recovery.js', 'upload-direct.js', 'upload.js']);

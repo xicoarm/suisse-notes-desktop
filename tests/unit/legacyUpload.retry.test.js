@@ -14,7 +14,7 @@ const accepted = { status: 200, data: { success: true, audioFileId: 'accepted-id
 const LEGACY = '/api/desktop/upload';
 
 const rigs = [];
-afterEach(() => { for (const r of rigs.splice(0)) r.cleanup(); });
+afterEach(async () => { for (const r of rigs.splice(0)) await r.cleanup(); });
 
 /** A rig whose server asks for the legacy POST (local-storage mode). */
 function fixture(opts) {

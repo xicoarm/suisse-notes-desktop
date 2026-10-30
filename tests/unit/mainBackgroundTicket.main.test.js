@@ -13,7 +13,7 @@ import { createBackgroundRig, deferred, until, jwt } from './support/backgroundR
 
 const rigs = [];
 const rig = (opts) => { const r = createBackgroundRig(opts); rigs.push(r); return r; };
-afterEach(() => { for (const r of rigs.splice(0)) r.cleanup(); });
+afterEach(async () => { for (const r of rigs.splice(0)) await r.cleanup(); });
 
 const refreshes = (r) => r.requests.filter((q) => q.url.endsWith('/api/auth/refresh'));
 

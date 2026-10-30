@@ -193,7 +193,7 @@ async function baseline(entry, extra) {
     await quiet(entry);
     return { result, max: r.points.length, shape: shape(r) };
   } finally {
-    r.cleanup();
+    await r.cleanup();
   }
 }
 
@@ -267,7 +267,7 @@ async function sweptRun(entry, n, variant, extra) {
   } catch (error) {
     fail(`threw ${error?.stack || error}`);
   } finally {
-    r.cleanup();
+    await r.cleanup();
   }
   return violations;
 }
@@ -287,7 +287,7 @@ async function refreshRun(entry, n, base) {
     if (!scope.alive()) problems.push('scope ended by a refresh');
     return problems.map((p) => `${entry.name} refresh N=${n}: ${p}`);
   } finally {
-    r.cleanup();
+    await r.cleanup();
   }
 }
 
@@ -379,7 +379,7 @@ describe('mutation: alive() removed from commit and the publish gate', () => {
         try { scope.update.queue(() => []); } catch { threw = true; }
         expect({ label, threw, writes: r.effectsAfter().length }).toEqual(label === 'mutant' ? { label, threw: false, writes: 1 } : { label, threw: true, writes: 0 });
       } finally {
-        r.cleanup();
+        await r.cleanup();
       }
     }
   }, 120000);

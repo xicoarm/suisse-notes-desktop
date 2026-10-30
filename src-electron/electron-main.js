@@ -723,6 +723,9 @@ const processPendingUploads = () => background.startQueue(scopes);
 /** R-S4: recovery, then clean-up; only with a released session, once per session. */
 const startRecovery = (reason) => background.startRecovery(scopes, reason);
 
+// The renderer waits for a running recovery before it starts a recording.
+ipcMain.handle('recording:isRecoveryRunning', () => background.recovery.isRunning());
+
 // Set FFmpeg path (cross-platform)
 if (app.isPackaged) {
   // Production: Use bundled FFmpeg

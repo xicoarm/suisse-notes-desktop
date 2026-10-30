@@ -13,7 +13,7 @@ import { createBackgroundRig, flush, until } from './support/backgroundRig.js';
 // from a timer without any session check).
 
 const rigs = [];
-afterEach(() => { for (const r of rigs.splice(0)) r.cleanup(); });
+afterEach(async () => { for (const r of rigs.splice(0)) await r.cleanup(); });
 
 const OLD = (Date.now() - 10 * 24 * 3600 * 1000) / 1000;
 
