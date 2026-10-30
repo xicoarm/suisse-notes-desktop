@@ -1,8 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import path from 'node:path';
 import { sweptRun, sweepEntry } from './support/sweep.js';
-import { CHAIN, chainEntry as entry, makeNativeTemplate, removeNativeTemplate } from './support/chainEntries.js';
+import { CHAIN, NAMED, chainEntry as entry, makeNativeTemplate, removeNativeTemplate } from './support/chainEntries.js';
 
 // Review round 10 (F1-F4): the sweep over main's REAL recovery chain.
 // finalizeForRecovery is main's own port (support/mainSlice.js), running
@@ -14,28 +13,8 @@ import { CHAIN, chainEntry as entry, makeNativeTemplate, removeNativeTemplate } 
 // the native recording (real Opus media). F1-F3 of review round 9 are named
 // cases of their own (each failed at 1f4d97d, docs/security/pr50-r10-failfirst.txt).
 
-const sep = path.sep;
-beforeAll(makeNativeTemplate, 60000);
-afterAll(removeNativeTemplate);
-
-/** The change at a named point (label, target path or arguments). */
-const at = (label, test) => (l, target) => l === label && !!target && test(String(target));
-
 describe('F1-F3 of review round 9: named points of the real recovery chain', () => {
-  const cases = [
-    ['F1 durable-files: sign-out during readdir(chunks), before mkdir(source-chunks)', 'recovery, real chain (WebM)',
-      at('fs.readdir', (t) => t.endsWith(`${sep}chunks`))],
-    ['F1 recording-persistence: sign-out while the session is published, before unlink(source_raw)', 'recovery, real chain (WebM)',
-      at('fs.rename', (t) => t.endsWith('source_final.webm'))],
-    ['F1 recording-persistence: sign-out during archiveChunkBatch, before mkdir(sessions)', 'recovery, real chain (WebM)',
-      at('fs.mkdir', (t) => t.endsWith(`${sep}chunks`))],
-    ['F2 merge: sign-out while the merged file is published, before system:capture-warning', 'recovery, real chain with the system audio merge',
-      at('handle.sync', (t) => t.endsWith('_merged.webm'))],
-    ['F3 encoded-opus-evidence: sign-out during the first ffprobe, before the second', 'recovery, native sources (real media)',
-      at('spawn:ffprobe', (t) => t.includes('-show_data') && t.includes('-show_streams'))],
-    ['F3 encoded-opus-evidence: sign-out while the output is read (captureContent), before any ffprobe', 'recovery, native sources (real media)',
-      at('fs.read', (t) => /native-finalization-[^/\\]+[/\\](fast-)?rendered\.webm$/.test(t))],
-  ];
+  const cases = Object.entries(NAMED).filter(([key]) => key !== 'PATH').map(([, c]) => c);
   for (const [title, name, point] of cases) {
     it(title, async () => {
       const violations = [];

@@ -130,3 +130,20 @@ now every one of them is a call at the fs/child_process boundary.
 The sweep (`tests/unit/sessionSweep.chain.main.test.js`) runs this whole
 chain as it is - only ffmpeg/ffprobe are replaced, at the child_process
 boundary - and counts at the module boundaries (`tests/unit/support/globalSinks.js`).
+
+### What keeps the sinks single (round 10, F4)
+
+- Static rules (`tests/unit/sessionSweep.static.test.js`): main installs the
+  effect gate before it loads any module other than electron, path and fs;
+  no module of main captures fs or child_process functions at load (the
+  module object and `fs.promises` only); no `original-fs`, `process.binding`,
+  `internalBinding` or worker threads; `webContents.send` exists once, in
+  `sendToRenderer`, and the registry's `send` is that function.
+- Mutants (`tests/unit/support/mutants.js`, run by
+  `tests/unit/sweepMutation.main.test.js`, each in a child process of its
+  own, applied when src-electron is loaded): per sink kind «sink off» and
+  «bypass» - fs gate off, fs gate not installed, a new write past the gate;
+  spawn gate off, a new child process past the gate; send check off, a new
+  event past `sendToRenderer`. Each must turn the sweep red with a
+  violation of its kind; the controls (unmutated, the same new paths
+  through their sinks) stay green and the new paths run in the baseline.

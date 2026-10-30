@@ -23,8 +23,11 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { createRequire } from 'node:module';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { fileURLToPath } from 'node:url';
+import { mutate } from './mutants.js';
 
 const require = createRequire(import.meta.url);
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
 export const STUB_FFMPEG = path.join(os.tmpdir(), 'sweep-stub', 'ffmpeg');
 export const STUB_FFPROBE = path.join(os.tmpdir(), 'sweep-stub', 'ffprobe');
@@ -241,6 +244,29 @@ function install() {
     childProcess[name] = function (file, ...rest) {
       if (state.rec) state.rec.spawn({ call: name, file: path.basename(String(file)), args: Array.isArray(rest[0]) ? rest[0] : [] });
       return orig.call(this, file, ...rest);
+    };
+  }
+
+  // The functions as a module sees them that captured them before main
+  // installed its gate (counted here, not gated): the bypass mutants
+  // (support/mutants.js) use them.
+  globalThis.__sweepPreGate = {
+    fs: { writeFileSync: fs.writeFileSync, mkdirSync: fs.mkdirSync, unlinkSync: fs.unlinkSync, renameSync: fs.renameSync },
+    cp: { execFile: childProcess.execFile, spawn: childProcess.spawn },
+  };
+
+  // A mutant (SWEEP_MUTANT): its edits of src-electron applied at load.
+  if (process.env.SWEEP_MUTANT) {
+    const Module = require('module');
+    const load = Module._extensions['.js'];
+    Module._extensions['.js'] = function (module, filename) {
+      const rel = path.relative(ROOT, filename).split(path.sep).join('/');
+      if (rel.startsWith('src-electron/')) {
+        const source = fs.readFileSync(filename, 'utf8').replace(/\r\n/g, '\n');
+        const mutated = mutate(rel, source);
+        if (mutated !== source) return module._compile(mutated, filename);
+      }
+      return load(module, filename);
     };
   }
 

@@ -93,3 +93,47 @@ export const CHAIN = [
 ];
 export const chainEntry = (name) => CHAIN.find((e) => e.name.startsWith(name));
 
+
+/** The change at a named point (label, target path or arguments). */
+export const at = (label, test) => (l, target) => l === label && !!target && test(String(target));
+
+/**
+ * The rename that publishes the merged file over audio_building.webm (the
+ * first rename to it after the merged file was synced). Stateful: a fresh
+ * predicate per run (`fresh`, support/sweep.js).
+ */
+function afterMergePublished() {
+  const make = () => {
+    let synced = false;
+    return (label, target) => {
+      const t = String(target || '');
+      if (label === 'handle.sync' && t.endsWith('_merged.webm')) synced = true;
+      return synced && label === 'fs.rename' && t.endsWith(`${sep}audio_building.webm`);
+    };
+  };
+  const point = make();
+  point.fresh = make;
+  return point;
+}
+
+/**
+ * Named points (F1-F3 of review round 9, each failed at 1f4d97d; PATH: right
+ * after the merged file is published, where the mutants of
+ * support/mutants.js insert a new effect). key -> [title, entry, point]
+ */
+export const NAMED = {
+  'F1 readdir': ['F1 durable-files: sign-out during readdir(chunks), before mkdir(source-chunks)', 'recovery, real chain (WebM)',
+    at('fs.readdir', (t) => t.endsWith(`${sep}chunks`))],
+  'F1 rename': ['F1 recording-persistence: sign-out while the session is published, before unlink(source_raw)', 'recovery, real chain (WebM)',
+    at('fs.rename', (t) => t.endsWith('source_final.webm'))],
+  'F1 mkdir': ['F1 recording-persistence: sign-out during archiveChunkBatch, before mkdir(sessions)', 'recovery, real chain (WebM)',
+    at('fs.mkdir', (t) => t.endsWith(`${sep}chunks`))],
+  'F2 merge': ['F2 merge: sign-out while the merged file is published, before system:capture-warning', 'recovery, real chain with the system audio merge',
+    at('handle.sync', (t) => t.endsWith('_merged.webm'))],
+  'F3 ffprobe': ['F3 encoded-opus-evidence: sign-out during the first ffprobe, before the second', 'recovery, native sources (real media)',
+    at('spawn:ffprobe', (t) => t.includes('-show_data') && t.includes('-show_streams'))],
+  'F3 read': ['F3 encoded-opus-evidence: sign-out while the output is read (captureContent), before any ffprobe', 'recovery, native sources (real media)',
+    at('fs.read', (t) => /native-finalization-[^/\\]+[/\\](fast-)?rendered\.webm$/.test(t))],
+  PATH: ['a new effect right after the merged file is published', 'recovery, real chain with the system audio merge',
+    afterMergePublished()],
+};

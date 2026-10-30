@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { mutate } from './mutants.js';
 
 const require = createRequire(import.meta.url);
 const acorn = require('acorn');
@@ -69,7 +70,7 @@ function registryProperty(ast, name) {
  * @returns {{ code: string, names: string[], provided: string[] }}
  */
 export function compileMainChain({ transform = (s) => s, extra = [] } = {}) {
-  const source = transform(fs.readFileSync(MAIN_FILE, 'utf8').replace(/\r\n/g, '\n'));
+  const source = transform(mutate('src-electron/electron-main.js', fs.readFileSync(MAIN_FILE, 'utf8').replace(/\r\n/g, '\n')));
   const ast = parse(source);
   const decl = new Map();
   for (const node of ast.body) for (const name of declaredNames(node)) decl.set(name, node);
@@ -110,7 +111,7 @@ export function compileMainChain({ transform = (s) => s, extra = [] } = {}) {
  * @returns {number} the number of install statements of main
  */
 export function installMainGate({ transform = (s) => s } = {}) {
-  const source = transform(fs.readFileSync(MAIN_FILE, 'utf8').replace(/\r\n/g, '\n'));
+  const source = transform(mutate('src-electron/electron-main.js', fs.readFileSync(MAIN_FILE, 'utf8').replace(/\r\n/g, '\n')));
   const installs = parse(source).body.filter((n) => n.type === 'ExpressionStatement' && /\binstallEffectGate\s*\(/.test(source.slice(n.start, n.end)));
   const mainRequire = createRequire(MAIN_FILE);
   // eslint-disable-next-line no-new-func

@@ -56,7 +56,7 @@ export async function baseline(entry, extra) {
     const scope = r.scopes.open();
     const result = await entry.run(r, scope);
     await quiet(entry, r);
-    return { result, max: r.points.length, shape: shape(r), labels: [...r.points] };
+    return { result, max: r.points.length, shape: shape(r), labels: [...r.points], spawns: r.spawns.map((x) => x.port || `${x.file} ${(x.args || []).join(' ')}`) };
   } finally {
     await r.cleanup();
   }
@@ -86,7 +86,7 @@ export async function sweptRun(entry, at, variant, extra) {
   const violations = [];
   const fail = (what) => violations.push(`${name}: ${what}`);
   let b = null;
-  if (typeof at === 'function') r.sweep.when = at;
+  if (typeof at === 'function') r.sweep.when = at.fresh ? at.fresh() : at;
   else r.sweep.at = at;
   r.sweep.action = () => {
     r.signOut();
