@@ -28,16 +28,24 @@
  *   and the stores are not files of the recordings folder.
  * - Round 11: open flags are classified by their bits too (fs.constants
  *   O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND - O_TRUNC empties a file
- *   at the open already), readFile with a writing flag is an open. A path
- *   is compared after its real path (symlinks, junctions; for a new file or
- *   a call that acts on the link itself the parent's), with the letter case
- *   folded on macOS and Windows. A descriptor or handle opened for writing
- *   is remembered with its path whatever the context it was opened in, so
- *   a write to it from background work after the end is refused even when
- *   the foreground opened it. Not resolved: hard links to a file of the
- *   folder made elsewhere (main makes none; `link` is checked on both
- *   names), descriptors from outside the fs module (none in main: static
- *   rules).
+ *   at the open already), readFile with a writing flag is an open.
+ * - Round 12, fail-closed: after the end a call passes only when it is
+ *   PROVEN that it does not reach the folder. A path is resolved the way the
+ *   system does it, name by name, a link followed where it stands before a
+ *   later «..» goes up from its target (no normalization first), and also
+ *   after collapsing «..» first (Windows and Node there); the letter case
+ *   is folded on macOS and Windows, Windows' own spelling (short names) is
+ *   taken from the system. A path that cannot be decided (a loop, no
+ *   access, «..» after a missing name, a device path) is refused, and so is
+ *   a write to the content or the attributes of a file with a second name
+ *   (a hard link). Every descriptor and handle - any flags, any context -
+ *   holds what its open found (the file's identity and whether it was a
+ *   file of the folder) until its close: removing or renaming the alias
+ *   later cannot weaken it. A call on a descriptor passes only for a pipe,
+ *   a terminal or a socket, or for a file its open found outside that is
+ *   still the same file, still outside and has no second name. Writes,
+ *   truncation and attributes (fchmod, futimes, fchown, handle.chmod/
+ *   utimes/chown) go through this one sink.
  * - Allowed after the change: removing an own unpublished temp file
  *   (`<name>.<uuid>.tmp`, durable-files). Calls Node makes inside an admitted
  *   call (rm walking a tree) belong to that call: it was handed to the system
@@ -78,9 +86,6 @@ const PATH_WRITES = {
   copyFile: [1], cp: [1], truncate: [0], symlink: [1], link: [0, 1], utimes: [0], lutimes: [0], chmod: [0],
   lchmod: [0], chown: [0], lchown: [0],
 };
-// Calls on the link itself, not on what it points to (or creating a name):
-// their path is compared by its parent's real path.
-const NOFOLLOW = new Set(['unlink', 'rm', 'rmdir', 'rename', 'symlink', 'link', 'lutimes', 'lchmod', 'lchown', 'mkdir', 'mkdtemp']);
 const FD_WRITES = ['write', 'writev', 'ftruncate', 'fchmod', 'futimes', 'fchown'];
 const HANDLE_WRITES = ['write', 'writev', 'writeFile', 'appendFile', 'truncate', 'chmod', 'chown', 'utimes'];
 const WRITE_BITS = constants.O_WRONLY | constants.O_RDWR | constants.O_CREAT | constants.O_TRUNC | constants.O_APPEND;
@@ -93,12 +98,24 @@ function writeFlags(flags) {
   if (typeof flags === 'string') return /[wa+]/.test(flags);
   return true;
 }
-const FOLD = process.platform === 'darwin' || process.platform === 'win32';
+const WIN = process.platform === 'win32';
+const FOLD = process.platform === 'darwin' || WIN;
 const fold = (p) => (FOLD ? p.normalize('NFC').toLowerCase() : p);
 const within = (root, target) => {
   const rel = path.relative(fold(root), fold(target));
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 };
+// How a call reaches its path: through every link ('follow'), on the name
+// itself ('name': unlink of a link removes the link), or either ('both':
+// link, copyFile and cp, where the systems differ).
+const MODE = {
+  unlink: 'name', rm: 'name', rmdir: 'name', rename: 'name', symlink: 'name', mkdir: 'name', mkdtemp: 'name',
+  lutimes: 'name', lchmod: 'name', lchown: 'name', link: 'both', copyFile: 'both', cp: 'both',
+};
+// Calls on a name whose file keeps its content: a hard link elsewhere is no matter for them.
+const NAME_ONLY = new Set(['unlink', 'rm', 'rmdir', 'rename', 'symlink', 'mkdir', 'mkdtemp']);
+const MAX_LINKS = 40;
+const SEPARATORS = WIN ? /[\\/]+/ : /\/+/;
 
 const INSTALLED = Symbol.for('suisse.effectGate');
 
@@ -112,14 +129,15 @@ const INSTALLED = Symbol.for('suisse.effectGate');
 function installEffectGate({ roots, fs = require('fs'), childProcess = require('child_process') }) {
   // Installed once per process; a later call only replaces the folders (main
   // installs once; each test rig loads main's chain again with its own folder).
-  if (fs[INSTALLED]) { fs[INSTALLED].roots = roots; fs[INSTALLED].version++; return false; }
-  const state = { roots, version: 0 };
+  if (fs[INSTALLED]) { fs[INSTALLED].roots = roots; return false; }
+  const state = { roots };
   Object.defineProperty(fs, INSTALLED, { value: state });
-  // Descriptors and handles opened for writing, in any context: fd/handle ->
-  // { path, version, inside } (inside: decided once, when first needed).
-  const writableFds = new Map();
-  const writableHandles = new WeakMap();
-  const { realpathSync, readlinkSync } = fs;
+  // Round 12: every descriptor and handle, opened in any context with any
+  // flags: fd/handle -> what the open found (see `held`).
+  const descriptors = new Map();
+  const handles = new WeakMap();
+  const { lstatSync, readlinkSync, fstatSync } = fs;
+  const nativeRealpath = fs.realpathSync && fs.realpathSync.native;
 
   const asPath = (value) => {
     if (typeof value === 'string') return value;
@@ -127,84 +145,227 @@ function installEffectGate({ roots, fs = require('fs'), childProcess = require('
     if (value instanceof URL) return require('url').fileURLToPath(value);
     return null;
   };
+  /** The start of an absolute path ('/', 'C:\\', '\\\\server\\share\\') and its names; null: not decidable. */
+  function split(p) {
+    if (!WIN) return p.startsWith('/') ? { start: '/', names: p.split(SEPARATORS) } : null;
+    const drive = /^([A-Za-z]:)[\\/]/.exec(p);
+    if (drive) return { start: `${drive[1]}\\`, names: p.slice(3).split(SEPARATORS) };
+    const unc = /^[\\/]{2}([^\\/?.][^\\/]*)[\\/]+([^\\/]+)(?:[\\/]|$)/.exec(p);
+    if (unc) return { start: `\\\\${unc[1]}\\${unc[2]}\\`, names: p.slice(unc[0].length).split(SEPARATORS) };
+    // Device paths (\\?\, \\.\), a drive's own current folder (C:x), the current drive's root (\x).
+    return null;
+  }
+  // A link's target as the system stores it on Windows (\\?\C:\..., \??\UNC\...).
+  const plain = (target) => (WIN ? target.replace(/^[\\/]{2}[?.][\\/]UNC[\\/]/i, '\\\\').replace(/^\\\?\?\\UNC\\/i, '\\\\').replace(/^([\\/]{2}[?.][\\/]|\\\?\?\\)(?=[A-Za-z]:)/, '') : target);
+
   /**
-   * The real path: the nearest existing ancestor resolved (a dangling link
-   * to its target), the rest appended. `follow` false: the last component
-   * is the name itself (unlink of a link removes the link).
+   * Round 12 (F8): the path the system reaches, resolved as the system does
+   * it - name by name, a link followed where it stands, BEFORE a later «..»
+   * goes up from its target (no normalization first: /out/link/../x is the
+   * x next to the link's target). `follow` false: the last name itself (a
+   * call on a link). Returns { real, stat } (stat: of the last name, null
+   * when it does not exist) or null when the path cannot be decided: a loop
+   * or more than 40 links, no access, a name that is no folder, «..» after
+   * a missing name, a link that cannot be read, a device path.
    */
-  function canonical(p, follow) {
-    let target = path.resolve(p);
-    const rest = [];
-    if (!follow) { rest.unshift(path.basename(target)); target = path.dirname(target); }
-    for (let hops = 0; hops < 64; hops++) {
-      try { return path.join(realpathSync.call(fs, target), ...rest); } catch (_) { /* missing or dangling */ }
-      try { target = path.resolve(path.dirname(target), readlinkSync.call(fs, target)); continue; } catch (_) { /* no link */ }
-      const parent = path.dirname(target);
-      if (parent === target) break;
-      rest.unshift(path.basename(target));
-      target = parent;
+  function resolve(p, follow) {
+    let absolute = p;
+    if (!(WIN ? split(p) : p.startsWith('/'))) {
+      let cwd;
+      try { cwd = process.cwd(); } catch (_) { return null; }
+      absolute = `${cwd}${path.sep}${p}`;
     }
-    return path.join(target, ...rest);
+    const parts = split(absolute);
+    if (!parts) return null;
+    const todo = parts.names.filter((name) => name !== '');
+    // A trailing separator or «/.» follows a link even for a call on the name.
+    const trailing = /[\\/]\.?$/.test(p) || /(^|[\\/])\.$/.test(p);
+    let dir = parts.start;
+    let missing = null;
+    let stat;
+    let links = 0;
+    while (todo.length) {
+      const name = todo.shift();
+      if (name === '.') continue;
+      if (name === '..') {
+        if (missing) return null;
+        dir = path.dirname(dir);
+        stat = undefined;
+        continue;
+      }
+      const at = path.join(dir, name);
+      if (missing) { missing.push(name); dir = at; continue; }
+      let st;
+      try { st = lstatSync.call(fs, at, { throwIfNoEntry: false }); } catch (_) { return null; }
+      if (!st) { missing = [name]; dir = at; stat = null; continue; }
+      const last = todo.every((rest) => rest === '.');
+      if (st.isSymbolicLink() && (!last || follow || trailing)) {
+        if (++links > MAX_LINKS) return null;
+        let target;
+        try { target = plain(String(readlinkSync.call(fs, at))); } catch (_) { return null; }
+        const absoluteTarget = split(target);
+        if (absoluteTarget) {
+          dir = absoluteTarget.start;
+          todo.unshift(...absoluteTarget.names.filter((n) => n !== ''));
+        } else if (WIN && /^([A-Za-z]:|[\\/])/.test(target)) {
+          return null;
+        } else {
+          todo.unshift(...target.split(SEPARATORS).filter((n) => n !== ''));
+        }
+        continue;
+      }
+      dir = at;
+      stat = st;
+    }
+    if (WIN) {
+      // Short (8.3) names and the letter case: the system's own spelling of the existing part.
+      const tail = missing ? missing.length : 0;
+      let existing = dir;
+      for (let i = 0; i < tail; i++) existing = path.dirname(existing);
+      try { existing = nativeRealpath.call(fs, existing); } catch (_) { return null; }
+      dir = path.join(existing, ...(missing || []));
+    }
+    return { real: dir, stat: stat || null };
   }
-  const canonicalRoots = new Map();
-  const canonicalRoot = (root) => {
-    if (!canonicalRoots.has(root)) {
-      if (canonicalRoots.size > 64) canonicalRoots.clear();
-      canonicalRoots.set(root, canonical(root, true));
+  /**
+   * Every reading of a path: as the system resolves it, and after collapsing
+   * «..» first (what Windows and Node there do before the system call).
+   * Null when one of them cannot be decided.
+   */
+  function readings(p, follow) {
+    let lexical;
+    try { lexical = path.resolve(p); } catch (_) { return null; }
+    const out = [];
+    for (const source of lexical === p ? [p] : [p, lexical]) {
+      const r = resolve(source, follow);
+      if (!r) return null;
+      out.push(r);
     }
-    return canonicalRoots.get(root);
-  };
-  /** Inside a root (an unreadable path argument fails closed). */
-  function inside(value, follow = true) {
-    const p = asPath(value);
-    if (p === null) return true;
+    return out;
+  }
+  /** Every spelling of the folders (as given, collapsed, resolved); null: not decidable. */
+  function rootForms() {
     let list;
-    try { list = (state.roots() || []).map((root) => path.resolve(root)); } catch (_) { return true; }
-    const target = path.resolve(p);
-    if (list.some((root) => within(root, target))) return true;
-    // Not inside by its name: by its real path (an alias of the folder)?
-    let real;
-    try { real = canonical(target, follow); } catch (_) { return true; }
-    return list.some((root) => within(canonicalRoot(root), real));
+    try { list = state.roots() || []; } catch (_) { return null; }
+    const forms = [];
+    for (const root of list) {
+      const p = asPath(root);
+      if (p === null) return null;
+      forms.push(path.resolve(p));
+      const r = readings(p, true);
+      if (!r) return null;
+      forms.push(...r.map((x) => x.real));
+    }
+    return forms;
   }
-  const entry = (value) => ({ path: asPath(value), version: -1, inside: false });
-  const insideEntry = (e) => {
-    if (!e) return false;
-    if (e.version !== state.version) { e.inside = e.path === null || inside(e.path); e.version = state.version; }
-    return e.inside;
-  };
-  /** Does this call write into a root? */
+  const insideAny = (forms, target) => forms.some((root) => within(root, target));
+  // A file with a second name: one of them may be in the folder.
+  const shared = (stat) => Boolean(stat) && !stat.isDirectory() && stat.nlink > 1;
+
+  /**
+   * Round 12: may this call reach a file of the folders? Allowed only when it
+   * is proven that it does not - in every reading of the path, and for a call
+   * on the content or the attributes of a file, the file has no second name.
+   */
+  function reaches(value, mode, nameOnly = false) {
+    const p = asPath(value);
+    if (p === null || p === '') return true;
+    const forms = rootForms();
+    if (!forms) return true;
+    try { if (insideAny(forms, path.resolve(p))) return true; } catch (_) { return true; }
+    const follows = mode === 'both' ? [true, false] : [mode === 'follow'];
+    for (const follow of follows) {
+      const found = readings(p, follow);
+      if (!found) return true;
+      for (const { real, stat } of found) {
+        if (insideAny(forms, real)) return true;
+        if (!nameOnly && shared(stat)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Round 12 (F9/F10): what an open found, held until the close: the file's
+   * identity (dev/ino of the descriptor) and its resolved path, and whether
+   * it was a file of the folders then (or could not be decided). Losing the
+   * alias later (the link removed or renamed) cannot weaken it.
+   */
+  let opening = false;
+  function opened(target, fd) {
+    const entry = { real: null, dev: null, ino: null, held: true };
+    // An open made while the folders are asked for (none in main) stays held.
+    if (opening) return entry;
+    opening = true;
+    try {
+      const st = fstatSync.call(fs, fd);
+      entry.dev = st.dev;
+      entry.ino = st.ino;
+      const p = asPath(target);
+      const forms = rootForms();
+      const found = p === null ? null : readings(p, true);
+      if (!forms || !found) return entry;
+      entry.real = found[0].real;
+      // The path must lead to the file the descriptor holds.
+      const same = found.every(({ stat }) => stat && stat.dev === st.dev && stat.ino === st.ino);
+      entry.held = !same || insideAny(forms, path.resolve(p)) || found.some(({ real }) => insideAny(forms, real));
+    } catch (_) { /* held */ } finally { opening = false; }
+    return entry;
+  }
+  /**
+   * May a call on this descriptor reach a file of the folders? Not a file
+   * (a pipe, a terminal, a socket): no. A file: only when its open found it
+   * outside, it is still the file of that open, it has no second name and
+   * its path still leads to it, outside.
+   */
+  function heldFd(fd, entry) {
+    if (typeof fd !== 'number') return true;
+    let st;
+    try { st = fstatSync.call(fs, fd); } catch (_) { return true; }
+    if (!st.isFile() && !st.isDirectory()) return false;
+    if (!entry || entry.held || entry.dev !== st.dev || entry.ino !== st.ino || shared(st)) return true;
+    const forms = rootForms();
+    const now = forms && readings(entry.real, true);
+    if (!now) return true;
+    return now.some(({ real, stat }) => !stat || stat.dev !== st.dev || stat.ino !== st.ino || insideAny(forms, real));
+  }
+  const handleOf = (value) => (value && typeof value === 'object' && handles.has(value) ? value : null);
+  /** Does this call reach a file of the folders (asked only after the session of its context ended)? */
   function concerns(name, args) {
-    if (name === 'open') return writeFlags(args[1]) && inside(args[0]);
-    if (name === 'readFile') return typeof args[1] === 'object' && args[1] !== null && writeFlags(args[1].flag) && asPath(args[0]) !== null && inside(args[0]);
-    if (FD_WRITES.includes(name)) return insideEntry(writableFds.get(args[0]));
+    if (name === 'open') return writeFlags(args[1]) && reaches(args[0], 'follow');
+    if (name === 'readFile') return typeof args[1] === 'object' && args[1] !== null && writeFlags(args[1].flag) && asPath(args[0]) !== null && reaches(args[0], 'follow');
+    if (FD_WRITES.includes(name)) return heldFd(args[0], descriptors.get(args[0]));
     const indices = PATH_WRITES[name];
     if (!indices) return false;
     if (name === 'writeFile' || name === 'appendFile') {
-      if (typeof args[0] === 'number') return insideEntry(writableFds.get(args[0]));
-      if (writableHandles.has(args[0])) return insideEntry(writableHandles.get(args[0]));
+      if (typeof args[0] === 'number') return heldFd(args[0], descriptors.get(args[0]));
+      const handle = handleOf(args[0]);
+      if (handle) return heldFd(handle.fd, handles.get(handle));
+      if (args[0] && typeof args[0] === 'object' && asPath(args[0]) === null) return true;
     }
     if (name === 'unlink' && TEMP.test(String(asPath(args[0]) ?? ''))) return false;
-    return indices.some((i) => inside(args[i], !NOFOLLOW.has(name)));
+    return indices.some((i) => reaches(args[i], MODE[name] || 'follow', NAME_ONLY.has(name) || (name === 'link' && i === 1)));
   }
-  const track = (args, fd) => { if (typeof fd === 'number' && writeFlags(args[1])) writableFds.set(fd, entry(args[0])); };
+  const track = (target, fd) => { if (typeof fd === 'number') descriptors.set(fd, opened(target, fd)); };
 
   // Outside a gated context every call passes unchanged (no path check);
-  // only a descriptor or handle opened for writing is remembered.
+  // every descriptor and handle is remembered with what its open found.
+  // Inside one, the path is examined only after the session ended.
   function gateSync(name) {
     const base = name.slice(0, -4);
     const original = fs[name];
     if (typeof original !== 'function') return;
     fs[name] = function (...args) {
-      if (base === 'close') writableFds.delete(args[0]);
+      if (base === 'close') descriptors.delete(args[0]);
       if (!publishGate.getStore()) {
-        const opened = original.apply(this, args);
-        if (base === 'open') track(args, opened);
-        return opened;
+        const result = original.apply(this, args);
+        if (base === 'open') track(args[0], result);
+        return result;
       }
-      if (concerns(base, args)) { const error = refusal(); if (error) throw error; }
+      const error = refusal();
+      if (error && concerns(base, args)) throw error;
       const result = admitted.run(true, () => original.apply(this, args));
-      if (base === 'open') track(args, result);
+      if (base === 'open') track(args[0], result);
       return result;
     };
   }
@@ -214,21 +375,19 @@ function installEffectGate({ roots, fs = require('fs'), childProcess = require('
     if (typeof original !== 'function') return;
     fs[name] = function (...args) {
       const callback = args[args.length - 1];
-      if (name === 'close') writableFds.delete(args[0]);
+      if (name === 'close') descriptors.delete(args[0]);
       if (typeof callback !== 'function') return original.apply(this, args);
-      const opens = name === 'open' && writeFlags(args[1]);
-      const opened = (error, fd) => { if (!error && opens) track(args, fd); };
+      const target = args[0];
+      const done = (error, fd) => { if (!error && name === 'open') track(target, fd); };
       if (!publishGate.getStore()) {
-        if (!opens) return original.apply(this, args);
-        args[args.length - 1] = function (...result) { opened(result[0], result[1]); return callback.apply(this, result); };
+        if (name !== 'open') return original.apply(this, args);
+        args[args.length - 1] = function (...result) { done(result[0], result[1]); return callback.apply(this, result); };
         return original.apply(this, args);
       }
-      if (concerns(name, args)) {
-        const error = refusal();
-        if (error) { process.nextTick(callback, error); return undefined; }
-      }
+      const error = refusal();
+      if (error && concerns(name, args)) { process.nextTick(callback, error); return undefined; }
       args[args.length - 1] = function (...result) {
-        opened(result[0], result[1]);
+        done(result[0], result[1]);
         return admitted.exit(() => callback.apply(this, result));
       };
       return admitted.run(true, () => original.apply(this, args));
@@ -241,25 +400,23 @@ function installEffectGate({ roots, fs = require('fs'), childProcess = require('
       const original = proto[name];
       if (typeof original !== 'function') continue;
       proto[name] = function (...args) {
-        if (publishGate.getStore() && insideEntry(writableHandles.get(this))) {
-          const error = refusal();
-          if (error) return Promise.reject(error);
-          return admitted.run(true, () => original.apply(this, args));
-        }
-        return original.apply(this, args);
+        if (!publishGate.getStore()) return original.apply(this, args);
+        const error = refusal();
+        if (error && heldFd(this.fd, handles.get(this))) return Promise.reject(error);
+        return admitted.run(true, () => original.apply(this, args));
       };
     }
     const close = proto.close;
     if (typeof close === 'function') {
       // The number is free for reuse only once the close completed.
-      proto.close = function (...args) { if (writableHandles.has(this)) writableFds.delete(this.fd); return close.apply(this, args); };
+      proto.close = function (...args) { if (handles.has(this)) descriptors.delete(this.fd); return close.apply(this, args); };
     }
   }
   const tracked = (pending, target) => pending.then((handle) => {
     if (!handlesGated) { handlesGated = true; gateHandles(Object.getPrototypeOf(handle)); }
-    const e = entry(target);
-    writableHandles.set(handle, e);
-    writableFds.set(handle.fd, e);
+    const entry = opened(target, handle.fd);
+    handles.set(handle, entry);
+    descriptors.set(handle.fd, entry);
     return handle;
   });
 
@@ -267,9 +424,10 @@ function installEffectGate({ roots, fs = require('fs'), childProcess = require('
     const original = fs.promises[name];
     if (typeof original !== 'function') return;
     fs.promises[name] = function (...args) {
-      const opens = name === 'open' && writeFlags(args[1]);
+      const opens = name === 'open';
       if (!publishGate.getStore()) return opens ? tracked(original.apply(this, args), args[0]) : original.apply(this, args);
-      if (concerns(name, args)) { const error = refusal(); if (error) return Promise.reject(error); }
+      const error = refusal();
+      if (error && concerns(name, args)) return Promise.reject(error);
       const pending = admitted.run(true, () => original.apply(this, args));
       return opens ? tracked(pending, args[0]) : pending;
     };

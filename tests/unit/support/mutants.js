@@ -34,10 +34,10 @@ const PATH_SEND = "    sendToRenderer('system:capture-warning', { kind: 'merged'
 const PATH_SEND_BYPASS = "    mainWindow.webContents.send('system:capture-warning', { kind: 'merged', recordId });";
 
 const FS_GATE_OFF = [
-  ['      if (concerns(base, args)) { const error = refusal(); if (error) throw error; }\n', ''],
-  ['      if (concerns(name, args)) {\n        const error = refusal();\n        if (error) { process.nextTick(callback, error); return undefined; }\n      }\n', ''],
-  ['      if (concerns(name, args)) { const error = refusal(); if (error) return Promise.reject(error); }\n', ''],
-  ['          const error = refusal();\n          if (error) return Promise.reject(error);\n', ''],
+  ['      if (error && concerns(base, args)) throw error;\n', ''],
+  ['      if (error && concerns(name, args)) { process.nextTick(callback, error); return undefined; }\n', ''],
+  ['      if (error && concerns(name, args)) return Promise.reject(error);\n', ''],
+  ['        if (error && heldFd(this.fd, handles.get(this))) return Promise.reject(error);\n', ''],
 ];
 const SPAWN_GATE_OFF = [
   ['      const error = refusal();\n      if (error) return refusedChild(', '      const error = null;\n      if (error) return refusedChild('],
