@@ -3,7 +3,7 @@
 // boundaries, not through what the code under test is handed:
 // - every write-class call of the `fs` module (sync, callback and promise
 //   API) and of every FileHandle (write, writev, writeFile, appendFile,
-//   truncate), with the target path;
+//   truncate), whatever its target (round 13: no path knowledge here);
 // - every `child_process` call (spawn, execFile, exec, fork and the sync
 //   ones). ffmpeg/ffprobe are replaced HERE by a stub process (or, for real
 //   media, forwarded to the bundled test binaries) - the chain itself runs
@@ -22,7 +22,7 @@ import childProcess from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { createRequire } from 'node:module';
-import { AsyncLocalStorage } from 'node:async_hooks';
+import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
 import { fileURLToPath } from 'node:url';
 import { mutate } from './mutants.js';
 
@@ -43,31 +43,41 @@ function install() {
   const original = { fs: {}, promises: {}, handle: {}, cp: {} };
   const fdPaths = new Map();
   const handlePaths = new WeakMap();
+  // Round 13 (P4): intervals of the bound run. One that survives the end of its
+  // session is an app service started in a session context.
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  globalThis.setInterval = function (...args) {
+    const handle = realSetInterval.apply(this, args);
+    if (state.rec?.intervals) state.rec.intervals.add(handle);
+    return handle;
+  };
+  globalThis.clearInterval = function (handle) {
+    if (state.rec?.intervals) state.rec.intervals.delete(handle);
+    return realClearInterval.call(this, handle);
+  };
 
+  // Labels and suspension points only: an effect is counted whatever its target
+  // (round 13: the context decides, not the place).
   const asPath = (value) => {
     if (typeof value === 'string') return value;
-    if (Buffer.isBuffer(value)) return value.toString();
+    if (Buffer.isBuffer(value)) return value.toString('latin1');
     if (value instanceof URL) return value.pathname;
     return null;
-  };
-  const FOLDS = process.platform === 'darwin' || process.platform === 'win32';
-  const foldCase = (p) => (FOLDS ? p.toLowerCase() : p);
-  const under = (root, target) => {
-    const rel = path.relative(foldCase(root), foldCase(target));
-    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
   };
   const inRoot = (value) => {
     const rec = state.rec;
     const p = asPath(value);
     if (!rec || !p) return false;
-    return under(rec.root, path.resolve(p));
+    const rel = path.relative(rec.root, path.resolve(p));
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
   };
   // Round 11 (F7): the oracle's own reading of open flags - not the gate's
   // function, so a blind spot of one cannot hide in the other. Flag strings
   // by Node's table (only r, rs, sr read), numbers by their access mode and
   // the bits that change a file at the open; anything else counts.
   const READING = new Set(['r', 'rs', 'sr']);
-  const { O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND } = fs.constants;
+  const { O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND, O_EXCL } = fs.constants;
   const changesFile = (flags) => {
     if (flags === undefined || flags === null || typeof flags === 'function') return false;
     if (typeof flags === 'string') return !READING.has(flags);
@@ -75,95 +85,23 @@ function install() {
     if ((flags & (O_WRONLY | O_RDWR)) !== O_RDONLY) return true;
     return [O_CREAT, O_TRUNC, O_APPEND].some((bit) => (flags & bit) === bit);
   };
+  const exclusive = (flags) => (typeof flags === 'number' ? (flags & O_EXCL) === O_EXCL && (flags & O_CREAT) === O_CREAT : typeof flags === 'string' && flags.includes('x'));
 
-  // Round 12 (F8): where a call really lands, read the way the system reads
-  // the path - its own realpath of the RAW path (POSIX follows a link before
-  // a later «..» goes up from its target; Windows, and Node there, collapse
-  // «..» first) - and for a name that does not exist (yet): the real folder
-  // plus the name, a dangling link by its target. `own`: a call on the name
-  // itself (unlink of a link). Null: not decidable (a loop, no access, «..»
-  // after a missing name) - counted as the folder.
-  const WINDOWS = process.platform === 'win32';
-  const absoluteOf = (p) => (WINDOWS ? path.resolve(p) : (p.startsWith('/') ? p : `${process.cwd()}/${p}`));
-  function lastName(p) {
-    const trimmed = p.length > 1 ? p.replace(WINDOWS ? /[\\/]+$/ : /\/+$/, '') : p;
-    const at = WINDOWS ? Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\')) : trimmed.lastIndexOf('/');
-    if (at < 0 || at === trimmed.length - 1) return null;
-    const dir = trimmed.slice(0, at);
-    return { dir: dir === '' ? '/' : (WINDOWS && /^[A-Za-z]:$/.test(dir) ? `${dir}\\` : dir), name: trimmed.slice(at + 1) };
-  }
-  function realTarget(p, own, hops = 0) {
-    if (p === null || p === undefined || hops > 40) return null;
-    const abs = absoluteOf(p);
-    if (own && !/[\\/]\.?$/.test(p)) {
-      const last = lastName(abs);
-      if (last && last.name !== '.' && last.name !== '..') {
-        const dir = realTarget(last.dir, false, hops);
-        return dir && path.join(dir, last.name);
-      }
-    }
-    try { return original.fs.realpathSync.native(abs); } catch (error) { if (error.code !== 'ENOENT') return null; }
-    const last = lastName(abs);
-    if (!last || last.name === '..') return null;
-    if (last.name === '.') return realTarget(last.dir, false, hops);
-    const dir = realTarget(last.dir, false, hops);
-    if (!dir) return null;
-    const at = path.join(dir, last.name);
-    let st;
-    try { st = original.fs.lstatSync(at, { throwIfNoEntry: false }); } catch { return null; }
-    if (!st) return at;
-    if (!st.isSymbolicLink()) return null;
-    let link;
-    try { link = String(original.fs.readlinkSync(at)); } catch { return null; }
-    return realTarget(path.isAbsolute(link) ? link : `${dir}${path.sep}${link}`, false, hops + 1);
-  }
-  /** A real path as a path under the bound root (the folder itself when not decidable), or null. */
-  function ourTarget(real) {
-    const rec = state.rec;
-    if (!rec) return null;
-    if (real === null) return rec.root;
-    for (const root of [rec.root, realTarget(rec.root, false)]) {
-      if (root && under(root, real)) return path.join(rec.root, real.slice(root.length).replace(/^[\\/]+/, ''));
-    }
-    return null;
-  }
-  /** The file with this identity in the bound root (a hard link, a descriptor whose name is gone), or null. */
-  function sameFileInRoot(st) {
-    const rec = state.rec;
-    if (!rec || !st) return null;
-    // bigint: Windows file ids exceed 2^53 (a Number would round them together).
-    const same = (s) => s.dev === st.dev && s.ino === st.ino;
-    const walk = (dir) => {
-      for (const d of original.fs.readdirSync(dir, { withFileTypes: true })) {
-        const p = path.join(dir, d.name);
-        if (same(original.fs.lstatSync(p, { bigint: true }))) return p;
-        if (d.isDirectory()) { const found = walk(p); if (found) return found; }
-      }
-      return null;
-    };
-    try { return same(original.fs.lstatSync(rec.root, { bigint: true })) ? rec.root : walk(rec.root); } catch { return null; }
-  }
-  // Descriptors and handles: what their open found (round 12, F9): the raw
-  // path and its real path then, whatever happens to the alias later.
-  const UNDECIDED = Symbol('undecided');
-  const opened = (target) => {
-    const raw = asPath(target);
-    return { raw, real: raw === null ? UNDECIDED : realTarget(raw, false) ?? UNDECIDED };
-  };
-  const remember = (fd, target) => { if (typeof fd === 'number') fdPaths.set(fd, opened(target)); };
-  const fdRaw = (fd) => fdPaths.get(fd)?.raw;
-  /** A descriptor's file under the root: by its open, else by its identity now. */
-  function fdTarget(fd, entry) {
-    if (entry) {
-      const mapped = ourTarget(entry.real === UNDECIDED ? null : entry.real);
-      if (mapped) return mapped;
-    }
-    let st;
-    try { st = original.fs.fstatSync(fd, { bigint: true }); } catch { return null; }
-    return sameFileInRoot(st);
-  }
+  const remember = (fd, target) => { if (typeof fd === 'number') fdPaths.set(fd, asPath(target)); };
+  const fdRaw = (fd) => fdPaths.get(fd);
 
-  const effect = (kind, target) => { if (state.rec) state.rec.effect(kind, String(asPath(target) ?? target)); };
+  // Round 13 (R-S7.7), on the oracle's own books: the one removal an exclusive
+  // open of this run earned, by the exact string. Not a name pattern.
+  const ownTemps = new Set();
+  const effect = (kind, target, extra = {}) => { if (state.rec) state.rec.effect(kind, String(asPath(target) ?? target), extra); };
+  function count(name, c, args) {
+    if (name === 'unlink' && typeof args[0] === 'string' && ownTemps.delete(args[0])) return effect(c.kind, c.target, { own: true });
+    return effect(c.kind, c.target);
+  }
+  function settled(name, args) {
+    if (name === 'open' && changesFile(args[1]) && exclusive(args[1]) && typeof args[0] === 'string') ownTemps.add(args[0]);
+    if (name === 'rename') ownTemps.delete(args[0]);
+  }
 
   // name -> [effect kind, index of the target path] (callback and promise API alike)
   const PATH_WRITES = {
@@ -175,60 +113,28 @@ function install() {
   const FD_WRITES = { write: 'write', writev: 'write', ftruncate: 'truncate', fchmod: 'attr', futimes: 'attr', fchown: 'attr' };
   const HANDLE_WRITES = { write: 'write', writev: 'write', writeFile: 'write', appendFile: 'write', truncate: 'truncate', chmod: 'attr', chown: 'attr', utimes: 'attr' };
   const HANDLE_WAITS = ['sync', 'datasync', 'close', 'read', 'readv', 'readFile', 'stat'];
-  // Calls on the name itself; the content of the file stays (no identity check).
-  const ON_NAME = new Set(['unlink', 'rm', 'rmdir', 'rename', 'symlink', 'mkdir', 'mkdtemp', 'lutimes', 'lchmod', 'lchown']);
-  const NAME_ONLY = new Set(['unlink', 'rm', 'rmdir', 'rename', 'symlink', 'mkdir', 'mkdtemp']);
   const isHandle = (value) => value !== null && typeof value === 'object' && handlePaths.has(value);
+  // Round 13: code of the caller runs inside these calls; what it does is no
+  // part of the call and is counted on its own (no `inside` around them).
+  const binaryData = (data) => typeof data === 'string' || ArrayBuffer.isView(data);
+  const foreign = (name, args) => name === 'cp' || ((name === 'writeFile' || name === 'appendFile') && !binaryData(args[1]));
+  const within = (name, args, call) => (foreign(name, args) ? call() : inside.run(name, call));
 
-  /** Is the call about the bound root? Effect kind (or null) and target. */
+  /** The effect kind of the call (or null), its label and whether it is a suspension point. */
   function classify(name, args) {
-    const c = classifyByName(name, args);
-    if (c.ours || !c.kind) return c;
-    // Not under the root by its name: where it really lands (an alias, a
-    // descriptor whose alias is gone, a hard link)?
-    const real = landsIn(name, args);
-    return real ? { ...c, target: real, ours: true } : c;
-  }
-  function landsIn(name, args) {
-    if (name in FD_WRITES) return fdTarget(args[0], fdPaths.get(args[0]));
-    if ((name === 'writeFile' || name === 'appendFile') && typeof args[0] === 'number') return fdTarget(args[0], fdPaths.get(args[0]));
-    if ((name === 'writeFile' || name === 'appendFile') && isHandle(args[0])) return fdTarget(args[0].fd, handlePaths.get(args[0]));
-    const index = name === 'open' || name === 'readFile' ? 0 : PATH_WRITES[name]?.[1];
-    if (index === undefined) return null;
-    // rename and link: the source too (moved away, or a second name made for it).
-    // link: Linux links the name, macOS may follow it - both readings.
-    const paths = name === 'rename' ? [[args[0], true], [args[1], true]]
-      : name === 'link' ? [[args[0], true], [args[0], false], [args[1], true]]
-        : [[args[index], ON_NAME.has(name)]];
-    for (const [value, own] of paths) {
-      const p = asPath(value);
-      if (p === null) continue;
-      const mapped = ourTarget(realTarget(p, own));
-      if (mapped) return mapped;
-      // The same file under another name (a hard link): its identity.
-      if (!NAME_ONLY.has(name) && !(name === 'link' && value === args[1])) {
-        let st;
-        try { st = (own ? original.fs.lstatSync : original.fs.statSync)(p, { throwIfNoEntry: false, bigint: true }); } catch { st = null; }
-        const same = st && !st.isDirectory() ? sameFileInRoot(st) : null;
-        if (same) return same;
-      }
-    }
-    return null;
-  }
-  function classifyByName(name, args) {
     if (name in PATH_WRITES) {
       const [kind, index] = PATH_WRITES[name];
       const target = args[index];
       // writeFile/appendFile also take an fd or a FileHandle.
-      if (typeof target === 'number') return { kind, target: fdRaw(target), ours: fdPaths.has(target) && inRoot(fdRaw(target)) };
-      if (isHandle(target)) return { kind, target: handlePaths.get(target).raw, ours: inRoot(handlePaths.get(target).raw) };
+      if (typeof target === 'number') return { kind, target: fdRaw(target) ?? `fd:${target}`, ours: inRoot(fdRaw(target)) };
+      if (isHandle(target)) return { kind, target: handlePaths.get(target), ours: inRoot(handlePaths.get(target)) };
       return { kind, target, ours: inRoot(target) || (index === 1 && inRoot(args[0])) };
     }
-    if (name in FD_WRITES) return { kind: FD_WRITES[name], target: fdRaw(args[0]), ours: fdPaths.has(args[0]) && inRoot(fdRaw(args[0])) };
+    if (name in FD_WRITES) return { kind: FD_WRITES[name], target: fdRaw(args[0]) ?? `fd:${args[0]}`, ours: inRoot(fdRaw(args[0])) };
     if (name === 'open') return { kind: changesFile(args[1]) ? 'open' : null, target: args[0], ours: inRoot(args[0]) };
     // readFile with a writing flag opens for writing (w+ empties the file).
     if (name === 'readFile' && typeof args[1] === 'object' && args[1] !== null && changesFile(args[1].flag) && asPath(args[0])) return { kind: 'open', target: args[0], ours: inRoot(args[0]) };
-    if (['close', 'fsync', 'fdatasync', 'fstat', 'read', 'readv'].includes(name)) return { kind: null, target: fdRaw(args[0]), ours: fdPaths.has(args[0]) && inRoot(fdRaw(args[0])) };
+    if (['close', 'fsync', 'fdatasync', 'fstat', 'read', 'readv'].includes(name)) return { kind: null, target: fdRaw(args[0]), ours: inRoot(fdRaw(args[0])) };
     return { kind: null, target: args[0], ours: inRoot(args[0]) };
   }
 
@@ -237,9 +143,7 @@ function install() {
     const orig = fs[name];
     original.fs[name] = orig;
     fs[name] = function (...args) {
-      // Descriptors are remembered unbound too: one opened before a run and
-      // written during it is a file of the root (round 11), by what its
-      // open found (round 12).
+      // Descriptors are remembered unbound too (labels of later effects).
       if (!state.rec || inside.getStore()) {
         const result = orig.apply(this, args);
         if (base === 'open' && !inside.getStore()) remember(result, args[0]);
@@ -247,9 +151,10 @@ function install() {
         return result;
       }
       const c = classify(base, args);
-      if (c.ours && c.kind) effect(c.kind, c.target);
+      if (c.kind) count(base, c, args);
       if (c.ours && base === 'rename' && state.rec.busy()) throw Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' });
-      const result = inside.run(name, () => orig.apply(this, args));
+      const result = within(base, args, () => orig.apply(this, args));
+      settled(base, args);
       if (base === 'open') remember(result, args[0]);
       if (base === 'close') fdPaths.delete(args[0]);
       return result;
@@ -269,19 +174,19 @@ function install() {
       const book = (res) => {
         if (name === 'open' && !res[0]) remember(res[1], target);
         if (name === 'close') fdPaths.delete(target);
+        if (!res[0]) settled(name, args);
       };
       const c = rec ? classify(name, args) : null;
+      if (c && c.kind) count(name, c, args);
       if (!c || !c.ours) {
-        if (name !== 'open' && name !== 'close') return orig.apply(this, args);
-        args[args.length - 1] = function (...res) { book(res); return cb.apply(this, res); };
-        return orig.apply(this, args);
+        args[args.length - 1] = function (...res) { book(res); return inside.exit(() => cb.apply(this, res)); };
+        return c && c.kind ? within(name, args, () => orig.apply(this, args)) : orig.apply(this, args);
       }
-      if (c.kind) effect(c.kind, c.target);
       args[args.length - 1] = function (...res) {
         book(res);
         inside.exit(() => rec.waitThen(`fs.${name}`, () => cb.apply(this, res), asPath(c.target)));
       };
-      return inside.run(name, () => orig.apply(this, args));
+      return within(name, args, () => orig.apply(this, args));
     };
     for (const key of Object.keys(orig)) fs[name][key] = orig[key];
   }
@@ -294,14 +199,11 @@ function install() {
       proto[name] = function (...args) {
         if (name === 'close') fdPaths.delete(this.fd);
         const rec = state.rec;
-        const entry = handlePaths.get(this);
         if (!rec || inside.getStore()) return orig.apply(this, args);
-        let target = entry && inRoot(entry.raw) ? entry.raw : null;
-        // A write: where it really lands (round 12, F9/F10).
-        if (!target && HANDLE_WRITES[name]) target = fdTarget(this.fd, entry);
-        if (!target) return orig.apply(this, args);
-        if (HANDLE_WRITES[name]) effect(HANDLE_WRITES[name], target);
-        return rec.after(`handle.${name}`, inside.run(name, () => orig.apply(this, args)), target);
+        const label = handlePaths.get(this);
+        if (HANDLE_WRITES[name]) effect(HANDLE_WRITES[name], label ?? `handle:${this.fd}`);
+        if (!inRoot(label)) return HANDLE_WRITES[name] ? within(name, [null, args[0]], () => orig.apply(this, args)) : orig.apply(this, args);
+        return rec.after(`handle.${name}`, within(name, [null, args[0]], () => orig.apply(this, args)), label);
       };
     }
   }
@@ -309,9 +211,9 @@ function install() {
   let handleProtoWrapped = false;
   const rememberHandle = (handle, target) => {
     if (!handleProtoWrapped) { handleProtoWrapped = true; wrapHandleProto(Object.getPrototypeOf(handle)); }
-    const entry = opened(target);
-    handlePaths.set(handle, entry);
-    fdPaths.set(handle.fd, entry);
+    const label = asPath(target);
+    handlePaths.set(handle, label);
+    fdPaths.set(handle.fd, label);
     return handle;
   };
   function wrapPromise(name) {
@@ -321,12 +223,11 @@ function install() {
       const rec = state.rec;
       if (inside.getStore()) return orig.apply(this, args);
       const c = rec ? classify(name, args) : null;
-      if (!c || !c.ours) return name === 'open' ? orig.apply(this, args).then((handle) => rememberHandle(handle, args[0])) : orig.apply(this, args);
-      if (c.kind) effect(c.kind, c.target);
+      if (c && c.kind) count(name, c, args);
+      const book = (value) => { settled(name, args); return name === 'open' ? rememberHandle(value, args[0]) : value; };
+      if (!c || !c.ours) return (c && c.kind ? within(name, args, () => orig.apply(this, args)) : orig.apply(this, args)).then(book);
       if (name === 'rename' && rec.busy()) return rec.after('fs.rename', Promise.reject(Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' })), asPath(c.target));
-      let pending = inside.run(name, () => orig.apply(this, args));
-      if (name === 'open') pending = pending.then((handle) => rememberHandle(handle, args[0]));
-      return rec.after(`fs.${name}`, pending, asPath(c.target));
+      return rec.after(`fs.${name}`, within(name, args, () => orig.apply(this, args)).then(book), asPath(c.target));
     };
   }
 
@@ -423,6 +324,10 @@ function install() {
     fs: { writeFileSync: fs.writeFileSync, mkdirSync: fs.mkdirSync, unlinkSync: fs.unlinkSync, renameSync: fs.renameSync, openSync: fs.openSync, closeSync: fs.closeSync, utimesSync: fs.utimesSync },
     cp: { execFile: childProcess.execFile, spawn: childProcess.spawn },
   };
+
+  // No session context in here: an effect run through it has lost its context.
+  globalThis.__sweepNoContext = new AsyncResource('sweep-no-context');
+  globalThis.__sweepCanary = () => state.rec?.canary;
 
   // A mutant (SWEEP_MUTANT): its edits of src-electron applied at load.
   if (process.env.SWEEP_MUTANT) {

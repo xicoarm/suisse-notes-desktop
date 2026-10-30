@@ -8,9 +8,9 @@ import path from 'node:path';
 // The oracle of the sweep (support/globalSinks.js) counts what really
 // changes a file of the recordings folder (review round 11, F7): numeric
 // open flags (O_TRUNC empties the file at the open, O_CREAT creates it),
-// readFile with a writing flag, writes through an alias of the folder, and
-// descriptors opened before the oracle was bound. It classifies on its own
-// (not with the gate's function): a shared blind spot would hide itself.
+// readFile with a writing flag and descriptors opened before the oracle was
+// bound. It classifies on its own (not with the gate's function): a shared
+// blind spot would hide itself.
 
 const { O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND } = fs.constants;
 let base;
@@ -27,7 +27,7 @@ beforeEach(() => {
   fs.writeFileSync(meta, '{}');
   rec = {
     root, media: 'stub', effects: [],
-    effect(kind, target) { this.effects.push({ kind, target }); },
+    effect(kind, target, extra = {}) { this.effects.push({ kind, target, ...extra }); },
     after: (l, p) => p, waitThen: (l, fn) => setImmediate(fn), busy: () => false, spawn() {}, stream() {}, emulate: () => ({}),
   };
 });
@@ -75,100 +75,63 @@ describe('F7: the oracle counts numeric writing opens', () => {
   });
 });
 
-describe('the oracle sees aliases and earlier descriptors', () => {
-  it('a write through a symlink (junction) into the folder is an effect', (ctx) => {
-    const alias = path.join(base, 'alias');
-    try { fs.symlinkSync(path.join(root, 'c1'), alias, 'junction'); } catch { return ctx.skip(); }
-    bound(() => fs.writeFileSync(path.join(alias, 'metadata.json'), 'X'));
-    expect(counted()).toEqual(['write:c1/metadata.json']);
+// Round 13: the oracle counts every effect, whatever its target, and code of
+// the caller inside a call is no part of that call.
+describe('round 13: every effect counts, wherever it lands', () => {
+  const kinds = () => rec.effects.map((e) => e.kind);
+
+  it('a write outside the recordings folder is an effect', () => {
+    bound(() => fs.writeFileSync(path.join(base, 'app.log'), 'x'));
+    expect(kinds()).toEqual(['write']);
   });
 
   it('a write to a descriptor opened before the oracle was bound is an effect', () => {
     const fd = fs.openSync(meta, 'r+');
-    try {
-      bound(() => fs.writeSync(fd, 'X', 0));
-    } finally {
-      fs.closeSync(fd);
-    }
-    expect(counted()).toEqual(['write:c1/metadata.json']);
-  });
-});
-
-// Review round 12: the oracle reads a path as the system does (its own
-// resolution: the system's realpath of the raw path), holds what an open
-// found, and counts attributes; independent of the gate's resolution.
-describe('round 12: where a call really lands', () => {
-  const link = (target, at, type) => { try { fs.symlinkSync(target, at, type); return at; } catch { return null; } };
-
-  it.skipIf(process.platform === 'win32')('F8: a write through a symlink plus «..» is an effect on the folder', (ctx) => {
-    fs.mkdirSync(path.join(root, 'c1', 'sub'));
-    const at = link(path.join(root, 'c1', 'sub'), path.join(base, 'link'), 'dir');
-    if (!at) return ctx.skip();
-    bound(() => fs.writeFileSync([at, '..', 'metadata.json'].join(path.sep), 'X'));
+    try { bound(() => fs.writeSync(fd, 'X', 0)); } finally { fs.closeSync(fd); }
     expect(counted()).toEqual(['write:c1/metadata.json']);
   });
 
-  it('F8: a write through a chain of links and to a dangling link into the folder is an effect', (ctx) => {
-    const second = link(path.join(root, 'c1'), path.join(base, 'l2'), 'dir');
-    const first = second && link('l2', path.join(base, 'l1'), 'dir');
-    const hang = link(path.join(root, 'c1', 'later.json'), path.join(base, 'hang'), 'file');
-    if (!first || !hang) return ctx.skip();
-    bound(() => { fs.writeFileSync(path.join(first, 'metadata.json'), 'X'); fs.writeFileSync(hang, 'X'); });
-    expect(counted()).toEqual(['write:c1/metadata.json', 'write:c1/later.json']);
-  });
-
-  it('F8: a write through a hard link to a file of the folder is an effect; removing the link is not', (ctx) => {
-    const hard = path.join(base, 'hard.json');
-    try { fs.linkSync(meta, hard); } catch { return ctx.skip(); }
-    bound(() => { fs.writeFileSync(hard, 'X'); fs.unlinkSync(hard); });
-    expect(counted()).toEqual(['write:c1/metadata.json']);
-  });
-
-  it('F9: a descriptor and a handle opened through a link, the link then removed: their writes are effects', async (ctx) => {
-    const alias = link(meta, path.join(base, 'meta-link.json'), 'file');
-    if (!alias) return ctx.skip();
-    const fd = fs.openSync(alias, 'r+');
-    const handle = await fs.promises.open(alias, 'r+');
-    fs.unlinkSync(alias);
-    sinks.bind(rec);
-    fs.writeSync(fd, 'X', 0);
-    await handle.write('Y', 0);
-    await fs.promises.writeFile(handle, 'Z');
-    sinks.unbind(rec);
-    fs.closeSync(fd);
-    await handle.close();
-    expect(counted()).toEqual(['write:c1/metadata.json', 'write:c1/metadata.json', 'write:c1/metadata.json']);
-  });
-
-  it('F10: attributes through a descriptor or handle opened for reading are effects', async () => {
-    const fd = fs.openSync(meta, 'r');
+  it('a write with a Buffer path, attributes through a reading handle: effects', async () => {
     const handle = await fs.promises.open(meta, 'r');
-    // Counted before the call; Windows refuses times on a reading descriptor (EPERM).
-    const attempt = async (call) => { try { await call(); } catch (error) { if (error.code !== 'EPERM') throw error; } };
     sinks.bind(rec);
-    try {
-      await attempt(() => fs.fchmodSync(fd, 0o644));
-      await attempt(() => fs.futimesSync(fd, new Date(), new Date()));
-      await attempt(() => handle.chmod(0o644));
-      await attempt(() => handle.utimes(new Date(), new Date()));
-    } finally {
-      sinks.unbind(rec);
-    }
-    fs.closeSync(fd);
+    fs.writeFileSync(Buffer.from(meta), 'X');
+    try { await handle.chmod(0o644); } catch (error) { if (error.code !== 'EPERM') throw error; }
+    sinks.unbind(rec);
     await handle.close();
-    expect(counted()).toEqual(['attr:c1/metadata.json', 'attr:c1/metadata.json', 'attr:c1/metadata.json', 'attr:c1/metadata.json']);
+    expect(kinds()).toEqual(['write', 'attr']);
   });
 
-  it('controls: a link outside plus «..» back outside, and reading through a link into the folder, are no effect', (ctx) => {
-    fs.mkdirSync(path.join(base, 'logs'));
-    const at = link(path.join(base, 'logs'), path.join(base, 'logdir'), 'dir');
-    const alias = link(path.join(root, 'c1'), path.join(base, 'alias'), 'dir');
-    if (!at || !alias) return ctx.skip();
+  it('what a cp filter does is counted on its own (the call does not hide it)', async () => {
+    const src = path.join(base, 'src');
+    fs.mkdirSync(src);
+    fs.writeFileSync(path.join(src, 'a.txt'), 'a');
+    const note = path.join(base, 'filter-note.txt');
+    sinks.bind(rec);
+    await fs.promises.cp(src, path.join(base, 'dst'), { recursive: true, filter: async () => { fs.writeFileSync(note, 'x'); return true; } });
+    sinks.unbind(rec);
+    expect(rec.effects.filter((e) => e.target === note).length).toBeGreaterThan(0);
+  });
+
+  it('what an iterable does while it is written is counted on its own', async () => {
+    const note = path.join(base, 'iterable-note.txt');
+    async function* data() { fs.writeFileSync(note, 'x'); yield 'a'; }
+    sinks.bind(rec);
+    await fs.promises.writeFile(path.join(base, 'out.txt'), data());
+    sinks.unbind(rec);
+    expect(rec.effects.some((e) => e.target === note)).toBe(true);
+  });
+
+  it('removing a temp file: only the removal an exclusive open earned is marked own, once, by its exact string', () => {
+    const temp = path.join(base, 'x.tmp');
+    const pattern = path.join(base, 'y.3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.tmp');
+    fs.writeFileSync(pattern, 'p');
     bound(() => {
-      fs.writeFileSync([at, '..', 'logs', 'app.log'].join(path.sep), 'x');
-      fs.readFileSync(path.join(alias, 'metadata.json'));
-      fs.closeSync(fs.openSync(path.join(alias, 'metadata.json'), 'r'));
+      fs.closeSync(fs.openSync(temp, 'wx'));
+      fs.unlinkSync(temp);
+      fs.closeSync(fs.openSync(temp, 'w'));
+      fs.unlinkSync(temp);
+      fs.unlinkSync(pattern);
     });
-    expect(counted()).toEqual([]);
+    expect(rec.effects.filter((e) => e.kind === 'unlink').map((e) => !!e.own)).toEqual([true, false, false]);
   });
 });

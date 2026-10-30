@@ -18,6 +18,24 @@ import { MUTANTS, KIND_PATTERN } from './support/mutants.js';
 
 const VITEST = path.resolve('node_modules/vitest/vitest.mjs');
 const PROBE = 'tests/unit/sweepMutant.probe.test.js';
+const CONTRACT = 'tests/unit/effectGate.contract.test.js';
+
+/** A contract mutant: the contract probe in a child process; its failing tests. */
+function contractProbe(name) {
+  const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'contract-mutant-')), 'result.json');
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [VITEST, 'run', CONTRACT, '--maxWorkers=1', '--minWorkers=1', '--reporter=json', `--outputFile=${out}`], {
+      env: { ...process.env, SWEEP_MUTANT: name },
+      stdio: 'ignore',
+    });
+    child.on('close', (code) => {
+      const report = fs.existsSync(out) ? JSON.parse(fs.readFileSync(out, 'utf8')) : null;
+      fs.rmSync(path.dirname(out), { recursive: true, force: true });
+      const failed = report ? report.testResults.flatMap((t) => t.assertionResults).filter((a) => a.status === 'failed').map((a) => a.fullName) : null;
+      resolve({ code, failed });
+    });
+  });
+}
 
 function probe(name) {
   const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sweep-mutant-')), 'result.json');
@@ -46,7 +64,7 @@ const next = () => {
   while (active < 3 && waiting.length) {
     const [name, done] = waiting.shift();
     active++;
-    probe(name).then((value) => { active--; done(value); next(); });
+    (MUTANTS[name].probe === 'contract' ? contractProbe(name) : probe(name)).then((value) => { active--; done(value); next(); });
   }
 };
 for (const name of Object.keys(MUTANTS)) runs[name] = new Promise((done) => { waiting.push([name, done]); });
@@ -71,6 +89,14 @@ describe('mutants of the sinks: the sweep turns red', () => {
     expect(base.spawns.some((s) => /ffprobe -version/.test(s))).toBe(true);
     expect(base.sent).toContain('system:capture-warning');
   }, 600000);
+
+  for (const [name, mutant] of Object.entries(MUTANTS).filter(([, m]) => m.probe === 'contract')) {
+    it(`${name}: the contract probe turns red (${mutant.red})`, async () => {
+      const { failed, code } = await run(name);
+      expect(code).not.toBe(0);
+      expect(failed.some((title) => mutant.red.test(title)), `${name}: ${JSON.stringify(failed)}`).toBe(true);
+    }, 600000);
+  }
 
   for (const [name, mutant] of Object.entries(MUTANTS).filter(([, m]) => m.kind)) {
     it(`${name}: red with a violation of kind ${mutant.kind}`, async () => {

@@ -9,7 +9,6 @@
 // ones, loaded with a require relative to src-electron/.
 
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { mutate } from './mutants.js';
@@ -115,7 +114,7 @@ export function installMainGate({ transform = (s) => s } = {}) {
   const installs = parse(source).body.filter((n) => n.type === 'ExpressionStatement' && /\binstallEffectGate\s*\(/.test(source.slice(n.start, n.end)));
   const mainRequire = createRequire(MAIN_FILE);
   // eslint-disable-next-line no-new-func
-  new Function('require', 'getRecordingsPath', `'use strict';\n${installs.map((n) => source.slice(n.start, n.end)).join('\n')}`)(mainRequire, () => path.join(os.tmpdir(), 'no-recordings-yet'));
+  new Function('require', `'use strict';\n${installs.map((n) => source.slice(n.start, n.end)).join('\n')}`)(mainRequire);
   return installs.length;
 }
 

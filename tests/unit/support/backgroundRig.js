@@ -113,15 +113,21 @@ function defaultAnswer(config) {
  * @param {(args: string[]) => boolean} [opts.ffmpegFails] the stub ffmpeg fails for these arguments
  * @param {(source: string) => string} [opts.mainTransform] a mutation of main's source (compiled per rig)
  * @param {object} [opts.disk] the persistent state of an earlier rig (a restart; with session 'persisted')
+ * @param {string} [opts.root] the recordings folder of an earlier rig (a restart; `keepRoot` on its cleanup)
  * @param {string} [opts.session] see below
  */
 export function createBackgroundRig({
   session = 'signedIn', recordings = ['r1'], lateAnswers = false, read: readOverrides = {}, ports: portOverrides = {},
   history, queue, active, renameBusy = 0, registryFactory = createScopeRegistry, realRead = false, media = 'stub',
-  ffmpegFails = null, mainTransform = null, disk: givenDisk = null,
+  ffmpegFails = null, mainTransform = null, disk: givenDisk = null, root: givenRoot = null,
 } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bg-rig-'));
-  for (const id of recordings) {
+  const root = givenRoot || fs.mkdtempSync(path.join(os.tmpdir(), 'bg-rig-'));
+  // Round 13: files outside the recordings folder (a log, the settings): in the
+  // context of an ended session they stay as they are too.
+  const canary = fs.mkdtempSync(path.join(os.tmpdir(), 'bg-canary-'));
+  fs.writeFileSync(path.join(canary, 'app.log'), 'log\n');
+  fs.writeFileSync(path.join(canary, 'settings.json'), '{}');
+  for (const id of givenRoot ? [] : recordings) {
     fs.mkdirSync(path.join(root, id), { recursive: true });
     fs.writeFileSync(path.join(root, id, 'audio.webm'), Buffer.alloc(10, 1));
   }
@@ -165,14 +171,17 @@ export function createBackgroundRig({
   // Fixture writes of the test itself (r.quietly) are no effects.
   let paused = false;
   const quietly = (fn) => { paused = true; try { return fn(); } finally { paused = false; } };
-  const effect = (kind, target) => {
+  const effect = (kind, target, extra = {}) => {
     if (paused) return;
-    effects.push({ kind, target: String(target), after: mark.changed });
+    effects.push({ kind, target: String(target), after: mark.changed, ...extra });
     if (hooks.onEffect) hooks.onEffect(kind, String(target));
   };
   let busy = renameBusy;
+  const intervals = new Set();
   const recorder = {
     root,
+    canary,
+    intervals,
     media,
     effect,
     after,
@@ -276,7 +285,7 @@ export function createBackgroundRig({
   const chain = loadMainChain(mainTransform ? compileMainChain({ transform: mainTransform }) : mainChain(), {
     app: { isPackaged: false, getPath: () => root, getVersion: () => 'test' },
     ffmpeg,
-    log: quiet,
+    log: { ...quiet },
     Sentry: sentry,
     mainWindow: window,
     historyStore: stores.history,
@@ -285,8 +294,6 @@ export function createBackgroundRig({
     sessionAuthority: s.authority,
     inFlightUploads: { has: (id) => !!scopes && scopes.inFlight.has(id) },
     resolveBundledBinaryPaths: () => ({ ffmpeg: STUB_FFMPEG, ffprobe: STUB_FFPROBE }),
-    // Main's effect gate is installed once per process; loading the chain
-    // again (each rig) replaces its folder with this one (effect-gate.js).
     getRecordingsPath: () => root,
     isExportRecoveryBusy: () => false,
     stopSystemAudio: async () => ({ success: true }),
@@ -368,19 +375,21 @@ export function createBackgroundRig({
   const signInA = () => s.passwordSignIn('a').apply();
   const refresh = () => s.authority.applySession(s.authority.ticket({ userId: 'a' }), { token: jwt('a', 'refreshed'), user: { id: 'a' } }, { kind: 'refresh' });
   /** Ends every scope, lets the work settle, then removes the recordings root. */
-  const cleanup = async () => {
+  const cleanup = async ({ keepRoot = false } = {}) => {
     scopes.abortAll();
     for (let i = 0; i < 20; i++) await flush();
     // Windows keeps a folder with an open handle: close every source stream
     // the rig opened before removing the root.
     await Promise.all(openStreams.map((st) => (st.closed ? null : new Promise((done) => { st.once('close', done); st.destroy(); }))));
     sinks.unbind(recorder);
-    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    for (const handle of intervals) clearInterval(handle);
+    fs.rmSync(canary, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    if (!keepRoot) fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   };
   const filePath = (id = 'r1') => path.join(root, id, 'audio.webm');
 
   return {
-    root, disk, s, scopes, background, uploads: background.uploads, stores, http, answer, hooks, read, report, chain,
+    root, canary, intervals, disk, s, scopes, background, uploads: background.uploads, stores, http, answer, hooks, read, report, chain,
     effects, requests, sent, sleeps, spawns, streams, reports, mark, points, sweep, timers,
     inflight: () => inflight,
     change, signOut, signInB, signOutThenB, signInA, refresh, cleanup, filePath, quietly,

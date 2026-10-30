@@ -177,7 +177,7 @@ const ENTRIES = [
 
 /** A copy of session-scope.js without alive() in commit and/or the publish gate. */
 const CUT_COMMIT = ['    function commit(fn) {\n      assertAlive();', '    function commit(fn) {'];
-const CUT_GATE = ['return publishGate.run({ assertAlive }, fn);', 'return publishGate.run({ assertAlive: () => {} }, fn);'];
+const CUT_GATE = ['return runInSession({ assertAlive }, fn);', 'return runInSession({ assertAlive: () => {} }, fn);'];
 
 function mutantRegistry(cuts = [CUT_COMMIT, CUT_GATE]) {
   let src = fs.readFileSync(SCOPE_FILE, 'utf8').replace(/\r\n/g, '\n'); // Windows checkout: CRLF

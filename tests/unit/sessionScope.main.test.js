@@ -261,7 +261,7 @@ describe('R-S2: effects only while alive, checked at the effect', () => {
     await durable.writeFileAtomic(path.join(dir, 'fg.json'), '1');
     expect(fs.readFileSync(path.join(dir, 'fg.json'), 'utf8')).toBe('1');
     const assertAlive = () => { throw Object.assign(new Error('Signed out'), { code: 'SESSION_ENDED' }); };
-    await expect(durable.publishGate.run({ assertAlive }, () => durable.writeFileAtomic(path.join(dir, 'bg.json'), '2'))).rejects.toMatchObject({ code: 'SESSION_ENDED' });
+    await expect(require('../../src-electron/effect-gate.js').runInSession({ assertAlive }, () => durable.writeFileAtomic(path.join(dir, 'bg.json'), '2'))).rejects.toMatchObject({ code: 'SESSION_ENDED' });
     expect(fs.existsSync(path.join(dir, 'bg.json'))).toBe(false);
   });
 

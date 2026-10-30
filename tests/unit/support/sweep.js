@@ -12,9 +12,10 @@ import path from 'node:path';
 import { createBackgroundRig, flush } from './backgroundRig.js';
 
 export const ended = (res) => res?.sessionEnded === true;
-// Own unpublished temp files of an interrupted durable write may be removed.
+// Names of the temp files of a durable write (comparison and snapshot only).
 export const TEMP = /\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/;
-export const notTemp = (effects) => effects.filter((e) => !(e.kind === 'unlink' && TEMP.test(e.target)));
+// R-S7.7, by the oracle's own books: the one removal an exclusive open earned.
+export const notTemp = (effects) => effects.filter((e) => !e.own);
 
 /**
  * Waits until the background work is quiet: no call in flight and no new
@@ -72,6 +73,8 @@ export function afterChange(r, label) {
   if (r.spawnsAfter().length) out.push(`${label}: child processes after the change: ${JSON.stringify(r.spawnsAfter().map((s) => s.port || `${s.file} ${s.args.slice(0, 6).join(' ')}`))}`);
   const timersAfter = r.sleeps.filter((s) => s.after);
   if (timersAfter.length) out.push(`${label}: timers after the change: ${JSON.stringify(timersAfter)}`);
+  // R-S7.5 (P4): whatever still ticks after the end was started in the session's context.
+  if (r.intervals.size) out.push(`${label}: an app service started in the session context still runs (${r.intervals.size} interval(s))`);
   if (JSON.stringify(r.stores.queue.data) !== r.sweep.queueAtChange) out.push(`${label}: queue changed after the change`);
   return out;
 }
@@ -80,7 +83,7 @@ export function afterChange(r, label) {
 // the change may still write there (council 3: temporary files only).
 const SCRATCH = /(^|[/\\])native-finalization-[^/\\]*([/\\]|$)/;
 
-/** Every file of the recordings root: its bytes, mode and mtime (read past the counters). */
+/** Every file of the recordings root and the external canary folder: bytes, mode and mtime (read past the counters). */
 export function snapshot(r) {
   const files = new Map();
   const walk = (dir) => {
@@ -93,7 +96,7 @@ export function snapshot(r) {
       }
     }
   };
-  r.quietly(() => { if (fs.existsSync(r.root)) walk(r.root); });
+  r.quietly(() => { for (const dir of [r.root, r.canary]) if (fs.existsSync(dir)) walk(dir); });
   return files;
 }
 
