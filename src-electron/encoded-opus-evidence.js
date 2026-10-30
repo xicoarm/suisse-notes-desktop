@@ -3,7 +3,7 @@
 // Looked up at call time, never captured at load: every start goes through
 // main's effect gate (effect-gate.js, review round 10, F3).
 const childProcess = require('child_process');
-const { assertPublishAllowed } = require('./effect-gate');
+const { assertPublishAllowed, bindSession } = require('./effect-gate');
 const { performance } = require('perf_hooks');
 const fs = require('fs');
 const path = require('path');
@@ -411,7 +411,7 @@ function probeLines(ffprobePath, args, timeoutMs, consume) {
     });
     proc.stderr.on('data', text => { stderr = (stderr + text).slice(-16384); });
     proc.once('error', error => { clearTimeout(timer); reject(error); });
-    proc.once('close', code => {
+    proc.once('close', bindSession(code => {
       clearTimeout(timer);
       // A start refused by main's effect gate: the session ended (round 10, F3).
       if (code !== 0) { try { assertPublishAllowed(); } catch (gateError) { reject(gateError); return; } }
@@ -419,7 +419,7 @@ function probeLines(ffprobePath, args, timeoutMs, consume) {
       if (code !== 0 || stderr.trim()) { reject(invalid(`packet probe failed (${code}): ${stderr.slice(-1024)}`)); return; }
       try { if (buffered) consume(buffered.replace(/\r$/, '')); resolve(); }
       catch (error) { reject(error); }
-    });
+    }, reject));
   });
 }
 

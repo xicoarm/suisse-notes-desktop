@@ -1,12 +1,13 @@
 const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu, Tray, nativeImage, desktopCapturer, systemPreferences, powerMonitor, powerSaveBlocker, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
-// Effect gate (security review 10/2026, round 10): installed before any other
-// module is loaded. Every write into the recordings folder and every child
-// process start by background work of a session that has ended is refused at
-// the fs / child_process module boundary, right before the system call
-// (effect-gate.js).
-require('./effect-gate').installEffectGate({ roots: () => [getRecordingsPath()] });
+// Effect gate (security review 10/2026, rounds 10 and 13): installed before any
+// other module is loaded. Every effect in the context of a session that has
+// ended is refused at the fs / child_process module boundary, right before the
+// system call (effect-gate.js).
+require('./effect-gate').installEffectGate();
+const { bindSession } = require('./effect-gate');
+const { createAppPorts } = require('./app-ports');
 const { writeFileAtomic, writeFileAtomicSync, publishFile, concatenateFiles, archiveChunkBatch, listChunkBatches, syncDirectorySync, assertPublishAllowed } = require('./durable-files');
 const { createRecordingPersistence, readFinalizedRecording, listSessions } = require('./recording-persistence');
 const nativeSourcePersistence = require('./native-source-persistence');
@@ -170,13 +171,15 @@ Sentry.init({
 // (sentryReporting is required above Sentry.init: beforeSend redacts with it.)
 const twoFactorAuth = require('./auth-two-factor');
 sentryReporting.installLogReporting({ log, Sentry });
+// R-S7.5: log lines and events of the port chain leave the session context here.
+const { telemetry } = createAppPorts({ log, Sentry });
 const windowReporting = sentryReporting.installWindowReporting({ Sentry, log });
 
 // === Global Error Handlers ===
 // Catch uncaught exceptions in main process
 process.on('uncaughtException', (error) => {
   log.error('Uncaught Exception:', error);
-  Sentry.captureException(error);
+  telemetry({ exception: error });
   // Don't exit immediately - try to keep app running for upload completion
 });
 
@@ -194,7 +197,7 @@ process.on('unhandledRejection', (reason, promise) => {
     return;
   }
   log.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  Sentry.captureException(reason instanceof Error ? reason : new Error(String(reason)));
+  telemetry({ exception: reason instanceof Error ? reason : new Error(String(reason)) });
 });
 
 // Handle renderer process crashes
@@ -2087,7 +2090,9 @@ function withRecordingLock(recordId, fn) {
   const previous = recordingLocks.get(recordId) || Promise.resolve();
   // Swallow the previous link's error so a failure in one handler doesn't
   // poison the next one's run.
-  const current = previous.catch(() => {}).then(fn);
+  // R-S7.4: the queue runs fn long after the request, from whatever context the
+  // previous link ended in.
+  const current = previous.catch(() => {}).then(bindSession(fn));
   recordingLocks.set(recordId, current);
   current.finally(() => {
     if (recordingLocks.get(recordId) === current) {
@@ -2285,11 +2290,11 @@ async function prepareRawSessionFile(recordId, rawPath) {
   const initSegPath = getInitSegmentPath(recordId);
   if (!fs.existsSync(initSegPath)) {
     log.warn('Raw session is header-less and no init_segment.bin exists — ffprobe will likely reject it');
-    Sentry.captureMessage('recording: header-less session roll without persisted init segment', {
+    telemetry({ message: 'recording: header-less session roll without persisted init segment', context: {
       level: 'warning',
       tags: { operation: 'prepareRawSessionFile' },
       extra: { recordId, rawPath }
-    });
+    } });
     return { rebaseSec: 0 };
   }
 
@@ -2301,11 +2306,11 @@ async function prepareRawSessionFile(recordId, rawPath) {
       try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore */ }
       reject(err);
     };
-    out.on('error', fail);
+    out.on('error', bindSession(fail, reject));
     out.on('finish', resolve);
     out.write(fs.readFileSync(initSegPath));
     const src = fs.createReadStream(rawPath);
-    src.on('error', fail);
+    src.on('error', bindSession(fail, reject));
     src.pipe(out);
   });
   fs.renameSync(tmpPath, rawPath);
@@ -2386,7 +2391,7 @@ function checkForTruncation(recordId, producedSec, expectedSec) {
     const detail = `produced ${Math.round(producedSec)}s but the session recorded ` +
       `${Math.round(expectedSec)}s — ${Math.round(verdict.shortfallSec)}s missing`;
     log.error(`Recording truncated: ${recordId} — ${detail}`);
-    Sentry.captureMessage(`recording: combined file is SHORT — ${detail} (recordId=${recordId})`, 'error');
+    telemetry({ message: `recording: combined file is SHORT — ${detail} (recordId=${recordId})`, context: 'error' });
     if (mainWindow && !mainWindow.isDestroyed()) {
       sendToRenderer('system:capture-warning', {
         kind: 'recording-truncated',
@@ -2601,7 +2606,7 @@ function reportBinaryHealthOnce(triggerSource) {
   if (binaryHealth.ffprobe.available === false) failedBinaries.push(`ffprobe (${binaryHealth.ffprobe.error || 'unavailable'})`);
   const failureSummary = failedBinaries.join(', ') || 'unknown';
 
-  Sentry.captureMessage(`Bundled media binary unavailable: ${failureSummary}`, {
+  telemetry({ message: `Bundled media binary unavailable: ${failureSummary}`, context: {
     level: 'warning',
     tags: {
       operation: 'binaryHealth',
@@ -2615,7 +2620,7 @@ function reportBinaryHealthOnce(triggerSource) {
       ffmpeg: { ...binaryHealth.ffmpeg },
       ffprobe: { ...binaryHealth.ffprobe },
     },
-  });
+  } });
 }
 
 function markBinaryUnavailable(kind, err, triggerSource) {
@@ -2655,11 +2660,11 @@ function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operati
       const elapsed = Date.now() - startTime;
       log.warn(`${operationName} operation timed out after ${timeoutMs}ms`);
       // Always report timeouts — they are never expected
-      Sentry.captureMessage(`FFmpeg timeout: ${operationName} after ${(elapsed / 1000).toFixed(1)}s`, {
+      telemetry({ message: `FFmpeg timeout: ${operationName} after ${(elapsed / 1000).toFixed(1)}s`, context: {
         level: 'error',
         tags: { operation: operationName },
         extra: { timeoutMs, elapsedMs: elapsed, processStarted },
-      });
+      } });
       try {
         ffmpegCommand.kill('SIGKILL');
       } catch (e) {
@@ -2678,11 +2683,11 @@ function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operati
       cleanup();
       const elapsed = Date.now() - startTime;
       log.warn(`${operationName} stderr silent for ${silentFor}ms — killing process`);
-      Sentry.captureMessage(`FFmpeg stalled: ${operationName} silent for ${(silentFor / 1000).toFixed(0)}s`, {
+      telemetry({ message: `FFmpeg stalled: ${operationName} silent for ${(silentFor / 1000).toFixed(0)}s`, context: {
         level: 'error',
         tags: { operation: operationName },
         extra: { silentMs: silentFor, elapsedMs: elapsed, timeoutMs, processStarted },
-      });
+      } });
       try {
         ffmpegCommand.kill('SIGKILL');
       } catch (e) {
@@ -2699,7 +2704,7 @@ function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operati
         cleanup();
         resolve();
       })
-      .on('error', (err) => {
+      .on('error', bindSession((err) => {
         cleanup();
         // A start refused by the effect gate (session ended): that error, no
         // health change, no report (round 10, F3).
@@ -2709,13 +2714,13 @@ function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operati
           markBinaryUnavailable('ffmpeg', err, `ffmpegWithTimeout:${operationName}`);
         }
         if (reportToSentry) {
-          Sentry.captureException(err, {
+          telemetry({ exception: err, context: {
             tags: { operation: operationName },
             extra: { elapsedMs: Date.now() - startTime, ffmpegAvailable: binaryHealth.ffmpeg.available, processStarted },
-          });
+          } });
         }
         reject(err);
-      })
+      }, reject))
       .run();
   });
 }
@@ -2741,11 +2746,11 @@ function notifyMergeDegraded(recordId, reason, detail) {
   assertPublishAllowed();
   recordCaptureWarning(recordId, 'merge-degraded');
   log.warn(`System audio merge degraded for ${recordId}: ${reason} (${detail || 'no detail'})`);
-  Sentry.captureMessage(`System audio merge degraded: ${reason}`, {
+  telemetry({ message: `System audio merge degraded: ${reason}`, context: {
     level: 'warning',
     tags: { operation: 'merge-degraded', recordId },
     extra: { detail },
-  });
+  } });
   sendToRenderer('system:capture-warning', { kind: 'merge-degraded', recordId, reason, detail });
 }
 
@@ -3244,12 +3249,12 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
     if (encodedTimestampChanges.length || result.sourceTimestampChanges?.length) {
       log.info(`Finalization tolerated timestamp-only changes for ${recordId}: output [${encodedTimestampChanges.join(', ')}], sources [${(result.sourceTimestampChanges || []).join(', ')}]`);
       try {
-        Sentry.captureMessage('finalization: timestamps of fresh recording files changed while saving (bytes unchanged, tolerated)', {
+        telemetry({ message: 'finalization: timestamps of fresh recording files changed while saving (bytes unchanged, tolerated)', context: {
           level: 'info',
           fingerprint: ['finalization-timestamp-only-change'],
           tags: { operation: 'finalization', rebuilt: String(!!result.sourceTimestampChanges?.length) },
           extra: { recordId, encodedTimestampChanges, sourceTimestampChanges: result.sourceTimestampChanges || [] },
-        });
+        } });
       } catch (_) { /* telemetry never breaks saving */ }
     }
     if (result.supersededScratchLeft) log.warn(`Superseded finalization scratch could not be removed for ${recordId}: ${result.supersededScratchLeft}`);

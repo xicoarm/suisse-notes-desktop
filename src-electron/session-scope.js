@@ -38,7 +38,8 @@
  */
 
 const realFs = require('fs');
-const { createDurableFiles, publishGate, assertManagedRecordingDirectory } = require('./durable-files');
+const { createDurableFiles, assertManagedRecordingDirectory } = require('./durable-files');
+const { runInSession } = require('./effect-gate');
 
 class SessionEndedError extends Error {
   constructor(cause) {
@@ -118,9 +119,9 @@ function createScopeRegistry({ authority, http, fs = realFs, stores, send = () =
       return result;
     }
 
-    /** Runs fn in the publish gate of this scope (durable-files checks alive() before every rename). */
+    /** Runs fn in the context of this session: the only place a context is created (R-S7.4). */
     function gated(fn) {
-      return publishGate.run({ assertAlive }, fn);
+      return runInSession({ assertAlive }, fn);
     }
 
     /** Settles only while alive: a late answer or error of an ended scope is a SessionEndedError. */

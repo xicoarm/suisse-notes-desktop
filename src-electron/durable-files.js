@@ -4,16 +4,16 @@ const realFs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
 const { pipeline } = require('stream/promises');
-const { publishGate, assertPublishAllowed } = require('./effect-gate');
+const { assertPublishAllowed } = require('./effect-gate');
 
-// Publish gate (security review 10/2026, rounds 9 and 10): background work of
-// a session (recovery finalization, durable writes of the scope) runs inside
-// `publishGate.run(gate, fn)`. Since round 10 the gate is enforced at the fs
-// module boundary for every write into the recordings folder (effect-gate.js,
-// installed by main first); the calls below check it once more right before
-// each publishing system call (rename, also every retry; the temp file that
-// becomes a published file; the new chunk folder). Foreground work
-// (recording, stop) has no gate.
+// Publish gate (security review 10/2026, rounds 9, 10 and 13): background work
+// of a session (recovery finalization, durable writes of the scope) runs in the
+// context of that session (`runInSession`). The gate is enforced at the fs
+// module boundary for every effect of that context (effect-gate.js, installed
+// by main first); the calls below check it once more right before each
+// publishing system call (rename, also every retry; the temp file that becomes
+// a published file; the new chunk folder). Foreground work (recording, stop)
+// has no context.
 
 function createDurableFiles(fs = realFs) {
   // A successful write means all bytes, including the directory entry, have been
@@ -157,5 +157,5 @@ function assertManagedRecordingDirectory(recordingsRoot, directory) {
 
 module.exports = {
   ...createDurableFiles(realFs),
-  createDurableFiles, assertManagedRecordingDirectory, publishGate, assertPublishAllowed,
+  createDurableFiles, assertManagedRecordingDirectory, assertPublishAllowed,
 };

@@ -62,6 +62,7 @@
  */
 
 const fs = require('fs');
+const { sealPort } = require('./effect-gate');
 
 const RECORD_FILE = 'session-authority.json';
 const MIGRATION_MARK_KEY = 'sessionAuthorityMigrated';
@@ -190,7 +191,29 @@ function memoryMarkStore() {
  * @param {(msg: string) => void} [deps.warn]
  * @param {() => number} [deps.now]
  */
-function createSessionAuthority({ recordStore, vault, userStore, flows, migrationMark = memoryMarkStore(), abortRequests = () => {}, warn = () => {}, now = Date.now }) {
+function createSessionAuthority({ recordStore: recordFile, vault: tokenVault, userStore: userRecord, flows: flowRecord, migrationMark: markRecord = memoryMarkStore(), abortRequests = () => {}, warn = () => {}, now = Date.now }) {
+  // R-S7.5: its own record, the tombstone and the mark leave any session
+  // context here, so E5/E8 can never fail in the context of an ended session.
+  // Private: a fixed list of writes, no path, no callback.
+  const WRITES = {
+    record: (text) => recordFile.write(text),
+    tokenSave: ({ token, options }) => (options ? tokenVault.saveToken(token, options) : tokenVault.saveToken(token)),
+    tokenClear: () => tokenVault.clearToken(),
+    userSet: (user) => userRecord.set(user),
+    userDelete: () => userRecord.delete(),
+    flowsClear: () => flowRecord.clear(),
+    markSet: () => markRecord.set(),
+  };
+  const authorityPersist = sealPort('authorityPersist', (op, value) => WRITES[op](value));
+  const over = (store, writes) => Object.assign(Object.create(store), writes);
+  const recordStore = over(recordFile, { write: (text) => authorityPersist('record', text) });
+  const vault = over(tokenVault, {
+    saveToken: (token, options) => authorityPersist('tokenSave', { token, options }),
+    clearToken: () => authorityPersist('tokenClear'),
+  });
+  const userStore = over(userRecord, { set: (user) => authorityPersist('userSet', user), delete: () => authorityPersist('userDelete') });
+  const flows = over(flowRecord, { clear: () => authorityPersist('flowsClear') });
+  const migrationMark = over(markRecord, { set: () => authorityPersist('markSet') });
   // epoch -1: the record could not be read; nothing persisted can match it.
   let ram = load();
   // User of a session that lives in memory only (record not writable).
