@@ -203,6 +203,9 @@ first violation that kills them, on every system.
 
 ## Review round 12: the alias class, fail-closed
 
+Superseded by round 13 (below): the path, alias and descriptor logic of this
+section is gone from the gate and the oracle; kept here as the history.
+
 Same course. Round 12 closes the class «path and descriptor alias», not only
 the three cases of the r11 review (F8-F10). Rule in the ended gated context:
 a call passes only when it is PROVEN that it does not reach the recordings
@@ -250,3 +253,72 @@ Limits that remain: a path changed by another process between the check and
 the system call (no current caller; external race), file systems that fold
 the letter case on Linux, descriptors from outside the fs module (static
 rules as before).
+
+## Review round 13: context, not path (council desktop 4, R-S7)
+
+The class of path, alias and descriptor provenance cannot be closed (rounds
+10 to 12), and the normal recording path paid for it. The gate no longer asks
+where an effect lands, only in which context it runs. Fail-first:
+`docs/security/pr50-r13-failfirst.txt`.
+
+| Rule | Where |
+|---|---|
+| R-S7.1 effect: the gated `fs` list (sync, callback, promise), FileHandle writes, writing opens, `child_process` starts, `sendToRenderer`. No effect: reading, `close`, `fsync`, reading opens | `effect-gate.js` `NAME_WRITES`, `FD_WRITES`, `HANDLE_WRITES`, `isEffect` |
+| R-S7.2 in the context of an ended session every effect is refused, whatever its target, spelling, descriptor or origin | `refusalFor`, `refusalOf` |
+| R-S7.3 without a context and in a living session: the direct call, no extra system call, no entry per open | `gateSync`, `gateCallback`, `gatePromise` |
+| R-S7.4 the context is created only by `runInSession` (scope's `gated()`); `bindSession` for what fires from a foreign context | inventory below |
+| R-S7.5 way out: only `appLog`, `telemetry` (`app-ports.js`), `authorityPersist` (private, `session-authority.js`), each through `sealPort`: fixed destination, no path, no callback | static rules `auditContextExit`, `auditPorts` |
+| R-S7.6 an admitted Node operation runs to its end inside; `cp`, `cpSync` and non-binary data for `writeFile`/`appendFile` are refused in every session context, a living one too; process starts ignore `admitted` | `runsForeignCode`, `startRefusal` |
+| R-S7.7 an exclusive open remembers its exact string per session context; after the end that allows exactly one unlink of exactly that string. Any other rest stays until a session of its owner clears it | `rememberTemp`, `refusalFor` |
+| R-S7.8 running media processes are not killed; no new workers, `utilityProcess`, addons, `original-fs`, `process.dlopen`, bindings, raw `http`/`net`/`shell` in the port chain and `background/` | static rules, `chainModules`, `lockfileFindings` |
+
+«Every context» in R-S7.6 means every session context: without a context (the
+foreground) R-S7.3 holds and `cp` or an iterable run as ever. Today's callers of
+either: none in `src-electron`.
+
+### Listeners, queues and callbacks of the port chain (R-S7.4)
+
+| Site | Fires from | Effect in the handler | Decision |
+|---|---|---|---|
+| `withRecordingLock` queue | the previous link's end | the whole finalization | `bindSession(fn)`; a refusal rejects the link |
+| `ffmpegWithTimeout` `.on('error')` | fluent-ffmpeg | health record, telemetry, the gate's check | `bindSession(fn, reject)` |
+| `ffmpegWithTimeout` `.on('end')`, `start`, `stderr`, `progress` | fluent-ffmpeg | none (local state, resolve) | not bound: no effect |
+| `ffmpegWithTimeout` wall and silence timer | own timer of this context | kill of its own process, telemetry | same context |
+| `prepareRawSessionFile` `out`/`src` `.on('error')` | its streams | unlink of its temp | `bindSession(fail, reject)` |
+| `prepareRawSessionFile` `.on('finish')` | its stream | none (resolve) | not bound |
+| `encoded-opus-evidence` `proc.once('close')` | the child | the gate's check | `bindSession(fn, reject)` |
+| `encoded-opus-evidence` `proc` `data`, `error` | the child | none (parse, reject) | not bound |
+| `native-source-finalization` `.on('stderr')` | fluent-ffmpeg | none (parse) | not bound |
+| `probeDurationSeconds`, `getAudioMetadata` callbacks | fluent-ffmpeg | none (resolve) | not bound |
+
+Settings, updates and crash markers are no part of the port chain (static rule on
+its closure). No real flow of today loses its context where `bindSession` could
+not reach it.
+
+### Oracle and probes
+
+The oracle (`support/globalSinks.js`) has no path logic any more: every effect
+counts, whatever its target; the recordings folder only marks suspension points.
+After the change any effect is a violation, in the old context or without one
+(P3). What code of the caller does inside `cp` or a non-binary write is no part of
+that call (no `inside` around them). The removal an exclusive open earned is on
+the oracle's own books, by the exact string. The snapshot covers an external
+canary folder too. An interval that outlives the session's end is an app service
+started in its context (P4).
+
+Class probe (`tests/unit/effectGate.contract.test.js`): argument form {String,
+Buffer, URL, FD, Handle} x effect x API x target {recording, external}: in the
+ended context all refused, nothing counted, nothing changed; the same matrix alive
+and without a context: all through. `tests/unit/sessionSweep.data.main.test.js`
+(P5): logout, login B and A at every point, then a restart: sources byte-identical,
+playable, no false receipt, one resumption, no failed attempt.
+
+Limits that remain (documented, not blocking): a mechanism ruled out statically
+without a caller; an external process; an effect already handed to the system.
+Path alias, hard link and descriptor provenance are no class of findings any more.
+
+Mobile (R-S7.9) has no gate, no context and no fs patch. The TUS timeout fallback
+(`src/services/upload.js`, `uploadFileMobile`) has no caller: not reproducible
+today, pinned by a static rule.
+
+Measurement: `.github/workflows/gate-measure.yml`, `scripts/perf/`.
