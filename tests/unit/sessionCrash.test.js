@@ -161,6 +161,13 @@ async function desktopLifeWithRun(plan) {
     life.ssoState = flow.state;
     await app.handleCallback(`suissenotes://auth/callback?state=${flow.state}&token=${B1}&user=${userB64({ id: 'b' })}`);
   });
+  // Round 9 (R-S3): a retry is counted once the attempt has an outcome in
+  // its session - an offline attempt of b writes the queue (a crash point).
+  await step('upload-offline', async () => {
+    const running = deferred();
+    running.resolve({ success: false, canRetry: true, error: 'offline' });
+    await app.processPendingUploadsWith(running);
+  });
   await step('upload-logout', async () => {
     const running = deferred();
     const uploading = app.processPendingUploadsWith(running);
@@ -186,6 +193,7 @@ const DESKTOP_ALLOWED = {
   refresh: [null, `a:${A1}`, `a:${A2}`],
   logout: [null, `a:${A2}`],
   sso: [null, `b:${B1}`],
+  'upload-offline': [null, `b:${B1}`],
   'upload-logout': [null, `b:${B1}`]
 };
 
@@ -516,7 +524,7 @@ describe('R5 / E8: a single failing storage operation anywhere (the app lives on
     for (const { op, n } of ops) {
       const plan = { op, n, when: 'fault' };
       const life = await desktopLifeWithRun(plan);
-      expect(life.boundaries.length, `fault ${op}#${n}`).toBe(6);
+      expect(life.boundaries.length, `fault ${op}#${n}`).toBe(7);
       for (const b of life.boundaries) {
         const restart = await desktopRestart(b.state, b.ssoState);
         checkDesktop({ plan, phase: b.phase, snapshot: b.state, restart, ssoState: b.ssoState });
