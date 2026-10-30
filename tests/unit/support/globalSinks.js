@@ -50,14 +50,56 @@ function install() {
     if (value instanceof URL) return value.pathname;
     return null;
   };
+  const under = (root, target) => {
+    const rel = path.relative(root, target);
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  };
   const inRoot = (value) => {
     const rec = state.rec;
     const p = asPath(value);
     if (!rec || !p) return false;
-    const rel = path.relative(rec.root, path.resolve(p));
-    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    return under(rec.root, path.resolve(p));
   };
-  const writeFlags = (flags) => /[wa+]/.test(String(flags ?? 'r'));
+  // Round 11 (F7): the oracle's own reading of open flags - not the gate's
+  // function, so a blind spot of one cannot hide in the other. Flag strings
+  // by Node's table (only r, rs, sr read), numbers by their access mode and
+  // the bits that change a file at the open; anything else counts.
+  const READING = new Set(['r', 'rs', 'sr']);
+  const { O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND } = fs.constants;
+  const changesFile = (flags) => {
+    if (flags === undefined || flags === null || typeof flags === 'function') return false;
+    if (typeof flags === 'string') return !READING.has(flags);
+    if (typeof flags !== 'number') return true;
+    if ((flags & (O_WRONLY | O_RDWR)) !== O_RDONLY) return true;
+    return [O_CREAT, O_TRUNC, O_APPEND].some((bit) => (flags & bit) === bit);
+  };
+  // An alias of the root (symlink, junction): the real path of the nearest
+  // existing ancestor, the rest appended (`own`: a call on the name itself,
+  // unlink of a link). Only for effects, so reads stay lexical (cheap).
+  const ON_NAME = new Set(['unlink', 'rm', 'rmdir', 'rename', 'symlink', 'link', 'lutimes', 'lchown', 'mkdir', 'mkdtemp']);
+  function realOf(p, own) {
+    let dir = path.resolve(p);
+    const tail = [];
+    if (own) { tail.unshift(path.basename(dir)); dir = path.dirname(dir); }
+    for (let i = 0; i < 64; i++) {
+      try { return path.join(original.fs.realpathSync(dir), ...tail); } catch { /* missing or dangling */ }
+      try { dir = path.resolve(path.dirname(dir), original.fs.readlinkSync(dir)); continue; } catch { /* no link */ }
+      if (path.dirname(dir) === dir) break;
+      tail.unshift(path.basename(dir));
+      dir = path.dirname(dir);
+    }
+    return null;
+  }
+  /** The target of an effect inside the root through an alias (as a path under the root), or null. */
+  function viaAlias(name, value) {
+    const rec = state.rec;
+    const p = asPath(value);
+    if (!rec || !p) return null;
+    const real = realOf(p, ON_NAME.has(name));
+    const root = realOf(rec.root, false);
+    if (!real || !root || !under(root, real)) return null;
+    return path.join(rec.root, path.relative(root, real));
+  }
   const effect = (kind, target) => { if (state.rec) state.rec.effect(kind, String(asPath(target) ?? target)); };
 
   // name -> [effect kind, index of the target path] (callback and promise API alike)
@@ -73,6 +115,13 @@ function install() {
 
   /** Is the call about the bound root? Effect kind (or null) and target. */
   function classify(name, args) {
+    const c = classifyByName(name, args);
+    if (c.ours || !c.kind) return c;
+    // Not under the root by its name: an effect through an alias of it?
+    const alias = viaAlias(name, c.target) || (name === 'rename' || name === 'link' ? viaAlias(name, args[0]) : null);
+    return alias ? { ...c, target: alias, ours: true } : c;
+  }
+  function classifyByName(name, args) {
     if (name in PATH_WRITES) {
       const [kind, index] = PATH_WRITES[name];
       const target = args[index];
@@ -81,7 +130,9 @@ function install() {
       return { kind, target, ours: inRoot(target) || (index === 1 && inRoot(args[0])) };
     }
     if (name in FD_WRITES) return { kind: FD_WRITES[name], target: fdPaths.get(args[0]), ours: fdPaths.has(args[0]) && inRoot(fdPaths.get(args[0])) };
-    if (name === 'open') return { kind: writeFlags(args[1]) ? 'open' : null, target: args[0], ours: inRoot(args[0]) };
+    if (name === 'open') return { kind: changesFile(args[1]) ? 'open' : null, target: args[0], ours: inRoot(args[0]) };
+    // readFile with a writing flag opens for writing (w+ empties the file).
+    if (name === 'readFile' && typeof args[1] === 'object' && args[1] !== null && changesFile(args[1].flag) && asPath(args[0])) return { kind: 'open', target: args[0], ours: inRoot(args[0]) };
     if (['close', 'fsync', 'fdatasync', 'fstat', 'read', 'readv'].includes(name)) return { kind: null, target: fdPaths.get(args[0]), ours: fdPaths.has(args[0]) && inRoot(fdPaths.get(args[0])) };
     return { kind: null, target: args[0], ours: inRoot(args[0]) };
   }
@@ -91,7 +142,14 @@ function install() {
     const orig = fs[name];
     original.fs[name] = orig;
     fs[name] = function (...args) {
-      if (!state.rec || inside.getStore()) return orig.apply(this, args);
+      // Descriptors are remembered unbound too: one opened before a run and
+      // written during it is a file of the root (round 11).
+      if (!state.rec || inside.getStore()) {
+        const result = orig.apply(this, args);
+        if (base === 'open' && !inside.getStore()) fdPaths.set(result, asPath(args[0]));
+        if (base === 'close') fdPaths.delete(args[0]);
+        return result;
+      }
       const c = classify(base, args);
       if (c.ours && c.kind) effect(c.kind, c.target);
       if (c.ours && base === 'rename' && state.rec.busy()) throw Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' });
@@ -108,6 +166,16 @@ function install() {
     fs[name] = function (...args) {
       const rec = state.rec;
       const cb = args[args.length - 1];
+      if (typeof cb === 'function' && !inside.getStore() && (name === 'open' || name === 'close') && !rec) {
+        const pathArg = asPath(args[0]);
+        const fd = args[0];
+        args[args.length - 1] = function (...res) {
+          if (name === 'open' && !res[0]) fdPaths.set(res[1], pathArg);
+          if (name === 'close') fdPaths.delete(fd);
+          return cb.apply(this, res);
+        };
+        return orig.apply(this, args);
+      }
       if (!rec || typeof cb !== 'function' || inside.getStore()) return orig.apply(this, args);
       const c = classify(name, args);
       if (!c.ours) return orig.apply(this, args);
@@ -144,6 +212,13 @@ function install() {
     original.promises[name] = orig;
     fs.promises[name] = function (...args) {
       const rec = state.rec;
+      if (!rec && name === 'open' && !inside.getStore()) {
+        return orig.apply(this, args).then((handle) => {
+          if (!handleProtoWrapped) { handleProtoWrapped = true; wrapHandleProto(Object.getPrototypeOf(handle)); }
+          handlePaths.set(handle, asPath(args[0]));
+          return handle;
+        });
+      }
       if (!rec || inside.getStore()) return orig.apply(this, args);
       const c = classify(name, args);
       if (!c.ours) return orig.apply(this, args);
