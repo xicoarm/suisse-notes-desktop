@@ -9,6 +9,7 @@
 // ones, loaded with a require relative to src-electron/.
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -97,6 +98,24 @@ export function compileMainChain({ transform = (s) => s, extra = [] } = {}) {
     `return { ports: (${source.slice(ports.start, ports.end)}), send: (${source.slice(send.start, send.end)}), ${names.join(', ')} };`,
   ].join('\n');
   return { code, names, provided: [...provided] };
+}
+
+/**
+ * Runs only main's own top-level statements that install its effect gate,
+ * as main does before it loads any other module (fluent-ffmpeg captures
+ * `spawn` when it is loaded). The test rig calls this before it loads
+ * fluent-ffmpeg; each rig's chain then installs again with its own folder.
+ * @param {object} [opts]
+ * @param {(source: string) => string} [opts.transform]
+ * @returns {number} the number of install statements of main
+ */
+export function installMainGate({ transform = (s) => s } = {}) {
+  const source = transform(fs.readFileSync(MAIN_FILE, 'utf8').replace(/\r\n/g, '\n'));
+  const installs = parse(source).body.filter((n) => n.type === 'ExpressionStatement' && /\binstallEffectGate\s*\(/.test(source.slice(n.start, n.end)));
+  const mainRequire = createRequire(MAIN_FILE);
+  // eslint-disable-next-line no-new-func
+  new Function('require', 'getRecordingsPath', `'use strict';\n${installs.map((n) => source.slice(n.start, n.end)).join('\n')}`)(mainRequire, () => path.join(os.tmpdir(), 'no-recordings-yet'));
+  return installs.length;
 }
 
 /**

@@ -2,9 +2,10 @@ const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu,
 const path = require('path');
 const fs = require('fs');
 // Effect gate (security review 10/2026, round 10): installed before any other
-// module is loaded. Every write into the recordings folder by background work
-// of a session that has ended is refused at the fs module boundary, right
-// before the system call (effect-gate.js).
+// module is loaded. Every write into the recordings folder and every child
+// process start by background work of a session that has ended is refused at
+// the fs / child_process module boundary, right before the system call
+// (effect-gate.js).
 require('./effect-gate').installEffectGate({ roots: () => [getRecordingsPath()] });
 const { writeFileAtomic, writeFileAtomicSync, publishFile, concatenateFiles, archiveChunkBatch, listChunkBatches, syncDirectorySync, assertPublishAllowed } = require('./durable-files');
 const { createRecordingPersistence, readFinalizedRecording, listSessions } = require('./recording-persistence');
@@ -2700,6 +2701,9 @@ function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operati
       })
       .on('error', (err) => {
         cleanup();
+        // A start refused by the effect gate (session ended): that error, no
+        // health change, no report (round 10, F3).
+        try { assertPublishAllowed(); } catch (gateError) { reject(gateError); return; }
         // Detect spawn failures and update the unified health record
         if (isSpawnError(err)) {
           markBinaryUnavailable('ffmpeg', err, `ffmpegWithTimeout:${operationName}`);

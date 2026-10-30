@@ -11,9 +11,9 @@
  * ffprobe after the first - and each review found the next one. So there is
  * ONE checked sink now, at the module boundary: main installs this gate
  * before any other module is loaded, and every write-class call of `fs`
- * (sync, callback and promise API, FileHandle writes) checks the publish
- * gate of its asynchronous context synchronously, right before the system
- * call.
+ * (sync, callback and promise API, FileHandle writes) and every
+ * `child_process` start checks the publish gate of its asynchronous context
+ * synchronously, right before the system call.
  *
  * - The publish gate is the context of background work of one session
  *   (session-scope.js runs ports and durable writes in `publishGate.run`).
@@ -21,7 +21,8 @@
  *   passes unchanged.
  * - Inside it, after the session ended, the call is refused with the
  *   scope's SessionEndedError: sync calls throw, callback calls get it as
- *   their error, promise calls reject.
+ *   their error, promise calls reject, a child process is never started (an
+ *   already-dead child that failed is returned instead).
  * - Files: only paths inside `roots()` (the recordings folder) and file
  *   descriptors/handles opened on them. Logs, telemetry, the session record
  *   and the stores are not files of the recordings folder.
@@ -29,9 +30,15 @@
  *   (`<name>.<uuid>.tmp`, durable-files). Calls Node makes inside an admitted
  *   call (rm walking a tree) belong to that call: it was handed to the system
  *   before the change.
+ * - Child processes: every start in a gated context, whatever the binary
+ *   (fluent-ffmpeg starts its processes from callbacks of its own). A
+ *   process that already runs is not killed (council 3: media work only
+ *   writes temporary files); its result is published only through the gate.
  */
 
 const { AsyncLocalStorage } = require('async_hooks');
+const { EventEmitter } = require('events');
+const { PassThrough } = require('stream');
 const path = require('path');
 
 const publishGate = new AsyncLocalStorage();
@@ -65,12 +72,13 @@ const writeFlags = (flags) => /[wa+]/.test(String(flags ?? 'r'));
 const INSTALLED = Symbol.for('suisse.effectGate');
 
 /**
- * Installs the gate on the `fs` module (once per process).
+ * Installs the gate on the `fs` and `child_process` modules (once per process).
  * @param {object} opts
  * @param {() => string[]} opts.roots - folders whose files are effects (the recordings folder)
  * @param {object} [opts.fs]
+ * @param {object} [opts.childProcess]
  */
-function installEffectGate({ roots, fs = require('fs') }) {
+function installEffectGate({ roots, fs = require('fs'), childProcess = require('child_process') }) {
   // Installed once per process; a later call only replaces the folders (main
   // installs once; each test rig loads main's chain again with its own folder).
   if (fs[INSTALLED]) { fs[INSTALLED].roots = roots; return false; }
@@ -183,6 +191,50 @@ function installEffectGate({ roots, fs = require('fs') }) {
   for (const name of CALLBACK) gateCallback(name);
   for (const name of ['open', ...Object.keys(PATH_WRITES)]) gatePromise(name);
 
+  // --- child processes: no start after the session of this context ended ---
+  function refusedChild(error, callback) {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.pid = undefined;
+    child.exitCode = null;
+    child.killed = false;
+    child.kill = () => false;
+    // It ends as a process that failed (exit code 1, the refusal on stderr),
+    // not with an 'error' event: fluent-ffmpeg cannot take an 'error' event
+    // of its child. Callback APIs get the refusal itself; the callers of the
+    // recovery chain check the gate when a child fails (ffmpegWithTimeout,
+    // encoded-opus-evidence), so the result is the scope's SESSION_ENDED.
+    child.refusal = error;
+    process.nextTick(() => {
+      if (callback) callback(error, '', '');
+      child.stderr.end(`${error.message}\n`);
+      child.stdout.end();
+      child.exitCode = 1;
+      child.emit('exit', 1, null);
+      child.emit('close', 1, null);
+    });
+    return child;
+  }
+  for (const name of ['spawn', 'execFile', 'exec', 'fork']) {
+    const original = childProcess[name];
+    if (typeof original !== 'function') continue;
+    childProcess[name] = function (...args) {
+      const error = refusal();
+      if (error) return refusedChild(error, typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null);
+      return original.apply(this, args);
+    };
+  }
+  for (const name of ['spawnSync', 'execFileSync', 'execSync']) {
+    const original = childProcess[name];
+    if (typeof original !== 'function') continue;
+    childProcess[name] = function (...args) {
+      const error = refusal();
+      if (error) throw error;
+      return original.apply(this, args);
+    };
+  }
   return true;
 }
 

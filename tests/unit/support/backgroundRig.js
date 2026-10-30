@@ -23,9 +23,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { createDisk, boot, jwt } from './desktopSession.js';
-import { compileMainChain, loadMainChain } from './mainSlice.js';
+import { compileMainChain, loadMainChain, installMainGate } from './mainSlice.js';
 
 const require = createRequire(import.meta.url);
+// Main installs its effect gate before it loads any other module; so does
+// the rig, with main's own statement (fluent-ffmpeg captures `spawn` at load).
+installMainGate();
 const axios = require('axios');
 const FormData = require('form-data');
 const ffmpeg = require('fluent-ffmpeg');
