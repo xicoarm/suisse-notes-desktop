@@ -22,9 +22,10 @@ const PATH_SPAWN = "    require('child_process').execFile(resolveBundledBinaryPa
 const PATH_SPAWN_BYPASS = "    globalThis.__sweepPreGate.cp.execFile(resolveBundledBinaryPaths().ffprobe, ['-version'], () => {});";
 // Round 11 (F6/F7): numeric open flags. Through the sink: a new file opened
 // with O_WRONLY|O_CREAT|O_TRUNC and written. Past it: O_TRUNC empties the
-// existing metadata.json at the open; O_CREAT creates a file without a write.
+// existing metadata.json at the open (with O_CREAT: Windows refuses O_TRUNC
+// without it, EINVAL); O_CREAT creates a file without a write.
 const PATH_OPEN = "    { const fd = fs.openSync(path.join(recordPath, 'merge-open.txt'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC); fs.writeSync(fd, 'merged'); fs.closeSync(fd); }";
-const PATH_OPEN_TRUNC_BYPASS = "    { const pre = globalThis.__sweepPreGate.fs; pre.closeSync(pre.openSync(path.join(recordPath, 'metadata.json'), fs.constants.O_WRONLY | fs.constants.O_TRUNC)); }";
+const PATH_OPEN_TRUNC_BYPASS = "    { const pre = globalThis.__sweepPreGate.fs; pre.closeSync(pre.openSync(path.join(recordPath, 'metadata.json'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC)); }";
 const PATH_OPEN_CREAT_BYPASS = "    { const pre = globalThis.__sweepPreGate.fs; pre.closeSync(pre.openSync(path.join(recordPath, 'merge-created.txt'), fs.constants.O_WRONLY | fs.constants.O_CREAT)); }";
 const PATH_SEND = "    sendToRenderer('system:capture-warning', { kind: 'merged', recordId });";
 const PATH_SEND_BYPASS = "    mainWindow.webContents.send('system:capture-warning', { kind: 'merged', recordId });";

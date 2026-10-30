@@ -11,7 +11,7 @@ const all = (max) => Array.from({ length: max }, (_, i) => i + 1);
 
 describe('sweep points', () => {
   it('full without a sample', () => {
-    expect(sweepPoints(81, 'recovery', {})).toEqual(all(81));
+    expect(sweepPoints(81, 'recovery', { sample: '' })).toEqual(all(81));
     expect(sweepPoints(81, 'recovery', { sample: '1' })).toEqual(all(81));
   });
 

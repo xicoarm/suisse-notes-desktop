@@ -40,7 +40,9 @@ const bound = (fn) => { sinks.bind(rec); try { return fn(); } finally { sinks.un
 describe('F7: the oracle counts numeric writing opens', () => {
   for (const [name, flags] of Object.entries({ 'O_WRONLY|O_TRUNC': O_WRONLY | O_TRUNC, O_RDWR, 'O_WRONLY|O_APPEND': O_WRONLY | O_APPEND, 'O_RDONLY|O_TRUNC': O_RDONLY | O_TRUNC })) {
     it(`openSync(metadata.json, ${name}) is an effect`, () => {
-      bound(() => fs.closeSync(fs.openSync(meta, flags)));
+      // Counted before the system call; Windows refuses O_TRUNC without
+      // O_CREAT (EINVAL), the attempt is still an effect.
+      bound(() => { try { fs.closeSync(fs.openSync(meta, flags)); } catch (error) { if (error.code !== 'EINVAL') throw error; } });
       expect(counted()).toContain('open:c1/metadata.json');
     });
   }
