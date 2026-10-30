@@ -1,0 +1,29 @@
+PR #50, review round 15: fail-first at 5cb135d (no product code changed in this round)
+The same tests with the measure of round 14 in the place of the new probe, restored only for this run.
+Run: 2026-10-30 UTC
+
+== tests/unit/nativeTimestamps.test.js, group «the probe of the short capture», with the event measure as the judge
+   Tests  8 failed | 8 passed (16); then with the new probe: 16 of 16 green, tests/unit/nativeRecorderEvidence.test.js 10 of 10.
+Red under the old judge and what it means:
+   control, start event 1.2 s late, continuous audio      false alarm of the old measure; new: green, residual under 0.1 s
+   audio missing at the start, 0.8 s                       old: nothing; new: red, residual about -0.8 s
+   signal jump in the middle, timestamps agree, 0.8 s      old: nothing; new: red by the frames alone
+   signal jump at the start, timestamps agree, 0.8 s       old: nothing; new: red by the frames alone
+   audio lost under a timestamp hole, 0.8 s                old: nothing on the clock; new: red by the frames
+   run without start()/stop() calls                        old: judged anyway; new: invalid, no fallback to the events
+   timestamp jump, middle and start, 0.8 s, no wall time   red under both; the old run fails here only on the new wording
+Green controls of the new probe: continuous audio, and a pause of the fake source (timestamp hole, consecutive content).
+Threshold 0.5 s unchanged. The former measure stays in the evidence as nativeClockFromEvents and judges nothing.
+
+== The two old hits, from the original evidence (head c21d4d7, macOS arm64, s11-baseline; these artifacts hold JSON, no media)
+They hold no stop call, so the stop event stands in; stop event and stop call are not the same moment.
+                       from start event   start() to event   from start() call   frames     packets
+   staffel 1, run 5    +1.192 s           1232 ms            -0.040 s            2 to 96    47.34 s
+   staffel 2, run 3    +0.738 s           803 ms             -0.065 s            0 to 94    46.92 s
+Both failed only on the clock. Packets against the frames (coarse without the frame edges): within half a frame of each end.
+All 300 short captures of those 60 runs, from the start() call to the stop event: -0.093 s to +0.006 s; old measure up to 1.192 s.
+
+== Limits
+The mutants are real encoded files judged by the real probe, not faults injected into a running capture; the captures in CI prove the wiring on green runs only.
+A signal jump inside the very first frame, with agreeing clocks, only moves the first identity and is not seen by the frames.
+Other harnesses (endurance, device, native source) keep their own clock, where a late source is judged separately.
