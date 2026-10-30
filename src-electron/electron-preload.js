@@ -57,13 +57,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('auth:verifyTwoFactor', String(tempToken ?? ''), String(code ?? ''), isBackupCode === true),
     resendTwoFactorEmail: (tempToken) =>
       ipcRenderer.invoke('auth:resendTwoFactorEmail', String(tempToken ?? '')),
-    saveToken: (token) => ipcRenderer.invoke('auth:saveToken', token),
+    // Token and user are written only by main's session authority (with the
+    // ticket of the sign-in that produced them): no save API here.
     getToken: () => ipcRenderer.invoke('auth:getToken'),
-    clearToken: () => ipcRenderer.invoke('auth:clearToken'),
-    saveUserInfo: (userInfo) => ipcRenderer.invoke('auth:saveUserInfo', userInfo),
     getUserInfo: () => ipcRenderer.invoke('auth:getUserInfo'),
+    restoreSession: () => ipcRenderer.invoke('auth:restoreSession'),
+    currentSession: () => ipcRenderer.invoke('auth:currentSession'),
+    signOut: () => ipcRenderer.invoke('auth:signOut'),
     refreshToken: () => ipcRenderer.invoke('auth:refreshToken'),
-    createWebSession: () => ipcRenderer.invoke('auth:createWebSession'),
+    // Opens a web-app page signed in as this user; main keeps the hand-off.
+    openWebWithSession: (pagePath) => ipcRenderer.invoke('auth:openWebWithSession', String(pagePath ?? '')),
     // SSO via system browser + suissenotes:// custom protocol
     loginWithMicrosoft: () => ipcRenderer.invoke('auth:loginWithMicrosoft'),
     loginWithGoogle: () => ipcRenderer.invoke('auth:loginWithGoogle'),
@@ -202,8 +205,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Upload
   upload: {
     start: (params) => ipcRenderer.invoke('upload:start', params),
-    pause: (recordId) => ipcRenderer.invoke('upload:pause', recordId),
-    resume: (recordId) => ipcRenderer.invoke('upload:resume', recordId),
     cancel: (recordId) => ipcRenderer.invoke('upload:cancel', recordId),
     // Upload queue methods (for offline persistence)
     getPendingQueue: () => ipcRenderer.invoke('upload:getPendingQueue'),

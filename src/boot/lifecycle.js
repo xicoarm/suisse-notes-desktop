@@ -9,6 +9,7 @@ import { sentryAppBackground, sentryAppForeground, sentryNetworkChange, sentryLo
 import { addBreadcrumb, captureMessage } from './sentry';
 import { markSessionState } from '../services/sessionHealth';
 import { redactUrl } from '../utils/redact';
+import { parseSSOCallbackUrl } from '../utils/ssoCallback';
 
 // Module-level state for lifecycle management
 let lifecycleInitialized = false;
@@ -31,52 +32,6 @@ let onNetworkOffline = null;
 let onLowBattery = null;
 let onCriticalBattery = null;
 
-/**
- * Parse a deep-link URL into an SSO callback payload, or null if it isn't one.
- * Accepted shapes:
- *   suissenotes://auth/callback?token=<jwt>&user=<base64url-json>     (Phase 1, custom scheme)
- *   suissenotes://auth/callback?error=<message>
- *   https://app.suisse-meets.ch/sso/handoff?...                       (Phase 2, Universal Link / App Link — same params)
- * Returns: { token, user } | { error } | null
- */
-function parseSSOCallbackUrl(rawUrl) {
-  if (!rawUrl || typeof rawUrl !== 'string') return null;
-  let parsed;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    return null;
-  }
-
-  const isCustomScheme = parsed.protocol === 'suissenotes:'
-    && parsed.host === 'auth'
-    && parsed.pathname.replace(/\/$/, '') === '/callback';
-  const isUniversalLink = parsed.protocol === 'https:'
-    && (parsed.host === 'app.suisse-meets.ch' || parsed.host === 'app.suisse-notes.ch')
-    && parsed.pathname.startsWith('/sso/');
-  if (!isCustomScheme && !isUniversalLink) return null;
-
-  // `code` (contract 10/2026) is what the app translates; `error` stays an
-  // English sentence for older app versions.
-  const error = parsed.searchParams.get('error');
-  const code = parsed.searchParams.get('code');
-  if (code) return { error: error || code, code };
-  if (error) return { error };
-
-  const token = parsed.searchParams.get('token');
-  const userB64 = parsed.searchParams.get('user');
-  if (!token || !userB64) return { error: 'invalid_callback' };
-
-  try {
-    // base64url -> JSON. Convert URL-safe chars and pad before atob.
-    const std = userB64.replace(/-/g, '+').replace(/_/g, '/');
-    const padded = std + '='.repeat((4 - (std.length % 4)) % 4);
-    const user = JSON.parse(atob(padded));
-    return { token, user };
-  } catch {
-    return { error: 'invalid_callback' };
-  }
-}
 
 /**
  * Run one initialization step in isolation. A failing step must never abort
@@ -228,7 +183,7 @@ export const initializeLifecycle = async () => {
       console.log('Lifecycle: App opened via URL', safeUrl);
       addBreadcrumb({ category: 'sso', message: `appUrlOpen fired url=${safeUrl.slice(0, 200)}`, level: 'info' });
       const ssoPayload = parseSSOCallbackUrl(data.url);
-      const tag = ssoPayload ? (ssoPayload.error ? 'error:' + ssoPayload.error : 'success+token') : 'null';
+      const tag = ssoPayload ? (ssoPayload.error ? 'error:' + ssoPayload.error : (ssoPayload.authCode ? 'success+code' : 'success+token')) : 'null';
       addBreadcrumb({ category: 'sso', message: `parseSSOCallbackUrl result=${tag}`, level: 'info' });
       if (ssoPayload) {
         // Hand off to the LoginPage (or wherever it's listened to) via a

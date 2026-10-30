@@ -123,27 +123,11 @@ export async function recoverQueueFromPreferences() {
  * With validation and recovery from _tmp key on corruption (V12)
  * @returns {Array<{recordId: string, filePath: string, metadata: Object, retries: number, addedAt: number}>}
  */
-// Drop items older than QUEUE_ITEM_MAX_AGE_MS so an unprocessed queue
-// can't grow unbounded. Returns the cleaned array AND, if anything was
-// dropped, persists the cleaned version back to storage so the GC is a
-// one-time pay on each load rather than recomputing every getQueue().
-function _gcStaleItems(items, persistBackKey = null) {
-  if (!Array.isArray(items) || items.length === 0) return items || [];
-  const now = Date.now();
-  const fresh = items.filter(item => {
-    if (!item || typeof item.addedAt !== 'number') return true; // keep if no timestamp
-    return (now - item.addedAt) <= QUEUE_ITEM_MAX_AGE_MS;
-  });
-  const dropped = items.length - fresh.length;
-  if (dropped > 0) {
-    console.warn(`Upload queue GC: dropped ${dropped} item(s) older than ${QUEUE_ITEM_MAX_AGE_MS / (24 * 3600 * 1000)} days`);
-    if (persistBackKey) {
-      try { localStorage.setItem(persistBackKey, JSON.stringify(fresh)); } catch { /* best-effort */ }
-    }
-  }
-  return fresh;
-}
-
+// No age cleanup on read (U4): reading the queue has no account context, so
+// it cannot tell a held item (another or an unknown owner, waiting for its
+// login or an explicit claim) from an abandoned one. Expired items of the
+// signed-in owner are removed by processMobileUploadQueue, which reports
+// them to the history.
 export function getMobileUploadQueue() {
   let mainCorrupt = false;
   try {
@@ -155,7 +139,7 @@ export function getMobileUploadQueue() {
         const valid = parsed.filter(item =>
           item && typeof item.recordId === 'string' && typeof item.filePath === 'string'
         );
-        return _gcStaleItems(valid, MOBILE_UPLOAD_QUEUE_KEY);
+        return valid;
       }
     }
   } catch {
@@ -173,14 +157,10 @@ export function getMobileUploadQueue() {
         const valid = parsed.filter(item =>
           item && typeof item.recordId === 'string' && typeof item.filePath === 'string'
         );
-        const fresh = _gcStaleItems(valid, MOBILE_UPLOAD_QUEUE_KEY);
-        // Restore main key from _tmp (already done by _gcStaleItems if it
-        // dropped anything; otherwise persist the recovered set explicitly).
-        if (fresh.length === valid.length) {
-          localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, JSON.stringify(fresh));
-        }
+        // Restore the main key from _tmp.
+        localStorage.setItem(MOBILE_UPLOAD_QUEUE_KEY, JSON.stringify(valid));
         console.log('Upload queue recovered from _tmp key');
-        return fresh;
+        return valid;
       }
     }
   } catch {
@@ -198,18 +178,173 @@ export function getMobileUploadQueue() {
   return [];
 }
 
+// --- Queue ownership (security) ---
+// Every queued recording belongs to the account that recorded it. The queue
+// uploads an item only while that same account is signed in; otherwise the
+// item is held (never uploaded under another account).
+// Items queued by app versions before owners were recorded (no `ownerUserId`
+// field) get their owner from the recording metadata: the per-account
+// recording history on this device (`recordings_history_cache_<userId>`).
+// Found in exactly one account's history -> that account; otherwise the owner
+// stays unknown (null) and the item is held until the signed-in user claims
+// it explicitly (HistoryPage). Never assigned to whoever happens to be signed
+// in.
+const HISTORY_CACHE_PREFIX = 'recordings_history_cache_';
+
+function _currentUserId(authStore) {
+  const id = authStore?.user?.id;
+  return id === undefined || id === null || id === '' ? null : String(id);
+}
+
+function _normOwner(id) {
+  return id === undefined || id === null || id === '' ? null : String(id);
+}
+
+/** userId claim of a session JWT (unverified; only to label the queue item). */
+export function tokenUserId(token) {
+  try {
+    if (typeof token !== 'string') return null;
+    const part = token.split('.')[1];
+    if (!part) return null;
+    const json = atob(part.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(part.length / 4) * 4, '='));
+    const claims = JSON.parse(json);
+    return _normOwner(claims && (claims.userId ?? claims.sub ?? claims.id));
+  } catch {
+    return null;
+  }
+}
+
+/** Owner of a recording per the per-account history on this device, or null. */
+export function ownerFromRecordingHistory(recordId) {
+  const owners = new Set();
+  try {
+    for (let k = 0; k < localStorage.length; k++) {
+      const key = localStorage.key(k);
+      if (!key || !key.startsWith(HISTORY_CACHE_PREFIX)) continue;
+      const uid = key.slice(HISTORY_CACHE_PREFIX.length);
+      if (!uid || uid === 'null' || uid === 'undefined') continue;
+      let list;
+      try { list = JSON.parse(localStorage.getItem(key) || '[]'); } catch { continue; }
+      if (Array.isArray(list) && list.some((r) => r && (r.id === recordId || r.recordId === recordId))) owners.add(uid);
+    }
+  } catch { /* no storage */ }
+  return owners.size === 1 ? [...owners][0] : null;
+}
+
+/**
+ * Who may upload this item now?
+ * @returns {'owner'|'other_account'|'owner_unknown'|'signed_out'}
+ */
+export function queueItemOwnership(item, currentUserId) {
+  if (!currentUserId) return 'signed_out';
+  if (!item || item.ownerUserId === undefined || item.ownerUserId === null || item.ownerUserId === '') return 'owner_unknown';
+  return String(item.ownerUserId) === String(currentUserId) ? 'owner' : 'other_account';
+}
+
+/**
+ * Items from app versions without owners: owner from the recording history,
+ * else explicitly unknown (null = held until claimed). Idempotent.
+ */
+function _resolveLegacyQueueOwners() {
+  try {
+    const queue = getMobileUploadQueue();
+    let changed = false;
+    for (const item of queue) {
+      if (item.ownerUserId !== undefined) continue;
+      item.ownerUserId = ownerFromRecordingHistory(item.recordId);
+      changed = true;
+    }
+    if (changed) _safeWriteQueue(queue);
+  } catch (e) {
+    console.warn('Upload queue owner resolution failed:', e?.message || e);
+  }
+}
+
+/**
+ * May this upload run with this token? Used by uploadWithVerification for
+ * every caller.
+ * - The owner is the queued item's owner (mobile), else the caller's explicit
+ *   owner; both must agree.
+ * - A queued item of unknown owner is held until the user claims it
+ *   (claimUnownedMobileUploads); nothing else assigns an owner.
+ * - With a known owner, the token must belong to that account (an
+ *   undecodable token cannot prove it and is refused).
+ * @returns {{ ok: true, owner: string|null } | { ok: false, reason: 'other_account'|'owner_unknown' }}
+ */
+export function uploadOwnershipCheck({ recordId, filePath, authToken, ownerUserId = null }) {
+  let owner = _normOwner(ownerUserId);
+  if (isCapacitor() && filePath && recordId) {
+    let queued = getMobileUploadQueue().find(item => item.recordId === recordId);
+    if (queued && queued.ownerUserId === undefined) {
+      _resolveLegacyQueueOwners();
+      queued = getMobileUploadQueue().find(item => item.recordId === recordId);
+    }
+    if (queued) {
+      const queuedOwner = _normOwner(queued.ownerUserId);
+      if (queuedOwner) {
+        if (owner && owner !== queuedOwner) return { ok: false, reason: 'other_account' };
+        owner = queuedOwner;
+      } else {
+        return { ok: false, reason: 'owner_unknown' };
+      }
+    }
+  }
+  if (owner && tokenUserId(authToken) !== owner) return { ok: false, reason: 'other_account' };
+  return { ok: true, owner };
+}
+
+/**
+ * Held items for the UI: recordings waiting for another account, and items
+ * whose owner is unknown (the user may claim those explicitly).
+ */
+export function getHeldMobileUploads(currentUserId) {
+  const held = { otherAccount: [], ownerUnknown: [] };
+  const uid = currentUserId ? String(currentUserId) : null;
+  if (!uid) return held;
+  _resolveLegacyQueueOwners();
+  for (const item of getMobileUploadQueue()) {
+    const ownership = queueItemOwnership(item, uid);
+    if (ownership === 'other_account') held.otherAccount.push(item.recordId);
+    else if (ownership === 'owner_unknown') held.ownerUnknown.push(item.recordId);
+  }
+  return held;
+}
+
+/**
+ * The signed-in user confirmed that recordings of unknown owner are theirs.
+ * Only items without an owner can be claimed — never another account's.
+ * @returns {number} claimed items
+ */
+export function claimUnownedMobileUploads(userId, recordIds = null) {
+  if (!userId) return 0;
+  const queue = getMobileUploadQueue();
+  let claimed = 0;
+  for (const item of queue) {
+    if (queueItemOwnership(item, userId) !== 'owner_unknown') continue;
+    if (Array.isArray(recordIds) && !recordIds.includes(item.recordId)) continue;
+    item.ownerUserId = String(userId);
+    claimed++;
+  }
+  if (claimed) _safeWriteQueue(queue);
+  return claimed;
+}
+
 /**
  * Add a failed upload to the persistent mobile queue
  * @param {string} recordId
  * @param {string} filePath
  * @param {Object} metadata - Upload metadata (duration, title, customVocabulary, etc.)
+ * @param {string|null} ownerUserId - the account that recorded it (null = unknown, held until claimed)
  */
-export function addToMobileUploadQueue(recordId, filePath, metadata) {
+export function addToMobileUploadQueue(recordId, filePath, metadata, ownerUserId = null) {
   try {
     const queue = getMobileUploadQueue();
-    // Don't add duplicates
+    const owner = _normOwner(ownerUserId);
+    // Don't add duplicates. The owner of an existing item is never set or
+    // replaced here (U3): an item without owner is assigned only by the
+    // user's explicit claim (claimUnownedMobileUploads).
     if (queue.some(item => item.recordId === recordId)) return;
-    queue.push({ recordId, filePath, metadata, retries: 0, addedAt: Date.now() });
+    queue.push({ recordId, filePath, metadata, retries: 0, addedAt: Date.now(), ownerUserId: owner });
     _safeWriteQueue(queue);
   } catch (e) {
     console.warn('Failed to add to mobile upload queue:', e);
@@ -310,10 +445,12 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
   if (queue.length === 0) return { processed: 0, succeeded: 0, failed: 0, purged: [], unrecoverable: [] };
 
   const apiUrl = typeof getApiUrl === 'function' ? getApiUrl() : getApiUrl;
+  _resolveLegacyQueueOwners();
   let succeeded = 0;
   let failed = 0;
   const purgedRecordIds = [];        // Stale / over-budget items removed silently
   const unrecoverableRecordIds = []; // Items hit non-retryable errors this run
+  const heldRecordIds = [];          // Items of another (or an unknown) account: never uploaded here
   let tokenRefreshAttempts = 0;
   const MAX_TOKEN_REFRESHES_PER_RUN = 2;
 
@@ -336,6 +473,9 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
   for (let j = queue.length - 1; j >= 0; j--) {
     const item = queue[j];
     const isStale = item.addedAt && (Date.now() - item.addedAt > QUEUE_ITEM_MAX_AGE_MS);
+    // U4: an item waiting for its owner (another or an unknown account) is
+    // never dropped here, however long the wait.
+    if (queueItemOwnership(item, _currentUserId(authStore)) !== 'owner') continue;
     if (isStale || item.retries >= MAX_QUEUE_RETRIES) {
       console.warn(`Removing expired queue item ${item.recordId} (retries: ${item.retries}, age: ${item.addedAt ? Math.round((Date.now() - item.addedAt) / 86400000) + 'd' : 'unknown'})`);
       removeFromMobileUploadQueue(item.recordId);
@@ -370,6 +510,15 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
       continue;
     }
 
+    // SECURITY: upload only under the account that recorded it. Checked per
+    // item, right before the upload (the account can change during a run).
+    const ownership = queueItemOwnership(item, _currentUserId(authStore));
+    if (ownership !== 'owner') {
+      if (!heldRecordIds.includes(item.recordId)) heldRecordIds.push(item.recordId);
+      i++;
+      continue;
+    }
+
     try {
       const result = await uploadWithVerification({
         filePath: item.filePath,
@@ -398,6 +547,11 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
         } catch (e) {
           console.warn('Could not update history after queued upload:', e);
         }
+        i++;
+      } else if (result.held) {
+        // Refused by the owner check (e.g. a refresh returned another
+        // account's token): held, never failed or dropped (U2/U4).
+        if (!heldRecordIds.includes(item.recordId)) heldRecordIds.push(item.recordId);
         i++;
       } else if (result.inProgress) {
         // Another driver holds the in-flight guard for this recordId. The
@@ -495,7 +649,8 @@ export async function processMobileUploadQueue(authStore, getApiUrl) {
     }
   }
 
-  return { processed: activeQueue.length, succeeded, failed, purged: purgedRecordIds, unrecoverable: unrecoverableRecordIds };
+  if (heldRecordIds.length > 0) crumb(`upload queue: ${heldRecordIds.length} item(s) held for another account`, 'warning');
+  return { processed: activeQueue.length, succeeded, failed, purged: purgedRecordIds, unrecoverable: unrecoverableRecordIds, held: heldRecordIds };
   } finally {
     isProcessingMobileQueue = false;
   }
@@ -768,6 +923,7 @@ const pollServerStatus = async (apiUrl, audioFileId, localChecksum, maxAttempts 
  * @param {Function} options.onProgress - Progress callback (0-100)
  * @param {Function} options.onStatusChange - Status change callback
  * @param {Function} options.getAuthStore - Function to get auth store for token refresh
+ * @param {string} [options.ownerUserId] - account that recorded it (default: user of authToken)
  * @returns {Promise<{success: boolean, audioFileId?: string, canDelete: boolean, error?: string}>}
  */
 export const uploadWithVerification = async (options) => {
@@ -780,7 +936,8 @@ export const uploadWithVerification = async (options) => {
     metadata = {},
     onProgress = () => {},
     onStatusChange = () => {},
-    getAuthStore = null // For token refresh
+    getAuthStore = null, // For token refresh
+    ownerUserId = null // account that recorded it (default: the token's user)
   } = options;
 
   // A missing recordId would upload to "recordings/null/…" and register a
@@ -790,12 +947,54 @@ export const uploadWithVerification = async (options) => {
     return { success: false, canDelete: false, canRetry: false, error: 'Missing recording id' };
   }
 
-  // Helper to get a fresh token
+  // SECURITY: every upload path (queue, manual retry, auto-retry, device
+  // sync) runs through here, so the owner check lives here: a recording is
+  // uploaded only with a token of the account that owns it.
+  const ownership = uploadOwnershipCheck({ recordId, filePath, authToken, ownerUserId });
+  if (!ownership.ok) {
+    crumb(`refused upload recordId=${recordId}: ${ownership.reason}`);
+    return {
+      success: false,
+      canDelete: false,
+      canRetry: false,
+      held: true,
+      ownership: ownership.reason,
+      error: ownership.reason === 'owner_unknown'
+        ? 'Recording owner unknown: confirm it in History before uploading'
+        : 'Recording belongs to another account'
+    };
+  }
+  // U1: the owner is fixed BEFORE the first request - the queued/explicit
+  // owner, else the account of the token this upload starts with. Without a
+  // provable owner (undecodable or missing token) there is no request: the
+  // recording is kept and queued without owner, held until the user claims
+  // it in History.
+  const expectedOwner = ownership.owner ?? tokenUserId(authToken);
+  if (!expectedOwner) {
+    crumb(`held upload recordId=${recordId}: owner cannot be determined`);
+    if (isCapacitor() && filePath) addToMobileUploadQueue(recordId, filePath, metadata, null);
+    return {
+      success: false,
+      canDelete: false,
+      canRetry: false,
+      held: true,
+      ownership: 'owner_unknown',
+      error: 'Recording owner unknown: confirm it in History before uploading'
+    };
+  }
+
+  // Helper to get a fresh token (U2). A refreshed token of another account
+  // (the user switched accounts during the upload) is never used for this
+  // recording.
   const getFreshToken = async () => {
     if (getAuthStore) {
       const authStore = getAuthStore();
       const result = await authStore.handleAuthError();
       if (result.success) {
+        if (tokenUserId(result.token) !== expectedOwner) {
+          crumb(`refused token refresh for recordId=${recordId}: account changed`);
+          return null;
+        }
         return result.token;
       }
     }
@@ -813,8 +1012,10 @@ export const uploadWithVerification = async (options) => {
   // next launch / network-online / foreground. Idempotent (dedupes by
   // recordId) and removed on confirmed success below. Only for Capacitor
   // file-path uploads; a picked File object has no resumable path.
+  // The owner is the account whose token this upload uses (or the caller's
+  // explicit owner): a retry later runs only under that same account.
   if (isCapacitor() && filePath && recordId) {
-    addToMobileUploadQueue(recordId, filePath, metadata);
+    addToMobileUploadQueue(recordId, filePath, metadata, expectedOwner);
   }
 
   if (!_beginMobileUpload(recordId)) {

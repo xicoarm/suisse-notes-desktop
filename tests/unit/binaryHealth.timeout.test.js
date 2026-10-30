@@ -27,7 +27,7 @@ function fixture() {
       fs: { statSync: () => ({ size: 100, mode: 0o755 }) }, setTimeout, clearTimeout,
       require: name => { if (name !== 'child_process') throw Error('Unexpected dependency'); return { spawn, execFile }; },
       binaryHealth: health, resolveBundledBinaryPaths: () => ({ ffprobe: '/synthetic/ffprobe' }),
-      isSpawnError: () => false, markBinaryUnavailable: vi.fn(),
+      isSpawnError: () => false, markBinaryUnavailable: vi.fn(), assertPublishAllowed: () => {},
     });
   return { child, spawn, execFile, health, ...functions };
 }

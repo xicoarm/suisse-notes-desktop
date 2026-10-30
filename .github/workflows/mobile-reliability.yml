@@ -41,6 +41,11 @@ on:
         description: 'Endurance minutes (m2 only)'
         default: '315'
 
+
+# Least privilege: these jobs only read the repository.
+permissions:
+  contents: read
+
 jobs:
   scenarios:
     if: github.event_name != 'schedule' && github.event.action != 'labeled'
@@ -75,7 +80,13 @@ jobs:
       - name: Run the mobile harness
         env:
           SUISSE_E2E_SYNTH_SPEECH: '1'
-        run: node tests/mobile-harness/run.js ${{ github.event.inputs.scenario || 'all' }} --platform ${{ github.event.inputs.platform || matrix.platform }}
+          # Passed as variables (never interpolated into the script), validated.
+          IN_SCENARIO: ${{ github.event.inputs.scenario || 'all' }}
+          IN_PLATFORM: ${{ github.event.inputs.platform || matrix.platform }}
+        run: |
+          [[ "$IN_SCENARIO" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "::error::invalid scenario"; exit 1; }
+          [[ "$IN_PLATFORM" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "::error::invalid platform"; exit 1; }
+          node tests/mobile-harness/run.js "$IN_SCENARIO" --platform "$IN_PLATFORM"
       - name: Upload evidence (results, screenshots, console logs, device file systems)
         if: always()
         uses: actions/upload-artifact@v4
@@ -120,7 +131,10 @@ jobs:
       - name: 5h15 recording on the virtual phone
         env:
           SUISSE_E2E_SYNTH_SPEECH: '1'
-        run: node tests/mobile-harness/run.js m2-endurance --platform android --minutes ${{ github.event.inputs.minutes || '315' }}
+          IN_MINUTES: ${{ github.event.inputs.minutes || '315' }}
+        run: |
+          [[ "$IN_MINUTES" =~ ^[0-9]{1,4}$ ]] || { echo "::error::invalid minutes"; exit 1; }
+          node tests/mobile-harness/run.js m2-endurance --platform android --minutes "$IN_MINUTES"
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4

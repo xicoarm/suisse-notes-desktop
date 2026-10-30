@@ -15,7 +15,8 @@
  *   m5-recorder-sync   pair → busy card → auto-sync (empty file, corrupted transfer, dropped link, button
  *                      recording) → bytes identical on the server → cancel keeps a skipped entry → unpair
  *   m6-crash-recovery  app killed mid-recording → relaunch → recovery combines and queues the upload
- *   m7-repair          reinstall (storage wiped) → the recorder still bound to the user's UUID → pairs again
+ *   m7-repair          reinstall keeping the keystore (iOS Keychain) → same identity, pairs again;
+ *                      reinstall wiping it (Android) → refused with the actionable message, binding untouched
  *   m8-sentry-capture  every error type reaches Sentry: uncaught, rejection, Vue, console.error/warn,
  *                      failed HTTP answers, errors before init, offline queue, unclean exit after a kill
  *   m9-gateway-restart backend restarts behind nginx (HTML 502 for every /api call): login, minutes
@@ -432,31 +433,49 @@ async function m6CrashRecovery() {
 }
 
 async function m7Repair() {
-  // The recorder is bound to the UUID this user's app derives from the user id
-  // (what a previous install of 3.9.37+ would have registered).
+  // Pairing identity = a random per-install key in the platform keystore (no
+  // longer derived from the user id, which anyone who knows the id could
+  // compute). iOS keeps Keychain items across a reinstall; Android wipes the
+  // Keystore with the app. The harness keystore lives in localStorage under
+  // 'E2E.SecureTokenStore.'.
   const recorder = { poweredOn: true, files: [{ file: 'R20260902-090000.opus', size: 20_000, seed: 21 }], boundAppUuid: null };
-  const repairOk = await withApp('m7-repair', { recorder }, async (app) => {
-    const problems = [], notes = [];
+  const pairFromScan = async (app) => {
     await app.navigate('/device');
     await app.clickByTest('[data-test=device-scan]');
     await app.clickByTest('[data-test=device-scan-result]', 30_000);
+  };
+  const repairOk = await withApp('m7-repair', { recorder }, async (app) => {
+    const problems = [], notes = [];
+    await pairFromScan(app);
     await app.waitFor(async () => (await app.getDeviceState())?.connectionState === 'connected', { timeoutMs: 60_000, label: 'first pairing' });
     const bound = await app.recorder('return r.boundAppUuid');
     notes.push(`recorder bound to ${bound}`);
-    // Reinstall: every app preference gone, recorder keeps its binding.
+
+    // 1) Reinstall that keeps the keystore (iOS): every preference gone, same identity.
+    await app.evalTimed(() => { for (const k of Object.keys(localStorage)) if (!k.startsWith('E2E.SecureTokenStore.')) localStorage.removeItem(k); });
+    await app.relaunch();
+    await app.login();
+    await pairFromScan(app);
+    const again = await app.waitFor(async () => (await app.getDeviceState())?.connectionState === 'connected', { timeoutMs: 60_000, label: 'pairing after reinstall (keystore kept)' }).catch(() => false);
+    const stats = await app.recorder('return r.stats');
+    const boundAfter = await app.recorder('return r.boundAppUuid');
+    notes.push(`keystore kept: handshakes=${stats.handshakes} rejected=${stats.rejectedHandshakes} bound after=${boundAfter}`);
+    if (!again) problems.push(`re-pairing after a reinstall with the keystore kept failed (error: ${(await app.getDeviceState())?.error})`);
+    if (boundAfter !== bound) problems.push('the recorder was re-bound instead of accepting the same app identity');
+    if (stats.handshakes < 2 || stats.rejectedHandshakes !== 0) problems.push(`expected 2 accepted handshakes, got ${JSON.stringify(stats)}`);
+
+    // 2) Reinstall that wipes the keystore (Android): a new identity; the
+    // recorder must refuse it with the actionable message and keep its binding.
     await app.evalTimed(() => localStorage.clear());
     await app.relaunch();
     await app.login();
-    await app.navigate('/device');
-    await app.clickByTest('[data-test=device-scan]');
-    await app.clickByTest('[data-test=device-scan-result]', 30_000);
-    const again = await app.waitFor(async () => (await app.getDeviceState())?.connectionState === 'connected', { timeoutMs: 60_000, label: 'pairing after reinstall' }).catch(() => false);
-    const stats = await app.recorder('return r.stats');
-    const boundAfter = await app.recorder('return r.boundAppUuid');
-    notes.push(`handshakes=${stats.handshakes} rejected=${stats.rejectedHandshakes} bound after reinstall=${boundAfter}`);
-    if (!again) problems.push(`re-pairing after a reinstall failed (error: ${(await app.getDeviceState())?.error})`);
-    if (boundAfter !== bound) problems.push('the recorder was re-bound instead of accepting the same app identity');
-    if (stats.handshakes < 2 || stats.rejectedHandshakes !== 0) problems.push(`expected 2 accepted handshakes, got ${JSON.stringify(stats)}`);
+    await pairFromScan(app);
+    const refused = await app.waitFor(async () => { const d = await app.getDeviceState(); return d?.error ? d : null; }, { timeoutMs: 60_000, label: 'refusal after reinstall (keystore wiped)' }).catch(() => null);
+    const boundWiped = await app.recorder('return r.boundAppUuid');
+    notes.push(`keystore wiped: state=${refused?.connectionState} error=${refused?.error} bound=${boundWiped}`);
+    if (!refused || !/rejected pairing|paired/i.test(refused.error || '')) problems.push('a recorder bound to the previous installation was not reported as such');
+    if (refused?.connectionState === 'connected') problems.push('connected to a recorder that rejected the new installation');
+    if (boundWiped !== bound) problems.push('the recorder binding changed after a refused pairing');
     return { pass: problems.length === 0, problems, notes };
   });
   // Sequential: both scenarios bind the same mock port.

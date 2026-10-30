@@ -51,6 +51,11 @@ function retryDelay(response, fallbackMs) {
   return fallbackMs;
 }
 
+// A request of main's background work carries its SessionScope (session-scope.js).
+function scopeAlive(config) {
+  return !config?.scope || typeof config.scope.alive !== 'function' || config.scope.alive() === true;
+}
+
 function pathOf(url) {
   try { return new URL(url).pathname; } catch { return String(url || '').split('?')[0]; }
 }
@@ -111,7 +116,7 @@ function installApiResilience({ axios, log, getApiBaseUrl, sleep = defaultSleep,
           const method = String(config.method || 'get').toLowerCase();
           const allowed = config.retryGateway ?? IDEMPOTENT_METHODS.has(method);
           const attempt = config.__gatewayAttempt || 0;
-          if (allowed && attempt < delaysMs.length && !config.signal?.aborted) {
+          if (allowed && attempt < delaysMs.length && !config.signal?.aborted && scopeAlive(config)) {
             config.__gatewayAttempt = attempt + 1;
             wait = retryDelay(error.response, delaysMs[attempt]);
             retryConfig = config;
@@ -124,7 +129,10 @@ function installApiResilience({ axios, log, getApiBaseUrl, sleep = defaultSleep,
       }
       if (!retryConfig) return Promise.reject(error);
       await sleep(wait);
-      if (retryConfig.signal?.aborted) return Promise.reject(error);
+      // Round 9 (council 3, R-S2): the retry is a request of its own - only
+      // while the session scope of the request is alive, checked right
+      // before sending (the bearer of an ended session never goes out again).
+      if (retryConfig.signal?.aborted || !scopeAlive(retryConfig)) return Promise.reject(error);
       return axios.request(retryConfig);
     }
   );

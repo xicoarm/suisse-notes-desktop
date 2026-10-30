@@ -358,8 +358,9 @@ async function verifyCodedAudio(filePath, scenario, expectations = {}) {
     contentDurationS: analysis.contentDurationS ?? analysis.durationS, sourceOffsetS,
     identifiedFrames: groups.length, firstFrame: first?.id ?? null, lastFrame: last?.id ?? null,
     firstIdentifiedStartS: first?.start ?? null, lastIdentifiedEndS: last?.end ?? null,
+    firstIdentifiedEndS: first?.end ?? null, lastIdentifiedStartS: last?.start ?? null,
     decoderWarnings: analysis.decoderWarnings, rejectedGroups: analysis.rejectedGroups, pauses: analysis.pauses ?? null };
 }
 
 module.exports = { buildCodedScenario, verifyCodedAudio, analyzeCodedAudio, symbolsForFrame,
-  SAMPLE_RATE, FRAME_SECONDS, ANALYSIS_RATE, PAUSE_SILENCE_RMS, PAUSE_GUARD_SECONDS };
+  SAMPLE_RATE, FRAME_SECONDS, WINDOW_SECONDS, ANALYSIS_RATE, PAUSE_SILENCE_RMS, PAUSE_GUARD_SECONDS };

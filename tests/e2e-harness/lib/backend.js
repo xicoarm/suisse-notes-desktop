@@ -98,7 +98,19 @@ function cleanupAllTestMeetings() {
   dbQuery(`DELETE FROM "Meeting" m USING "User" u WHERE m."userId"=u.id AND u.email='${E2E_EMAIL}'`);
 }
 
+/**
+ * Live runs need real credentials, and they come from the environment only
+ * (this repository is public: no fallback values, ever). Fail before any app
+ * or network work starts instead of failing late with an empty password.
+ */
+function requireLiveCredentials({ db = true, env = process.env } = {}) {
+  const missing = [];
+  if (!env.E2E_PASSWORD) missing.push('E2E_PASSWORD');
+  if (db && !env.SUISSE_E2E_DB_PASSWORD) missing.push('SUISSE_E2E_DB_PASSWORD');
+  if (missing.length) throw new Error(`Live E2E needs ${missing.join(' and ')} in the environment`);
+}
+
 module.exports = {
-  API, E2E_EMAIL, E2E_PASSWORD,
+  API, E2E_EMAIL, E2E_PASSWORD, requireLiveCredentials,
   loginLive, pollUploadStatus, dbQuery, verifyBackendState, cleanupMeeting,
 };

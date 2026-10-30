@@ -6,8 +6,8 @@ import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { buildCodedScenario, verifyCodedAudio, analyzeCodedAudio } = require('../e2e-harness/lib/coded-audio');
-const { measureTimestampHoles, finalPausesFromHoles, assessNativeClock, readAssemblyPlanGaps, comparePlanGaps } = require('../e2e-harness/lib/native-timestamps');
+const { buildCodedScenario, verifyCodedAudio, analyzeCodedAudio, FRAME_SECONDS, WINDOW_SECONDS } = require('../e2e-harness/lib/coded-audio');
+const { measureTimestampHoles, finalPausesFromHoles, assessNativeClock, assessRecorderCallClock, readAssemblyPlanGaps, comparePlanGaps } = require('../e2e-harness/lib/native-timestamps');
 const FFMPEG = require('@ffmpeg-installer/ffmpeg').path;
 const workRoot = path.resolve('tests/e2e-harness/work');
 let directory, scenario;
@@ -130,6 +130,110 @@ describe('native timestamp holes', () => {
     expect(assessNativeClock(holes, null).problems).toEqual([]);
     const overlapping = assessNativeClock({ ...holes, overlaps: [{ startS: 1, lengthS: 0.02, packetIndex: 50 }], totalOverlapS: 0.02 }, 13);
     expect(overlapping.problems).toEqual(['NATIVE CLOCK: 1 overlapping native timestamp(s) totaling 0.020s']);
+  });
+
+  describe('the probe of the short capture: start() and stop() calls and the numbered frames', () => {
+    const probe = async (file, wallS, startEventLagS = 0) => {
+      const measurement = await measureTimestampHoles(file);
+      const audio = await verifyCodedAudio(file, scenario);
+      const recorder = { startCalledAt: 1000, stopCalledAt: 1000 + wallS * 1000 };
+      return { measurement, audio,
+        now: assessRecorderCallClock(measurement, recorder, audio, { frameSeconds: FRAME_SECONDS, windowSeconds: WINDOW_SECONDS }),
+        // The measure of round 14: from the start event, late by startEventLagS.
+        before: assessNativeClock(measurement, wallS - startEventLagS) };
+    };
+    const reencoded = (name, filter) => {
+      const output = path.join(directory, name + '.webm');
+      ffmpeg(['-i', scenario.wavPath, '-af', filter, '-c:a', 'libopus', '-b:a', '64k', output]);
+      return output;
+    };
+    let continuous;
+    beforeAll(() => { continuous = reencoded('probe-continuous', 'anull'); });
+
+    it('control: continuous audio is green, however late the start event comes', async () => {
+      const { now, before, measurement } = await probe(continuous, 12.03, 1.2);
+      expect(now.problems).toEqual([]);
+      expect(Math.abs(now.residualS)).toBeLessThan(0.1);
+      expect(Math.abs(now.identityResidualS)).toBeLessThan(0.1);
+      expect(measurement.holes).toEqual([]);
+      // What the event measure reported on the same recording.
+      expect(before.problems[0]).toMatch(/exceeds the recorder wall clock/);
+    }, 60000);
+
+    it('control: a pause of the fake source keeps both green', async () => {
+      const file = pausedOriginal('probe-pause', 5.2, 0.8);
+      const { now } = await probe(file, 12.83);
+      expect(now.problems).toEqual([]);
+      expect(Math.abs(now.identityResidualS)).toBeLessThan(0.1);
+    }, 60000);
+
+    it('a timestamp jump in the middle without wall time is red', async () => {
+      const { now } = await probe(pausedOriginal('probe-middle-pts', 5.2, 0.8), 12.03);
+      expect(now.residualS).toBeGreaterThan(0.5);
+      expect(now.problems.join()).toMatch(/differs from the recorder start\/stop calls/);
+    }, 60000);
+
+    it('a timestamp jump at the start without wall time is red', async () => {
+      const { now } = await probe(pausedOriginal('probe-start-pts', 0.1, 0.8), 12.03);
+      expect(now.residualS).toBeGreaterThan(0.5);
+      expect(now.problems.join()).toMatch(/differs from the recorder start\/stop calls/);
+    }, 60000);
+
+    it('audio missing at the start is red, which the event measure never saw', async () => {
+      const file = reencoded('probe-start-missing', 'atrim=start=0.8,asetpts=PTS-STARTPTS');
+      const { now, before } = await probe(file, 12.03);
+      expect(now.residualS).toBeLessThan(-0.5);
+      expect(now.problems.join()).toMatch(/differs from the recorder start\/stop calls/);
+      expect(before.problems).toEqual([]);
+    }, 60000);
+
+    it('a jump of the signal in the middle with agreeing timestamps is red by the frames alone', async () => {
+      const file = reencoded('probe-middle-signal', "aselect='not(between(t\\,5.2\\,6))',asetpts=N/SR/TB");
+      const { measurement } = await probe(file, 12.03);
+      const { now, before } = await probe(file, measurement.ptsSpanS);
+      expect(Math.abs(now.residualS)).toBeLessThan(0.01);
+      expect(now.identityResidualS).toBeLessThan(-0.5);
+      expect(now.problems.join()).toMatch(/SIGNAL IDENTITY/);
+      expect(before.problems).toEqual([]);
+    }, 60000);
+
+    it('a jump of the signal at the start with agreeing timestamps is red by the frames alone', async () => {
+      // Just after the opening frames: a jump in the very first frame only moves the first identity.
+      const file = reencoded('probe-start-signal', "aselect='not(between(t\\,1\\,1.8))',asetpts=N/SR/TB");
+      const { measurement } = await probe(file, 12.03);
+      const { now } = await probe(file, measurement.ptsSpanS);
+      expect(now.identityResidualS).toBeLessThan(-0.5);
+      expect(now.problems.join()).toMatch(/SIGNAL IDENTITY/);
+    }, 60000);
+
+    it('audio lost under a timestamp hole is red by the frames, the wall clock agrees', async () => {
+      const file = lossOriginal('probe-middle-loss', 5.2, 6);
+      const { measurement } = await probe(file, 12.03);
+      const { now } = await probe(file, measurement.ptsSpanS);
+      expect(now.identityResidualS).toBeLessThan(-0.5);
+      expect(now.problems.join()).toMatch(/SIGNAL IDENTITY/);
+    }, 60000);
+
+    it('a run without both calls is invalid and never falls back to the events', async () => {
+      const { measurement, audio } = await probe(continuous, 12.03);
+      const events = { startedAt: 1000, stoppedAt: 13030 };
+      for (const recorder of [events, { ...events, startCalledAt: 1000 }, { ...events, stopCalledAt: 13030 }, { startCalledAt: 2000, stopCalledAt: 2000 }, null]) {
+        expect(() => assessRecorderCallClock(measurement, recorder, audio, { frameSeconds: FRAME_SECONDS, windowSeconds: WINDOW_SECONDS })).toThrow(/INVALID RUN/);
+      }
+    }, 60000);
+
+    it('is what the short capture judges by, with the event measure kept as an observation only', () => {
+      const source = fs.readFileSync(path.resolve('tests/e2e-harness/qualification.js'), 'utf8');
+      expect(source).toMatch(/result\.nativeClock = assessRecorderCallClock\(result\.nativeTimestamps, recorder, result\.nativeSourceAudio/);
+      expect(source).toMatch(/const expectedDurationS = \(recorder\.stopCalledAt - recorder\.startCalledAt\) \/ 1000/);
+      expect(source).not.toMatch(/problems\.push\(\.\.\.result\.nativeClockFromEvents/);
+    });
+
+    it('no numbered frames is red, not a pass', async () => {
+      const { measurement } = await probe(continuous, 12.03);
+      const result = assessRecorderCallClock(measurement, { startCalledAt: 1000, stopCalledAt: 13030 }, { firstFrame: null, lastFrame: null }, { frameSeconds: FRAME_SECONDS, windowSeconds: WINDOW_SECONDS });
+      expect(result.problems).toEqual(['SIGNAL IDENTITY: no numbered frames to compare with the native packets']);
+    }, 60000);
   });
 
   it('cross-checks the finalization plan gap accounting and selects the validated plan', async () => {

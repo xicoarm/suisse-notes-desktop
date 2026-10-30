@@ -34,6 +34,11 @@ on:
         default: false
         type: boolean
 
+
+# Least privilege: these jobs only read the repository.
+permissions:
+  contents: read
+
 jobs:
   submit:
     runs-on: ubuntu-latest
@@ -50,8 +55,10 @@ jobs:
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
           ASC_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+          IN_VERSION: ${{ inputs.version }}
         run: |
-          node scripts/asc-submit.js             --app 6758680707             --version "${{ inputs.version }}"             --withdraw
+          [[ "$IN_VERSION" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]] || { echo "::error::invalid version"; exit 1; }
+          node scripts/asc-submit.js --app 6758680707 --version "$IN_VERSION" --withdraw
 
       - name: Read the state of the version (changes nothing)
         if: ${{ inputs.status }}
@@ -59,8 +66,10 @@ jobs:
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
           ASC_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
+          IN_VERSION: ${{ inputs.version }}
         run: |
-          node scripts/asc-submit.js             --app 6758680707             --version "${{ inputs.version }}"             --status
+          [[ "$IN_VERSION" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]] || { echo "::error::invalid version"; exit 1; }
+          node scripts/asc-submit.js --app 6758680707 --version "$IN_VERSION" --status
 
       - name: Write release notes
         if: ${{ !inputs.status && !inputs.withdraw }}
@@ -79,10 +88,14 @@ jobs:
           ASC_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}
           ASC_DEMO_USER: ${{ secrets.ASC_DEMO_USER }}
           ASC_DEMO_PASS: ${{ secrets.ASC_DEMO_PASS }}
+          # Inputs reach the shell only as quoted variables, validated first.
+          IN_VERSION: ${{ inputs.version }}
+          IN_BUILD: ${{ inputs.build }}
+          IN_SUBMIT: ${{ inputs.submit }}
         run: |
-          node scripts/asc-submit.js \
-            --app 6758680707 \
-            --version "${{ inputs.version }}" \
-            --build "${{ inputs.build }}" \
-            --notes-file /tmp/release-notes.txt \
-            ${{ inputs.submit && '--submit' || '' }}
+          set -euo pipefail
+          [[ "$IN_VERSION" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]] || { echo "::error::invalid version"; exit 1; }
+          [[ -z "$IN_BUILD" || "$IN_BUILD" =~ ^[0-9]+(\.[0-9]+)*$ ]] || { echo "::error::invalid build"; exit 1; }
+          set -- --app 6758680707 --version "$IN_VERSION" --build "$IN_BUILD" --notes-file /tmp/release-notes.txt
+          if [ "$IN_SUBMIT" = "true" ]; then set -- "$@" --submit; fi
+          node scripts/asc-submit.js "$@"

@@ -7,9 +7,9 @@ const { performance } = require('perf_hooks');
 const { AppDriver, sleep } = require('./lib/app-driver');
 const { startMockBackend } = require('./lib/mock-backend');
 const { buildCodedScenario, WORK_DIR } = require('./lib/audio');
-const { verifyCodedAudio } = require('./lib/coded-audio');
+const { verifyCodedAudio, FRAME_SECONDS, WINDOW_SECONDS } = require('./lib/coded-audio');
 const { installRecordingRoleObserver, legacyBatchLayout } = require('./lib/native-recorder-evidence');
-const { measureTimestampHoles, finalPausesFromHoles, assessNativeClock, readAssemblyPlanGaps, comparePlanGaps } = require('./lib/native-timestamps');
+const { measureTimestampHoles, finalPausesFromHoles, assessNativeClock, assessRecorderCallClock, readAssemblyPlanGaps, comparePlanGaps } = require('./lib/native-timestamps');
 const { inspectNativeSources } = require('../../src-electron/native-source-persistence');
 const { concatenateFiles } = require('../../src-electron/durable-files');
 
@@ -123,7 +123,8 @@ async function captureCase(kind, seconds, opts = {}) {
     const recorder = result.nativeArchiveExpected ? native[0] : mixed[0];
     if (!recorder || !recorder.events || !recorder.bytes) result.problems.push('No nonempty MediaRecorder output observed');
     if (recorder?.startedAt == null || recorder?.stoppedAt == null) throw new Error('Missing recorder start/stop timing evidence');
-    const expectedDurationS = (recorder.stoppedAt - recorder.startedAt) / 1000;
+    if (!Number.isFinite(recorder?.startCalledAt) || !Number.isFinite(recorder?.stopCalledAt)) throw new Error('INVALID RUN: the recorder start()/stop() calls were not both observed');
+    const expectedDurationS = (recorder.stopCalledAt - recorder.startCalledAt) / 1000;
     const output = app.findOutputFile();
     if (!output) throw new Error('No finalized recording; original profile retained');
     result.output = output;
@@ -151,12 +152,14 @@ async function captureCase(kind, seconds, opts = {}) {
       result.nativeSourceAudio = await verifyCodedAudio(nativeOriginal, reference);
       result.problems.push(...result.nativeSourceAudio.problems.map(problem => 'Native original: ' + problem));
       result.nativeTimestamps = await measureTimestampHoles(nativeOriginal);
-      result.nativeClock = assessNativeClock(result.nativeTimestamps, expectedDurationS);
+      result.nativeClock = assessRecorderCallClock(result.nativeTimestamps, recorder, result.nativeSourceAudio, { frameSeconds: FRAME_SECONDS, windowSeconds: WINDOW_SECONDS });
       result.problems.push(...result.nativeClock.problems);
+      // Observation only: the former measure, from the start and stop events.
+      result.nativeClockFromEvents = assessNativeClock(result.nativeTimestamps, (recorder.stoppedAt - recorder.startedAt) / 1000);
       result.nativeAssemblyGaps = comparePlanGaps(readAssemblyPlanGaps(path.dirname(output)), source.sourceId, result.nativeTimestamps);
       result.problems.push(...result.nativeAssemblyGaps.problems);
       expectedPauses = finalPausesFromHoles(result.nativeTimestamps, source.startOffsetMs / 1000);
-      result.notes.push('Final content is compared after removing the native source\'s own measured timestamp holes; the native original must independently pass the as-is oracle, its holes must match the finalization plan, and its timestamp span must agree with the recorder wall clock.');
+      result.notes.push('Final content is compared after removing the native source\'s own measured timestamp holes; the native original must independently pass the as-is oracle, its holes must match the finalization plan, and its timestamp span must agree with the recorder start/stop calls and its numbered frames.');
     }
     result.audio = await verifyCodedAudio(output, reference, { expectedDurationS, durationToleranceS: 1.5, expectedPauses });
     result.problems.push(...result.audio.problems);

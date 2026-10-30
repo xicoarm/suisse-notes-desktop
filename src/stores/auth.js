@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia';
 import { isElectron, isCapacitor, getPlatform } from '../utils/platform';
-import { storeToken, getToken, storeUserCredentials, getUserCredentials, clearAllCredentials } from '../services/secureStorage';
+import {
+  sessionTicket, isCurrentTicket, applySession as applyMobileSession, signOut as signOutMobile, loadSession as loadMobileSession
+} from '../services/sessionAuthority';
 import { apiRequest, authenticatedRequest, API_ENDPOINTS, parseJsonSafe } from '../services/api';
 import { addBreadcrumb, captureException, captureMessage, setUser } from '../boot/sentry';
 import { i18n } from '../boot/i18n';
@@ -22,20 +24,6 @@ function isNetworkFailure(error) {
 function networkKind(error) {
   if (error?.name === 'TimeoutError' || error?.code === 'ETIMEDOUT' || /timed out/i.test(error?.message || '')) return 'timeout';
   return 'offline';
-}
-
-/**
- * End any SSO wait (spinner) and drop an SSO result the desktop main process
- * still buffers, so it can never be applied to a later session. Used on
- * password sign-in, registration and logout.
- */
-function discardPendingSSO(authStore) {
-  authStore.ssoProvider = null;
-  if (!isElectron()) return;
-  try {
-    const take = window.electronAPI?.auth?.takePendingSSO;
-    if (typeof take === 'function') Promise.resolve(take()).catch(() => {});
-  } catch { /* nothing buffered */ }
 }
 
 /**
@@ -200,41 +188,36 @@ function failureFromAnswer(response, data) {
   };
 }
 
-async function platformSaveToken(token) {
-  if (isElectron()) {
-    return window.electronAPI.auth.saveToken(token);
-  }
-  return storeToken(token);
+/**
+ * E2: the ticket of a sign-in that starts now. Mobile (and the web build used
+ * in tests): the session authority in services/sessionAuthority.js. Desktop:
+ * main takes it itself in the IPC handler and applies the result there
+ * (src-electron/session-authority.js).
+ */
+function signInTicket(extra) {
+  return isElectron() ? null : sessionTicket(extra);
 }
 
-async function platformGetToken() {
-  if (isElectron()) {
-    const result = await window.electronAPI.auth.getToken();
-    return result?.token || result || null;
+/** E5 steps 1-3 on every platform; never throws. */
+async function platformSignOut() {
+  try {
+    if (isElectron()) return (await window.electronAPI.auth.signOut()) || { success: false };
+    return await signOutMobile();
+  } catch (error) {
+    console.error('Sign-out failed:', error?.message || error);
   }
-  return getToken();
+  return { success: false, error: 'sign_out_incomplete' };
 }
 
-async function platformClearToken() {
-  if (isElectron()) {
-    return window.electronAPI.auth.clearToken();
-  }
-  return clearAllCredentials();
+/** The stored session at start, or signed out (E6). */
+async function platformRestoreSession() {
+  if (isElectron()) return (await window.electronAPI.auth.restoreSession()) || { signedOut: true };
+  return loadMobileSession();
 }
 
-async function platformSaveUserInfo(userInfo) {
-  if (isElectron()) {
-    return window.electronAPI.auth.saveUserInfo(userInfo);
-  }
-  return storeUserCredentials(userInfo);
-}
-
-async function platformGetUserInfo() {
-  if (isElectron()) {
-    const result = await window.electronAPI.auth.getUserInfo();
-    return result || null;
-  }
-  return getUserCredentials();
+/** Rollout stop signal: an open SSO flow got a callback without state. No data. */
+function countMissingState() {
+  captureMessage('sso_missing_state', 'warning', { fingerprint: ['sso_missing_state'] });
 }
 
 // Token refresh interval: 30 minutes. The backend /api/auth/refresh route is
@@ -255,6 +238,49 @@ function decodeJwtExpMs(token) {
   } catch {
     return null;
   }
+}
+
+function decodeJwtUserId(token) {
+  try {
+    const payload = token.split('.')[1];
+    const std = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const json = JSON.parse(atob(std + '='.repeat((4 - (std.length % 4)) % 4)));
+    return typeof json.userId === 'string' && json.userId ? json.userId : null;
+  } catch {
+    return null;
+  }
+}
+
+const SSO_USER_FIELDS = ['id', 'email', 'name', 'role', 'organizationId', 'organizationName', 'image', 'language', 'locale'];
+
+/**
+ * The user object of an SSO result comes from a URL. Keep only plain fields
+ * and require the id to be the token's own userId: a result whose user does
+ * not belong to its token is refused.
+ */
+export function sanitizeSsoUser(user, token) {
+  if (!user || typeof user !== 'object' || Array.isArray(user)) return null;
+  const tokenUserId = decodeJwtUserId(token);
+  if (!tokenUserId || String(user.id ?? '') !== tokenUserId) return null;
+  const clean = {};
+  for (const key of SSO_USER_FIELDS) {
+    const value = user[key];
+    if (typeof value === 'string') clean[key] = value.slice(0, 320);
+    else if (typeof value === 'number' || typeof value === 'boolean') clean[key] = value;
+  }
+  clean.id = tokenUserId;
+  return clean;
+}
+
+/** Mobile PKCE exchange: one-time code + verifier -> { token, user }. */
+async function exchangeSsoCode(authCode, verifier, state) {
+  const response = await apiRequest('/api/auth/sso/exchange', {
+    method: 'POST',
+    body: JSON.stringify({ authCode, codeVerifier: verifier, state })
+  });
+  const data = await parseJsonSafe(response);
+  if (!response.ok || !data || !data.token || !data.user) return null;
+  return { token: data.token, user: data.user };
 }
 
 /**
@@ -297,6 +323,9 @@ export const useAuthStore = defineStore('auth', {
     twoFactor: null,
     twoFactorResending: false,
     _refreshPromise: null,  // Mutex for token refresh (prevents concurrent stampede)
+    // Epoch of the session authority this state mirrors (desktop: main's).
+    // A result of an older epoch never changes this state.
+    _epoch: -1,
     _tokenRefreshInterval: null,
   }),
 
@@ -311,12 +340,17 @@ export const useAuthStore = defineStore('auth', {
       this.loading = true;
       this.error = null;
       this.twoFactor = null;
+      const ticket = signInTicket();
 
       try {
         const result = await platformLogin(username, password);
 
-        if (result.success) {
-          await this._completePasswordLogin(result);
+        if (result.ignored) {
+          return { success: false, ignored: true, reason: result.reason || 'session_changed' };
+        } else if (result.success) {
+          if (!(await this._completePasswordLogin(result, ticket))) {
+            return { success: false, ignored: true, reason: 'session_changed' };
+          }
           return { success: true };
         } else if (result.requiresTwoFactor && result.tempToken) {
           this.twoFactor = startTwoFactorStep(result);
@@ -342,19 +376,43 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
-    /** Session from a password sign-in success (directly or after the second factor). */
-    async _completePasswordLogin(result) {
+    /**
+     * Apply a sign-in result through the session authority (E2/E3) and
+     * mirror it here. Desktop: main applied it already (the IPC answer
+     * carries its epoch). Mobile: applySession with the ticket taken when the
+     * sign-in started.
+     * @returns {Promise<boolean>} false: dropped (the session changed meanwhile)
+     */
+    async _applySignIn(result, ticket, kind) {
+      if (isElectron()) {
+        if (!Number.isSafeInteger(result?.epoch) || result.epoch < this._epoch) return false;
+        this._epoch = result.epoch;
+      } else {
+        const applied = await applyMobileSession(ticket, { token: result.token, user: result.user }, { kind });
+        if (!applied.applied || !isCurrentTicket({ epoch: applied.epoch })) return false;
+        this._epoch = applied.epoch;
+      }
+      // Synchronous from here: the state matches the authority's session.
       this.user = result.user;
       this.token = result.token;
       this.isAuthenticated = true;
+      this.error = null;
       this.twoFactor = null;
-      // A Microsoft/Google sign-in still waiting in the browser is over:
-      // its result must not replace this session later.
-      discardPendingSSO(this);
+      // A Microsoft/Google sign-in still waiting in the browser is over (the
+      // authority dropped its flow).
+      this.ssoProvider = null;
+      return true;
+    },
 
-      // Save token and user info securely
-      await platformSaveToken(result.token);
-      await platformSaveUserInfo(result.user);
+    /**
+     * Session from a password sign-in success (directly or after the second factor).
+     * @returns {Promise<boolean>} false when the result was dropped
+     */
+    async _completePasswordLogin(result, ticket) {
+      if (!(await this._applySignIn(result, ticket, 'login'))) {
+        addBreadcrumb({ category: 'auth', message: 'Sign-in result dropped: session changed', level: 'warning' });
+        return false;
+      }
 
       // Set Sentry user context
       setUser(result.user);
@@ -382,6 +440,7 @@ export const useAuthStore = defineStore('auth', {
 
       // P1 Fix: Resume any pending uploads that failed while logged out
       resumeMobileUploadQueue(this);
+      return true;
     },
 
     /**
@@ -407,6 +466,7 @@ export const useAuthStore = defineStore('auth', {
 
       this.loading = true;
       this.error = null;
+      const ticket = signInTicket();
       try {
         const result = await platformVerifyTwoFactor(step.tempToken, normalized, backup);
         // "Back to sign-in" (or a new password attempt) while the answer was
@@ -415,8 +475,13 @@ export const useAuthStore = defineStore('auth', {
           addBreadcrumb({ category: 'auth', message: 'Second-factor answer ignored: step was left', level: 'info' });
           return { success: false, ignored: true, reason: '2fa_step_left', next: 'password' };
         }
+        if (result?.ignored) {
+          return { success: false, ignored: true, reason: result.reason || 'session_changed', next: 'password' };
+        }
         if (result?.success && result.token) {
-          await this._completePasswordLogin(result);
+          if (!(await this._completePasswordLogin(result, ticket))) {
+            return { success: false, ignored: true, reason: 'session_changed', next: 'password' };
+          }
           addBreadcrumb({ category: 'auth', message: 'Second factor accepted', level: 'info' });
           return { success: true };
         }
@@ -481,33 +546,18 @@ export const useAuthStore = defineStore('auth', {
      * (e.g. via the SSO custom-protocol callback). Mirrors the post-success
      * branch of login() so downstream stores see identical state.
      */
-    async loginWithSSO({ token, user }) {
+    async loginWithSSO({ token, user: rawUser }, ticket) {
+      const user = token ? sanitizeSsoUser(rawUser, token) : null;
       if (!token || !user) {
         this.error = tr('ssoFailed');
         return { success: false, error: this.error };
       }
       try {
-        this.user = user;
-        this.token = token;
-        this.isAuthenticated = true;
-        this.error = null;
-        this.twoFactor = null;
-
-        await platformSaveToken(token);
-        await platformSaveUserInfo(user);
-
-        setUser(user);
-        this.startTokenRefresh();
-        refreshMinutesInBackground(token);
-
-        try {
-          const { useDeviceStore } = await import('./device');
-          const deviceStore = useDeviceStore();
-          await deviceStore.reloadForUser();
-        } catch (e) {
-          console.warn('Device store reload after SSO login failed:', e);
+        if (!(await this._applySignIn({ token, user }, ticket, 'sso'))) {
+          return { success: false, ignored: true, reason: 'session_changed' };
         }
-
+        this._afterSSOSession(user, token);
+        await this._reloadDevicesAfterSSO();
         resumeMobileUploadQueue(this);
         addBreadcrumb({ category: 'auth', message: 'SSO login successful', level: 'info' });
         return { success: true };
@@ -516,6 +566,42 @@ export const useAuthStore = defineStore('auth', {
         this.error = tr('ssoFailed');
         return { success: false, error: this.error };
       }
+    },
+
+    _afterSSOSession(user, token) {
+      setUser(user);
+      this.startTokenRefresh();
+      refreshMinutesInBackground(token);
+    },
+
+    async _reloadDevicesAfterSSO() {
+      try {
+        const { useDeviceStore } = await import('./device');
+        await useDeviceStore().reloadForUser();
+      } catch (e) {
+        console.warn('Device store reload after SSO login failed:', e);
+      }
+    },
+
+    /**
+     * Desktop: main applied the SSO session (or holds an error result of the
+     * current epoch). Mirror main's session - only the one of this result's
+     * epoch, never a later or earlier one.
+     */
+    async _adoptDesktopSSO(payload) {
+      let session = null;
+      try { session = await window.electronAPI.auth.currentSession(); } catch { session = null; }
+      if (!session || session.signedOut || session.epoch !== payload.epoch || !session.token || !session.user) return false;
+      if (this.isAuthenticated || session.epoch < this._epoch) return false;
+      this._epoch = session.epoch;
+      this.user = session.user;
+      this.token = session.token;
+      this.isAuthenticated = true;
+      this.error = null;
+      this.twoFactor = null;
+      this._afterSSOSession(session.user, session.token);
+      await this._reloadDevicesAfterSSO();
+      return true;
     },
 
     /** An SSO flow was started in the browser (shows the spinner on the login page). */
@@ -539,16 +625,73 @@ export const useAuthStore = defineStore('auth', {
      * @returns {Promise<{ success: boolean, cancelled?: boolean, reason?: string }>}
      */
     async completeSSO(payload) {
-      const provider = this.ssoProvider || 'unknown';
-      this.ssoProvider = null;
+      // An ignored result has no side effect at all (no store change, see
+      // boot/sso.js): nothing below the two checks runs for it.
       // Never switch or touch a signed-in session (see boot/sso.js).
       if (this.isAuthenticated) {
         addBreadcrumb({ category: 'sso', message: 'SSO result ignored: already signed in', level: 'warning' });
         return { success: false, ignored: true, reason: 'already_signed_in' };
       }
+      // SECURITY: only a result of a sign-in this app started is applied,
+      // and only through the session authority with the ticket (epoch) of
+      // that sign-in: a crafted suissenotes://auth/callback link (web page,
+      // message, QR code, another app) is dropped without a trace in the UI;
+      // a sign-in in progress keeps waiting for its real result. A sign-in or
+      // sign-out that happened meanwhile wins: the result is dropped with no
+      // side effect (E3).
+      const dropped = (reason) => {
+        addBreadcrumb({ category: 'sso', message: `SSO result ignored: ${reason}`, level: 'warning' });
+        return { success: false, ignored: true, reason };
+      };
+
+      let ticket = null;
+      if (isElectron()) {
+        // Main bound the result to its flow and applied it (sso-flow.js);
+        // the renderer never applies a token from a payload.
+        if (!payload || payload.bound !== true) return dropped('unbound_result');
+        if (payload.applied !== true && !payload.error && !payload.code) return dropped('not_applied');
+      } else if (isCapacitor()) {
+        const { consumeSsoFlow, endSsoFlowLocally } = await import('../services/ssoFlow');
+        if (payload && payload.local === true && !payload.token && !payload.authCode) {
+          // The in-app browser this app opened ended without a callback URL:
+          // not a result (it can never sign in), it only ends the flow.
+          if (!endSsoFlowLocally()) return dropped('no_pending_flow');
+        } else {
+          const binding = consumeSsoFlow(payload);
+          if (!binding.ok) {
+            if (binding.reason === 'missing_state') countMissingState();
+            return dropped(binding.reason);
+          }
+          ticket = { epoch: binding.epoch };
+          if (payload && !payload.error && !payload.code && payload.authCode) {
+            let exchanged = null;
+            try {
+              exchanged = await exchangeSsoCode(payload.authCode, binding.verifier, payload.state);
+            } catch (error) {
+              if (!isNetworkFailure(error)) captureException(error, { tags: { action: 'ssoExchange' } });
+            }
+            payload = exchanged || { error: 'invalid_callback' };
+          }
+          if (this.isAuthenticated || !isCurrentTicket(ticket)) return dropped('session_changed');
+        }
+      } else {
+        return dropped('unsupported_platform');
+      }
+
+      const provider = this.ssoProvider || 'unknown';
       const seq = this.ssoOutcome.seq + 1;
 
+      if (isElectron() && payload.applied === true) {
+        if (!(await this._adoptDesktopSSO(payload))) return dropped('session_changed');
+        this.ssoProvider = null;
+        resumeMobileUploadQueue(this);
+        addBreadcrumb({ category: 'auth', message: 'SSO login successful', level: 'info' });
+        this.ssoOutcome = { seq, success: true, cancelled: false, reason: null };
+        return { success: true, reason: null };
+      }
+
       if (!payload || payload.error || payload.code || !payload.token) {
+        this.ssoProvider = null;
         const outcome = classifySsoError(payload && (payload.error || payload.code)
           ? payload
           : { error: 'invalid_callback' });
@@ -567,7 +710,9 @@ export const useAuthStore = defineStore('auth', {
         return { success: false, cancelled: outcome.cancelled, reason: outcome.reason };
       }
 
-      const result = await this.loginWithSSO(payload);
+      const result = await this.loginWithSSO(payload, ticket);
+      if (result.ignored) return dropped(result.reason);
+      this.ssoProvider = null;
       if (!result.success) {
         captureMessage('auth: SSO sign-in could not be stored (session_failed)', 'warning', {
           fingerprint: ['sso-sign-in-failed', 'session_failed'],
@@ -581,19 +726,17 @@ export const useAuthStore = defineStore('auth', {
     async register(email, password, name) {
       this.loading = true;
       this.error = null;
+      const ticket = signInTicket();
 
       try {
         const result = await platformRegister(email, password, name);
 
-        if (result.success) {
-          this.user = result.user;
-          this.token = result.token;
-          this.isAuthenticated = true;
-          discardPendingSSO(this);
-
-          // Save token and user info securely
-          await platformSaveToken(result.token);
-          await platformSaveUserInfo(result.user);
+        if (result.ignored) {
+          return { success: false, ignored: true, reason: result.reason || 'session_changed' };
+        } else if (result.success) {
+          if (!(await this._applySignIn(result, ticket, 'login'))) {
+            return { success: false, ignored: true, reason: 'session_changed' };
+          }
 
           setUser(result.user);
 
@@ -638,21 +781,35 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
+    /**
+     * Sign out (E5): 1-3 by the session authority first - tombstone with a
+     * new epoch and RAM lock, requests aborted, token, user, SSO flow and
+     * buffer deleted - then 4. the BLE clean-up (no token is readable any
+     * more; the user object stays until it is done). A sign-out that could
+     * not be confirmed is reported to the user; the lock stays and every
+     * start deletes again.
+     * @returns {Promise<{ success: boolean }>}
+     */
     async logout() {
-      // Disconnect BLE and clear device state BEFORE clearing user
-      // (must happen while user.id is still available for scoped keys)
+      // RAM lock in this store before anything is awaited.
+      this.token = null;
+      this.isAuthenticated = false;
+      this.twoFactor = null;
+      this.ssoProvider = null;
+      this._refreshPromise = null;
+      this.stopTokenRefresh();
+
+      const signOut = await platformSignOut();
+      if (Number.isSafeInteger(signOut?.epoch)) this._epoch = Math.max(this._epoch, signOut.epoch);
+
+      // BLE: disconnect and clear device state while user.id is still set
+      // (user-scoped pairing keys).
       try {
         const { useDeviceStore } = await import('./device');
         const deviceStore = useDeviceStore();
         await deviceStore.onLogout();
       } catch (error) {
         console.warn('Error cleaning up device store on logout:', error);
-      }
-
-      try {
-        await platformClearToken();
-      } catch (error) {
-        console.error('Error clearing token:', error);
       }
 
       // Clear history store to prevent data leaks between users
@@ -670,19 +827,17 @@ export const useAuthStore = defineStore('auth', {
       const { useTranscriptionSettingsStore } = await import('./transcription-settings');
       useTranscriptionSettingsStore().reset();
 
-      // Stop token refresh
-      this.stopTokenRefresh();
-
       // Clear Sentry user context
       setUser(null);
 
       this.user = null;
-      this.token = null;
-      this.isAuthenticated = false;
       this.error = null;
-      this.twoFactor = null;
-      discardPendingSSO(this);
-      this._refreshPromise = null;
+      if (!signOut?.success) {
+        // Visible: the login page shows it. Codes only.
+        this.error = tr('signOutIncomplete');
+        captureMessage('auth: sign-out incomplete', 'warning', { fingerprint: ['sign-out-incomplete'] });
+      }
+      return { success: !!signOut?.success };
     },
 
     /**
@@ -698,67 +853,65 @@ export const useAuthStore = defineStore('auth', {
 
     async checkSession() {
       try {
-        const token = await platformGetToken();
-        const userInfo = await platformGetUserInfo();
+        // The session authority purges legacy copies and honours the
+        // tombstone: after a sign-out (even a failed one) nothing is restored.
+        const session = await platformRestoreSession();
+        if (session?.mismatch) await platformSignOut();
+        if (!session || session.signedOut || !session.token || !session.user || Object.keys(session.user).length === 0) {
+          this.isAuthenticated = false;
+          return;
+        }
+        const { token, user: userInfo } = session;
 
-        // On mobile, getUserCredentials returns {} (empty object) when nothing is stored
-        const hasUserInfo = userInfo && Object.keys(userInfo).length > 0;
+        // Never restore a session the server would reject: a blind restore
+        // shows a "logged in" UI on a dead token, lets the user record, and
+        // only fails at upload time — after the meeting is over.
+        const tokenState = getTokenState(token);
 
-        if (token && hasUserInfo) {
-          // Never restore a session the server would reject: a blind restore
-          // shows a "logged in" UI on a dead token, lets the user record, and
-          // only fails at upload time — after the meeting is over.
-          const tokenState = getTokenState(token);
+        if (tokenState === 'dead') {
+          console.warn('Stored token expired beyond refresh grace - requiring re-login');
+          await platformSignOut();
+          this.isAuthenticated = false;
+          return;
+        }
 
-          if (tokenState === 'dead') {
-            console.warn('Stored token expired beyond refresh grace - requiring re-login');
-            await platformClearToken();
+        this._epoch = session.epoch;
+        this.token = token;
+        this.user = userInfo;
+        this.isAuthenticated = true;
+
+        if (tokenState === 'grace') {
+          // Expired but revivable — settle it NOW, before any UI claims a
+          // working session. A definitive rejection means re-login; a
+          // network failure keeps the session (offline use stays possible).
+          const refresh = await this._doTokenRefresh();
+          if (!refresh.success && refresh.authRejected) {
+            console.warn('Stored token rejected by refresh - requiring re-login');
+            this.user = null;
+            this.token = null;
             this.isAuthenticated = false;
+            await platformSignOut();
             return;
           }
-
-          this.token = token;
-          this.user = userInfo;
-          this.isAuthenticated = true;
-
-          if (tokenState === 'grace') {
-            // Expired but revivable — settle it NOW, before any UI claims a
-            // working session. A definitive rejection means re-login; a
-            // network failure keeps the session (offline use stays possible).
-            const refresh = await this._doTokenRefresh();
-            if (!refresh.success && refresh.authRejected) {
-              console.warn('Stored token rejected by refresh - requiring re-login');
-              await platformClearToken();
-              this.user = null;
-              this.token = null;
-              this.isAuthenticated = false;
-              return;
-            }
-          } else if (tokenState === 'stale') {
-            // Still valid — refresh in the background to restore full lifetime
-            this._doTokenRefresh().catch(() => {});
-          }
-
-          // Set Sentry user context on session restore
-          setUser(userInfo);
-
-          // Reload device store for this user (user-scoped BLE pairings)
-          try {
-            const { useDeviceStore } = await import('./device');
-            const deviceStore = useDeviceStore();
-            await deviceStore.reloadForUser();
-          } catch (e) {
-            console.warn('Device store reload after session restore failed:', e);
-          }
-
-          // Start periodic token refresh
-          this.startTokenRefresh();
-        } else if (token) {
-          // Token exists but no user info - clear and require re-login
-          console.warn('Token found but no user info - requiring re-login');
-          await platformClearToken();
-          this.isAuthenticated = false;
+        } else if (tokenState === 'stale') {
+          // Still valid — refresh in the background to restore full lifetime
+          this._doTokenRefresh().catch(() => {});
         }
+
+        // Set Sentry user context on session restore
+        setUser(userInfo);
+
+        // Reload device store for this user (user-scoped BLE pairings)
+        try {
+          const { useDeviceStore } = await import('./device');
+          const deviceStore = useDeviceStore();
+          await deviceStore.reloadForUser();
+        } catch (e) {
+          console.warn('Device store reload after session restore failed:', e);
+        }
+
+        // Start periodic token refresh
+        this.startTokenRefresh();
       } catch (error) {
         console.error('Error checking session:', error);
         this.isAuthenticated = false;
@@ -864,13 +1017,19 @@ export const useAuthStore = defineStore('auth', {
       if (!this.token && !this.isAuthenticated) {
         return { success: false, authRejected: true };
       }
+      // E3: a refresh applies only in the session it started in, and only
+      // for the same user.
+      const epochAtStart = this._epoch;
+      const userIdAtStart = decodeJwtUserId(this.token);
+      const ticket = signInTicket({ userId: userIdAtStart });
 
       try {
         let result;
 
         if (isElectron()) {
-          // Electron: use IPC handler (main process has the encrypted token)
+          // Electron: main refreshes and applies it (session authority).
           result = await window.electronAPI.auth.refreshToken();
+          if (result?.ignored) return { success: false };
           if (!result?.success) {
             // Distinguish a definitive rejection (expired beyond grace,
             // disabled account, no stored token) from a transient failure so
@@ -879,6 +1038,7 @@ export const useAuthStore = defineStore('auth', {
               /not authenticated/i.test(result?.error || '');
             return { success: false, authRejected };
           }
+          if (!this.isAuthenticated || this._epoch !== epochAtStart || result.epoch !== this._epoch) return { success: false };
         } else {
           // Mobile / web: direct fetch
           const response = await authenticatedRequest(API_ENDPOINTS.refreshToken, this.token, {
@@ -887,21 +1047,17 @@ export const useAuthStore = defineStore('auth', {
           if (!response.ok) {
             return { success: false, authRejected: response.status === 401 || response.status === 403 };
           }
-          result = await parseJsonSafe(response);
-          if (!result.token) return { success: false }; // non-JSON / unexpected body — transient
-          // Normalize: direct API returns { token, user } at top level
-          result = { success: true, token: result.token, user: result.user };
+          const data = await parseJsonSafe(response);
+          if (!data.token) return { success: false }; // non-JSON / unexpected body — transient
+          const applied = await applyMobileSession(ticket, { token: data.token, user: data.user }, { kind: 'refresh' });
+          if (!applied.applied || !isCurrentTicket(ticket) || !this.isAuthenticated) return { success: false };
+          result = { success: true, token: data.token, user: data.user };
         }
 
         if (result.success && result.token) {
-          // Update store state
+          // Synchronous: the state follows the authority's session.
           this.token = result.token;
-          if (result.user) {
-            this.user = result.user;
-            await platformSaveUserInfo(result.user);
-          }
-          // Persist new token
-          await platformSaveToken(result.token);
+          if (result.user && String(result.user.id ?? '') === String(userIdAtStart ?? '')) this.user = result.user;
 
           addBreadcrumb({ category: 'auth', message: 'Token refreshed successfully', level: 'info' });
 

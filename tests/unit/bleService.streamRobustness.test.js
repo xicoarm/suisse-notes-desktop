@@ -91,7 +91,7 @@ describe('downloadFile drops audio frames of an aborted transfer', () => {
         [CMD, 0x1D, 0x00, crc & 0xFF, (crc >> 8) & 0xFF]
       ]
     });
-    const out = await m.downloadFile('R.opus');
+    const out = await m.downloadFile('R.opus', null, 4096);
     expect(Array.from(out)).toEqual(Array.from(file));
   });
 
@@ -101,6 +101,6 @@ describe('downloadFile drops audio frames of an aborted transfer', () => {
       0x74: syncEcho,
       0x1C: () => [[AUDIO, 0x1C, 0x00, 0x00, 0x00, 1, 2], [AUDIO, 0x1C, 0x00, 0x00, 0x02, 3, 4], [CMD, 0x1D, 0x00, 0, 0]]
     });
-    await expect(m.downloadFile('R.opus')).rejects.toThrow(/frame 2 received, expected 1/);
+    await expect(m.downloadFile('R.opus', null, 4096)).rejects.toThrow(/frame 2 received, expected 1/);
   });
 });

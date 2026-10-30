@@ -6,6 +6,11 @@ on:
   push:
     branches: [main]
 
+
+# Least privilege: these jobs only read the repository.
+permissions:
+  contents: read
+
 jobs:
   lint-and-test:
     strategy:
@@ -34,6 +39,14 @@ jobs:
         # Real fsync and FFmpeg tests share the runner's disk. Avoid competing
         # test files exhausting an unrelated persistence test's time budget.
         run: npm run test -- --maxWorkers=1 --minWorkers=1
+        env:
+          # The session sweeps run every point on Linux and macOS; Windows
+          # (about seven times slower per run) a fixed-seed sample of the
+          # points, always the first and last two. Mutants, named points,
+          # unit probes and the real-media flows (first, middle and last point
+          # on all three systems) are never sampled (tests/unit/support/sweep.js);
+          # the sample makes room for those flows in the 25 minutes of this job.
+          SWEEP_SAMPLE: ${{ matrix.os == 'windows-latest' && '0.1' || '' }}
 
   build-validation:
     runs-on: ubuntu-latest

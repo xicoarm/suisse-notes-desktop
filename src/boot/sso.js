@@ -52,6 +52,10 @@ export function createSSOResultHandler({ getAuthStore, router, closeBrowser = nu
     }
 
     const result = await authStore.completeSSO(payload);
+    // Not a result of a sign-in this app started (no or a foreign state, or
+    // somebody signed in meanwhile): zero side effects - the browser stays
+    // open, the page stays where it is.
+    if (!result || result.ignored) return;
     if (closeBrowser) {
       try { await closeBrowser(); } catch { /* already closed */ }
     }

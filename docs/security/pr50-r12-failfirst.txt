@@ -1,0 +1,67 @@
+# PR #50 review round 12 - fail-first at production head c21d4d7 (tests of commit 1 only, 338a95c)
+# 2026-10-30T11:06:06+01:00 node v24.22.0, vitest; worktree at c21d4d7 plus the test files of 338a95c
+# git: src-electron identical to c21d4d7: yes
+# commands: npx vitest run tests/unit/effectGate.flags.test.js tests/unit/globalSinks.flags.test.js tests/unit/effectGate.aliasClass.test.js
+#           npx vitest run tests/unit/sweepMutation.main.test.js --maxWorkers=1 (under the heavy lock)
+
+## Class probe at the head (gate and oracle of c21d4d7)
+
+class probe (seed 0x5e12, linux): 1174 protected cells, 316 refused, 418 counted by the oracle (0 of them refused on the Windows reading only, nothing to count); 30 cells on a link itself passed; 570 control cells; 0 cells without the right to make a link
+
+## Summary
+
+ ❯ tests/unit/globalSinks.flags.test.js  (15 tests | 3 failed) 56ms
+ ❯ tests/unit/effectGate.flags.test.js  (56 tests | 8 failed | 1 skipped) 140ms
+ ❯ tests/unit/effectGate.aliasClass.test.js  (19 tests | 13 failed) 6732ms
+ ❯ tests/unit/sweepMutation.main.test.js  (13 tests | 1 failed) 17510ms
+ FAIL  tests/unit/effectGate.aliasClass.test.js > control cells outside the recordings folder: no over-refusal > summary of the class probe
+ FAIL  tests/unit/effectGate.aliasClass.test.js > path form: chain of links > every descriptor and handle effect, by origin: refused, the folder unchanged, the oracle counts it
+ FAIL  tests/unit/effectGate.aliasClass.test.js > path form: dangling link > every descriptor and handle effect, by origin: refused, the folder unchanged, the oracle counts it
+ FAIL  tests/unit/effectGate.aliasClass.test.js > path form: dangling link > every path effect in the ended context: refused, the folder unchanged, the oracle counts it
+ FAIL  tests/unit/effectGate.aliasClass.test.js > path form: direct > every descriptor and handle effect, by origin: refused, the folder unchanged, the oracle counts it
+ FAIL  tests/unit/effectGate.aliasClass.test.js > path form: hard link > every descriptor and handle effect, by origin: refused, the folder unchanged, the oracle counts it
+ FAIL  tests/unit/effectGate.aliasClass.test.js > path form: hard link > every path effect in the ended context: refused, the folder unchanged, the oracle counts it
+ FAIL  tests/unit/effectGate.aliasClass.test.js > path form: relative > every descriptor and handle effect, by origin: refused, the folder unchanged, the oracle counts it
+ FAIL  tests/unit/effectGate.aliasClass.test.js > path form: symlink plus .. > every descriptor and handle effect, by origin: refused, the folder unchanged, the oracle counts it
+ FAIL  tests/unit/effectGate.aliasClass.test.js > path form: symlink plus .. > every path effect in the ended context: refused, the folder unchanged, the oracle counts it
+ FAIL  tests/unit/effectGate.aliasClass.test.js > path form: symlink to a file > every descriptor and handle effect, by origin: refused, the folder unchanged, the oracle counts it
+ FAIL  tests/unit/effectGate.aliasClass.test.js > path form: symlink to a file > every path effect in the ended context: refused, the folder unchanged, the oracle counts it
+ FAIL  tests/unit/effectGate.aliasClass.test.js > path form: symlink to a folder > every descriptor and handle effect, by origin: refused, the folder unchanged, the oracle counts it
+ FAIL  tests/unit/effectGate.flags.test.js > round 12, F10: reading opens and attributes > a descriptor opened for reading (foreground and ended context): fchmod, futimes, fchown refused after the end
+ FAIL  tests/unit/effectGate.flags.test.js > round 12, F10: reading opens and attributes > a handle opened for reading: chmod, utimes, chown refused after the end; path chmod and utimes too
+ FAIL  tests/unit/effectGate.flags.test.js > round 12, F8: a path resolved as the system resolves it > a folder without access on the way is refused after the end (not decidable)
+ FAIL  tests/unit/effectGate.flags.test.js > round 12, F8: a path resolved as the system resolves it > a hard link to a file of the folder: writing through it is refused, removing the link itself passes
+ FAIL  tests/unit/effectGate.flags.test.js > round 12, F8: a path resolved as the system resolves it > a path that cannot be decided (a link loop) is refused after the end, and fails by itself before it
+ FAIL  tests/unit/effectGate.flags.test.js > round 12, F8: a path resolved as the system resolves it > a symlink plus «..» (the link first, then up from its target): refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > round 12, F9: what the open found is held until the close > a descriptor and a handle opened in the foreground through a link, the link then removed: refused after logout and after login B
+ FAIL  tests/unit/effectGate.flags.test.js > round 12, F9: what the open found is held until the close > a descriptor and a handle opened in the foreground through a link, the link then renamed: refused after logout and after login B
+ FAIL  tests/unit/globalSinks.flags.test.js > round 12: where a call really lands > F8: a write through a hard link to a file of the folder is an effect; removing the link is not
+ FAIL  tests/unit/globalSinks.flags.test.js > round 12: where a call really lands > F8: a write through a symlink plus «..» is an effect on the folder
+ FAIL  tests/unit/globalSinks.flags.test.js > round 12: where a call really lands > F9: a descriptor and a handle opened through a link, the link then removed: their writes are effects
+ FAIL  tests/unit/sweepMutation.main.test.js > mutants of the sinks: the sweep turns red > fs-attr-bypass: red with a violation of kind fs
+
+## Class probe at the head, read
+
+Of 1174 protected cells the sink of c21d4d7 refused 316 (858 passed: link
+plus «..», hard links, dangling links and chains with numeric or string
+writing opens, and every descriptor/handle opened for reading or whose alias
+was removed or renamed - fchmod, futimes, writes after the alias is gone);
+the oracle of c21d4d7 counted 418 (756 not: the same alias class). Control
+cells (570) and calls on a link itself (30) passed already.
+
+## Mutant fs-attr-bypass at the head (snapshot without mode/mtime)
+
+[sweep:mutant] fs-attr-bypass: 2 violations
+  recovery, real chain with the system audio merge at the named point A: effects after the change: ["attr:c1/metadata.json"]
+  recovery, real chain with the system audio merge at the named point B: effects after the change: ["attr:c1/metadata.json"]
+
+     → fs-attr-bypass: /attributes changed after the change: .*c1\/metadata\.json/ in ["recovery, real chain with the system audio merge at the named point A: effects after the change: [\"attr:c1/metadata.json\"]","recovery, real chain with the system audio merge at the named point B: effects after the change: [\"attr:c1/metadata.json\"]"]: expected false to be true // Object.is equality
+AssertionError: fs-attr-bypass: /attributes changed after the change: .*c1\/metadata\.json/ in ["recovery, real chain with the system audio merge at the named point A: effects after the change: [\"attr:c1/metadata.json\"]","recovery, real chain with the system audio merge at the named point B: effects after the change: [\"attr:c1/metadata.json\"]"]: expected false to be true // Object.is equality
+  expected: the attribute change also seen by the snapshot (/attributes changed after the change: .*c1\/metadata\.json/) - missing at the head.
+
+## After the fix (d50548e gate, 4ffe1f2 oracle)
+
+class probe (seed 0x5e12, linux): 1174 protected cells, 1174 refused, 1174 counted by the oracle; 30 cells on a link itself passed; 570 control cells.
+effectGate.flags 55 passed (1 skipped: letter case on Linux), globalSinks.flags 15 passed,
+sweepMutation 13 passed (fs-attr-bypass: counted AND attributes changed), sessionSweep.main 20, sessionSweep.chain.main 10, recovery.session 18 passed.
+

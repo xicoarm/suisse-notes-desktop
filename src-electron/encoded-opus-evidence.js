@@ -1,6 +1,9 @@
 'use strict';
 
-const { spawn } = require('child_process');
+// Looked up at call time, never captured at load: every start goes through
+// main's effect gate (effect-gate.js, review round 10, F3).
+const childProcess = require('child_process');
+const { assertPublishAllowed, bindSession } = require('./effect-gate');
 const { performance } = require('perf_hooks');
 const fs = require('fs');
 const path = require('path');
@@ -389,7 +392,7 @@ function createOpusPacketAccounting({ readPacket } = {}) {
 function probeLines(ffprobePath, args, timeoutMs, consume) {
   return new Promise((resolve, reject) => {
     let buffered = '', stderr = '', failure = null, timer;
-    const proc = spawn(ffprobePath, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = childProcess.spawn(ffprobePath, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const fail = error => { if (!failure) failure = error; try { proc.kill('SIGKILL'); } catch (_) { /* already closed */ } };
     timer = setTimeout(() => fail(invalid('packet inspection timed out')), timeoutMs);
     proc.stdout.setEncoding('utf8'); proc.stderr.setEncoding('utf8');
@@ -408,13 +411,15 @@ function probeLines(ffprobePath, args, timeoutMs, consume) {
     });
     proc.stderr.on('data', text => { stderr = (stderr + text).slice(-16384); });
     proc.once('error', error => { clearTimeout(timer); reject(error); });
-    proc.once('close', code => {
+    proc.once('close', bindSession(code => {
       clearTimeout(timer);
+      // A start refused by main's effect gate: the session ended (round 10, F3).
+      if (code !== 0) { try { assertPublishAllowed(); } catch (gateError) { reject(gateError); return; } }
       if (failure) { reject(failure); return; }
       if (code !== 0 || stderr.trim()) { reject(invalid(`packet probe failed (${code}): ${stderr.slice(-1024)}`)); return; }
       try { if (buffered) consume(buffered.replace(/\r$/, '')); resolve(); }
       catch (error) { reject(error); }
-    });
+    }, reject));
   });
 }
 

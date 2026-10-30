@@ -6,13 +6,14 @@
 // `App/capacitor.config.json` on every sync, including the sync the release
 // workflow runs before it builds. Without this step the build silently loses:
 //
-//   1. the BackgroundRecordingPlugin registration (recording stops working);
+//   1. the BackgroundRecordingPlugin and SecureTokenStorePlugin registrations
+//      (recording stops working; the session token cannot be stored);
 //   2. the sentry-cocoa package (native crashes, app hangs and watchdog
 //      terminations stop being reported — the app cannot report its own death
 //      from JavaScript).
 //
 // The Sentry plugin for Capacitor cannot be used instead: it requires
-// capacitor-swift-pm 7 while this app pins 6.2.1.
+// capacitor-swift-pm 7 while this app pins 6.2.2.
 //
 // Both patches are idempotent, and `npm run cap:sync` runs this file.
 
@@ -21,6 +22,9 @@ const path = require('path');
 
 const SENTRY_PACKAGE = '.package(url: "https://github.com/getsentry/sentry-cocoa", from: "8.56.2"),';
 const SENTRY_PRODUCT = '.product(name: "Sentry", package: "sentry-cocoa"),';
+// In-app plugins (App/Plugins/*.swift) that cap sync does not list itself.
+// SecureTokenStorePlugin holds the session token in the Keychain.
+const LOCAL_PLUGIN_CLASSES = ['BackgroundRecordingPlugin', 'SecureTokenStorePlugin'];
 
 function patchPackageSwift(file) {
   if (!fs.existsSync(file)) return { file, changed: false, reason: 'missing' };
@@ -51,10 +55,11 @@ function patchCapacitorConfig(file) {
   if (!fs.existsSync(file)) return { file, changed: false, reason: 'missing' };
   const config = JSON.parse(fs.readFileSync(file, 'utf8'));
   if (!Array.isArray(config.packageClassList)) config.packageClassList = [];
-  if (config.packageClassList.includes('BackgroundRecordingPlugin')) return { file, changed: false, reason: 'already patched' };
-  config.packageClassList.push('BackgroundRecordingPlugin');
+  const missing = LOCAL_PLUGIN_CLASSES.filter(name => !config.packageClassList.includes(name));
+  if (missing.length === 0) return { file, changed: false, reason: 'already patched' };
+  config.packageClassList.push(...missing);
   fs.writeFileSync(file, JSON.stringify(config, null, '\t'));
-  return { file, changed: true, reason: 'BackgroundRecordingPlugin re-registered' };
+  return { file, changed: true, reason: `${missing.join(', ')} re-registered` };
 }
 
 function patchIosProject(root = path.resolve(__dirname, '..', 'src-capacitor')) {
@@ -70,4 +75,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { patchIosProject, patchPackageSwift, patchCapacitorConfig, SENTRY_PACKAGE, SENTRY_PRODUCT };
+module.exports = { patchIosProject, patchPackageSwift, patchCapacitorConfig, SENTRY_PACKAGE, SENTRY_PRODUCT, LOCAL_PLUGIN_CLASSES };

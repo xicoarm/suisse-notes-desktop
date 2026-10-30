@@ -1,0 +1,126 @@
+name: Effect gate measurement
+
+# Review round 13 (P6, P7): the same scenario on the heads before and after the
+# gate's path logic and on this head. Runs on a push whose commit message carries
+# [gate-measure], or by hand once this file is on the default branch. Reports
+# numbers; it blocks nothing.
+
+on:
+  push:
+    branches: [fix/client-security-2026-10-29]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-measure-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  runtime:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[gate-measure]') }}
+    name: Runtime / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Measure the three heads, alternating
+        shell: bash
+        run: |
+          mkdir -p measure
+          for head in c21d4d7 e1e0a09 "$GITHUB_SHA"; do
+            short="${head:0:7}"
+            git show "$head:src-electron/effect-gate.js" > "measure/gate-$short.js"
+          done
+          for round in 1 2 3; do
+            for head in c21d4d7 e1e0a09 "${GITHUB_SHA:0:7}"; do
+              node scripts/perf/gate-bench.js "measure/gate-$head.js" "$head" >> measure/runtime.jsonl
+              node scripts/perf/gate-bench.js "measure/gate-$head.js" "$head" --slow >> measure/runtime.jsonl
+            done
+          done
+          cat measure/runtime.jsonl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gate-runtime-${{ matrix.os }}
+          path: measure/runtime.jsonl
+
+  audio:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[gate-measure]') }}
+    name: Audio / ${{ matrix.head }} / ${{ matrix.run }}
+    runs-on: macos-26
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        head: [c21d4d7, e1e0a09, this]
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    env:
+      CI: 'true'
+      HUSKY: '0'
+      API_BASE_URL: http://127.0.0.1:3000
+      VITE_API_URL: http://127.0.0.1:3000
+      SUISSE_E2E_HOOKS: '1'
+      SUISSE_TEST_NETWORK_ISOLATION: '1'
+      SUISSE_E2E_APP_DIR: dist/electron/UnPackaged
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      SENTRY_AUTH_TOKEN: ''
+      GH_TOKEN: ''
+      GITHUB_TOKEN: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Put the head under test in place
+        env:
+          HEAD_UNDER_TEST: ${{ matrix.head }}
+        run: |
+          cp scripts/perf/main-probe.cjs "$RUNNER_TEMP/main-probe.cjs"
+          if [ "$HEAD_UNDER_TEST" != this ]; then git checkout --detach "$HEAD_UNDER_TEST"; fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+        timeout-minutes: 10
+      - run: node scripts/prepare-ffmpeg.js
+        timeout-minutes: 2
+      - run: npx quasar build -m electron --skip-pkg
+        timeout-minutes: 10
+      # In front of the built main, not its source: an eval or a changed source
+      # would change how the bundler wraps main, and the same on every head.
+      - name: Put the main-process probe in front of the built main
+        env:
+          PROBE_DIR: ${{ runner.temp }}/gate-probe
+        run: |
+          mkdir -p "$PROBE_DIR"
+          main=dist/electron/UnPackaged/electron-main.js
+          { printf "try { process.env.GATE_PROBE_DIR = '%s'; require('%s'); } catch (e) { console.error(e); }\n" "$PROBE_DIR" "$RUNNER_TEMP/main-probe.cjs"; cat "$main"; } > measure-main.js
+          mv measure-main.js "$main"
+      - name: The synthetic capture qualification (s11-baseline among it)
+        timeout-minutes: 23
+        continue-on-error: true
+        run: node tests/e2e-harness/ci/run-qualification.js
+      - name: Keep the clock results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-audio-${{ matrix.head }}-${{ matrix.run }}
+          path: |
+            ${{ runner.temp }}/gate-probe/
+            tests/e2e-harness/work/result_*.json
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 1

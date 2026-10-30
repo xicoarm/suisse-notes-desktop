@@ -19,47 +19,12 @@ import { registerPlugin } from '@capacitor/core';
 import { isIOS, isAndroid } from '../utils/platform';
 import { addBreadcrumb, captureMessage } from '../boot/sentry';
 import { redactUrl } from '../utils/redact';
+import { parseSSOCallbackUrl } from '../utils/ssoCallback';
 
 const SSOAuth = registerPlugin('SSOAuth');
 
-/**
- * Parse a suissenotes://auth/callback URL or https://app.suisse-meets.ch/sso/...
- * Universal Link into { token, user } | { error } | null.
- * Mirrors the implementation in src/boot/lifecycle.js — kept in sync.
- */
-export function parseSSOCallbackUrl(rawUrl) {
-  if (!rawUrl || typeof rawUrl !== 'string') return null;
-  let parsed;
-  try { parsed = new URL(rawUrl); } catch { return null; }
-
-  const isCustomScheme = parsed.protocol === 'suissenotes:'
-    && parsed.host === 'auth'
-    && parsed.pathname.replace(/\/$/, '') === '/callback';
-  const isUniversalLink = parsed.protocol === 'https:'
-    && (parsed.host === 'app.suisse-meets.ch' || parsed.host === 'app.suisse-notes.ch')
-    && parsed.pathname.startsWith('/sso/');
-  if (!isCustomScheme && !isUniversalLink) return null;
-
-  // `code` (contract 10/2026) is what the app translates; `error` stays an
-  // English sentence for older app versions.
-  const error = parsed.searchParams.get('error');
-  const code = parsed.searchParams.get('code');
-  if (code) return { error: error || code, code };
-  if (error) return { error };
-
-  const token = parsed.searchParams.get('token');
-  const userB64 = parsed.searchParams.get('user');
-  if (!token || !userB64) return { error: 'invalid_callback' };
-
-  try {
-    const std = userB64.replace(/-/g, '+').replace(/_/g, '/');
-    const padded = std + '='.repeat((4 - (std.length % 4)) % 4);
-    const user = JSON.parse(atob(padded));
-    return { token, user };
-  } catch {
-    return { error: 'invalid_callback' };
-  }
-}
+// Re-exported for existing importers; the single implementation lives in utils.
+export { parseSSOCallbackUrl };
 
 /**
  * Open the OAuth URL using the platform-appropriate API and dispatch the
@@ -91,19 +56,21 @@ export async function openSSO({ url, callbackScheme = 'suissenotes' }) {
         window.dispatchEvent(new CustomEvent('sso:callback', { detail: payload }));
       } else {
         captureMessage('sso: iOS callback URL did not parse as an SSO callback', 'warning');
-        window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: 'invalid_callback' } }));
+        window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: 'invalid_callback', local: true } }));
       }
     } catch (err) {
       const msg = err?.message || String(err);
+      // `local: true`: the browser session this app opened ended here (no URL
+      // involved); it ends the pending flow without a state (services/ssoFlow.js).
       // Treat user-cancel quietly (Android USER_CANCELED, iOS
       // ASWebAuthenticationSession error 1 = canceledLogin); everything else
       // surfaces as a warning.
       if (msg === 'USER_CANCELED' || /WebAuthenticationSession error 1\b|canceledLogin/i.test(msg)) {
         addBreadcrumb({ category: 'sso', message: 'SSOAuth.startAuth cancelled by user', level: 'info' });
-        window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: 'canceled' } }));
+        window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: 'canceled', local: true } }));
       } else {
         captureMessage(`sso: SSOAuth.startAuth rejected reason=${msg.slice(0, 200)}`, 'warning');
-        window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: msg } }));
+        window.dispatchEvent(new CustomEvent('sso:callback', { detail: { error: msg, local: true } }));
       }
     }
     return;

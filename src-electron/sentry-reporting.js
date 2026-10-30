@@ -62,6 +62,94 @@ function scrub(text) {
     .replace(/(https?:\/\/[^\s"']+)\?[^\s"']*/g, '$1?<redacted>');
 }
 
+// Query keys whose values are credentials or bind a sign-in (same list as the
+// renderer's src/utils/redact.js), and bare JWTs.
+const SECRET_QUERY_KEYS = ['token', 'access_token', 'refresh_token', 'id_token', 'session', 'user', 'auth', 'code', 'password',
+  'auth_code', 'handoff', 'hv', 'state', 'app_state', 'code_verifier', 'code_challenge', 'sessiontoken', 'codeverifier'];
+const SECRET_QUERY_RE = new RegExp(`([?&#]|^)(${SECRET_QUERY_KEYS.join('|')})=([^&#\\s'"]+)`, 'gi');
+const JWT_RE = /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g;
+// JSON-ish "sessionToken":"…", "password": "…" in serialized bodies/messages.
+const SECRET_JSON_RE = /("(?:[A-Za-z_]*token|password|secret|authorization|cookie|codeVerifier|verifier|sessionToken)"\s*:\s*")[^"]*(")/gi;
+const SECRET_FIELD_RE = /^(authorization|cookie|set-cookie|password|secret|token|access_token|refresh_token|id_token|sessiontoken|session_token|authtoken|auth_token|codeverifier|code_verifier|apikey|api_key|x-api-key)$/i;
+
+/** Redact free text for Sentry: credentials, JWTs, secret query values, user names, mail addresses. */
+function redactText(text) {
+  if (typeof text !== 'string' || !text) return text;
+  return scrub(text
+    .replace(SECRET_JSON_RE, '$1<redacted>$2')
+    .replace(SECRET_QUERY_RE, (m, sep, key) => `${sep}${key}=<redacted>`)
+    .replace(JWT_RE, '<redacted-jwt>'));
+}
+
+function redactDeep(value, depth = 0) {
+  if (typeof value === 'string') return redactText(value);
+  if (!value || typeof value !== 'object' || depth > 6) return value;
+  if (Array.isArray(value)) return value.map((v) => redactDeep(v, depth + 1));
+  const out = {};
+  for (const [key, v] of Object.entries(value)) {
+    out[key] = SECRET_FIELD_RE.test(key) && v !== null && v !== undefined ? '<redacted>' : redactDeep(v, depth + 1);
+  }
+  return out;
+}
+
+/**
+ * Main-process Sentry beforeSend/beforeBreadcrumb: the same redaction for
+ * every part of an event that can carry text from an Error or a log line -
+ * message, exception values, stack frames (paths, local variables), extra,
+ * contexts, tags, request and breadcrumbs. Never throws; on an internal
+ * failure the event is dropped rather than sent unredacted.
+ */
+function redactEvent(event) {
+  if (!event || typeof event !== 'object') return event;
+  try {
+    if (typeof event.message === 'string') event.message = redactText(event.message);
+    else if (event.message && typeof event.message === 'object') event.message = redactDeep(event.message);
+    if (event.logentry) event.logentry = redactDeep(event.logentry);
+    for (const ex of event.exception?.values || []) {
+      if (typeof ex.value === 'string') ex.value = redactText(ex.value);
+      for (const frame of ex.stacktrace?.frames || []) {
+        for (const key of ['filename', 'abs_path', 'module', 'context_line']) {
+          if (typeof frame[key] === 'string') frame[key] = redactText(frame[key]);
+        }
+        for (const key of ['pre_context', 'post_context']) {
+          if (Array.isArray(frame[key])) frame[key] = frame[key].map(redactText);
+        }
+        if (frame.vars) frame.vars = redactDeep(frame.vars);
+      }
+    }
+    for (const thread of event.threads?.values || []) {
+      for (const frame of thread.stacktrace?.frames || []) {
+        for (const key of ['filename', 'abs_path']) {
+          if (typeof frame[key] === 'string') frame[key] = redactText(frame[key]);
+        }
+        if (frame.vars) frame.vars = redactDeep(frame.vars);
+      }
+    }
+    if (Array.isArray(event.fingerprint)) event.fingerprint = event.fingerprint.map((f) => (typeof f === 'string' ? redactText(f) : f));
+    if (event.extra) event.extra = redactDeep(event.extra);
+    if (event.contexts) event.contexts = redactDeep(event.contexts);
+    if (event.tags) event.tags = redactDeep(event.tags);
+    if (event.request) event.request = redactDeep(event.request);
+    if (event.user) event.user = event.user.id !== undefined ? { id: event.user.id } : {};
+    if (Array.isArray(event.breadcrumbs)) event.breadcrumbs = event.breadcrumbs.map(redactBreadcrumb).filter(Boolean);
+    return event;
+  } catch (_) {
+    return null;
+  }
+}
+
+function redactBreadcrumb(crumb) {
+  if (!crumb || typeof crumb !== 'object') return crumb;
+  try {
+    const out = { ...crumb };
+    if (typeof out.message === 'string') out.message = redactText(out.message);
+    if (out.data) out.data = redactDeep(out.data);
+    return out;
+  } catch (_) {
+    return null;
+  }
+}
+
 function textOf(value) {
   if (value instanceof Error) return `${value.name}: ${value.message}`;
   if (typeof value === 'string') return value;
@@ -74,7 +162,9 @@ function textOf(value) {
 function describe(data) {
   const parts = Array.isArray(data) ? data : [data];
   const error = parts.find(part => part instanceof Error) || null;
-  const message = scrub(parts.map(textOf).join(' ')).slice(0, MAX_MESSAGE);
+  // Fully redacted before anything is derived from it (title, fingerprint,
+  // extra logLine, breadcrumb): credentials, JWTs, secret query values.
+  const message = redactText(parts.map(textOf).join(' ')).slice(0, MAX_MESSAGE);
   return { error, message };
 }
 
@@ -204,4 +294,4 @@ function installWindowReporting({ Sentry, log = null } = {}) {
   return { report, attachWindow };
 }
 
-module.exports = { installLogReporting, installWindowReporting, createOccurrenceSampler, fingerprintOf, scrub, describe };
+module.exports = { installLogReporting, installWindowReporting, createOccurrenceSampler, fingerprintOf, scrub, describe, redactText, redactEvent, redactBreadcrumb };

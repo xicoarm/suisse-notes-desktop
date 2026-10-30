@@ -12,9 +12,15 @@ vi.mock('../../src/stores/minutes', () => ({
   useMinutesStore: () => ({ fetchMinutes: vi.fn(async () => ({ success: true })), setFromServer: vi.fn(), reset: vi.fn() })
 }));
 
+// Desktop: main applies the SSO session (sso-flow.js + session-authority.js)
+// and the renderer mirrors main's session of the result's epoch.
+const mainSession = vi.hoisted(() => ({ current: { signedOut: true, epoch: 0 } }));
 const electronAuth = {
-  saveToken: vi.fn(async () => ({ success: true })),
-  saveUserInfo: vi.fn(async () => ({ success: true }))
+  currentSession: vi.fn(async () => mainSession.current)
+};
+const appliedIn = (epoch, userId) => {
+  mainSession.current = { signedOut: false, epoch, token: jwt(userId), user: { id: userId } };
+  return { bound: true, applied: true, epoch };
 };
 // performance: vue-i18n needs window.performance to translate.
 vi.stubGlobal('window', { electronAPI: { auth: electronAuth }, performance: globalThis.performance });
@@ -23,6 +29,8 @@ const { useAuthStore } = await import('../../src/stores/auth');
 const { createSSOResultHandler } = await import('../../src/boot/sso');
 const { i18n } = await import('../../src/boot/i18n');
 const en = (key) => i18n.global.getLocaleMessage('en')[key];
+// A token whose userId claim matches the result's user (sanitizeSsoUser).
+const jwt = (userId) => `h.${Buffer.from(JSON.stringify({ userId })).toString('base64url')}.s`;
 
 function fakeRouter(name = 'login') {
   const router = {
@@ -43,7 +51,7 @@ describe('auth store: completeSSO', () => {
   it('a cancel is silent and ends the wait', async () => {
     const store = useAuthStore();
     store.beginSSO('microsoft');
-    const result = await store.completeSSO({ error: 'User cancelled', code: 'sso_cancelled' });
+    const result = await store.completeSSO({ error: 'User cancelled', code: 'sso_cancelled', bound: true });
     expect(result).toEqual({ success: false, cancelled: true, reason: 'sso_cancelled' });
     expect(store.error).toBeNull();
     expect(store.ssoProvider).toBeNull();
@@ -54,30 +62,42 @@ describe('auth store: completeSSO', () => {
   it('a failure shows the translated text and reports a warning with codes only', async () => {
     const store = useAuthStore();
     store.beginSSO('microsoft');
-    await store.completeSSO({ error: 'AADSTS65001: The user or administrator has not consented to use the application.' });
+    await store.completeSSO({ error: 'AADSTS65001: The user or administrator has not consented to use the application.', bound: true });
     expect(store.error).toBe(en('ssoAdminConsent'));
     expect(store.error).not.toMatch(/AADSTS/);
     expect(sentry.captureMessage).toHaveBeenCalledWith('auth: SSO sign-in failed (AADSTS65001)', 'warning',
       expect.objectContaining({ tags: { sso_reason: 'AADSTS65001', sso_provider: 'microsoft' } }));
   });
 
-  it('a success signs in', async () => {
+  it('a success signs in (main\'s session of that epoch)', async () => {
     const store = useAuthStore();
     store.beginSSO('google');
-    const result = await store.completeSSO({ token: 'jwt', user: { id: 'u1' }, deliveryId: 1 });
+    const result = await store.completeSSO({ ...appliedIn(1, 'u1'), deliveryId: 1 });
+    store.stopTokenRefresh();
     expect(result.success).toBe(true);
     expect(store.isAuthenticated).toBe(true);
+    expect(store.token).toBe(jwt('u1'));
     expect(store.ssoOutcome).toMatchObject({ seq: 1, success: true });
-    expect(electronAuth.saveToken).toHaveBeenCalledWith('jwt');
   });
 
   it('a success that arrives after the wait was abandoned (2FA in the browser) is still accepted', async () => {
     const store = useAuthStore();
     store.beginSSO('microsoft');
     store.abandonSSO();
-    const result = await store.completeSSO({ token: 'late', user: { id: 'u2' } });
+    const result = await store.completeSSO(appliedIn(2, 'u2'));
+    store.stopTokenRefresh();
     expect(result.success).toBe(true);
-    expect(store.token).toBe('late');
+    expect(store.token).toBe(jwt('u2'));
+  });
+
+  it('a result of an epoch main has left (sign-out meanwhile) is never mirrored', async () => {
+    const store = useAuthStore();
+    const payload = appliedIn(3, 'u3');
+    mainSession.current = { signedOut: true, epoch: 4 };
+    const result = await store.completeSSO(payload);
+    expect(result).toMatchObject({ success: false, ignored: true });
+    expect(store.isAuthenticated).toBe(false);
+    expect(store.token).toBeNull();
   });
 });
 
@@ -91,7 +111,8 @@ describe('app-wide SSO result handler (boot/sso.js)', () => {
     const store = useAuthStore();
     const router = fakeRouter('about');
     const handle = createSSOResultHandler({ getAuthStore: () => store, router });
-    await handle({ token: 'jwt', user: { id: 'u1' }, deliveryId: 7 });
+    await handle({ ...appliedIn(5, 'u1'), deliveryId: 7 });
+    store.stopTokenRefresh();
     expect(router.isReady).toHaveBeenCalled();
     expect(store.isAuthenticated).toBe(true);
     expect(router.push).toHaveBeenCalledWith('/record');
@@ -101,8 +122,8 @@ describe('app-wide SSO result handler (boot/sso.js)', () => {
     const store = useAuthStore();
     const completeSSO = vi.spyOn(store, 'completeSSO');
     const handle = createSSOResultHandler({ getAuthStore: () => store, router: fakeRouter() });
-    await handle({ error: 'x', code: 'sso_failed', deliveryId: 3 });
-    await handle({ error: 'x', code: 'sso_failed', deliveryId: 3 });
+    await handle({ error: 'x', code: 'sso_failed', deliveryId: 3, bound: true });
+    await handle({ error: 'x', code: 'sso_failed', deliveryId: 3, bound: true });
     expect(completeSSO).toHaveBeenCalledTimes(1);
   });
 
@@ -110,13 +131,13 @@ describe('app-wide SSO result handler (boot/sso.js)', () => {
     const store = useAuthStore();
     const router = fakeRouter('register');
     const handle = createSSOResultHandler({ getAuthStore: () => store, router });
-    await handle({ error: 'x', code: 'sso_account_exists' });
+    await handle({ error: 'x', code: 'sso_account_exists', bound: true });
     expect(router.push).toHaveBeenCalledWith('/login');
     expect(store.error).toBe(en('ssoAccountExists'));
 
     const cancelRouter = fakeRouter('register');
     const cancel = createSSOResultHandler({ getAuthStore: () => store, router: cancelRouter });
-    await cancel({ error: 'access_denied' });
+    await cancel({ error: 'access_denied', bound: true });
     expect(cancelRouter.push).not.toHaveBeenCalled();
   });
 
@@ -130,13 +151,13 @@ describe('app-wide SSO result handler (boot/sso.js)', () => {
     const router = fakeRouter('history');
     const handle = createSSOResultHandler({ getAuthStore: () => store, router });
 
-    await handle({ token: 'attacker', user: { id: 'evil' }, deliveryId: 11 });
+    await handle({ token: 'attacker', user: { id: 'evil' }, deliveryId: 11, bound: true });
 
     expect(loginWithSSO).not.toHaveBeenCalled();
     expect(store.token).toBe('current');
     expect(store.user).toEqual({ id: 'me' });
     expect(store.ssoProvider).toBeNull();
-    expect(electronAuth.saveToken).not.toHaveBeenCalled();
+    expect(electronAuth.currentSession).not.toHaveBeenCalled();
     expect(router.push).not.toHaveBeenCalled();
     expect(sentry.addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringMatching(/ignored: already signed in/) }));
   });
@@ -148,7 +169,7 @@ describe('app-wide SSO result handler (boot/sso.js)', () => {
     const router = fakeRouter('record');
     const handle = createSSOResultHandler({ getAuthStore: () => store, router });
 
-    await handle({ error: 'Login failed', code: 'sso_failed' });
+    await handle({ error: 'Login failed', code: 'sso_failed', bound: true });
 
     expect(router.push).not.toHaveBeenCalled();
     expect(store.error).toBeNull();
@@ -160,24 +181,25 @@ describe('app-wide SSO result handler (boot/sso.js)', () => {
     const store = useAuthStore();
     store.isAuthenticated = true;
     store.token = 'current';
-    const result = await store.completeSSO({ token: 'other', user: { id: 'x' } });
+    const result = await store.completeSSO({ token: 'other', user: { id: 'x' }, bound: true });
     expect(result).toMatchObject({ success: false, ignored: true });
     expect(store.token).toBe('current');
   });
 
-  it('a password sign-in ends the SSO wait and drops a result main still buffers', async () => {
-    const takePendingSSO = vi.fn(async () => ({ token: 'stale', user: { id: 's' } }));
-    electronAuth.takePendingSSO = takePendingSSO;
-    electronAuth.login = vi.fn(async () => ({ success: true, token: 'pw', user: { id: 'me' }, minutes: { remaining: 5 } }));
+  it('a password sign-in ends the SSO wait (main drops its flow and buffer with the new epoch)', async () => {
+    electronAuth.login = vi.fn(async () => ({ success: true, token: 'pw', user: { id: 'me' }, minutes: { remaining: 5 }, epoch: 6 }));
     try {
       const store = useAuthStore();
       store.beginSSO('google');
       await store.login('a@b.ch', 'secret');
+      store.stopTokenRefresh();
       expect(store.ssoProvider).toBeNull();
-      expect(takePendingSSO).toHaveBeenCalled();
+      expect(store.token).toBe('pw');
+      // A buffered result of the older epoch is never mirrored afterwards.
+      mainSession.current = { signedOut: false, epoch: 6, token: 'pw', user: { id: 'me' } };
+      expect((await store.completeSSO({ bound: true, applied: true, epoch: 5 })).ignored).toBe(true);
       expect(store.token).toBe('pw');
     } finally {
-      delete electronAuth.takePendingSSO;
       delete electronAuth.login;
     }
   });
@@ -186,7 +208,41 @@ describe('app-wide SSO result handler (boot/sso.js)', () => {
     const store = useAuthStore();
     const closeBrowser = vi.fn(async () => {});
     const handle = createSSOResultHandler({ getAuthStore: () => store, router: fakeRouter(), closeBrowser });
-    await handle({ error: 'x', code: 'sso_failed' });
+    await handle({ error: 'x', code: 'sso_failed', bound: true });
     expect(closeBrowser).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('SECURITY: SSO results are bound to a sign-in this app started', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  it('desktop: a result main did not bind (crafted link) is ignored while signed out', async () => {
+    const store = useAuthStore();
+    store.beginSSO('microsoft');
+    const result = await store.completeSSO({ token: jwt('evil'), user: { id: 'evil' } });
+    expect(result).toMatchObject({ success: false, ignored: true, reason: 'unbound_result' });
+    expect(store.isAuthenticated).toBe(false);
+    // The real result of the sign-in in progress is still awaited.
+    expect(store.ssoProvider).toBe('microsoft');
+  });
+
+  it('an unbound error result shows nothing', async () => {
+    const store = useAuthStore();
+    const result = await store.completeSSO({ error: 'x', code: 'sso_failed' });
+    expect(result.ignored).toBe(true);
+    expect(store.error).toBeNull();
+    expect(store.ssoOutcome.seq).toBe(0);
+  });
+
+  it('desktop: the renderer never applies a token from a payload, even a "bound" one', async () => {
+    const store = useAuthStore();
+    const result = await store.completeSSO({ token: jwt('u1'), user: { id: 'u1' }, bound: true });
+    expect(result).toMatchObject({ success: false, ignored: true, reason: 'not_applied' });
+    expect(store.isAuthenticated).toBe(false);
+    expect(electronAuth.currentSession).not.toHaveBeenCalled();
+  });
+});
+

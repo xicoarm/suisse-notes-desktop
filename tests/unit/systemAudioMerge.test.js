@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { createRecordingPersistence, readFinalizedRecording } = require('../../src-electron/recording-persistence');
 const { concatenateFiles, publishFile } = require('../../src-electron/durable-files');
+const { isSessionEnded } = require('../../src-electron/session-scope');
 const main = fs.readFileSync('src-electron/electron-main.js', 'utf8');
 const declaration = main.slice(main.indexOf('async function mergeSystemAudio('), main.indexOf('// IPC handler for checking disk space before recording'));
 if (!declaration.startsWith('async function mergeSystemAudio(')) throw new Error('Missing production merge handler');
@@ -42,10 +43,10 @@ beforeEach(async () => {
   };
   const valid = file => ({ valid: fs.existsSync(file) && fs.readFileSync(file, 'utf8') !== 'partial', error: 'incomplete output' });
   const merge = new Function('fs', 'path', 'getRecordingPath', 'binaryHealth', 'notifyMergeDegraded', 'log',
-    'ffmpeg', 'ffmpegWithTimeout', 'FFMPEG_TIMEOUT_MS', 'validateAudioOutput', 'publishFile',
+    'ffmpeg', 'ffmpegWithTimeout', 'FFMPEG_TIMEOUT_MS', 'validateAudioOutput', 'publishFile', 'isSessionEnded',
     declaration + '\nreturn mergeSystemAudio;')(
     fs, path, () => root, { ffmpeg: { get available() { return available; }, error: 'missing binary' } },
-    warnings, { info() {}, warn() {} }, ffmpeg, encode, 300000, valid, publishFile);
+    warnings, { info() {}, warn() {} }, ffmpeg, encode, 300000, valid, publishFile, isSessionEnded);
   persistence = createRecordingPersistence({
     prepareRaw: async () => ({}), remux: (input, output) => fs.promises.copyFile(input, output),
     concatSessions: concatenateFiles, merge: file => merge(file, 'fixture'), validate: valid, probe: async () => 10,
@@ -80,6 +81,14 @@ describe('macOS system audio is required for final publication', () => {
     const recovered = await persistence.finalize(root);
     expect(fs.readFileSync(recovered.outputPath, 'utf8')).toBe('microphone+participants');
     expect(await readFinalizedRecording(root)).toMatchObject({ success: true });
+  });
+
+  it('passes a session change on at once: no degradation warning, no clean-up (review round 10, F2)', async () => {
+    const { SessionEndedError } = require('../../src-electron/session-scope');
+    failure = new SessionEndedError();
+    await expect(persistence.finalize(root)).rejects.toMatchObject({ code: 'SESSION_ENDED' });
+    expect(warnings).not.toHaveBeenCalled();
+    expect(fs.readFileSync(path.join(root, 'system_audio.raw'), 'utf8')).toBe('participants');
   });
 
   it('preserves ENOSPC classification for the existing free-space retry flow', async () => {

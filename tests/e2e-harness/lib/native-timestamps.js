@@ -124,6 +124,50 @@ function assessNativeClock(measurement, recorderWallS, toleranceS = CLOCK_TOLERA
     lateDeliveryS: residualS !== null && residualS < 0 ? round(-residualS) : 0, problems };
 }
 
+/**
+ * The short-capture probe. The start event is queued after recording began and
+ * can lag by more than a second on a busy runner, so the span is judged against
+ * the start() and stop() calls, captured synchronously, and in both directions:
+ * a span too short is audio missing from the recording. A run without both
+ * calls is invalid; the events are never a fallback. The numbered frames judge
+ * the same recording without any clock: packets and identities must cover the
+ * same content, so a jump in the signal shows even when the timestamps agree.
+ * audio is the coded oracle's result for this original, frameSeconds and
+ * windowSeconds the oracle's own constants.
+ */
+function assessRecorderCallClock(measurement, recorder, audio, { frameSeconds, windowSeconds, toleranceS = CLOCK_TOLERANCE_SECONDS }) {
+  if (!measurement || !Number.isFinite(measurement.ptsSpanS)) throw new Error('Native clock assessment needs a timestamp measurement');
+  const { startCalledAt, stopCalledAt } = recorder || {};
+  if (!Number.isFinite(startCalledAt) || !Number.isFinite(stopCalledAt) || stopCalledAt <= startCalledAt) {
+    throw new Error('INVALID RUN: the recorder start()/stop() calls were not both observed');
+  }
+  const problems = [];
+  if (measurement.overlaps.length) {
+    problems.push(`NATIVE CLOCK: ${measurement.overlaps.length} overlapping native timestamp(s) totaling ${measurement.totalOverlapS.toFixed(3)}s`);
+  }
+  const callWallS = round((stopCalledAt - startCalledAt) / 1000);
+  const residualS = round(measurement.ptsSpanS - callWallS);
+  if (Math.abs(residualS) > toleranceS) {
+    problems.push(`NATIVE CLOCK: native timestamp span ${measurement.ptsSpanS.toFixed(3)}s differs from the recorder start/stop calls ${callWallS.toFixed(3)}s by ${residualS.toFixed(3)}s (tolerance ${toleranceS}s); ${measurement.holes.length} hole(s) total ${measurement.totalHoleS.toFixed(3)}s`);
+  }
+  // Between the end of the first numbered frame and the start of the last lie
+  // only whole frames. The last and first windows sit half a window inside them.
+  const frames = audio && Number.isInteger(audio.firstFrame) && Number.isInteger(audio.lastFrame) ? audio.lastFrame - audio.firstFrame : null;
+  let identityResidualS = null;
+  if (frames === null || frames < 2 || ![audio.firstIdentifiedEndS, audio.lastIdentifiedStartS, audio.contentDurationS].every(Number.isFinite)) {
+    problems.push('SIGNAL IDENTITY: no numbered frames to compare with the native packets');
+  } else {
+    const leadS = audio.firstIdentifiedEndS + windowSeconds / 2;
+    const trailS = audio.contentDurationS - audio.lastIdentifiedStartS + windowSeconds / 2;
+    identityResidualS = round(measurement.codedDurationS - (leadS + (frames - 1) * frameSeconds + trailS));
+    if (Math.abs(identityResidualS) > toleranceS) {
+      problems.push(`SIGNAL IDENTITY: frames ${audio.firstFrame}→${audio.lastFrame} and ${measurement.codedDurationS.toFixed(3)}s of native packets differ by ${identityResidualS.toFixed(3)}s (tolerance ${toleranceS}s)`);
+    }
+  }
+  return { callWallS, ptsSpanS: measurement.ptsSpanS, codedDurationS: measurement.codedDurationS, holeCount: measurement.holes.length,
+    totalHoleS: measurement.totalHoleS, overlapCount: measurement.overlaps.length, residualS, identityResidualS, toleranceS, problems };
+}
+
 /** The finalization plan that produced the published output, if exactly one validated plan exists. */
 function readAssemblyPlanGaps(recordingDir) {
   const candidates = fs.readdirSync(recordingDir, { withFileTypes: true })
@@ -152,5 +196,5 @@ function comparePlanGaps(planInfo, sourceId, measurement) {
     measuredGapCount: measurement.holes.length, measuredGapS: measurement.totalHoleS, problems };
 }
 
-module.exports = { measureTimestampHoles, finalPausesFromHoles, assessNativeClock, readAssemblyPlanGaps, comparePlanGaps,
+module.exports = { measureTimestampHoles, finalPausesFromHoles, assessNativeClock, assessRecorderCallClock, readAssemblyPlanGaps, comparePlanGaps,
   MIN_HOLE_SECONDS, CLOCK_TOLERANCE_SECONDS };

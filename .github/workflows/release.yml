@@ -539,7 +539,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           echo "=== Verifying GitHub Release assets ==="
-          TAG="${{ github.ref_name }}"
+          TAG="$GITHUB_REF_NAME"
           ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
           echo "Release assets:"
           echo "$ASSETS"

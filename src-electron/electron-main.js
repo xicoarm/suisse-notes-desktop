@@ -1,10 +1,18 @@
 const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu, Tray, nativeImage, desktopCapturer, systemPreferences, powerMonitor, powerSaveBlocker, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { writeFileAtomic, writeFileAtomicSync, publishFile, concatenateFiles, archiveChunkBatch, listChunkBatches, syncDirectorySync } = require('./durable-files');
+// Effect gate (security review 10/2026, rounds 10 and 13): installed before any
+// other module is loaded. Every effect in the context of a session that has
+// ended is refused at the fs / child_process module boundary, right before the
+// system call (effect-gate.js).
+require('./effect-gate').installEffectGate();
+const { bindSession } = require('./effect-gate');
+const { createAppPorts } = require('./app-ports');
+const { writeFileAtomic, writeFileAtomicSync, publishFile, concatenateFiles, archiveChunkBatch, listChunkBatches, syncDirectorySync, assertPublishAllowed } = require('./durable-files');
 const { createRecordingPersistence, readFinalizedRecording, listSessions } = require('./recording-persistence');
 const nativeSourcePersistence = require('./native-source-persistence');
 const { createNativeSourceFinalization } = require('./native-source-finalization');
+const { createTokenVault } = require('./token-vault');
 const { NATIVE_CAPTURE_MODE, usesNativeSources, readNativeCaptureMarker, markNativeCaptureSession } = require('./native-recording-session');
 const { assessRecordingUpload, FINALIZATION_PENDING_MARKER } = require('./recording-upload-eligibility');
 const { withCaptureWarnings, hydrateHistoryCaptureWarnings } = require('./recording-history-warnings');
@@ -18,13 +26,14 @@ const { pathToFileURL } = require('url');
 const axios = require('axios');
 const Store = require('electron-store');
 const ffmpeg = require('fluent-ffmpeg');
-const { Upload } = require('tus-js-client');
 const { autoUpdater } = require('electron-updater');
 const { createUpdateChecks, isPersistentDownloadError, UPDATE_CHECK_INTERVAL_MS, UPDATE_CHECK_AFTER_WAKE_MS, UPDATE_CHECK_MIN_GAP_MS } = require('./update-checks');
 const log = require('electron-log');
 const Sentry = require('@sentry/electron/main');
 const { machineIdSync } = require('node-machine-id');
-const { uploadViaPresignedSas, abortDirectUpload, FATAL_HTTP_STATUSES } = require('./upload-direct');
+const { createScopeRegistry, isSessionEnded } = require('./session-scope');
+const { createBackground } = require('./background');
+const queueOps = require('./background/queue-ops');
 
 // === App identity pinning (display "Suisse Meets", machine "Suisse Notes") ===
 // Keeps userData at %APPDATA%\Suisse Notes and the macOS safeStorage Keychain
@@ -107,6 +116,8 @@ function isTransientNetworkError(err, message) {
   return false;
 }
 
+const sentryReporting = require('./sentry-reporting');
+
 Sentry.init({
   enabled: process.env.SUISSE_E2E_HOOKS !== '1',
   dsn: 'https://185912b1585eb5138079ae189a6d41ec@o4510659364716544.ingest.de.sentry.io/4510659366748240',
@@ -143,7 +154,13 @@ Sentry.init({
       event.level = 'warning';
       event.tags = { ...(event.tags || {}), transient_network: 'true' };
     }
-    return event;
+    // Errors and log lines reach Sentry as raw objects (sentry-reporting.js
+    // captureException): redact message, exception values, stack, extra,
+    // contexts and breadcrumbs here, for every event of the main process.
+    return sentryReporting.redactEvent(event);
+  },
+  beforeBreadcrumb(crumb) {
+    return sentryReporting.redactBreadcrumb(crumb);
   }
 });
 
@@ -151,16 +168,18 @@ Sentry.init({
 // Sentry event, a warning becomes a warning-level event, and info lines become
 // breadcrumbs. Before this, a failed AudioTee start, a failed finalization or a
 // refused IPC call existed only in the user's local main.log.
-const sentryReporting = require('./sentry-reporting');
+// (sentryReporting is required above Sentry.init: beforeSend redacts with it.)
 const twoFactorAuth = require('./auth-two-factor');
 sentryReporting.installLogReporting({ log, Sentry });
+// R-S7.5: log lines and events of the port chain leave the session context here.
+const { telemetry } = createAppPorts({ log, Sentry });
 const windowReporting = sentryReporting.installWindowReporting({ Sentry, log });
 
 // === Global Error Handlers ===
 // Catch uncaught exceptions in main process
 process.on('uncaughtException', (error) => {
   log.error('Uncaught Exception:', error);
-  Sentry.captureException(error);
+  telemetry({ exception: error });
   // Don't exit immediately - try to keep app running for upload completion
 });
 
@@ -178,7 +197,7 @@ process.on('unhandledRejection', (reason, promise) => {
     return;
   }
   log.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  Sentry.captureException(reason instanceof Error ? reason : new Error(String(reason)));
+  telemetry({ exception: reason instanceof Error ? reason : new Error(String(reason)) });
 });
 
 // Handle renderer process crashes
@@ -198,7 +217,7 @@ app.on('render-process-gone', (event, webContents, details) => {
   stopSystemAudio().catch(e => log.warn('Failed to stop AudioTee after renderer crash:', e?.message));
 
   // P0 Data Loss Fix: Write crash metadata for active recording (V8)
-  // Do NOT clear active recording state - let recoverOrphanedRecordings find it on next launch
+  // Do NOT clear active recording state - let the recovery find it on next launch
   try {
     const activeSession = getActiveRecording();
     if (activeSession && activeSession.recordId) {
@@ -248,7 +267,7 @@ app.on('child-process-gone', (event, details) => {
   if (details.serviceName === 'audio.mojom.AudioService' && details.reason === 'crashed') {
     log.warn('Audio Service crashed — notifying renderer to recover system audio');
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('system:audio-service-crashed', {
+      sendToRenderer('system:audio-service-crashed', {
         reason: details.reason,
         exitCode: details.exitCode
       });
@@ -317,58 +336,59 @@ if (process.env.SUISSE_E2E_HOOKS === '1') {
   app.setAsDefaultProtocolClient(SSO_PROTOCOL);
 }
 
-// The last SSO result, kept until the renderer confirms it has it
-// (auth:takePendingSSO). A result pushed while the renderer is still booting
-// (cold start by the suissenotes:// URL, a reload) used to be lost: the push
-// arrived before any listener existed, and the app opened /about instead.
-let pendingSSOPayload = null;
+// The last SSO result is kept by the session authority until the renderer
+// confirms it has it (auth:takePendingSSO). A result pushed while the renderer
+// is still booting (cold start by the suissenotes:// URL, a reload) used to be
+// lost: the push arrived before any listener existed.
 let ssoDeliverySeq = 0;
 
-ipcMain.handle('auth:takePendingSSO', () => {
-  const payload = pendingSSOPayload;
-  pendingSSOPayload = null;
-  return payload;
-});
+ipcMain.handle('auth:takePendingSSO', () => (sessionAuthority ? sessionAuthority.takePending() : null));
 
-function handleSSOUrl(url) {
-  if (!url || typeof url !== 'string' || !url.startsWith(`${SSO_PROTOCOL}://`)) return;
-  let payload;
+const ssoFlow = require('./sso-flow');
+const { createSessionAuthority, fileRecordStore, configUserStore, configMarkStore, tokenUserId: sessionTokenUserId, RECORD_FILE } = require('./session-authority');
+// Created below, after configStore: the pending flow lives in configStore
+// (survives a restart: the browser sign-in may come back to a cold start).
+let ssoFlows = null;
+let sessionAuthority = null;
+// Background scopes (session-scope.js); created once the stores exist.
+let scopes = null;
+let handleSsoCallback = null;
+
+// Exchange a one-time SSO code for the session (PKCE, newer server contract).
+async function exchangeSsoCode(authCode, verifier, state) {
   try {
-    const parsed = new URL(url);
-    if (parsed.host !== 'auth' || parsed.pathname.replace(/\/$/, '') !== '/callback') {
-      log.warn('SSO: ignoring unknown URL path:', url);
-      return;
-    }
-    const error = parsed.searchParams.get('error');
-    // Contract 10/2026: `code` is the machine code the app translates;
-    // `error` stays an English sentence for older app versions.
-    const code = parsed.searchParams.get('code');
-    const token = parsed.searchParams.get('token');
-    const userB64 = parsed.searchParams.get('user');
-    if (error || code) {
-      payload = code ? { error: error || code, code } : { error };
-    } else if (token && userB64) {
-      const userJson = Buffer.from(userB64, 'base64url').toString('utf8');
-      payload = { token, user: JSON.parse(userJson) };
-    } else {
-      payload = { error: 'invalid_callback' };
-    }
-  } catch (e) {
-    log.error('SSO: failed to parse callback URL', e.message);
-    payload = { error: 'invalid_callback' };
+    const response = await axios.post(`${API_BASE_URL}/api/auth/sso/exchange`,
+      { authCode, codeVerifier: verifier, state },
+      { headers: { 'Content-Type': 'application/json' }, timeout: 30000 });
+    const data = response.data || {};
+    if (data.token && data.user && typeof data.user === 'object') return { token: data.token, user: data.user };
+  } catch (error) {
+    log.warn(`SSO: code exchange failed (${error?.response?.status || error?.code || 'error'})`);
   }
+  return { error: 'invalid_callback' };
+}
 
-  // Buffer first, push second: the renderer acknowledges a push by taking the
-  // buffer (deliveryId lets it ignore the same result arriving both ways).
+// Buffer first, push second: the renderer acknowledges a push by taking the
+// buffer (deliveryId lets it ignore the same result arriving both ways).
+function deliverSsoResult(payload) {
   payload.deliveryId = ++ssoDeliverySeq;
-  pendingSSOPayload = payload;
-  log.info(`SSO: callback received (${payload.token ? 'success' : `error code=${payload.code || '-'}`}), delivery ${payload.deliveryId}`);
+  if (!sessionAuthority.setPending(payload)) return;
+  log.info(`SSO: callback received (${payload.applied ? 'signed in' : `error code=${payload.code || '-'}`}), delivery ${payload.deliveryId}`);
   if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
-    mainWindow.webContents.send('auth:ssoCallback', payload);
+    sendToRenderer('auth:ssoCallback', payload);
   }
+  if (payload.applied) afterSessionApplied();
+}
+
+async function handleSSOUrl(url) {
+  if (!url || typeof url !== 'string' || !url.startsWith(`${SSO_PROTOCOL}://`)) return;
+  // SECURITY: applied only through the session authority with the ticket of
+  // a flow this app started (state binding); see sso-flow.js.
+  if (!handleSsoCallback) return;
+  await handleSsoCallback(url);
 }
 
 // === Single Instance Lock ===
@@ -385,21 +405,18 @@ if (!gotTheLock) {
     }
     // Win/Linux deliver the deep-link URL via argv on the second instance
     const ssoUrl = argv.find(a => typeof a === 'string' && a.startsWith(`${SSO_PROTOCOL}://`));
-    if (ssoUrl) handleSSOUrl(ssoUrl);
+    if (ssoUrl) handleSSOUrl(ssoUrl).catch(() => {});
   });
 }
 
 // macOS deep-link handoff
 app.on('open-url', (event, url) => {
   event.preventDefault();
-  handleSSOUrl(url);
+  handleSSOUrl(url).catch(() => {});
 });
 
-// Cold-start case (Win/Linux): URL is in our own argv
-{
-  const ssoUrl = process.argv.find(a => typeof a === 'string' && a.startsWith(`${SSO_PROTOCOL}://`));
-  if (ssoUrl) handleSSOUrl(ssoUrl);
-}
+// Cold-start case (Win/Linux): the URL in our own argv is handled once
+// configStore (and with it the persisted SSO flow) exists, see below.
 
 // Configure auto-updater logging
 autoUpdater.logger = log;
@@ -498,11 +515,59 @@ const configStore = new Store({
   }
 });
 
+// Session token: encrypted by the OS keystore only, never plaintext on disk
+// (see token-vault.js; a legacy plaintext token is deleted, never adopted).
+const tokenVault = createTokenVault({
+  safeStorage,
+  store: configStore,
+  warn: (msg) => log.warn(msg),
+  // E6: nothing is returned while the session authority says signed out.
+  isAllowed: () => !!sessionAuthority && sessionAuthority.tokenAllowed()
+});
+
+ssoFlows = ssoFlow.createSsoFlowStore({ storage: configStore });
+
+// Session authority: the one writer of token and user, and the sign-out
+// tombstone that every main path honours (session-authority.js).
+sessionAuthority = createSessionAuthority({
+  recordStore: fileRecordStore(path.join(app.getPath('userData'), RECORD_FILE)),
+  vault: tokenVault,
+  userStore: configUserStore(configStore),
+  // One-time migration of the previous version's session (E1 addendum).
+  migrationMark: configMarkStore(configStore),
+  flows: ssoFlows,
+  // R-S3 (round 9): every epoch change ends every background scope.
+  abortRequests: () => { if (scopes) scopes.abortAll(); },
+  warn: (msg) => log.warn(msg)
+});
+// Also the one-time migration of the previous version's session (record
+// missing): main alone, before any renderer exists. Held (RAM lock, nothing
+// deleted) while the OS keystore is not open yet - see app.whenReady.
+sessionAuthority.startup();
+
+handleSsoCallback = ssoFlow.createSsoCallbackHandler({
+  authority: sessionAuthority,
+  flows: ssoFlows,
+  exchange: exchangeSsoCode,
+  deliver: deliverSsoResult,
+  // Rollout stop signal: an open flow got a callback without the state echo
+  // (backend without «SSO state echo»). No URL, no user data.
+  countMissingState: () => Sentry.captureMessage('sso_missing_state', { level: 'warning', fingerprint: ['sso_missing_state'] }),
+  log: (msg) => log.warn(msg)
+});
+
+// Cold-start case (Win/Linux): URL is in our own argv
+{
+  const ssoUrl = process.argv.find(a => typeof a === 'string' && a.startsWith(`${SSO_PROTOCOL}://`));
+  if (ssoUrl) handleSSOUrl(ssoUrl).catch(() => {});
+}
+
 // Restore Sentry user context from stored session (so crash reports identify the user)
 try {
-  const storedUser = configStore.get('userInfo');
+  const storedUser = sessionAuthority.getUser();
   if (storedUser) {
-    Sentry.setUser({ id: storedUser.id, email: storedUser.email });
+    // Opaque account id only (no e-mail/name to telemetry).
+    if (storedUser.id) Sentry.setUser({ id: String(storedUser.id) });
   }
 } catch (e) { /* ignore */ }
 
@@ -580,585 +645,93 @@ function readUploadReceipt(recordId) {
   try { return JSON.parse(fs.readFileSync(path.join(getRecordingPath(recordId), 'upload-receipt.json'), 'utf8')); }
   catch (_) { return null; }
 }
-function saveUploadOutcome(recordId, result) {
-  const recordings = historyStore.get('recordings', []);
-  const recording = recordings.find(r => r.id === recordId);
-  if (!recording) return;
-  if (result.success || result.pendingVerification) {
-    Object.assign(recording, {
-      uploadStatus: result.success ? 'uploaded' : 'pending_verification',
-      audioFileId: result.audioFileId, transcriptionId: result.transcriptionId || null,
-      uploadVerified: result.verified === true, uploadError: result.error || null,
-    });
-    historyStore.set('recordings', recordings);
-  }
-}
-async function verifyAcceptedUpload(recordId, filePath, accepted, ownerId, remember = true, sourceSnapshot = null) {
-  const stats = fs.statSync(filePath);
-  const receipt = { ...accepted, verified: false, contentVerified: false, canDelete: false, ownerId, filePath, fileSize: sourceSnapshot?.size ?? stats.size, fileMtimeMs: sourceSnapshot?.mtimeMs ?? stats.mtimeMs };
-  if (remember) {
-    fs.mkdirSync(getRecordingPath(recordId), { recursive: true });
-    await writeFileAtomic(path.join(getRecordingPath(recordId), 'upload-receipt.json'), JSON.stringify(receipt));
-  }
-  if (stats.size !== receipt.fileSize || stats.mtimeMs !== receipt.fileMtimeMs) {
-    const result = { ...accepted, success: false, verified: false, contentVerified: false, canDelete: false, canRetry: false, pendingVerification: true, error: 'Local audio changed during upload. Both copies are retained for review.' };
-    saveUploadOutcome(recordId, result);
-    return result;
-  }
-  const verification = accepted.audioFileId
-    ? await pollServerStatus(accepted.audioFileId, 15, ownerId)
-    : { persisted: false, verified: false, error: 'Server returned no recording identifier' };
-  const result = verifiedUploadResult(accepted, verification);
-  await writeFileAtomic(path.join(getRecordingPath(recordId), 'upload-receipt.json'), JSON.stringify({ ...receipt, verified: result.verified, contentVerified: result.contentVerified, canDelete: result.canDelete }));
-  saveUploadOutcome(recordId, result);
-  return result;
-}
 
-// Add upload to persistent queue
+// Foreground queue changes (user cancel, remove, upload:start while signed
+// out). Background work changes the queue only through its SessionScope.
 function addToUploadQueue(recordId, filePath, metadata, userId = recordingOwner(recordId)) {
-  const queue = uploadQueueStore.get('pendingUploads', []);
-  const existing = queue.find(u => u.recordId === recordId);
-  if (existing) {
-    // Re-enqueue of a known recording (e.g. manual retry): refresh the file
-    // path/metadata but KEEP the accumulated retryCount — resetting it made
-    // the max-retries cap unreachable for a doomed upload that kept getting
-    // re-added, so it retried forever (ELECTRON-27 class).
-    existing.userId = existing.userId || userId;
-    existing.filePath = filePath;
-    existing.metadata = metadata;
-    uploadQueueStore.set('pendingUploads', queue);
-    return;
-  }
-  queue.push({
-    recordId,
-    filePath,
-    metadata,
-    userId,
-    addedAt: new Date().toISOString(),
-    retryCount: 0
-  });
-  uploadQueueStore.set('pendingUploads', queue);
+  uploadQueueStore.set('pendingUploads', queueOps.addToQueue(uploadQueueStore.get('pendingUploads', []), { recordId, filePath, metadata, userId }));
   log.info('Added to upload queue:', recordId);
 }
 
-// Remove upload from queue
 function removeFromUploadQueue(recordId) {
-  const queue = uploadQueueStore.get('pendingUploads', []);
-  const newQueue = queue.filter(u => u.recordId !== recordId);
-  uploadQueueStore.set('pendingUploads', newQueue);
+  uploadQueueStore.set('pendingUploads', queueOps.removeFromQueue(uploadQueueStore.get('pendingUploads', []), recordId));
   log.info('Removed from upload queue:', recordId);
 }
 
-// Update retry count in queue
-function updateUploadQueueRetry(recordId) {
-  const queue = uploadQueueStore.get('pendingUploads', []);
-  const item = queue.find(u => u.recordId === recordId);
-  if (item) {
-    item.retryCount = (item.retryCount || 0) + 1;
-    item.lastRetry = new Date().toISOString();
-    uploadQueueStore.set('pendingUploads', queue);
-  }
-}
+// === Background work (review round 9, council 3) ===
+// Every piece of main's background work (upload queue, upload:start, direct
+// and legacy upload, verification, polls, refresh, recovery, clean-up, the
+// blob clean-up of a cancel) runs in a SessionScope opened at its entry and
+// reaches effects only through it (session-scope.js, background/). The
+// authority ends every scope at every epoch change, never at a refresh.
+scopes = createScopeRegistry({
+  authority: sessionAuthority,
+  http: axios,
+  stores: { history: historyStore, queue: uploadQueueStore, active: activeRecordingStore },
+  send: sendToRenderer,
+  // Mixed helpers (docs/security/pr50-senken.md): called only while the
+  // scope is alive, inside its publish gate.
+  ports: {
+    probeAudio: (filePath) => getAudioMetadata(filePath),
+    probeDuration: (filePath) => probeDurationSeconds(filePath),
+    finalizeForRecovery: (recordId) => withRecordingLock(recordId, () => {
+      // The lock queue may run this long after the request: the gate first.
+      assertPublishAllowed();
+      return inFlightUploads.has(recordId)
+        ? { success: false, error: 'This recording is still uploading' }
+        : finalizeRecording(recordId, '.webm', 0, { recovery: true });
+    }),
+  },
+  log
+});
+// In-flight uploads, keyed by (scope, recordId); read side for main.
+const inFlightUploads = scopes.inFlight;
 
-// === Auto-Recovery for Orphaned Recordings ===
-// Recover recordings that were interrupted by app crash
-let isRecoveryRunning = false;
+const background = createBackground({
+  config: { apiBaseUrl: API_BASE_URL, appVersion: app.getVersion(), FINALIZATION_PENDING_MARKER, rescanMs: 120000 },
+  // Read-only helpers (no effect; static rule in mainBackgroundStatic.test.js).
+  read: {
+    getUser: () => sessionAuthority.getUser(),
+    getRecordingPath: (recordId) => getRecordingPath(recordId),
+    getRecordingsPath: () => getRecordingsPath(),
+    recordingOwner: (recordId) => recordingOwner(recordId),
+    readUploadReceipt: (recordId) => readUploadReceipt(recordId),
+    assessRecordingUpload: (args) => assessRecordingUpload(args),
+    recordingState: (recordId) => ({
+      unsaved: unsavedRecordingId === recordId,
+      locked: recordingLocks.has(recordId),
+      live: isRecordingInProgress && getActiveRecording()?.recordId === recordId,
+      inFlight: inFlightUploads.has(recordId),
+    }),
+    recordingInProgress: () => isRecordingInProgress,
+    inFlight: (recordId) => inFlightUploads.has(recordId),
+    readFinalizedRecording: (dirPath) => readFinalizedRecording(dirPath),
+    listSessions: (dirPath) => listSessions(dirPath),
+    listChunkBatches: (dirPath) => listChunkBatches(dirPath),
+    usesNativeSources: (dirPath) => usesNativeSources(dirPath),
+    validateAudioOutput: (filePath) => validateAudioOutput(filePath),
+  },
+  pure: {
+    tokenUserId, sessionTokenUserId, canUploadForUser, verifiedUploadResult, safeParseDuration,
+    repairRecoveredHistoryRecord, withCaptureWarnings, calculateUploadTimeout, FormData: require('form-data'),
+  },
+  report: {
+    captureUploadFailureOnce,
+    captureMessage: (...args) => Sentry.captureMessage(...args),
+    captureException: (...args) => Sentry.captureException(...args),
+  },
+  hooks: { onBusyChange: () => updateRecordingPowerBlocker() },
+  log
+});
 
-async function recoverOrphanedRecordings() {
-  if (isRecoveryRunning) {
-    log.warn('Recovery already in progress, skipping');
-    return;
-  }
-  isRecoveryRunning = true;
+/** Upload queue run (startup, after sign-in, periodic, manual retry). No session: nothing. */
+const processPendingUploads = () => background.startQueue(scopes);
 
-  try {
-    const recordingsPath = getRecordingsPath();
-    if (!fs.existsSync(recordingsPath)) {
-      log.info('No recordings directory found, skipping recovery');
-      clearActiveRecording();
-      return;
-    }
+/** R-S4: recovery, then clean-up; only with a released session, once per session. */
+const startRecovery = (reason) => background.startRecovery(scopes, reason);
 
-    // Check if there's an active recording that was interrupted
-    const activeSession = getActiveRecording();
-    if (activeSession) {
-      log.info('Found interrupted recording session:', activeSession.recordId);
-    }
-
-    // Scan for directories with chunks that don't have a combined audio file
-    const dirs = fs.readdirSync(recordingsPath);
-    let recoveredCount = 0;
-    let totalAttempted = 0;
-    let skippedLive = false;
-    let skippedFresh = false;
-    const recoveredForUpload = []; // {recordId, filePath, metadata} to enqueue for autonomous upload
-    const recoveredRecords = [];   // lightweight {id, createdAt, durationSeconds} for the renderer toast
-
-    for (const dir of dirs) {
-      try {
-        const dirPath = path.join(recordingsPath, dir);
-        const stats = fs.statSync(dirPath);
-
-        if (!stats.isDirectory()) continue;
-
-        const chunksPath = path.join(dirPath, 'chunks');
-        const sessionsPath = path.join(dirPath, 'sessions');
-        const audioPath = path.join(dirPath, 'audio.webm');
-
-        // A filename is not a completion record: FFmpeg can leave a partial
-        // output after a crash. Check the durable receipt, then repair history.
-        if (inFlightUploads.has(dir) || recordingLocks.has(dir)) continue;
-        const existingRecord = historyStore.get('recordings', []).find(r => r.id === dir);
-        const finalized = fs.existsSync(path.join(dirPath, FINALIZATION_PENDING_MARKER)) ? null : await readFinalizedRecording(dirPath);
-        if (finalized && existingRecord?.filePath === finalized.outputPath &&
-            !['recording', 'processing', 'stopped'].includes(existingRecord.uploadStatus)) continue;
-
-        // Check if there are chunks or sessions to recover
-        const chunkFiles = fs.existsSync(chunksPath)
-          ? fs.readdirSync(chunksPath).filter(f => f.startsWith('chunk_'))
-          : [];
-        const hasChunks = chunkFiles.length > 0;
-        const hasSessions = listSessions(dirPath).length > 0;
-        const hasBatches = listChunkBatches(dirPath).length > 0;
-        const hasOutput = fs.existsSync(audioPath);
-        const pcmPath = path.join(dirPath, 'system_audio.raw');
-        const hasPcm = fs.existsSync(pcmPath) && fs.statSync(pcmPath).size > 0;
-        const hasNative = usesNativeSources(dirPath);
-        if (!hasChunks && !hasSessions && !hasBatches && !hasOutput && !hasPcm && !hasNative) continue;
-        // Older releases deleted sources after combining and wrote no receipt.
-        // Such an audio.webm that history already points at, in a settled state,
-        // needs nothing; without this every launch "recovered" it again (32 at
-        // once for one user). Pending/failed ones still go to the upload queue.
-        if (!finalized && hasOutput && !hasChunks && !hasSessions && !hasBatches && !hasPcm && !hasNative &&
-            existingRecord?.filePath === audioPath &&
-            ['completed', 'uploaded', 'skipped', 'cancelled', 'pending_verification'].includes(existingRecord.uploadStatus)) continue;
-
-        // Never touch a recording that is being written RIGHT NOW. This scan
-        // runs ~5s after launch — a recording started inside that window
-        // matches the "chunks but no audio.webm" predicate, and recovering it
-        // would combine and DELETE its live chunks mid-recording.
-        if (unsavedRecordingId === dir || (isRecordingInProgress && getActiveRecording()?.recordId === dir)) {
-          log.info(`Recovery: skipping ${dir} — recording is live`);
-          skippedLive = true;
-          continue;
-        }
-        // Freshness backstop in case active-session tracking is stale: a chunk
-        // written within the last 60s means a recorder is (or was just)
-        // writing here — leave it for the next launch.
-        if (hasChunks) {
-          try {
-            const newestChunk = chunkFiles.reduce((best, f) => {
-              const n = parseInt(f.replace('chunk_', ''), 10);
-              return Number.isFinite(n) && n > best.n ? { n, f } : best;
-            }, { n: -1, f: null });
-            if (newestChunk.f) {
-              const ageMs = Date.now() - fs.statSync(path.join(chunksPath, newestChunk.f)).mtimeMs;
-              if (ageMs < 60000) {
-                log.info(`Recovery: skipping ${dir} — chunks still being written (${Math.round(ageMs / 1000)}s old)`);
-                skippedLive = true;
-                skippedFresh = true;
-                continue;
-              }
-            }
-          } catch (e) {
-            log.warn(`Recovery: freshness check failed for ${dir}:`, e.message);
-          }
-        }
-
-        totalAttempted++;
-        log.info(`Attempting to recover orphaned recording: ${dir}`);
-
-        // Try to combine the chunks
-        let result = finalized;
-        // Older releases removed sources after finalization. Restore a surviving
-        // legacy output into history instead of making it invisible.
-        if (!result && hasOutput && !hasChunks && !hasSessions && !hasBatches && !hasNative) {
-          const eligibility = await assessRecordingUpload({ recordId: dir, filePath: audioPath, recordingsRoot: recordingsPath });
-          const validation = eligibility.allowed && validateAudioOutput(audioPath);
-          if (validation?.valid) {
-            const duration = safeParseDuration(await getAudioMetadata(audioPath));
-            result = { success: true, outputPath: audioPath, duration, fileSize: validation.size, fileSizeMb: (validation.size / 1048576).toFixed(2) };
-          }
-        }
-        if (!result) result = await combineChunksForRecovery(dir);
-
-        if (result.success) {
-          recoveredCount++;
-          log.info(`Successfully recovered recording: ${dir} (${result.fileSizeMb}MB)`);
-
-          // Add/update the history entry with the recovered file + "pending"
-          // upload status. Read metadata.json for userId/startedAt/duration —
-          // this runs for BOTH the new-entry and existing-entry paths.
-          const recordings = historyStore.get('recordings', []);
-          const existingIndex = recordings.findIndex(r => r.id === dir);
-
-          let metadataUserId = null;
-          let metadataStartedAt = null;
-          let metadataDuration = 0;
-          const metadataPath = path.join(dirPath, 'metadata.json');
-          if (fs.existsSync(metadataPath)) {
-            try {
-              const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
-              metadataUserId = metadata.userId;
-              metadataStartedAt = metadata.startedAt;
-              metadataDuration = metadata.duration || 0;
-              log.info(`Read metadata.json for ${dir}: userId=${metadataUserId}, startedAt=${metadataStartedAt}`);
-            } catch (e) {
-              log.warn(`Could not read metadata.json for ${dir}:`, e.message);
-            }
-          }
-
-          const recoveredFileSize = result.fileSize || parseFloat(result.fileSizeMb) * 1024 * 1024;
-          metadataDuration = result.duration || metadataDuration;
-
-          if (existingIndex === -1) {
-            // No history entry yet — create one for the recovered recording.
-            const matchingActive = activeSession?.recordId === dir ? activeSession : null;
-            const userId = metadataUserId || matchingActive?.userId || 'unknown';
-            const createdAt = metadataStartedAt || matchingActive?.startedAt || new Date().toISOString();
-            recordings.push(withCaptureWarnings({
-              id: dir,
-              userId,
-              createdAt,
-              duration: metadataDuration,
-              fileSize: recoveredFileSize,
-              filePath: result.outputPath,
-              uploadStatus: 'pending',
-              storagePreference: 'keep',
-              recovered: true
-            }, getRecordingsPath()));
-            historyStore.set('recordings', recordings);
-            log.info(`Added recovered recording to history: ${dir} (userId: ${userId})`);
-            recoveredForUpload.push({ recordId: dir, filePath: result.outputPath, metadata: { duration: String(metadataDuration || 0) } });
-            recoveredRecords.push({ id: dir, createdAt, durationSeconds: metadataDuration || 0 });
-          } else {
-            // A history entry already EXISTS — it was created at record-start and
-            // is stuck at uploadStatus:'recording' with an empty filePath because
-            // the app died mid-recording (crash, power loss, forced sleep). The
-            // old code skipped this case entirely, stranding the recovered audio
-            // on disk: valid file, but invisible to the user and never uploaded.
-            // (Found via a real power-loss during the 5h endurance test.) Update
-            // it in place so the recovered file becomes visible and gets uploaded.
-            // Never clobber an already-terminal upload status.
-            const existing = recordings[existingIndex];
-            // Never resurrect a recording the user finished with or explicitly
-            // dismissed. Terminal states include upload success AND user intent
-            // (skipped/cancelled) — flipping those to 'pending' would re-upload a
-            // recording the user chose not to send.
-            const TERMINAL_STATUSES = ['completed', 'uploaded', 'skipped', 'cancelled', 'pending_verification'];
-            const terminal = TERMINAL_STATUSES.includes(existing.uploadStatus);
-            recordings[existingIndex] = withCaptureWarnings({
-              ...repairRecoveredHistoryRecord(existing, { ...result, fileSize: recoveredFileSize, duration: metadataDuration }),
-              uploadStatus: terminal ? existing.uploadStatus : 'pending',
-              recovered: true
-            }, getRecordingsPath());
-            historyStore.set('recordings', recordings);
-            log.info(`Updated recovered recording history: ${dir} (status ${existing.uploadStatus} -> ${recordings[existingIndex].uploadStatus}, canonical filePath repaired)`);
-            if (!terminal) {
-              const finalRec = recordings[existingIndex];
-              recoveredForUpload.push({ recordId: dir, filePath: finalRec.filePath, metadata: { duration: String(finalRec.duration || 0), ...(finalRec.prep || {}) } });
-              recoveredRecords.push({ id: dir, createdAt: finalRec.createdAt, durationSeconds: finalRec.duration || 0 });
-            }
-          }
-        } else {
-          log.warn(`Could not recover recording ${dir}: ${result.error}`);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('system:capture-warning', { kind: 'recovery-failed', recordId: dir });
-          }
-        }
-      } catch (err) {
-        log.error(`Error processing directory ${dir} for recovery:`, err);
-      }
-    }
-
-    // Only clear active recording state if recovery succeeded or there was nothing to recover.
-    // If all attempts failed, preserve state so next startup retries.
-    if (skippedLive) {
-      // The active session belongs to a recording that is live (or freshly
-      // written) right now — leave its crash-recovery state untouched.
-    } else if (totalAttempted === 0 || recoveredCount > 0) {
-      clearActiveRecording();
-    } else {
-      // Track failed recovery attempts to avoid infinite retries
-      const attempts = (activeSession?.recoveryAttempts || 0) + 1;
-      if (attempts >= 3) {
-        log.error(`Recovery failed ${attempts} times, giving up on active recording`);
-        Sentry.captureMessage(`Recording recovery failed after ${attempts} attempts`, 'error');
-        clearActiveRecording();
-      } else if (activeSession) {
-        activeRecordingStore.set('activeSession', { ...activeSession, recoveryAttempts: attempts });
-        log.warn(`Recovery failed (attempt ${attempts}/3), will retry on next startup`);
-      }
-    }
-
-    if (recoveredCount > 0) {
-      log.info(`Recovery complete: ${recoveredCount} recording(s) recovered`);
-
-      // Enqueue recovered recordings into the main-process AUTONOMOUS upload queue
-      // so they upload even if the renderer never comes up, isn't logged in, or
-      // the user quits quickly. processPendingUploads() uses the main-side auth
-      // token and does not depend on the renderer. (Before this, a recovered
-      // recording sat 'pending' until the renderer's 60s retry loop ran — which
-      // never fired if the renderer wasn't authenticated; confirmed by the
-      // power-loss recovery test where the file recovered but never uploaded.)
-      for (const u of recoveredForUpload) {
-        try { addToUploadQueue(u.recordId, u.filePath, u.metadata); } catch (e) { log.warn('recovery: enqueue failed:', e.message); }
-      }
-
-      // Give the user clear feedback and refresh the (now-stale) renderer history.
-      // Count only recordings that actually came back to the user; a history
-      // entry whose path was merely repaired is not news to them.
-      if (recoveredRecords.length > 0 && mainWindow && !mainWindow.isDestroyed()) {
-        try {
-          mainWindow.webContents.send('recording:recovered', { count: recoveredRecords.length, records: recoveredRecords });
-        } catch (e) { /* ignore */ }
-      }
-
-      // Kick the queue immediately (don't wait for the next periodic trigger).
-      if (recoveredForUpload.length > 0) {
-        processPendingUploads().catch(err => log.error('recovery: upload processing failed:', err));
-      }
-    }
-
-    // A dir was skipped because its chunks were written <60s ago but no
-    // recording is in progress — that is the crash-then-quick-reopen case.
-    // Recovery only runs at startup, so without a re-scan the recording would
-    // stay unrecovered until the NEXT launch. Re-scan once the freshness
-    // window has safely passed.
-    if (skippedFresh && !isRecordingInProgress) {
-      log.info('Recovery: scheduling re-scan in 2 minutes for freshly-written chunk dirs');
-      setTimeout(() => {
-        recoverOrphanedRecordings().catch(err => {
-          log.error('Error in recovery re-scan:', err);
-        });
-      }, 120000);
-    }
-  } catch (error) {
-    log.error('Error during orphaned recording recovery:', error);
-    Sentry.captureException(error);
-  } finally {
-    isRecoveryRunning = false;
-  }
-}
-
-// Expose recovery state to renderer so it can wait before starting a new recording
-ipcMain.handle('recording:isRecoveryRunning', () => isRecoveryRunning);
-
-// Internal function for recovery - similar to combineChunks but without IPC
-async function combineChunksForRecovery(recordId) {
-  return withRecordingLock(recordId, () => inFlightUploads.has(recordId)
-    ? { success: false, error: 'This recording is still uploading' }
-    : finalizeRecording(recordId, '.webm', 0, { recovery: true }));
-}
-
-// === Cleanup Old Orphaned Directories ===
-// Remove directories that are older than 7 days and have no audio file
-
-async function cleanupOldOrphanedDirectories() {
-  try {
-    const recordingsPath = getRecordingsPath();
-    if (!fs.existsSync(recordingsPath)) {
-      return;
-    }
-
-    const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-    const now = Date.now();
-    let cleanedCount = 0;
-
-    const dirs = fs.readdirSync(recordingsPath);
-    for (const dir of dirs) {
-      try {
-        const dirPath = path.join(recordingsPath, dir);
-        const stats = fs.statSync(dirPath);
-
-        if (!stats.isDirectory()) continue;
-
-        // Check if this directory has a combined audio file
-        const audioPath = path.join(dirPath, 'audio.webm');
-        const hasAudioFile = fs.existsSync(audioPath) ||
-          usesNativeSources(dirPath) ||
-          listChunkBatches(dirPath).length > 0 ||
-          (fs.existsSync(path.join(dirPath, 'system_audio.raw')) && fs.statSync(path.join(dirPath, 'system_audio.raw')).size > 0);
-
-        // Check if directory is old enough
-        const isOld = (now - stats.mtimeMs) > MAX_AGE_MS;
-
-        // Only clean up old directories without audio files
-        if (isOld && !hasAudioFile) {
-          // Check if it has chunks or sessions that weren't combined
-          const chunksPath = path.join(dirPath, 'chunks');
-          const sessionsPath = path.join(dirPath, 'sessions');
-          const hasChunks = fs.existsSync(chunksPath);
-          const hasSessions = fs.existsSync(sessionsPath);
-
-          if (hasChunks || hasSessions) {
-            // Check if there are actual chunk files (user's audio data)
-            const chunkFiles = hasChunks ? fs.readdirSync(chunksPath).filter(f => f.startsWith('chunk_')) : [];
-            const sessionFiles = hasSessions ? fs.readdirSync(sessionsPath).filter(f => f.endsWith('.webm')) : [];
-            if (chunkFiles.length > 0 || sessionFiles.length > 0) {
-              // NEVER delete directories with audio data — user might still want it
-              log.warn(`Keeping old orphaned directory with ${chunkFiles.length} chunks, ${sessionFiles.length} sessions: ${dir}`);
-            } else {
-              // Empty chunks/sessions dirs — safe to clean up
-              log.info(`Cleaning up old empty orphaned directory: ${dir}`);
-              await rmDirSafeBestEffort(dirPath, 'recovery-orphans');
-              cleanedCount++;
-            }
-          }
-        }
-      } catch (err) {
-        log.error(`Error checking directory ${dir} for cleanup:`, err);
-      }
-    }
-
-    if (cleanedCount > 0) {
-      log.info(`Cleaned up ${cleanedCount} old orphaned directory(ies)`);
-    }
-  } catch (error) {
-    log.error('Error during orphaned directory cleanup:', error);
-  }
-}
-
-// Process pending uploads on app startup or after login
-let isProcessingUploads = false;
-
-async function processPendingUploads() {
-  if (isProcessingUploads) {
-    log.info('Upload processing already in progress, skipping');
-    return;
-  }
-  isProcessingUploads = true;
-
-  try {
-  const queue = uploadQueueStore.get('pendingUploads', []);
-  if (queue.length === 0) return;
-
-  log.info(`Found ${queue.length} pending uploads, processing...`);
-
-  // Check if we have auth token
-  const authToken = await getAuthToken();
-  if (!authToken) {
-    log.info('No auth token, skipping pending uploads');
-    return;
-  }
-
-  // Process each pending upload with delay between them
-  for (const upload of queue) {
-    const currentUserId = tokenUserId(await getAuthToken());
-    if (!canUploadForUser(upload.userId || recordingOwner(upload.recordId), currentUserId)) continue;
-    // Don't double-upload: if the renderer's upload:start path already has this
-    // recording in flight, let it finish — otherwise we POST the same file twice
-    // and create a duplicate meeting on the server.
-    if (inFlightUploads.has(upload.recordId)) {
-      log.info(`Pending processor: ${upload.recordId} already in flight (renderer path), skipping`);
-      continue;
-    }
-    // Skip if too many retries (max 10)
-    if (upload.retryCount >= 10 && !readUploadReceipt(upload.recordId)?.audioFileId) {
-      log.warn(`Upload ${upload.recordId} exceeded max retries, removing from queue`);
-      removeFromUploadQueue(upload.recordId);
-      // Surface the drop in history — a silent queue removal leaves the
-      // entry 'pending' forever with no retry button and no explanation.
-      const recordings = historyStore.get('recordings', []);
-      const recording = recordings.find(r => r.id === upload.recordId);
-      if (recording && recording.uploadStatus !== 'uploaded') {
-        recording.uploadStatus = 'failed';
-        recording.uploadError = 'Upload failed after 10 attempts';
-        historyStore.set('recordings', recordings);
-      }
-      continue;
-    }
-
-    // Check if file still exists
-    try {
-      await fs.promises.access(upload.filePath);
-    } catch (e) {
-      log.warn(`File not found for ${upload.recordId}, removing from queue`);
-      removeFromUploadQueue(upload.recordId);
-      continue;
-    }
-
-    log.info(`Retrying upload for ${upload.recordId} (attempt ${upload.retryCount + 1})`);
-    updateUploadQueueRetry(upload.recordId);
-
-    inFlightUploads.add(upload.recordId);
-    updateRecordingPowerBlocker();
-    try {
-      const result = await uploadWithRetry(upload.recordId, upload.filePath, upload.metadata, 2);
-
-      // If auth expired, stop processing and notify user
-      if (!result.success && result.status === 401) {
-        log.warn('Token expired - stopping pending uploads processing');
-        // Notify renderer to prompt for re-login
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('auth:expired', {
-            message: 'Your session has expired. Please log in again to continue uploading.',
-            pendingUploads: queue.length
-          });
-        }
-        break; // Stop processing pending uploads
-      }
-
-      if (result.success) {
-        removeFromUploadQueue(upload.recordId);
-        // Update history status
-        const recordings = historyStore.get('recordings', []);
-        const recording = recordings.find(r => r.id === upload.recordId);
-        if (recording) {
-          recording.uploadStatus = 'uploaded';
-          recording.transcriptionId = result.transcriptionId;
-          recording.audioFileId = result.audioFileId;
-          historyStore.set('recordings', recordings);
-        }
-        log.info(`Successfully uploaded pending recording: ${upload.recordId}`);
-
-        // Notify renderer about background upload success
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('upload:complete', {
-            recordId: upload.recordId,
-            success: true,
-            audioFileId: result.audioFileId,
-            background: true
-          });
-        }
-      } else if (result.pendingVerification) {
-        saveUploadOutcome(upload.recordId, result);
-      } else if (result.canRetry === false) {
-        // Terminal failure (413, 402, 415, 400, etc.) — drop from queue so we
-        // don't keep re-attempting a doomed upload on every app launch.
-        log.warn(`[upload] Terminal failure for pending ${upload.recordId} (status=${result.status}): ${result.error} — removing from queue`);
-        removeFromUploadQueue(upload.recordId);
-        const recordings = historyStore.get('recordings', []);
-        const recording = recordings.find(r => r.id === upload.recordId);
-        if (recording) {
-          recording.uploadStatus = 'failed';
-          recording.uploadError = result.error || 'Upload rejected by server';
-          historyStore.set('recordings', recordings);
-        }
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('upload:complete', {
-            recordId: upload.recordId,
-            success: false,
-            error: result.error,
-            terminal: true,
-            background: true,
-          });
-        }
-      }
-    } catch (e) {
-      log.error(`Failed to upload ${upload.recordId}:`, e.message);
-    } finally {
-      inFlightUploads.delete(upload.recordId);
-      updateRecordingPowerBlocker();
-    }
-
-    // Wait 5 seconds between uploads to avoid overwhelming the server
-    await new Promise(r => setTimeout(r, 5000));
-  }
-  } finally {
-    isProcessingUploads = false;
-  }
-}
+// The renderer waits for a running recovery before it starts a recording.
+ipcMain.handle('recording:isRecoveryRunning', () => background.recovery.isRunning());
 
 // Set FFmpeg path (cross-platform)
 if (app.isPackaged) {
@@ -1184,16 +757,8 @@ if (app.isPackaged) {
   }
 }
 
-// Active uploads map for pause/resume/cancel
-const activeUploads = new Map();
-
-// AbortControllers for axios-based uploads (used by upload:cancel)
-const activeAbortControllers = new Map();
 // Track recordIds that were cancelled so we suppress post-cancel completion events
 const cancelledUploads = new Set();
-// audioFileIds for in-flight direct-blob uploads — used by upload:cancel to
-// best-effort clean up the staged blob in Azure when the user cancels.
-const activeDirectAudioFileIds = new Map();
 
 // Track if upload is in progress to prevent window close
 let isUploadInProgress = false;
@@ -1218,6 +783,16 @@ function updateRecordingPowerBlocker() {
 let isProcessingRecording = false;
 
 let mainWindow;
+
+// The ONE sink for renderer events (security review 10/2026, round 10): in
+// background work of a session that has ended (publish gate of its scope)
+// nothing reaches the renderer; the check is synchronous, right before the
+// send. Every event of main goes through here (static rule in
+// sessionSweep.static.test.js).
+function sendToRenderer(channel, payload) {
+  assertPublishAllowed();
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+}
 let tray = null;
 let recordingTrayInterval = null;
 
@@ -1509,6 +1084,14 @@ function createWindow() {
 
 // App ready
 app.whenReady().then(() => {
+  // Windows and Linux open the OS keystore (safeStorage) only at ready: a
+  // migration held at module load runs now, before the window and before any
+  // background upload. Still not possible: held, the next start tries again.
+  if (sessionAuthority.state().migrationPending) {
+    const migrated = sessionAuthority.startup();
+    if (migrated.signedOut === false) afterSessionApplied();
+  }
+
   // Set the App User Model ID for Windows notifications
   // This ensures notifications show "Suisse Meets" instead of "electron.app.electron".
   // The AUMID must keep matching appId (com.suisse-notes.desktop) — it is an
@@ -1578,7 +1161,7 @@ app.whenReady().then(() => {
           });
         });
 
-        mainWindow.webContents.send('recording:suspend', {
+        sendToRenderer('recording:suspend', {
           reason: 'system_suspend',
           timestamp: Date.now()
         });
@@ -1622,7 +1205,7 @@ app.whenReady().then(() => {
 
       // Notify renderer about the recovery need
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('recording:resume', {
+        sendToRenderer('recording:resume', {
           recordId: activeSession.recordId,
           suspendedAt: activeSession.suspendedAt,
           needsRecovery: true,
@@ -1645,7 +1228,7 @@ app.whenReady().then(() => {
     log.info('Screen locked');
     // Optionally notify renderer about screen lock
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('system:screen-locked');
+      sendToRenderer('system:screen-locked');
     }
   });
 
@@ -1653,7 +1236,7 @@ app.whenReady().then(() => {
     log.info('Screen unlocked');
     // Optionally notify renderer about screen unlock
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('system:screen-unlocked');
+      sendToRenderer('system:screen-unlocked');
     }
   });
 
@@ -1679,7 +1262,7 @@ app.whenReady().then(() => {
         });
       });
 
-      mainWindow.webContents.send('recording:suspend', {
+      sendToRenderer('recording:suspend', {
         reason,
         timestamp: Date.now()
       });
@@ -1748,12 +1331,10 @@ app.whenReady().then(() => {
     // persist server-side. The recording stays in the persistent upload queue
     // (added in upload:start) and resumes on next launch via
     // processPendingUploads.
-    if (hasUpload && activeAbortControllers.size > 0) {
+    if (hasUpload && scopes.uploadCount > 0) {
       isQuittingWithUploads = true; // keep aborted uploads queued for resume
-      log.info(`Aborting ${activeAbortControllers.size} in-flight upload(s) before quit`);
-      for (const controller of activeAbortControllers.values()) {
-        try { controller.abort(); } catch (_) { /* ignore */ }
-      }
+      log.info(`Aborting ${scopes.uploadCount} in-flight upload(s) before quit`);
+      scopes.abortUploadsForQuit();
       // Brief grace so the abort can unwind the upload promises before exit.
       await new Promise((r) => setTimeout(r, 300));
     }
@@ -1809,23 +1390,10 @@ app.whenReady().then(() => {
     });
   }
 
-  // === Recover Orphaned Recordings ===
-  // Run 5 seconds after startup to recover any crashed recordings
-  let recoveryPromise = null;
-  setTimeout(() => {
-    recoveryPromise = recoverOrphanedRecordings().catch(err => {
-      log.error('Error recovering orphaned recordings:', err);
-    });
-  }, 5000);
-
-  // === Cleanup Old Orphaned Directories ===
-  // Run 10 seconds after startup, but always wait for recovery to finish first
-  setTimeout(async () => {
-    if (recoveryPromise) await recoveryPromise;
-    cleanupOldOrphanedDirectories().catch(err => {
-      log.error('Error cleaning up orphaned directories:', err);
-    });
-  }, 10000);
+  // === Recover Orphaned Recordings, then clean up old empty folders ===
+  // 5 seconds after startup, only with a released session (R-S4, round 9):
+  // signed out, tombstone or held - nothing; afterSessionApplied starts it.
+  setTimeout(() => { startRecovery('startup'); }, 5000);
 
   // === Process Pending Uploads ===
   // Wait 15 seconds after startup to process pending uploads
@@ -1868,7 +1436,7 @@ autoUpdater.on('update-available', (info) => {
   // A newer release found mid-download does not relabel the running download.
   if (!updateDownload) updateDownload = { version: info.version, percent: 0 };
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update:available', { version: updateDownload.version });
+    sendToRenderer('update:available', { version: updateDownload.version });
   }
 });
 
@@ -1880,7 +1448,7 @@ autoUpdater.on('download-progress', (progressObj) => {
   log.info(`Download progress: ${progressObj.percent.toFixed(1)}%`);
   if (!pendingUpdateInfo && updateDownload) updateDownload.percent = progressObj.percent;
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update:progress', { version: updateDownload?.version || null, percent: progressObj.percent });
+    sendToRenderer('update:progress', { version: updateDownload?.version || null, percent: progressObj.percent });
   }
 });
 
@@ -1898,7 +1466,7 @@ function handleUpdateDownloadFailure(error) {
   const persistent = isPersistentDownloadError(error);
   log.warn(`Update ${updateDownload.version} download failed (${persistent ? 'retry in 4 h' : 'retry at next check'}): ${error?.message || error}`);
   if (persistent) updateChecks.downloadFailed();
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:failed', { version: updateDownload.version });
+  if (mainWindow && !mainWindow.isDestroyed()) sendToRenderer('update:failed', { version: updateDownload.version });
   updateDownload = null;
 }
 
@@ -1923,7 +1491,7 @@ autoUpdater.on('update-downloaded', (info) => {
   autoUpdater.autoDownload = false;
   // Will auto-install on app quit due to autoInstallOnAppQuit = true
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update:downloaded', { version: info.version });
+    sendToRenderer('update:downloaded', { version: info.version });
   }
 });
 
@@ -2060,7 +1628,11 @@ function getDeviceId() {
 // completion arrives asynchronously via the 'auth:ssoCallback' event.
 async function openSSOBrowser(provider) {
   try {
-    const url = `${API_BASE_URL}/api/auth/${provider}/login?client=desktop`;
+    // A signed-in app never starts an SSO flow (its result would be dropped).
+    if (!sessionAuthority.state().signedOut) return { success: false, error: 'already_signed_in' };
+    // Bind the callback to this sign-in (state + PKCE + session epoch, see sso-flow.js).
+    const flow = ssoFlows.begin(provider, sessionAuthority.state().epoch);
+    const url = ssoFlow.withFlowParams(`${API_BASE_URL}/api/auth/${provider}/login?client=desktop`, flow);
     log.info(`SSO: launching system browser for ${provider} login`);
     await shell.openExternal(url);
     return { success: true };
@@ -2074,7 +1646,48 @@ ipcMain.handle('auth:loginWithMicrosoft', () => openSSOBrowser('microsoft'));
 ipcMain.handle('auth:loginWithGoogle', () => openSSOBrowser('google'));
 
 // Authentication - Production only (no demo mode)
+/**
+ * E2: a password, 2FA or registration success is applied here, with the
+ * ticket taken when the request started. A sign-out (or any other session
+ * change) meanwhile drops it: { success: false, ignored: true }.
+ */
+function applySignIn(ticket, success) {
+  const applied = sessionAuthority.applySession(ticket, { token: success.token, user: success.user }, { kind: 'login' });
+  if (!applied.applied) {
+    log.info(`auth: sign-in result dropped (${applied.reason})`);
+    return { success: false, ignored: true, reason: applied.reason };
+  }
+  afterSessionApplied();
+  return { ...success, epoch: applied.epoch, persisted: applied.persisted };
+}
+
+/**
+ * E7 (round 8): a sign-in answer (also a 2FA challenge or an error) that
+ * arrives after the session changed is dropped - the same shape as a result
+ * applySession refused.
+ */
+function signInDropped() {
+  return { success: false, ignored: true, reason: 'session_changed' };
+}
+
+/** A new session is in place: uploads and the recovery waiting for a sign-in may run. */
+function afterSessionApplied() {
+  try {
+    const user = sessionAuthority.getUser();
+    // Opaque account id only (no e-mail/name to telemetry).
+    if (user && user.id) Sentry.setUser({ id: String(user.id) });
+  } catch { /* telemetry optional */ }
+  setImmediate(() => {
+    processPendingUploads().catch(err => {
+      log.error('Error processing pending uploads after login:', err);
+    });
+    // R-S4 (round 9): recovery waits for a released session; once per session.
+    startRecovery('sign-in');
+  });
+}
+
 ipcMain.handle('auth:login', async (event, email, password) => {
+  const ticket = sessionAuthority.ticket();
   try {
     // Suisse Notes API authentication. `twoFactor: "supported"` tells the
     // backend this app can ask for the second factor (src-electron/auth-two-factor.js).
@@ -2093,11 +1706,12 @@ ipcMain.handle('auth:login', async (event, email, password) => {
         'X-Desktop-App-Version': app.getVersion()
       }
     });
+    if (sessionEndedFor(ticket)) return signInDropped();
 
     // Check for successful response
     if (response.data && response.data.success) {
       const success = twoFactorAuth.loginSuccessFrom(response.data);
-      if (success) return success;
+      if (success) return applySignIn(ticket, success);
     }
     // 2FA account: the renderer asks for the code (no token yet).
     const challenge = twoFactorAuth.twoFactorChallengeFrom(response.data);
@@ -2108,6 +1722,7 @@ ipcMain.handle('auth:login', async (event, email, password) => {
     // A 2xx without a token: an answer the app cannot use.
     return { success: false, status: response.status, nonJson: true, code: authErrorCode(response.data) };
   } catch (error) {
+    if (sessionEndedFor(ticket)) return signInDropped();
     // The renderer (src/utils/authErrors.js) turns this into a translated
     // text: never show the server's sentence or an English transport string.
     const failure = authFailureFromAxiosError(error);
@@ -2128,6 +1743,7 @@ ipcMain.handle('auth:login', async (event, email, password) => {
 // validated in auth-two-factor.js before any request; the URL comes from the
 // configured API base only. Success has the shape of an auth:login success.
 ipcMain.handle('auth:verifyTwoFactor', async (event, tempToken, code, isBackupCode) => {
+  const ticket = sessionAuthority.ticket();
   const request = twoFactorAuth.buildVerifyRequest(API_BASE_URL, tempToken, code, isBackupCode);
   if (!request.ok) return request.failure;
   try {
@@ -2137,10 +1753,12 @@ ipcMain.handle('auth:verifyTwoFactor', async (event, tempToken, code, isBackupCo
       retryGateway: true,
       headers: { 'Content-Type': 'application/json', 'X-Desktop-App-Version': app.getVersion() }
     });
+    if (sessionEndedFor(ticket)) return signInDropped();
     const success = twoFactorAuth.loginSuccessFrom(response.data);
-    if (success) return success;
+    if (success) return applySignIn(ticket, success);
     return { success: false, status: response.status, nonJson: true, code: authErrorCode(response.data) };
   } catch (error) {
+    if (sessionEndedFor(ticket)) return signInDropped();
     const failure = authFailureFromAxiosError(error);
     // Wrong or expired codes are the user's; outages are ours.
     const line = `auth:verifyTwoFactor failed: status=${failure.status || '-'} code=${failure.code || '-'} network=${failure.networkCode || '-'}${failure.nonJson ? ' non-json' : ''}`;
@@ -2172,6 +1790,7 @@ ipcMain.handle('auth:resendTwoFactorEmail', async (event, tempToken) => {
 
 // Registration - Create new account
 ipcMain.handle('auth:register', async (event, email, password, name) => {
+  const ticket = sessionAuthority.ticket();
   try {
     const response = await axios.post(`${API_BASE_URL}/api/auth/register`, {
       email,
@@ -2187,18 +1806,20 @@ ipcMain.handle('auth:register', async (event, email, password, name) => {
         'X-Desktop-App-Version': app.getVersion()
       }
     });
+    if (sessionEndedFor(ticket)) return signInDropped();
 
     // Check for successful response (register endpoint returns { user, token })
     if (response.data && response.data.token) {
-      return {
+      return applySignIn(ticket, {
         success: true,
         token: response.data.token,
         user: response.data.user
-      };
+      });
     }
     log.warn(`auth:register: answer without a token (HTTP ${response.status})`);
     return { success: false, status: response.status, nonJson: true, code: authErrorCode(response.data) };
   } catch (error) {
+    if (sessionEndedFor(ticket)) return signInDropped();
     const failure = authFailureFromAxiosError(error);
     // Until 4.7.15 a failed registration left no trace anywhere: no log line,
     // no Sentry event (08.10.2026: a prospect failed for 15 minutes). The
@@ -2251,80 +1872,96 @@ function authFailureFromAxiosError(error) {
   };
 }
 
-ipcMain.handle('auth:saveToken', async (event, token) => {
-  try {
-    if (safeStorage.isEncryptionAvailable()) {
-      const encrypted = safeStorage.encryptString(token);
-      configStore.set('authToken', encrypted.toString('base64'));
-    } else {
-      // Fallback to plain storage (less secure)
-      configStore.set('authToken', token);
-    }
-    // Trigger pending uploads now that we have auth
-    setImmediate(() => {
-      processPendingUploads().catch(err => {
-        log.error('Error processing pending uploads after login:', err);
-      });
-    });
-
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
+// Token and user are written only by the session authority (applySession):
+// there is no IPC that stores a token or a user without a ticket (E2).
 
 ipcMain.handle('auth:getToken', async () => {
   try {
-    const stored = configStore.get('authToken');
-    if (!stored) return null;
-
-    if (safeStorage.isEncryptionAvailable()) {
-      const decrypted = safeStorage.decryptString(Buffer.from(stored, 'base64'));
-      return decrypted;
-    } else {
-      return stored;
-    }
+    return sessionAuthority.getToken();
   } catch (error) {
     console.error('Error getting token:', error);
     return null;
   }
 });
 
-ipcMain.handle('auth:clearToken', async () => {
-  for (const controller of activeAbortControllers.values()) controller.abort();
-  configStore.delete('authToken');
-  configStore.delete('userInfo');  // Also clear user info on logout
-  Sentry.setUser(null);  // Clear Sentry user context on logout
-  return { success: true };
-});
-
-// Save user info (for session restoration)
-ipcMain.handle('auth:saveUserInfo', async (event, userInfo) => {
-  try {
-    configStore.set('userInfo', userInfo);
-    // Set Sentry user context so main process errors are attributed to this user
-    if (userInfo) {
-      Sentry.setUser({ id: userInfo.id, email: userInfo.email });
-    }
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-// Get user info
 ipcMain.handle('auth:getUserInfo', async () => {
   try {
-    return configStore.get('userInfo', null);
+    return sessionAuthority.getUser();
   } catch (error) {
     console.error('Error getting user info:', error);
     return null;
   }
 });
 
-// Create web session token for seamless web login
+// Start of the renderer: the stored session, or signed out (E6).
+ipcMain.handle('auth:restoreSession', () => {
+  try {
+    return sessionAuthority.restore();
+  } catch (error) {
+    log.warn(`auth:restoreSession failed (${error?.message || error})`);
+    return { signedOut: true };
+  }
+});
+
+// The session as main holds it now (after an SSO result was applied).
+ipcMain.handle('auth:currentSession', () => {
+  const state = sessionAuthority.state();
+  if (state.signedOut) return { signedOut: true, epoch: state.epoch };
+  return { signedOut: false, epoch: state.epoch, token: sessionAuthority.getToken(), user: sessionAuthority.getUser() };
+});
+
+// E5 steps 1-3 (the renderer does the BLE clean-up afterwards).
+ipcMain.handle('auth:signOut', () => {
+  let result;
+  try {
+    result = sessionAuthority.signOut();
+  } catch (error) {
+    log.warn(`auth:signOut failed (${error?.message || error})`);
+    result = { success: false, error: 'sign_out_incomplete', epoch: sessionAuthority.state().epoch };
+  }
+  Sentry.setUser(null);  // Clear Sentry user context on logout
+  return result;
+});
+
+// Paths of the web app the signed-in user may be handed into from the app.
+// Everything else is refused: the hand-off signs the browser in as this user.
+const WEB_HANDOFF_PATHS = [/^\/meeting\/audio\/[A-Za-z0-9_-]{1,128}$/, /^\/settings\/integrations$/];
+const WEB_HANDOFF_ORIGIN = 'https://app.suisse-meets.ch';
+
+// Open a page of the web app in the system browser, signed in as the current
+// user. The session/hand-off value is created and used here only: it is never
+// returned to the renderer, copied, or logged (the renderer's «copy link»
+// copies the plain meeting URL).
+ipcMain.handle('auth:openWebWithSession', async (_event, pagePath) => {
+  const path = typeof pagePath === 'string' ? pagePath : '';
+  if (!WEB_HANDOFF_PATHS.some((re) => re.test(path))) {
+    return { success: false, error: 'path_not_allowed' };
+  }
+  const plainUrl = `${WEB_HANDOFF_ORIGIN}${path}`;
+  let target = plainUrl;
+  try {
+    // Bound hand-off (server contract 10/2026): single-use 60 s token in the
+    // query, PKCE verifier in the fragment (#hv=, never sent to a server).
+    const verifier = require('crypto').randomBytes(32).toString('base64url');
+    const session = await createWebSessionInMain(ssoFlow.pkceChallenge(verifier));
+    if (session.success) {
+      target = `${plainUrl}?session=${encodeURIComponent(session.sessionToken)}#hv=${encodeURIComponent(verifier)}`;
+    }
+  } catch (error) {
+    log.warn(`Web hand-off could not be created: ${error?.message || 'unknown'}`);
+  }
+  try {
+    await shell.openExternal(target);
+    return { success: true, signedIn: target !== plainUrl };
+  } catch (error) {
+    log.warn(`Could not open the browser: ${error?.message || 'unknown'}`);
+    return { success: false, error: 'open_failed' };
+  }
+});
+
+// Create web session token for seamless web login (main process only).
 // SECURITY: Verifies token matches stored user to prevent authentication as wrong user
-ipcMain.handle('auth:createWebSession', async () => {
+async function createWebSessionInMain(codeChallenge) {
   try {
     const authToken = await getAuthToken();
     if (!authToken) {
@@ -2333,7 +1970,7 @@ ipcMain.handle('auth:createWebSession', async () => {
 
     // CRITICAL SECURITY CHECK: Verify the token belongs to the expected user
     // This prevents authenticating as a stale/wrong user if token storage got out of sync
-    const storedUserInfo = configStore.get('userInfo');
+    const storedUserInfo = sessionAuthority.getUser();
     if (storedUserInfo && storedUserInfo.id) {
       try {
         // Decode JWT to check the userId (without verifying signature - server will verify)
@@ -2346,8 +1983,11 @@ ipcMain.handle('auth:createWebSession', async () => {
               storedUserId: storedUserInfo.id,
               storedEmail: storedUserInfo.email
             });
-            // Clear the mismatched token to force re-login
-            configStore.delete('authToken');
+            // Sign out to force re-login (the renderer follows on auth:expired)
+            sessionAuthority.signOut();
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              sendToRenderer('auth:expired', { message: 'Session mismatch detected. Please log in again for security.' });
+            }
             return {
               success: false,
               error: 'Session mismatch detected. Please log in again for security.'
@@ -2360,7 +2000,7 @@ ipcMain.handle('auth:createWebSession', async () => {
       }
     }
 
-    const response = await axios.post(`${API_BASE_URL}/api/auth/desktop/create-web-session`, {}, {
+    const response = await axios.post(`${API_BASE_URL}/api/auth/desktop/create-web-session`, { codeChallenge, codeChallengeMethod: 'S256' }, {
       headers: {
         'Authorization': `Bearer ${authToken}`,
         'Content-Type': 'application/json'
@@ -2368,67 +2008,33 @@ ipcMain.handle('auth:createWebSession', async () => {
       timeout: 30000
     });
 
-    if (response.data && response.data.success && response.data.sessionToken) {
-      return {
-        success: true,
-        sessionToken: response.data.sessionToken
-      };
+    // Single-use 60 s token bound to codeChallenge (400 HANDOFF_BINDING_REQUIRED
+    // from servers that refuse it ends up in catch: the plain URL is opened).
+    // `bound: true` confirms the challenge was stored; an older server's 200
+    // with an unbound, reusable token is not used (plain URL instead).
+    const sessionToken = ssoFlow.boundHandoffToken(response.data);
+    if (sessionToken) {
+      return { success: true, sessionToken };
     }
 
     return { success: false, error: 'Failed to create web session' };
   } catch (error) {
-    console.error('Create web session error:', error);
+    log.warn(`Create web session failed: ${error?.response?.status || error?.code || 'error'}`);
     return {
       success: false,
-      error: error.response?.data?.error || error.message || 'Failed to create web session'
-    };
-  }
-});
-
-// --- Token Refresh ---
-
-// Refresh the auth token from the main process and persist it to configStore.
-// Shared by the IPC handler AND main-side flows that hit a 401 mid-operation
-// (e.g. the upload-verification poll after a long transfer).
-async function refreshMainAuthToken() {
-  try {
-    const authToken = await getAuthToken();
-    if (!authToken) {
-      return { success: false, error: 'Not authenticated' };
-    }
-
-    const response = await axios.post(`${API_BASE_URL}/api/auth/refresh`, {}, {
-      headers: {
-        'Authorization': `Bearer ${authToken}`
-      },
-      timeout: 15000
-    });
-
-    if (response.data?.token) {
-      // Save new token to configStore immediately so main process is in sync
-      if (safeStorage.isEncryptionAvailable()) {
-        configStore.set('authToken', safeStorage.encryptString(response.data.token).toString('base64'));
-      } else {
-        configStore.set('authToken', response.data.token);
-      }
-      log.info('Token refreshed successfully (main process)');
-      return { success: true, token: response.data.token, user: response.data.user };
-    }
-    return { success: false, error: 'No token in refresh response' };
-  } catch (error) {
-    log.warn('Token refresh failed:', error.response?.status, error.message);
-    return {
-      success: false,
-      // status lets the renderer distinguish a definitive auth rejection
-      // (401/403 → re-login required) from a transient network failure
-      // (no status → keep the session, retry later).
-      status: error.response?.status,
-      error: error.response?.data?.error || error.message || 'Token refresh failed'
+      error: 'Failed to create web session'
     };
   }
 }
 
-ipcMain.handle('auth:refreshToken', async () => refreshMainAuthToken());
+// --- Token Refresh ---
+
+// The renderer asks; the refresh runs in a scope of the current session.
+ipcMain.handle('auth:refreshToken', async () => {
+  const scope = scopes.open();
+  if (!scope) return { success: false, error: 'Not authenticated' };
+  return background.uploads.refreshMainAuthToken(scope);
+});
 
 // --- Minutes / Credits ---
 
@@ -2484,7 +2090,9 @@ function withRecordingLock(recordId, fn) {
   const previous = recordingLocks.get(recordId) || Promise.resolve();
   // Swallow the previous link's error so a failure in one handler doesn't
   // poison the next one's run.
-  const current = previous.catch(() => {}).then(fn);
+  // R-S7.4: the queue runs fn long after the request, from whatever context the
+  // previous link ended in.
+  const current = previous.catch(() => {}).then(bindSession(fn));
   recordingLocks.set(recordId, current);
   current.finally(() => {
     if (recordingLocks.get(recordId) === current) {
@@ -2514,8 +2122,27 @@ function safeParseDuration(metadata) {
   return isFinite(d) ? Math.round(d) : 0;
 }
 
+// Duration for the direct upload's init (seconds; 0 when unknown). Port of
+// the background upload: runs only while its session is alive.
+function probeDurationSeconds(filePath) {
+  return new Promise((resolve) => {
+    try {
+      ffmpeg.ffprobe(filePath, (err, metadata) => {
+        if (err || !metadata) return resolve(0);
+        const d = Number(metadata?.format?.duration);
+        if (!Number.isFinite(d) || d <= 0) return resolve(0);
+        resolve(d);
+      });
+    } catch {
+      resolve(0);
+    }
+  });
+}
+
 // Helper: Get audio metadata via ffprobe
 function getAudioMetadata(filePath) {
+  // Background work (recovery port) starts no child process after its session ended.
+  assertPublishAllowed();
   // Fast-fail if ffprobe binary is known to be broken (startup probe or earlier call)
   if (binaryHealth.ffprobe.available === false) {
     return Promise.reject(new Error(`ffprobe binary unavailable (${binaryHealth.ffprobe.error || 'spawn failed'})`));
@@ -2609,27 +2236,6 @@ async function rmDirSafe(dirPath) {
   });
 }
 
-// Variant that never throws. Use in post-success cleanup paths where the
-// authoritative data is already written and a stale temp dir is a disk leak,
-// not a data-loss. Logs + reports to Sentry so we can track how often this
-// fails in the wild.
-async function rmDirSafeBestEffort(dirPath, operation) {
-  try {
-    await rmDirSafe(dirPath);
-    return { success: true };
-  } catch (err) {
-    log.warn(`Cleanup failed for ${dirPath} (${operation}): ${err.code || err.message}`);
-    try {
-      Sentry.captureMessage(`rmDirSafe failed: ${err.code || 'unknown'}`, {
-        level: 'warning',
-        tags: { operation: operation || 'cleanup' },
-        extra: { dirPath, errorCode: err.code, errorMessage: err.message }
-      });
-    } catch (sentryErr) { /* never let telemetry break cleanup */ }
-    return { success: false, error: err };
-  }
-}
-
 // Helper: Combine chunks using streaming to avoid memory issues with large files
 async function combineChunksStreaming(chunksPath, sortedChunks, outputPath) {
   return concatenateFiles(sortedChunks.map(name => path.join(chunksPath, name)), outputPath);
@@ -2684,11 +2290,11 @@ async function prepareRawSessionFile(recordId, rawPath) {
   const initSegPath = getInitSegmentPath(recordId);
   if (!fs.existsSync(initSegPath)) {
     log.warn('Raw session is header-less and no init_segment.bin exists — ffprobe will likely reject it');
-    Sentry.captureMessage('recording: header-less session roll without persisted init segment', {
+    telemetry({ message: 'recording: header-less session roll without persisted init segment', context: {
       level: 'warning',
       tags: { operation: 'prepareRawSessionFile' },
       extra: { recordId, rawPath }
-    });
+    } });
     return { rebaseSec: 0 };
   }
 
@@ -2700,11 +2306,11 @@ async function prepareRawSessionFile(recordId, rawPath) {
       try { fs.unlinkSync(tmpPath); } catch (e) { /* ignore */ }
       reject(err);
     };
-    out.on('error', fail);
+    out.on('error', bindSession(fail, reject));
     out.on('finish', resolve);
     out.write(fs.readFileSync(initSegPath));
     const src = fs.createReadStream(rawPath);
-    src.on('error', fail);
+    src.on('error', bindSession(fail, reject));
     src.pipe(out);
   });
   fs.renameSync(tmpPath, rawPath);
@@ -2785,9 +2391,9 @@ function checkForTruncation(recordId, producedSec, expectedSec) {
     const detail = `produced ${Math.round(producedSec)}s but the session recorded ` +
       `${Math.round(expectedSec)}s — ${Math.round(verdict.shortfallSec)}s missing`;
     log.error(`Recording truncated: ${recordId} — ${detail}`);
-    Sentry.captureMessage(`recording: combined file is SHORT — ${detail} (recordId=${recordId})`, 'error');
+    telemetry({ message: `recording: combined file is SHORT — ${detail} (recordId=${recordId})`, context: 'error' });
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('system:capture-warning', {
+      sendToRenderer('system:capture-warning', {
         kind: 'recording-truncated',
         recordId,
         producedSeconds: Math.round(producedSec),
@@ -3000,7 +2606,7 @@ function reportBinaryHealthOnce(triggerSource) {
   if (binaryHealth.ffprobe.available === false) failedBinaries.push(`ffprobe (${binaryHealth.ffprobe.error || 'unavailable'})`);
   const failureSummary = failedBinaries.join(', ') || 'unknown';
 
-  Sentry.captureMessage(`Bundled media binary unavailable: ${failureSummary}`, {
+  telemetry({ message: `Bundled media binary unavailable: ${failureSummary}`, context: {
     level: 'warning',
     tags: {
       operation: 'binaryHealth',
@@ -3014,7 +2620,7 @@ function reportBinaryHealthOnce(triggerSource) {
       ffmpeg: { ...binaryHealth.ffmpeg },
       ffprobe: { ...binaryHealth.ffprobe },
     },
-  });
+  } });
 }
 
 function markBinaryUnavailable(kind, err, triggerSource) {
@@ -3029,6 +2635,9 @@ function markBinaryUnavailable(kind, err, triggerSource) {
 
 // Execute FFmpeg command with timeout + Sentry tracking
 function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operationName = 'FFmpeg', { reportToSentry = true } = {}) {
+  // Recovery finalization (publish gate of its scope): no new FFmpeg process
+  // after the session ended. Foreground (stop) has no gate.
+  assertPublishAllowed();
   // Fast-fail if FFmpeg binary is known to be broken (startup probe or earlier call)
   if (binaryHealth.ffmpeg.available === false) {
     return Promise.reject(new Error(`FFmpeg binary unavailable (${binaryHealth.ffmpeg.error || 'spawn failed'}) — skipping ${operationName}`));
@@ -3051,11 +2660,11 @@ function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operati
       const elapsed = Date.now() - startTime;
       log.warn(`${operationName} operation timed out after ${timeoutMs}ms`);
       // Always report timeouts — they are never expected
-      Sentry.captureMessage(`FFmpeg timeout: ${operationName} after ${(elapsed / 1000).toFixed(1)}s`, {
+      telemetry({ message: `FFmpeg timeout: ${operationName} after ${(elapsed / 1000).toFixed(1)}s`, context: {
         level: 'error',
         tags: { operation: operationName },
         extra: { timeoutMs, elapsedMs: elapsed, processStarted },
-      });
+      } });
       try {
         ffmpegCommand.kill('SIGKILL');
       } catch (e) {
@@ -3074,11 +2683,11 @@ function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operati
       cleanup();
       const elapsed = Date.now() - startTime;
       log.warn(`${operationName} stderr silent for ${silentFor}ms — killing process`);
-      Sentry.captureMessage(`FFmpeg stalled: ${operationName} silent for ${(silentFor / 1000).toFixed(0)}s`, {
+      telemetry({ message: `FFmpeg stalled: ${operationName} silent for ${(silentFor / 1000).toFixed(0)}s`, context: {
         level: 'error',
         tags: { operation: operationName },
         extra: { silentMs: silentFor, elapsedMs: elapsed, timeoutMs, processStarted },
-      });
+      } });
       try {
         ffmpegCommand.kill('SIGKILL');
       } catch (e) {
@@ -3095,20 +2704,23 @@ function ffmpegWithTimeout(ffmpegCommand, timeoutMs = FFMPEG_TIMEOUT_MS, operati
         cleanup();
         resolve();
       })
-      .on('error', (err) => {
+      .on('error', bindSession((err) => {
         cleanup();
+        // A start refused by the effect gate (session ended): that error, no
+        // health change, no report (round 10, F3).
+        try { assertPublishAllowed(); } catch (gateError) { reject(gateError); return; }
         // Detect spawn failures and update the unified health record
         if (isSpawnError(err)) {
           markBinaryUnavailable('ffmpeg', err, `ffmpegWithTimeout:${operationName}`);
         }
         if (reportToSentry) {
-          Sentry.captureException(err, {
+          telemetry({ exception: err, context: {
             tags: { operation: operationName },
             extra: { elapsedMs: Date.now() - startTime, ffmpegAvailable: binaryHealth.ffmpeg.available, processStarted },
-          });
+          } });
         }
         reject(err);
-      })
+      }, reject))
       .run();
   });
 }
@@ -3119,7 +2731,11 @@ function recordCaptureWarning(recordId, kind) {
     const metadata = fs.existsSync(metadataPath) ? JSON.parse(fs.readFileSync(metadataPath, 'utf8')) : { recordId };
     metadata.captureWarnings = [...new Set([...(metadata.captureWarnings || []), kind])];
     writeFileWithSync(metadataPath, JSON.stringify(metadata, null, 2));
-  } catch (error) { log.error('Could not persist capture warning:', error.message); }
+  } catch (error) {
+    // The session of this background work ended: never swallowed (round 10, F2).
+    if (isSessionEnded(error)) throw error;
+    log.error('Could not persist capture warning:', error.message);
+  }
 }
 
 // Tell the renderer (and Sentry, once) that captured system audio could NOT be
@@ -3127,16 +2743,15 @@ function recordCaptureWarning(recordId, kind) {
 // warn — the user uploaded a "complete" meeting whose participants were simply
 // missing (field evidence: ELECTRON-1Y, ffmpeg unavailable on 2 machines).
 function notifyMergeDegraded(recordId, reason, detail) {
+  assertPublishAllowed();
   recordCaptureWarning(recordId, 'merge-degraded');
   log.warn(`System audio merge degraded for ${recordId}: ${reason} (${detail || 'no detail'})`);
-  Sentry.captureMessage(`System audio merge degraded: ${reason}`, {
+  telemetry({ message: `System audio merge degraded: ${reason}`, context: {
     level: 'warning',
     tags: { operation: 'merge-degraded', recordId },
     extra: { detail },
-  });
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('system:capture-warning', { kind: 'merge-degraded', recordId, reason, detail });
-  }
+  } });
+  sendToRenderer('system:capture-warning', { kind: 'merge-degraded', recordId, reason, detail });
 }
 
 // Merge system audio (PCM) with mic recording using FFmpeg amix
@@ -3207,6 +2822,9 @@ async function mergeSystemAudio(micPath, recordId) {
     await publishFile(mergedPath, micPath);
     log.info('System audio merged successfully');
   } catch (err) {
+    // A session change is not a degraded merge: passed on at once, no warning,
+    // no clean-up, no event (round 10, F2).
+    if (isSessionEnded(err)) throw err;
     notifyMergeDegraded(recordId, err.mergeReason || 'merge-failed', err.message);
     try { if (fs.existsSync(mergedPath)) fs.unlinkSync(mergedPath); } catch (e) { /* ignore */ }
     // Returning the mic file here lets finalize() publish a success receipt and
@@ -3540,6 +3158,7 @@ function updateRecordingMetadataOnCompletion(recordId, duration, hasAudioFile) {
     }
     log.info('Recording metadata updated on completion:', recordId);
   } catch (error) {
+    if (isSessionEnded(error)) throw error;
     log.error('Failed to update recording metadata on completion:', error);
     // Don't throw - this is non-critical
   }
@@ -3630,25 +3249,34 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
     if (encodedTimestampChanges.length || result.sourceTimestampChanges?.length) {
       log.info(`Finalization tolerated timestamp-only changes for ${recordId}: output [${encodedTimestampChanges.join(', ')}], sources [${(result.sourceTimestampChanges || []).join(', ')}]`);
       try {
-        Sentry.captureMessage('finalization: timestamps of fresh recording files changed while saving (bytes unchanged, tolerated)', {
+        telemetry({ message: 'finalization: timestamps of fresh recording files changed while saving (bytes unchanged, tolerated)', context: {
           level: 'info',
           fingerprint: ['finalization-timestamp-only-change'],
           tags: { operation: 'finalization', rebuilt: String(!!result.sourceTimestampChanges?.length) },
           extra: { recordId, encodedTimestampChanges, sourceTimestampChanges: result.sourceTimestampChanges || [] },
-        });
+        } });
       } catch (_) { /* telemetry never breaks saving */ }
     }
     if (result.supersededScratchLeft) log.warn(`Superseded finalization scratch could not be removed for ${recordId}: ${result.supersededScratchLeft}`);
     for (const warning of result.warnings || []) {
+      assertPublishAllowed();
       recordCaptureWarning(recordId, typeof warning === 'string' ? warning : warning.kind || warning.code || 'native-source-recovery');
     }
+    // Publishing steps: in recovery (publish gate of the scope) each one only
+    // while the session is alive, checked right before it (round 9, R-S4).
+    assertPublishAllowed();
     await fs.promises.unlink(pendingPath);
     syncDirectorySync(recordPath);
+    assertPublishAllowed();
     updateRecordingMetadataOnCompletion(recordId, result.duration, true);
+    assertPublishAllowed();
     checkForTruncation(recordId, result.duration, Number(expectedDurationSec) || 0);
+    assertPublishAllowed();
     if (getActiveRecording()?.recordId === recordId) clearActiveRecording();
     return result;
   } catch (error) {
+    // The session of the recovery ended: the scope settles it (round 10, F2).
+    if (isSessionEnded(error)) throw error;
     log.error('Recording finalization failed; all source batches retained:', error);
     const diskFull = error.code === 'ENOSPC' || /no space left|not enough space|disk full/i.test(error.message || '');
     return { success: false, diskFull, requiresRecovery: error.code === 'PCM_CAPTURE_RECOVERY_REQUIRED', error: error.message, code: error.code || null };
@@ -3742,713 +3370,39 @@ ipcMain.handle('recording:deleteRecording', async (event, recordId, options = {}
 // Helper: Get auth token
 async function getAuthToken() {
   try {
-    const stored = configStore.get('authToken');
-    if (!stored) return null;
-
-    if (safeStorage.isEncryptionAvailable()) {
-      return safeStorage.decryptString(Buffer.from(stored, 'base64'));
-    }
-    return stored;
+    return sessionAuthority.getToken();
   } catch (e) {
     console.warn('Could not get auth token:', e);
     return null;
   }
 }
 
-// Helper: Sleep for delay
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+// Work without a ticket belongs to no session (round 8): never «the current
+// one» by default - a default taken late is how a late 401 refreshed the
+// next session.
+function sessionEndedFor(ticket) {
+  return !ticket || !sessionAuthority.isCurrent(ticket);
 }
-
-// === Two-Phase Upload Verification (P0 Data Loss Fix) ===
-// Poll server to verify file was actually persisted before allowing deletion
-
-/**
- * Poll server to verify upload was persisted
- * @param {string} audioFileId - The audio file ID returned by upload
- * @param {number} maxAttempts - Maximum polling attempts (default 15 = 30 seconds)
- * @returns {Promise<{persisted: boolean, verified: boolean, error?: string}>}
- */
-async function pollServerStatus(audioFileId, maxAttempts = 15, ownerId = null) {
-  const pollInterval = 2000; // 2 seconds between polls
-  let authToken = await getAuthToken();
-  // Parity with the renderer poller: a token that expired during a long
-  // transfer gets ONE refresh before we give up on real verification.
-  let authRefreshAttempted = false;
-
-  // Status semantics — keep in lockstep with the renderer copy in
-  // src/services/upload.js and the server contract in
-  // src/lib/api/desktop-contract.ts (RecordingStatus). The moment the server
-  // returns any persisted state, the audioFileId resolves to a Meeting row.
-  // This does not verify blob contents or authorize local deletion. We do not
-  // need to wait for downstream transcription. Legacy lowercase values are kept for any
-  // older endpoint that still echoes them.
-  const PERSISTED_STATES = new Set([
-    'persisted', 'complete', 'processing',         // legacy
-    'PROCESSING', 'COMPLETED',                     // stored by the verified backend contract
-  ]);
-  const FAILED_STATES = new Set([
-    'failed',                                       // legacy
-    'FAILED', 'CANCELLED',                          // contract
-  ]);
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      if (ownerId && !canUploadForUser(ownerId, tokenUserId(await getAuthToken()))) {
-        return { persisted: false, verified: false, authError: true, error: 'Sign in to the recording account to verify this upload' };
-      }
-      const response = await axios.get(
-        `${API_BASE_URL}/api/desktop/upload/${audioFileId}/status`,
-        {
-          headers: {
-            'Authorization': `Bearer ${authToken}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: 10000
-        }
-      );
-
-      if (response.data) {
-        const status = response.data.status;
-
-        if (PERSISTED_STATES.has(status)) {
-          log.info(`Upload verification successful for ${audioFileId}: status=${status}`);
-          return { persisted: true, verified: true };
-        }
-
-        if (FAILED_STATES.has(status)) {
-          const errMsg = response.data.errorMessage || response.data.error || `Server reported status=${status}`;
-          log.error(`Server reported upload failed for ${audioFileId}:`, errMsg);
-          return { persisted: false, verified: false, error: errMsg };
-        }
-
-        // RECORDING means the server is still ingesting — keep polling.
-        if (status === 'RECORDING' || status === 'recording') {
-          log.info(`Upload status for ${audioFileId}: ${status}, waiting...`);
-        } else {
-          // Unknown status cannot confirm storage. Retain local audio and the receipt.
-          log.warn(`Upload status for ${audioFileId}: unrecognized status "${status}" — retaining local audio until confirmation`);
-          Sentry.captureMessage(`Upload status unknown enum: ${status}`, {
-            level: 'warning',
-            tags: { operation: 'upload_verification' },
-            extra: { audioFileId, status },
-          });
-          return { persisted: false, verified: false, error: 'Unrecognized server recording status: ' + status };
-        }
-      }
-
-      await sleep(pollInterval);
-    } catch (error) {
-      // A 404 may mean this recording is absent, even when the route exists.
-      if (error.response && error.response.status === 404) {
-        log.warn('Server has not confirmed the recording (404); retaining local audio');
-        return { persisted: false, verified: false, error: 'Server has not confirmed this recording (404)' };
-      }
-
-      // 401 on the status endpoint after the authenticated POST already
-      // landed the bytes — the token likely expired DURING the long transfer.
-      // Try one refresh, then retain the local audio with verification pending.
-      if (error.response && error.response.status === 401) {
-        if (!authRefreshAttempted) {
-          authRefreshAttempted = true;
-          const refresh = await refreshMainAuthToken();
-          if (refresh.success && refresh.token) {
-            log.info('Upload status 401 — token refreshed, retrying verification');
-            authToken = refresh.token;
-            attempt--; // rewind: this attempt didn't count
-            continue;
-          }
-        }
-        log.warn('Upload status unauthorized; retaining local audio');
-        return { persisted: false, verified: false, authError: true, error: 'Sign in to confirm the uploaded recording' };
-      }
-
-      log.warn(`Status poll attempt ${attempt + 1} failed:`, error.message);
-      if (attempt < maxAttempts - 1) {
-        await sleep(pollInterval);
-      }
-    }
-  }
-
-  // Timeout - server didn't confirm in time
-  log.error(`Upload verification timeout for ${audioFileId} after ${maxAttempts} attempts`);
-  Sentry.captureMessage(`Upload verification timeout: ${audioFileId}`, {
-    level: 'error',
-    tags: { operation: 'upload_verification' },
-    extra: { audioFileId, maxAttempts },
-  });
-  return { persisted: false, verified: false, error: 'Server confirmation timeout' };
-}
-
-/**
- * Poll meeting transcription status after gateway failure.
- * The transcription webhook may complete the meeting while the desktop shows "pending".
- * Polls GET /api/desktop/meeting/{meetingId}/status every 30s for up to 15 minutes.
- */
-async function pollMeetingTranscriptionStatus(meetingId, maxAttempts = 30) {
-  const pollInterval = 30000; // 30 seconds between polls
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      // Re-fetch token each iteration to handle expiry during long polls
-      const authToken = await getAuthToken();
-      if (!authToken) {
-        log.warn(`[MeetingPoll] No auth token available for meeting ${meetingId}`);
-        return { status: 'AUTH_EXPIRED', resolved: false };
-      }
-
-      const response = await axios.get(
-        `${API_BASE_URL}/api/desktop/meeting/${meetingId}/status`,
-        {
-          headers: {
-            'Authorization': `Bearer ${authToken}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: 10000
-        }
-      );
-
-      if (response.data) {
-        const status = response.data.status;
-
-        if (status === 'COMPLETED') {
-          log.info(`[MeetingPoll] Meeting ${meetingId} transcription completed`);
-          return { status: 'COMPLETED', resolved: true };
-        }
-
-        if (status === 'FAILED') {
-          log.warn(`[MeetingPoll] Meeting ${meetingId} transcription failed`);
-          return { status: 'FAILED', resolved: true };
-        }
-
-        // Still PROCESSING — continue polling
-        log.info(`[MeetingPoll] Meeting ${meetingId} still ${status} (attempt ${attempt + 1}/${maxAttempts})`);
-      }
-
-      if (attempt < maxAttempts - 1) {
-        await sleep(pollInterval);
-      }
-    } catch (error) {
-      if (error.response && error.response.status === 404) {
-        log.warn(`[MeetingPoll] Status endpoint not available for meeting ${meetingId}`);
-        return { status: 'UNKNOWN', resolved: false };
-      }
-      log.warn(`[MeetingPoll] Poll attempt ${attempt + 1} failed:`, error.message);
-      if (attempt < maxAttempts - 1) {
-        await sleep(pollInterval);
-      }
-    }
-  }
-
-  log.warn(`[MeetingPoll] Timeout for meeting ${meetingId} after ${maxAttempts} attempts`);
-  return { status: 'TIMEOUT', resolved: false };
-}
-
-// Helper: Upload with retry logic.
-//
-// New flow (direct-to-Azure-Blob via SAS):
-//   - POST /api/uploads/init → server returns SAS URL + block size
-//   - PUT each block directly to Azure (bypasses our app server)
-//   - PUT block list to commit
-//   - POST /api/uploads/complete → server creates meeting + dispatches transcription
-//
-// Legacy flow (formData POST to /api/desktop/upload) is still kept for
-// backward compatibility — used when:
-//   1. Server is in local-storage mode (returns mode: 'fallback' from init)
-//   2. /api/uploads/init returns 404 (older backend without these routes)
-//   3. /api/uploads/init returns 400 "durationSeconds is required" — the
-//      client's ffprobe duration probe failed (e.g. AV blocking ffprobe.exe
-//      on Windows). The legacy POST does its own server-side probe so it
-//      doesn't need a client-supplied duration.
-async function uploadWithRetry(recordId, filePath, metadata, maxRetries = 3) {
-  if (unsavedRecordingId === recordId) return { success: false, canDelete: false, canRetry: true, error: 'Finish saving the recording before uploading it' };
-  if (recordingLocks.has(recordId) || (isRecordingInProgress && getActiveRecording()?.recordId === recordId)) {
-    return { success: false, canDelete: false, canRetry: true, error: 'The recording is still being saved' };
-  }
-  const eligibility = await assessRecordingUpload({ recordId, filePath, recordingsRoot: getRecordingsPath() });
-  if (!eligibility.allowed) return { success: false, canDelete: false, canRetry: true, requiresFinalization: true, error: eligibility.error };
-  const ownerId = recordingOwner(recordId);
-  if (!canUploadForUser(ownerId, tokenUserId(await getAuthToken()))) {
-    return { success: false, status: 401, canDelete: false, canRetry: true, error: 'Sign in to the account that owns this recording' };
-  }
-  const receipt = readUploadReceipt(recordId);
-  if (receipt?.audioFileId) {
-    const stats = fs.statSync(filePath);
-    if (receipt.ownerId !== ownerId || receipt.fileSize !== stats.size || receipt.fileMtimeMs !== stats.mtimeMs) {
-      return { success: false, canDelete: false, canRetry: false, error: 'The local audio changed after upload. Both copies are retained; review the recording before uploading again.' };
-    }
-    return verifyAcceptedUpload(recordId, filePath, receipt, ownerId, false);
-  }
-  const sourceSnapshot = fs.statSync(filePath);
-  const abortController = new AbortController();
-  activeAbortControllers.set(recordId, abortController);
-
-  try {
-    // === Phase 1: Try direct-to-Azure-Blob upload ===
-    const directResult = await tryDirectUpload({
-      recordId,
-      filePath,
-      metadata,
-      abortController,
-      maxRetries,
-      ownerId,
-    });
-
-    if (directResult.handled) {
-      // Direct flow either succeeded or failed terminally — do not run legacy.
-      if (directResult.result.success) return verifyAcceptedUpload(recordId, filePath, directResult.result, ownerId, true, sourceSnapshot);
-      return directResult.result;
-    }
-    log.info(`[upload] Direct flow not available for ${recordId} (${directResult.reason}); falling back to legacy POST`);
-
-    // === Phase 2: Legacy formData POST fallback ===
-    return await uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, abortController, ownerId, sourceSnapshot);
-  } finally {
-    activeAbortControllers.delete(recordId);
-    activeDirectAudioFileIds.delete(recordId);
-  }
-}
-
-/**
- * Try the new direct-to-Azure-Blob upload path. Returns:
- *   { handled: true, result } — finished (success or terminal failure)
- *   { handled: false, reason } — caller should run the legacy fallback
- */
-async function tryDirectUpload({ recordId, filePath, metadata, abortController, maxRetries, ownerId }) {
-  const authToken = await getAuthToken();
-  if (!authToken) {
-    // status 401 so the renderer's token-refresh/re-login recovery path
-    // treats this exactly like a server-side auth rejection (it keys on
-    // result.status === 401; without it this fell through as a generic
-    // terminal failure and the recording was dropped from the retry queue).
-    return {
-      handled: true,
-      result: { success: false, error: 'Not authenticated. Please login first.', status: 401, canRetry: false },
-    };
-  }
-
-  // Notify renderer that upload started so the UI shows progress immediately
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('upload:started', { recordId });
-  }
-
-  const onProgress = ({ progress, bytesUploaded, bytesTotal }) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('upload:progress', {
-        recordId,
-        progress,
-        bytesUploaded,
-        bytesTotal,
-      });
-    }
-  };
-
-  let lastTransientError;
-  // Outer retry handles transient init/complete failures. Per-block retry
-  // is handled inside upload-direct.js — we don't double-retry blocks.
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (attempt > 0) {
-      const delay = Math.min(15_000, 2000 * Math.pow(2, attempt - 1));
-      log.info(`[upload] Direct retry attempt ${attempt}/${maxRetries} after ${delay}ms`);
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('upload:retry', { recordId, attempt, maxRetries });
-      }
-      await sleep(delay);
-    }
-
-    if (abortController.signal.aborted) {
-      return {
-        handled: true,
-        result: { success: false, error: 'Upload cancelled', cancelled: true, canRetry: false },
-      };
-    }
-
-    let result;
-    try {
-      const attemptToken = await getAuthToken();
-      if (!canUploadForUser(ownerId, tokenUserId(attemptToken))) return { handled: true, result: { success: false, status: 401, canRetry: true, error: 'Sign in as the recording owner to upload it' } };
-      result = await uploadViaPresignedSas({
-        apiBaseUrl: API_BASE_URL,
-        authToken: attemptToken,
-        recordId,
-        filePath,
-        metadata,
-        abortController,
-        ffmpeg,
-        onProgress,
-        onSession: ({ audioFileId }) => {
-          // Track for upload:cancel cleanup. Cleared when this function returns.
-          if (audioFileId) {
-            activeDirectAudioFileIds.set(recordId, audioFileId);
-          }
-        },
-      });
-    } catch (err) {
-      // Defense-in-depth (ELECTRON-27 class): a thrown error carrying a FATAL
-      // HTTP status must terminate — it will fail identically on every retry,
-      // every 5-minute queue pass, and every app launch. upload-direct
-      // classifies these itself, but any slip (new code path, axios quirk)
-      // must not turn into a permanent retry loop.
-      const fatalStatus = err?.response?.status && FATAL_HTTP_STATUSES.has(err.response.status);
-      if (fatalStatus) {
-        captureUploadFailureOnce(recordId, err, 'upload-direct', {
-          attempt: attempt + 1, maxRetries, classified: 'fatal-thrown',
-        });
-        return {
-          handled: true,
-          result: {
-            success: false,
-            status: err.response.status,
-            error: err.response.data?.error || err.message,
-            canRetry: false,
-          },
-        };
-      }
-      // Bubbled-up transient error from upload-direct → retry.
-      lastTransientError = err;
-      log.warn(`[upload] Direct upload transient error attempt ${attempt + 1}: ${err.message}`);
-      if (attempt >= maxRetries) {
-        captureUploadFailureOnce(recordId, err, 'upload-direct', {
-          attempt: attempt + 1, maxRetries,
-        });
-        return {
-          handled: true,
-          result: {
-            success: false,
-            error: err.message || 'Upload failed after all retry attempts',
-            canRetry: true,
-          },
-        };
-      }
-      continue;
-    }
-
-    if (result.mode === 'fallback') {
-      return { handled: false, reason: 'server requested local-storage fallback' };
-    }
-
-    if (result.success) {
-      return { handled: true, result };
-    }
-
-    if (result.cancelled) {
-      return { handled: true, result };
-    }
-
-    // Direct flow returned a terminal failure — do not retry, do not fall back…
-    // …unless the failure indicates the backend simply doesn't speak the SAS
-    // protocol or rejects our (sometimes-zero) client-probed duration. In
-    // those cases the legacy multipart POST path can still succeed because
-    // the server probes duration itself and has no SAS routing requirement.
-    if (result.canRetry === false) {
-      if (result.status === 404) {
-        log.info(
-          `[upload] /api/uploads/init returned 404 for ${recordId} — backend lacks SAS routes; falling back to legacy POST`
-        );
-        return { handled: false, reason: 'init returned 404 (legacy backend)' };
-      }
-      if (
-        result.status === 400 &&
-        /durationSeconds.*required/i.test(result.error || '')
-      ) {
-        log.warn(
-          `[upload] /api/uploads/init rejected ${recordId} for missing durationSeconds (likely ffprobe spawn failure on client); falling back to legacy POST so the server can probe`
-        );
-        return { handled: false, reason: 'init rejected missing durationSeconds' };
-      }
-      Sentry.captureMessage(`Upload terminal failure: ${result.error}`, {
-        level: 'warning',
-        tags: { operation: 'upload-direct', recordId, status: String(result.status || 0) },
-      });
-      return { handled: true, result };
-    }
-
-    // Retryable failure — go around the loop.
-    log.warn(`[upload] Direct upload retryable failure attempt ${attempt + 1}: ${result.error}`);
-  }
-
-  // Exhausted retries on a retryable error
-  return {
-    handled: true,
-    result: {
-      success: false,
-      error: lastTransientError?.message || 'Upload failed after all retry attempts',
-      canRetry: true,
-    },
-  };
-}
-
-// Legacy formData POST upload path — only invoked when the backend
-// reports it is in local-storage mode (no Azure SAS available).
-async function uploadWithRetryLegacy(recordId, filePath, metadata, maxRetries, abortController, ownerId, sourceSnapshot) {
-  const retryDelays = [0, 2000, 5000, 10000]; // Exponential backoff
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    // Define progress tracking variables at loop scope so catch block can access them
-    let progressInterval = null;
-    const stopProgressUpdates = () => {
-      if (progressInterval) {
-        clearInterval(progressInterval);
-        progressInterval = null;
-      }
-    };
-
-    try {
-      // Wait before retry (except first attempt)
-      if (attempt > 0) {
-        const delay = retryDelays[Math.min(attempt, retryDelays.length - 1)];
-        console.log(`Upload retry attempt ${attempt}/${maxRetries} after ${delay}ms`);
-
-        // Notify renderer about retry
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('upload:retry', {
-            recordId,
-            attempt,
-            maxRetries
-          });
-        }
-
-        await sleep(delay);
-      }
-
-      const authToken = await getAuthToken();
-      if (authToken && !canUploadForUser(ownerId, tokenUserId(authToken))) {
-        return { success: false, status: 401, canDelete: false, canRetry: true, error: 'The recording belongs to a different account' };
-      }
-      if (!authToken) {
-        // status 401: route this through the renderer's auth-recovery path
-        // (refresh + retry / persistent queue) instead of a generic failure.
-        return { success: false, error: 'Not authenticated. Please login first.', status: 401, canRetry: false };
-      }
-
-      const fileStats = await fs.promises.stat(filePath);
-
-      const FormData = require('form-data');
-      const formData = new FormData();
-
-      // Detect content type based on file extension
-      const ext = path.extname(filePath).toLowerCase();
-      const mimeTypes = {
-        '.mp3': 'audio/mpeg',
-        '.mp4': 'video/mp4',
-        '.wav': 'audio/wav',
-        '.m4a': 'audio/mp4',
-        '.webm': 'audio/webm',
-        '.ogg': 'audio/ogg',
-        '.flac': 'audio/flac',
-        '.aac': 'audio/aac',
-        '.mov': 'video/quicktime',
-        '.m4v': 'video/mp4',
-        '.mpeg': 'video/mpeg',
-        '.avi': 'video/x-msvideo',
-        '.mkv': 'video/x-matroska',
-        '.opus': 'audio/opus',
-        '.wma': 'audio/x-ms-wma',
-        '.amr': 'audio/amr',
-        '.3gp': 'video/3gpp'
-      };
-      const contentType = mimeTypes[ext] || 'application/octet-stream';
-
-      // Use stream instead of buffer for efficient memory usage
-      const fileStream = fs.createReadStream(filePath);
-      formData.append('audio', fileStream, {
-        filename: path.basename(filePath),
-        contentType: contentType,
-        knownLength: fileStats.size
-      });
-
-      formData.append('metadata', JSON.stringify({
-        recordId,
-        duration: metadata?.duration || 0,
-        timestamp: new Date().toISOString(),
-        ...metadata
-      }));
-
-      // Time-based progress estimation for more realistic UX
-      const uploadStartTime = Date.now();
-      const fileSizeBytes = fileStats.size;
-      // Estimate: assume ~1.5 MB/s upload + 10 sec server processing
-      const estimatedUploadMs = (fileSizeBytes / (1.5 * 1024 * 1024)) * 1000 + 10000;
-
-      let lastProgress = 0;
-
-      // Update progress based on elapsed time (more realistic than axios progress)
-      const startProgressUpdates = () => {
-        progressInterval = setInterval(() => {
-          const elapsed = Date.now() - uploadStartTime;
-          // Calculate progress based on time, cap at 95% until complete
-          const timeProgress = Math.min(95, Math.round((elapsed / estimatedUploadMs) * 100));
-
-          if (timeProgress !== lastProgress && mainWindow && !mainWindow.isDestroyed()) {
-            lastProgress = timeProgress;
-            mainWindow.webContents.send('upload:progress', {
-              recordId,
-              progress: timeProgress,
-              bytesUploaded: Math.round((timeProgress / 100) * fileSizeBytes),
-              bytesTotal: fileSizeBytes,
-              attempt: attempt + 1,
-              maxRetries: maxRetries + 1
-            });
-          }
-        }, 500);
-      };
-
-      startProgressUpdates();
-
-      const uploadUrl = `${API_BASE_URL}/api/desktop/upload`;
-      const uploadTimeout = calculateUploadTimeout(fileStats.size);
-      log.info('Uploading to:', uploadUrl);
-      log.info('Upload config:', {
-        fileSize: fileStats.size,
-        fileSizeMB: (fileStats.size / (1024 * 1024)).toFixed(2),
-        timeout: uploadTimeout,
-        timeoutMinutes: (uploadTimeout / 60000).toFixed(1),
-        hasAuthToken: !!authToken
-      });
-      // SECURITY: Token logging removed (P0 Security Fix)
-
-      const response = await axios.post(uploadUrl, formData, {
-        headers: {
-          ...formData.getHeaders(),
-          'Authorization': `Bearer ${authToken}`,
-          'X-Desktop-App-Version': app.getVersion()
-        },
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity,
-        timeout: uploadTimeout,  // Dynamic timeout based on file size
-        signal: abortController.signal
-      });
-      log.info('Upload response received:', response.status);
-
-      // Stop progress updates
-      stopProgressUpdates();
-
-      // Log full response for debugging
-      console.log('Upload response status:', response.status);
-      console.log('Upload response data:', JSON.stringify(response.data, null, 2));
-
-      if (response.data && response.data.success) {
-        console.log('Upload HTTP response successful:', response.data);
-
-        return await verifyAcceptedUpload(recordId, filePath, response.data, ownerId, true, sourceSnapshot);
-      } else {
-        stopProgressUpdates();
-        throw new Error(response.data?.error || 'Upload failed');
-      }
-    } catch (error) {
-      stopProgressUpdates();
-
-      // If the upload was cancelled via AbortController, exit immediately
-      if (abortController.signal.aborted) {
-        log.info(`Upload cancelled for ${recordId}`);
-        return { success: false, error: 'Upload cancelled', cancelled: true, canRetry: false };
-      }
-
-      log.error(`Upload attempt ${attempt + 1} failed:`, {
-        message: error.message,
-        code: error.code,
-        status: error.response?.status,
-        statusText: error.response?.statusText,
-        responseData: error.response?.data,
-        isTimeout: error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED'
-      });
-
-      // Check for authentication errors (401) - don't retry these
-      if (error.response && error.response.status === 401) {
-        const errorMessage = error.response.data?.error || error.response.data?.message || 'Token expired';
-        log.warn('Upload failed due to authentication error:', errorMessage);
-        return {
-          success: false,
-          error: errorMessage,
-          status: 401,
-          canRetry: false
-        };
-      }
-
-      // Check for insufficient minutes (402/403 with minutes error) - don't retry these
-      if (error.response && (error.response.status === 402 ||
-          (error.response.data?.error && /insufficient|minutes|credit|balance/i.test(error.response.data.error)))) {
-        const errorMessage = error.response.data?.error || 'Insufficient minutes';
-        log.warn('Upload failed due to insufficient minutes:', errorMessage);
-        return {
-          success: false,
-          error: errorMessage,
-          status: error.response.status,
-          canRetry: false,
-          insufficientMinutes: true
-        };
-      }
-
-      const isRetryable = error.code === 'ECONNREFUSED' ||
-                          error.code === 'ETIMEDOUT' ||
-                          error.code === 'ECONNABORTED' ||
-                          error.code === 'ENOTFOUND' ||
-                          error.code === 'ENETUNREACH' ||
-                          error.code === 'EAI_AGAIN' ||
-                          error.code === 'ECONNRESET' ||
-                          error.code === 'EPIPE' ||
-                          (error.message && error.message.includes('socket hang up')) ||
-                          error.transient === true || // api-resilience: HTML instead of JSON, exhausted gateway retry
-                          (error.response && error.response.status >= 500);
-
-      // If we've exhausted retries or error is not retryable
-      if (attempt >= maxRetries || !isRetryable) {
-        let errorMessage = 'Upload failed';
-        let status = 0;
-        if (error.nonJson) {
-          errorMessage = error.message;
-          status = error.status || 0;
-        } else if (error.response) {
-          errorMessage = error.response.data?.error || `Server error: ${error.response.status}`;
-          status = error.response.status;
-        } else if (error.code === 'ECONNREFUSED') {
-          errorMessage = 'Could not connect to server. Please check your internet connection.';
-        } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
-          errorMessage = 'Upload timed out. Please try again.';
-        } else if (error.code === 'ENOTFOUND' || error.code === 'ENETUNREACH') {
-          errorMessage = 'No internet connection. Please check your network.';
-        } else if (error.code === 'ECONNRESET' || error.code === 'EPIPE' || (error.message && error.message.includes('socket hang up'))) {
-          errorMessage = 'Connection was interrupted. Please try again.';
-        } else {
-          errorMessage = error.message || 'Unknown error';
-        }
-
-        // Report upload failure to Sentry (retries exhausted or non-retryable)
-        // — throttled to once per recordId/session so automatic retry passes
-        // of the same doomed upload cannot storm Sentry (ELECTRON-27).
-        captureUploadFailureOnce(recordId, error, 'upload', {
-          attempt: attempt + 1,
-          maxRetries,
-          errorCode: error.code,
-          httpStatus: status,
-          isRetryable,
-          isTimeout: error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED',
-        });
-
-        return { success: false, error: errorMessage, status, canRetry: isRetryable };
-      }
-      // Otherwise continue to next retry attempt
-    }
-  }
-
-  return { success: false, error: 'Upload failed after all retry attempts', canRetry: true };
-}
-
-const inFlightUploads = new Set();
 
 ipcMain.handle('upload:start', async (event, params) => {
   const { filePath, metadata } = params;
   const recordId = validateRecordId(params.recordId);
 
+  if (unsavedRecordingId === recordId) return { success: false, canDelete: false, canRetry: true, error: 'Finish saving the recording before uploading it' };
+  // Round 9: the upload is background work of the session it starts in.
+  const scope = scopes.open();
+  if (!scope) {
+    // Signed out: the recording waits in the queue for its owner's sign-in.
+    addToUploadQueue(recordId, filePath, metadata);
+    return { success: false, status: 401, canDelete: false, canRetry: true, error: 'Not authenticated. Please login first.' };
+  }
   // Prevent duplicate concurrent uploads of the same recording.
   // inProgress lets the renderer's retry paths hand off to the running upload
   // instead of misfiling the rejection as a fresh failure.
-  if (unsavedRecordingId === recordId) return { success: false, canDelete: false, canRetry: true, error: 'Finish saving the recording before uploading it' };
-  if (inFlightUploads.has(recordId)) {
+  if (!scope.claim(recordId)) {
     log.warn(`Upload already in progress for ${recordId}, rejecting duplicate`);
     return { success: false, error: 'Upload already in progress', duplicate: true, inProgress: true };
   }
-  inFlightUploads.add(recordId);
   updateRecordingPowerBlocker();
 
   // Mark upload as in progress
@@ -4456,60 +3410,17 @@ ipcMain.handle('upload:start', async (event, params) => {
   pendingUploadsCount++;
 
   try {
-    // Persist before any network request; failures still release the upload lock.
-    addToUploadQueue(recordId, filePath, metadata, recordingOwner(recordId) || tokenUserId(await getAuthToken()));
-    // Notify renderer that upload started
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('upload:started', { recordId });
-    }
-
     // Clear any previous cancelled state for this recordId (e.g. from a retry)
     cancelledUploads.delete(recordId);
-
-    const result = await uploadWithRetry(recordId, filePath, metadata);
-
-    // Remove from queue on success OR on terminal failure (canRetry === false).
-    // The old behavior left non-retryable failures in the queue, where they
-    // would be re-attempted on every app launch and 413/402/etc forever.
-    // DRD-2: a quit-time abort returns { cancelled: true, canRetry: false }.
-    // Unlike a user cancel (routed through upload:cancel, which registers the
-    // recordId in cancelledUploads), it must NOT be removed from the queue — we
-    // want it to resume on next launch.
-    // 401 is NOT terminal for the recording: it becomes uploadable the moment
-    // the user re-logs-in (auth:saveToken triggers processPendingUploads).
-    // Dropping it here silently lost recordings made on an expired session.
-    const authFailure = result.status === 401;
-    const abortedByQuit = result.cancelled && isQuittingWithUploads && !cancelledUploads.has(recordId);
-    if ((result.success || (result.canRetry === false && !authFailure)) && !abortedByQuit) {
-      removeFromUploadQueue(recordId);
-      if (!result.success) {
-        log.warn(`[upload] Removing terminal-failure ${recordId} from queue (status=${result.status}, error=${result.error})`);
-      }
-    }
-
-    // Suppress completion event if the upload was cancelled by the user
-    if (cancelledUploads.has(recordId)) {
-      cancelledUploads.delete(recordId);
-      return result;
-    }
-
-    // Notify renderer of completion
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('upload:complete', {
-        recordId,
-        success: result.success,
-        error: result.error,
-        pendingVerification: result.pendingVerification,
-        audioFileId: result.audioFileId,
-        verified: result.verified,
-        contentVerified: result.contentVerified === true,
-        canDelete: result.canDelete,
-      });
-    }
-
+    const result = await background.uploads.runUploadStart(scope, { recordId, filePath, metadata }, {
+      cancelled: () => cancelledUploads.has(recordId),
+      quitting: () => isQuittingWithUploads,
+    });
+    // Suppress the completion event of a user cancel only once.
+    cancelledUploads.delete(recordId);
     return result;
   } finally {
-    inFlightUploads.delete(recordId);
+    scope.release(recordId);
     updateRecordingPowerBlocker();
     pendingUploadsCount--;
     if (pendingUploadsCount <= 0) {
@@ -4519,139 +3430,25 @@ ipcMain.handle('upload:start', async (event, params) => {
   }
 });
 
-// Keep TUS-based upload for backward compatibility (if needed)
-ipcMain.handle('upload:startTUS', async (event, params) => {
-  const { recordId, filePath, metadata } = params;
-  const authToken = await getAuthToken();
-
-  try {
-    const fileStats = await fs.promises.stat(filePath);
-    const fileStream = fs.createReadStream(filePath);
-
-    return new Promise((resolve, reject) => {
-      const upload = new Upload(fileStream, {
-        endpoint: `${API_BASE_URL}/upload`,
-
-        // Chunk size: 25MB
-        chunkSize: 25 * 1024 * 1024,
-
-        // Retry configuration
-        retryDelays: [0, 1000, 3000, 5000],
-
-        // Metadata to send with upload
-        metadata: {
-          filename: path.basename(filePath),
-          filetype: 'audio/webm',
-          recordId: recordId,
-          duration: metadata?.duration?.toString() || '0',
-          ...metadata
-        },
-
-        // Auth headers
-        headers: authToken ? {
-          'Authorization': `Bearer ${authToken}`
-        } : {},
-
-        // Upload size
-        uploadSize: fileStats.size,
-
-        // Progress callback
-        onProgress: (bytesUploaded, bytesTotal) => {
-          const progress = Math.round((bytesUploaded / bytesTotal) * 100);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('upload:progress', {
-              recordId,
-              progress,
-              bytesUploaded,
-              bytesTotal
-            });
-          }
-        },
-
-        // Success callback
-        onSuccess: () => {
-          activeUploads.delete(recordId);
-          resolve({ success: true, url: upload.url });
-        },
-
-        // Error callback
-        onError: (error) => {
-          activeUploads.delete(recordId);
-          reject(error);
-        }
-      });
-
-      // Store reference for pause/cancel
-      activeUploads.set(recordId, upload);
-
-      // Start upload
-      upload.start();
-    });
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('upload:pause', async (event, recordId) => {
-  const upload = activeUploads.get(recordId);
-  if (upload) {
-    upload.abort();
-    return { success: true };
-  }
-  return { success: false, error: 'Upload not found' };
-});
-
-ipcMain.handle('upload:resume', async (event, recordId) => {
-  const upload = activeUploads.get(recordId);
-  if (upload) {
-    upload.start();
-    return { success: true };
-  }
-  return { success: false, error: 'Upload not found' };
-});
-
 ipcMain.handle('upload:cancel', async (event, recordId) => {
   // Mark as cancelled so upload:start suppresses the completion event
   cancelledUploads.add(recordId);
 
-  // Abort the axios-based upload (current flow)
-  const controller = activeAbortControllers.get(recordId);
-  if (controller) {
-    controller.abort();
-    activeAbortControllers.delete(recordId);
-  }
+  // Abort the running upload (its own controller, registered by its scope).
+  const cancelled = scopes.cancelUpload(recordId);
 
   // Best-effort cleanup of staged blob if the cancelled upload used the
-  // direct-to-Azure flow. Fires asynchronously — we don't make the user
-  // wait for blob deletion before the cancel responds.
-  const audioFileId = activeDirectAudioFileIds.get(recordId);
-  if (audioFileId) {
-    activeDirectAudioFileIds.delete(recordId);
-    getAuthToken()
-      .then((token) => {
-        if (!token) return;
-        return abortDirectUpload({
-          apiBaseUrl: API_BASE_URL,
-          authToken: token,
-          recordId,
-          audioFileId,
-        });
-      })
+  // direct-to-blob flow. Fires asynchronously — we don't make the user wait
+  // for blob deletion. Background work of the upload's own session: after a
+  // session change it sends nothing.
+  if (cancelled?.audioFileId && cancelled.scope.alive()) {
+    const scope = cancelled.scope;
+    Promise.resolve()
+      .then(() => background.abortDirectUpload(scope, { recordId, audioFileId: cancelled.audioFileId }))
       .catch((e) => log.warn(`[upload:cancel] abort cleanup failed for ${recordId}:`, e?.message));
   }
 
-  // Also handle legacy TUS-based uploads
-  const upload = activeUploads.get(recordId);
-  if (upload) {
-    try {
-      await upload.abort(true); // true = terminate on server
-    } catch (e) {
-      console.warn('Error aborting upload:', e);
-    }
-    activeUploads.delete(recordId);
-  }
-
-  // Remove from persistent upload queue
+  // Remove from persistent upload queue (the user's own action, any session)
   removeFromUploadQueue(recordId);
 
   return { success: true };
@@ -4679,7 +3476,9 @@ ipcMain.handle('upload:removeFromQueue', async (event, recordId) => {
 });
 
 ipcMain.handle('meeting:pollStatus', async (event, meetingId) => {
-  return await pollMeetingTranscriptionStatus(meetingId);
+  const scope = scopes.open();
+  if (!scope) return { status: 'AUTH_EXPIRED', resolved: false };
+  return background.uploads.pollMeetingTranscriptionStatus(scope, meetingId);
 });
 
 // --- Utility ---
@@ -5083,7 +3882,7 @@ ipcMain.handle('dialog:openFile', async (event, options) => {
 
 function isExportRecoveryBusy(recordId) {
   return isRecordingInProgress || isProcessingRecording || !!unsavedRecordingId || !!activeAudioTee ||
-    isRecoveryRunning || inFlightUploads.has(recordId) || activeRecordingStore.get('lockedRecordings', []).includes(recordId);
+    background.recovery.isRunning() || inFlightUploads.has(recordId) || activeRecordingStore.get('lockedRecordings', []).includes(recordId);
 }
 
 const exportRecording = createRecordingExporter({
@@ -5241,7 +4040,7 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
     monitor.reset(Date.now());
     const report = verdict => {
       if (!verdict) return;
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('system:capture-warning', {
+      if (mainWindow && !mainWindow.isDestroyed()) sendToRenderer('system:capture-warning', {
         kind: verdict === 'warn' ? 'system-audio-silent' : 'system-audio-restored',
         recordId, silentSeconds: monitor.state(Date.now()).silentSeconds, platform: process.platform,
       });
@@ -5249,7 +4048,7 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
     // The Record page's system-audio meter: what the capture really hears, live.
     const sendLevel = level => {
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('systemAudio:level', { recordId, percent: meterPercent(level.rms) });
+        sendToRenderer('systemAudio:level', { recordId, percent: meterPercent(level.rms) });
       }
     };
     const levelMeter = createLevelMeter({ intervalMs: 150, onLevel: sendLevel });
@@ -5295,7 +4094,7 @@ ipcMain.handle('systemAudio:start', (event, recordId, offsetMs = 0) => serialize
       onFailure: error => {
         log.error('System audio capture failed:', error.message);
         recordCaptureWarning(recordId, 'system-audio-interrupted');
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('system:capture-warning', { kind: 'system-audio-interrupted', recordId });
+        if (mainWindow && !mainWindow.isDestroyed()) sendToRenderer('system:capture-warning', { kind: 'system-audio-interrupted', recordId });
         capture.stop().catch(err => log.warn('System audio cleanup failed:', err.message));
       },
       onClosed: () => {

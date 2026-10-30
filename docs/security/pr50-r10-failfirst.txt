@@ -1,0 +1,148 @@
+# PR #50 review round 10 - fail-first at production head 1f4d97d4 (tests of commit 1 only)
+# 2026-10-30T03:57:33+01:00 node v24.22.0, vitest; command: npx vitest run tests/unit/sessionSweep.chain.main.test.js tests/unit/sessionSweep.main.test.js tests/unit/recovery.session.test.js
+# git: HEAD 1f4d97d, src-electron unchanged: yes
+
+Production code: src-electron at 1f4d97d4 unchanged (git diff HEAD -- src-electron empty). Tests: the round-10
+rig (global sinks at the fs/child_process module boundaries incl. FileHandle writes, main's real ports and
+finalization chain from electron-main.js, stub ffmpeg/ffprobe or the bundled binaries for native media).
+
+## Summary
+
+ ✓ tests/unit/recovery.session.test.js  (18 tests) 1227ms
+ FAIL  tests/unit/sessionSweep.chain.main.test.js > F1-F3 of review round 9: named points of the real recovery chain > F1 durable-files: sign-out during readdir(chunks), before mkdir(source-chunks)
+ FAIL  tests/unit/sessionSweep.chain.main.test.js > F1-F3 of review round 9: named points of the real recovery chain > F1 recording-persistence: sign-out while the session is published, before unlink(source_raw)
+ FAIL  tests/unit/sessionSweep.chain.main.test.js > F1-F3 of review round 9: named points of the real recovery chain > F1 recording-persistence: sign-out during archiveChunkBatch, before mkdir(sessions)
+ FAIL  tests/unit/sessionSweep.chain.main.test.js > F1-F3 of review round 9: named points of the real recovery chain > F3 encoded-opus-evidence: sign-out during the first ffprobe, before the second
+ FAIL  tests/unit/sessionSweep.chain.main.test.js > F1-F3 of review round 9: named points of the real recovery chain > F3 encoded-opus-evidence: sign-out while the output is read (captureContent), before any ffprobe
+ FAIL  tests/unit/sessionSweep.chain.main.test.js > F1-F3 of review round 9: named points of the real recovery chain > F2 merge: sign-out while the merged file is published, before system:capture-warning
+ FAIL  tests/unit/sessionSweep.chain.main.test.js > sweep N=1..max over the real recovery chain (variants A, B, refresh control) > recovery, real chain (WebM)
+ FAIL  tests/unit/sessionSweep.chain.main.test.js > sweep N=1..max over the real recovery chain (variants A, B, refresh control) > recovery, real chain with the system audio merge
+ FAIL  tests/unit/sessionSweep.chain.main.test.js > sweep N=1..max over the real recovery chain (variants A, B, refresh control) > recovery, native sources (real media)
+ FAIL  tests/unit/sessionSweep.main.test.js > sweep N=1..max: a session change at every suspension point > queue run
+ FAIL  tests/unit/sessionSweep.main.test.js > sweep N=1..max: a session change at every suspension point > direct upload
+ FAIL  tests/unit/sessionSweep.main.test.js > sweep N=1..max: a session change at every suspension point > direct upload, offline retry
+ FAIL  tests/unit/sessionSweep.main.test.js > sweep N=1..max: a session change at every suspension point > upload:start
+ FAIL  tests/unit/sessionSweep.main.test.js > sweep N=1..max: a session change at every suspension point > legacy upload
+ FAIL  tests/unit/sessionSweep.main.test.js > sweep N=1..max: a session change at every suspension point > direct upload, long recording (3 blocks)
+ FAIL  tests/unit/sessionSweep.main.test.js > sweep N=1..max: a session change at every suspension point > verify + poll with 401 and refresh
+ FAIL  tests/unit/sessionSweep.main.test.js > sweep N=1..max: a session change at every suspension point > verify + poll with gateway 502
+ FAIL  tests/unit/sessionSweep.main.test.js > sweep N=1..max: a session change at every suspension point > verify, rename retry (EBUSY)
+ FAIL  tests/unit/sessionSweep.main.test.js > sweep N=1..max: a session change at every suspension point > recovery with finalization
+ FAIL  tests/unit/sessionSweep.main.test.js > sweep N=1..max: a session change at every suspension point > recovery re-scan
+ FAIL  tests/unit/sessionSweep.main.test.js > mutation: alive() removed from commit and the publish gate > the publish gate alone (commitRename): red
+ FAIL  tests/unit/sessionSweep.main.test.js > mutation: alive() removed from commit and the publish gate > commit alone: the sweep cannot reach it (every background await resumes through settle()), the scope check is red
+ FAIL  tests/unit/sessionSweep.main.test.js > mutation: alive() removed from commit and the publish gate > control: the unmutated scope passes the same runs
+ Test Files  2 failed | 1 passed (3)
+      Tests  23 failed | 25 passed (48)
+exit 1
+
+## Violations (named F1-F3 cases in full; per sweep entry the first 12)
+
+[sweep:chain] F1 durable-files: sign-out during readdir(chunks), before mkdir(source-chunks)
+  recovery, real chain (WebM) at the named point A: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain (WebM) at the named point B: effects after the change: ["mkdir:c1/source-chunks"]
+
+[sweep:chain] F1 recording-persistence: sign-out while the session is published, before unlink(source_raw)
+  recovery, real chain (WebM) at the named point A: effects after the change: ["unlink:c1/sessions/source_raw.webm"]
+  recovery, real chain (WebM) at the named point B: effects after the change: ["unlink:c1/sessions/source_raw.webm"]
+
+[sweep:chain] F1 recording-persistence: sign-out during archiveChunkBatch, before mkdir(sessions)
+  recovery, real chain (WebM) at the named point A: effects after the change: ["mkdir:c1/sessions","open:c1/sessions/source_raw.webm.tmp","write:c1/sessions/source_raw.webm.tmp","open:c1/sessions/source_raw.webm.tmp"]
+  recovery, real chain (WebM) at the named point B: effects after the change: ["mkdir:c1/sessions","open:c1/sessions/source_raw.webm.tmp","write:c1/sessions/source_raw.webm.tmp","open:c1/sessions/source_raw.webm.tmp"]
+
+[sweep:chain] F2 merge: sign-out while the merged file is published, before system:capture-warning
+  recovery, real chain with the system audio merge at the named point A: effects after the change: ["unlink:c1/audio_building_merged.webm"]
+  recovery, real chain with the system audio merge at the named point A: events after the change: ["system:capture-warning"]
+  recovery, real chain with the system audio merge at the named point B: effects after the change: ["unlink:c1/audio_building_merged.webm"]
+  recovery, real chain with the system audio merge at the named point B: events after the change: ["system:capture-warning"]
+
+[sweep:chain] F3 encoded-opus-evidence: sign-out during the first ffprobe, before the second
+  recovery, native sources (real media) at the named point A: child processes after the change: ["ffprobe -v error -select_streams a -show_packets -show_data_hash"]
+  recovery, native sources (real media) at the named point B: child processes after the change: ["ffprobe -v error -select_streams a -show_packets -show_data_hash"]
+
+[sweep:chain] F3 encoded-opus-evidence: sign-out while the output is read (captureContent), before any ffprobe
+  recovery, native sources (real media) at the named point A: child processes after the change: ["ffprobe -v error -select_streams a -show_streams -show_data","ffprobe -v error -select_streams a -show_packets -show_data_hash"]
+  recovery, native sources (real media) at the named point B: child processes after the change: ["ffprobe -v error -select_streams a -show_streams -show_data","ffprobe -v error -select_streams a -show_packets -show_data_hash"]
+
+[sweep:chain] recovery, real chain (WebM): 72 violations
+  recovery, real chain (WebM) N=2 A: effects after the change: ["write:c1/finalization-pending.json.tmp"]
+  recovery, real chain (WebM) N=2 B: effects after the change: ["write:c1/finalization-pending.json.tmp"]
+  recovery, real chain (WebM) N=5 A: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain (WebM) N=5 B: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain (WebM) N=6 A: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain (WebM) N=6 B: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain (WebM) N=7 A: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain (WebM) N=7 B: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain (WebM) N=8 A: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain (WebM) N=8 B: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain (WebM) N=12 A: effects after the change: ["mkdir:c1/sessions","open:c1/sessions/source_raw.webm.tmp","write:c1/sessions/source_raw.webm.tmp","open:c1/sessions/source_raw.webm.tmp"]
+  recovery, real chain (WebM) N=12 B: effects after the change: ["mkdir:c1/sessions","open:c1/sessions/source_raw.webm.tmp","write:c1/sessions/source_raw.webm.tmp","open:c1/sessions/source_raw.webm.tmp"]
+
+[sweep:chain] recovery, real chain with the system audio merge: 96 violations
+  recovery, real chain with the system audio merge N=2 A: effects after the change: ["write:c1/finalization-pending.json.tmp"]
+  recovery, real chain with the system audio merge N=2 B: effects after the change: ["write:c1/finalization-pending.json.tmp"]
+  recovery, real chain with the system audio merge N=5 A: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain with the system audio merge N=5 B: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain with the system audio merge N=6 A: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain with the system audio merge N=6 B: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain with the system audio merge N=7 A: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain with the system audio merge N=7 B: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain with the system audio merge N=8 A: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain with the system audio merge N=8 B: effects after the change: ["mkdir:c1/source-chunks"]
+  recovery, real chain with the system audio merge N=12 A: effects after the change: ["mkdir:c1/sessions","open:c1/sessions/source_raw.webm.tmp","write:c1/sessions/source_raw.webm.tmp","open:c1/sessions/source_raw.webm.tmp"]
+  recovery, real chain with the system audio merge N=12 B: effects after the change: ["mkdir:c1/sessions","open:c1/sessions/source_raw.webm.tmp","write:c1/sessions/source_raw.webm.tmp","open:c1/sessions/source_raw.webm.tmp"]
+
+[sweep] runs=876 points={"queue run":21,"upload:start":19,"direct upload":19,"direct upload, offline retry":23,"direct upload, long recording (3 blocks)":23,"legacy upload":18,"verify + poll with 401 and refresh":13,"verify + poll with gateway 502":13,"verify, rename retry (EBUSY)":13,"token refresh":1,"meeting status poll":3,"recovery with finalization":81,"recovery re-scan":42,"clean-up":2,"blob clean-up of a cancel":1}
+
+[sweep:chain] recovery, native sources (real media): 58 violations
+  recovery, native sources (real media) N=2 A: effects after the change: ["write:n1/finalization-pending.json.tmp"]
+  recovery, native sources (real media) N=2 B: effects after the change: ["write:n1/finalization-pending.json.tmp"]
+  recovery, native sources (real media) N=8 A: effects after the change: ["write:n1/finalization-plan.json.tmp"]
+  recovery, native sources (real media) N=8 B: effects after the change: ["write:n1/finalization-plan.json.tmp"]
+  recovery, native sources (real media) N=11 A: effects after the change: ["mkdir:n1/native-finalization-X","open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","write:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp"]
+  recovery, native sources (real media) N=11 B: effects after the change: ["mkdir:n1/native-finalization-X","open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","write:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp"]
+  recovery, native sources (real media) N=12 A: effects after the change: ["mkdir:n1/native-finalization-X","open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","write:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp"]
+  recovery, native sources (real media) N=12 B: effects after the change: ["mkdir:n1/native-finalization-X","open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","write:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp"]
+  recovery, native sources (real media) N=13 A: effects after the change: ["open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","write:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp"]
+  recovery, native sources (real media) N=13 B: effects after the change: ["open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","write:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp"]
+  recovery, native sources (real media) N=14 A: effects after the change: ["open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","write:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp"]
+  recovery, native sources (real media) N=14 B: effects after the change: ["open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","write:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp","open:n1/native-finalization-X/3f0c2a52-7d1e-4c4b-9a7e-2b1d5f6a8c90.webm.tmp"]
+
+[sweep:chain] runs=861 points={"recovery, real chain (WebM)":96,"recovery, real chain with the system audio merge":101,"recovery, native sources (real media)":90}
+
+## F5 (pendingUploads.crashLoop.test.js, same production head)
+
+command: npx vitest run tests/unit/pendingUploads.crashLoop.test.js
+
+ FAIL  tests/unit/pendingUploads.crashLoop.test.js > F5: a crash during the upload counts as an attempt; a session change does not > the same place crashes at every start: the limit removes the entry after 10 starts, the source stays
+- Expected
++ Received
+
+  Array [
+    0,
+-   1,
+-   2,
+-   3,
+-   4,
+-   5,
+-   6,
+-   7,
+-   8,
+-   9,
++   0,
++   0,
++   0,
++   0,
++   0,
++   0,
++   0,
++   0,
++   0,
++   0,
++   0,
+  ]
+
+ ❯ tests/unit/pendingUploads.crashLoop.test.js:44:20
+ Test Files  1 failed (1)
+      Tests  1 failed | 2 passed (3)
+exit 1

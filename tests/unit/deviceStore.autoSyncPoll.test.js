@@ -57,6 +57,13 @@ const ble = vi.hoisted(() => {
   return s;
 });
 vi.mock('../../src/services/bleService', () => ({ getBleManager: () => ble.manager }));
+// Pairing keys live in secure storage (keystore); an in-memory stand-in.
+vi.mock('../../src/services/secureStorage', () => { const m = new Map(); return {
+  getSecureItem: async (k) => (m.has(k) ? m.get(k) : null),
+  readSecureItem: async (k) => ({ ok: true, value: m.has(k) ? m.get(k) : null }),
+  setSecureItem: async (k, v) => { m.set(k, v); return { success: true }; },
+  removeSecureItem: async (k) => { m.delete(k); return { success: true }; }
+}; });
 vi.mock('@capacitor/preferences', () => { const m = new Map(); return { Preferences: {
   async get({ key }) { return { value: m.has(key) ? m.get(key) : null }; }, async set({ key, value }) { m.set(key, value); }, async remove({ key }) { m.delete(key); }
 } }; });

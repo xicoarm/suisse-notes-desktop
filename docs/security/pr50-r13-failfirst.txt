@@ -1,0 +1,151 @@
+PR #50, review round 13: fail-first at e1e0a09 (the gate of round 12, the probes of round 13)
+New probes copied onto a worktree of e1e0a09; only a test shim added there (exports of the new API without its behaviour, the folder from the fixture). Nothing of it is on the branch.
+Run: 2026-10-30 12:53:26 UTC
+
+== P1, P2, class matrix, temp, P4, P6: tests/unit/effectGate.contract.test.js
+ ❯ tests/unit/effectGate.contract.test.js  (44 tests | 32 failed) 4044ms
+   ❯ tests/unit/effectGate.contract.test.js > class probe: argument form x effect x API x target > in the context of an ended session all 424 cells are refused, nothing counted, nothing changed
+     → expected [ …(587) ] to deeply equal []
+   ❯ tests/unit/effectGate.contract.test.js > class probe: argument form x effect x API x target > a write stream: refused after the end wherever it points, through while alive
+     → expected { refused: [ 'refused', 'ok' ], …(1) } to deeply equal { …(2) }
+   ❯ tests/unit/effectGate.contract.test.js > P1: the static counter cases of round 12 > F11: a path with a byte that is no UTF-8, a link into the recording: refused, bytes unchanged
+     → expected { result: 'ok', same: false } to deeply equal { result: 'refused', same: true }
+   ❯ tests/unit/effectGate.contract.test.js > P1: the static counter cases of round 12 > F12: cp (sync) with a link below its target into the recording: refused, bytes unchanged
+     → expected { result: 'ok', same: false } to deeply equal { result: 'refused', same: true }
+   ❯ tests/unit/effectGate.contract.test.js > P1: the static counter cases of round 12 > F12: cp (callback) with a link below its target into the recording: refused, bytes unchanged
+     → expected { result: 'ok', same: false } to deeply equal { result: 'refused', same: true }
+   ❯ tests/unit/effectGate.contract.test.js > P1: the static counter cases of round 12 > F12: cp (promise) with a link below its target into the recording: refused, bytes unchanged
+     → expected { result: 'ok', same: false } to deeply equal { result: 'refused', same: true }
+   ❯ tests/unit/effectGate.contract.test.js > P2: a listener of session A after its end > bound: emit without a context: no write, no process, no event; the refusal is handed on as an error
+     → expected { written: true, …(2) } to deeply equal { written: false, sent: [], …(1) }
+   ❯ tests/unit/effectGate.contract.test.js > P2: a listener of session A after its end > bound: emit under session B: no write, no process, no event; the refusal is handed on as an error
+     → expected { written: true, …(2) } to deeply equal { written: false, sent: [], …(1) }
+   ❯ tests/unit/effectGate.contract.test.js > P2: a listener of session A after its end > bound: emit from an external timer: no write, no process, no event; the refusal is handed on as an error
+     → expected { written: true, …(2) } to deeply equal { written: false, sent: [], …(1) }
+   ❯ tests/unit/effectGate.contract.test.js > P2: a listener of session A after its end > a queue of a bound function: the refusal rejects its promise (no fail handler: it goes on)
+     → promise resolved "undefined" instead of rejecting
+   ❯ tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > cp with a delayed filter (living session): refused, the filter never runs
+     → expected false to be true // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with an async iterable (living session): refused, nothing written
+     → ["ok","ok","ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE"]: expected false to be true // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with an iterable (living session): refused, nothing written
+     → ["ok","ok","ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE"]: expected false to be true // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with a stream (living session): refused, nothing written
+     → ["ok","ok","ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE"]: expected false to be true // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with an object with toString (living session): refused, nothing written
+     → ["ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE"]: expected false to be true // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > a handle's writeFile with an iterable (living session): refused
+     → expected false to be true // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > cp with a delayed filter (ended session): refused, the filter never runs
+     → expected false to be true // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with an async iterable (ended session): refused, nothing written
+     → ["ok","ok","ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE"]: expected false to be true // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with an iterable (ended session): refused, nothing written
+     → ["ok","ok","ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE"]: expected false to be true // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with a stream (ended session): refused, nothing written
+     → ["ok","ok","ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE"]: expected false to be true // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with an object with toString (ended session): refused, nothing written
+     → ["ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE","ERR_INVALID_ARG_TYPE"]: expected false to be true // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > a handle's writeFile with an iterable (ended session): refused
+     → expected false to be true // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > a process start inside an admitted call is refused after the end (it ignores admitted)
+     → expected 'ok' to be 'SESSION_ENDED' // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > R-S7.7: the temp rule > an exclusive open of this context earns one unlink of its exact string (sync)
+     → expected { second: 'ok', kept: false } to deeply equal { second: 'refused', kept: true }
+   ❯ tests/unit/effectGate.contract.test.js > R-S7.7: the temp rule > an exclusive open of this context earns one unlink of its exact string (callback)
+     → expected { second: 'ok', kept: false } to deeply equal { second: 'refused', kept: true }
+   ❯ tests/unit/effectGate.contract.test.js > R-S7.7: the temp rule > an exclusive open of this context earns one unlink of its exact string (promise)
+     → expected { second: 'ok', kept: false } to deeply equal { second: 'refused', kept: true }
+   ❯ tests/unit/effectGate.contract.test.js > R-S7.7: the temp rule > the name pattern alone earns nothing
+     → expected 'ok' to be 'refused' // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > R-S7.7: the temp rule > only the exact string: another spelling of the same file is refused
+     → expected [ 'ok', 'ENOENT' ] to deeply equal [ 'refused', 'refused' ]
+   ❯ tests/unit/effectGate.contract.test.js > R-S7.7: the temp rule > another session's exclusive open earns this session nothing; a non-exclusive open neither
+     → expected [ 'ok', 'refused' ] to deeply equal [ 'refused', 'refused' ]
+   ❯ tests/unit/effectGate.contract.test.js > R-S7.7: the temp rule > once published (renamed) the string earns nothing any more
+     → expected 'ok' to be 'refused' // Object.is equality
+   ❯ tests/unit/effectGate.contract.test.js > P4: what leaves the context > a port takes no callback, there is no fourth one, the context is not exported
+     → expected [Function] to throw an error
+   ❯ tests/unit/effectGate.contract.test.js > P6: no extra system call per open > lstat, fstat, readlink, stat per open: the same with and without the gate, without a context and in a living session
+     → expected [ [ 'lstatSync', 200 ], …(1) ] to deeply equal []
+ FAIL  tests/unit/effectGate.contract.test.js > class probe: argument form x effect x API x target > in the context of an ended session all 424 cells are refused, nothing counted, nothing changed
+ ❯ tests/unit/effectGate.contract.test.js:204:19
+ FAIL  tests/unit/effectGate.contract.test.js > class probe: argument form x effect x API x target > a write stream: refused after the end wherever it points, through while alive
+ ❯ tests/unit/effectGate.contract.test.js:239:83
+ FAIL  tests/unit/effectGate.contract.test.js > P1: the static counter cases of round 12 > F11: a path with a byte that is no UTF-8, a link into the recording: refused, bytes unchanged
+ ❯ tests/unit/effectGate.contract.test.js:268:68
+ FAIL  tests/unit/effectGate.contract.test.js > P1: the static counter cases of round 12 > F12: cp (sync) with a link below its target into the recording: refused, bytes unchanged
+ FAIL  tests/unit/effectGate.contract.test.js > P1: the static counter cases of round 12 > F12: cp (promise) with a link below its target into the recording: refused, bytes unchanged
+ ❯ tests/unit/effectGate.contract.test.js:289:70
+ FAIL  tests/unit/effectGate.contract.test.js > P1: the static counter cases of round 12 > F12: cp (callback) with a link below its target into the recording: refused, bytes unchanged
+ ❯ tests/unit/effectGate.contract.test.js:289:70
+ FAIL  tests/unit/effectGate.contract.test.js > P2: a listener of session A after its end > bound: emit without a context: no write, no process, no event; the refusal is handed on as an error
+ FAIL  tests/unit/effectGate.contract.test.js > P2: a listener of session A after its end > bound: emit under session B: no write, no process, no event; the refusal is handed on as an error
+ FAIL  tests/unit/effectGate.contract.test.js > P2: a listener of session A after its end > bound: emit from an external timer: no write, no process, no event; the refusal is handed on as an error
+ ❯ tests/unit/effectGate.contract.test.js:321:62
+ FAIL  tests/unit/effectGate.contract.test.js > P2: a listener of session A after its end > a queue of a bound function: the refusal rejects its promise (no fail handler: it goes on)
+ ❯ tests/unit/effectGate.contract.test.js:340:45
+ FAIL  tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > cp with a delayed filter (living session): refused, the filter never runs
+ FAIL  tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > cp with a delayed filter (ended session): refused, the filter never runs
+ ❯ tests/unit/effectGate.contract.test.js:360:67
+ FAIL  tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with an async iterable (living session): refused, nothing written
+ FAIL  tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with an iterable (living session): refused, nothing written
+ FAIL  tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with a stream (living session): refused, nothing written
+ FAIL  tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with an async iterable (ended session): refused, nothing written
+ FAIL  tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with an iterable (ended session): refused, nothing written
+ FAIL  tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with a stream (ended session): refused, nothing written
+ ❯ tests/unit/effectGate.contract.test.js:376:106
+ FAIL  tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with an object with toString (living session): refused, nothing written
+ FAIL  tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > writeFile/appendFile with an object with toString (ended session): refused, nothing written
+ ❯ tests/unit/effectGate.contract.test.js:376:106
+ FAIL  tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > a handle's writeFile with an iterable (living session): refused
+ FAIL  tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > a handle's writeFile with an iterable (ended session): refused
+ ❯ tests/unit/effectGate.contract.test.js:386:67
+ FAIL  tests/unit/effectGate.contract.test.js > P2: foreign code is never admitted > a process start inside an admitted call is refused after the end (it ignores admitted)
+ ❯ tests/unit/effectGate.contract.test.js:407:20
+ FAIL  tests/unit/effectGate.contract.test.js > R-S7.7: the temp rule > an exclusive open of this context earns one unlink of its exact string (sync)
+ FAIL  tests/unit/effectGate.contract.test.js > R-S7.7: the temp rule > an exclusive open of this context earns one unlink of its exact string (callback)
+ FAIL  tests/unit/effectGate.contract.test.js > R-S7.7: the temp rule > an exclusive open of this context earns one unlink of its exact string (promise)
+ ❯ tests/unit/effectGate.contract.test.js:425:53
+ FAIL  tests/unit/effectGate.contract.test.js > R-S7.7: the temp rule > the name pattern alone earns nothing
+ ❯ tests/unit/effectGate.contract.test.js:435:77
+ FAIL  tests/unit/effectGate.contract.test.js > R-S7.7: the temp rule > only the exact string: another spelling of the same file is refused
+ ❯ tests/unit/effectGate.contract.test.js:447:21
+ FAIL  tests/unit/effectGate.contract.test.js > R-S7.7: the temp rule > another session's exclusive open earns this session nothing; a non-exclusive open neither
+ ❯ tests/unit/effectGate.contract.test.js:460:21
+ FAIL  tests/unit/effectGate.contract.test.js > R-S7.7: the temp rule > once published (renamed) the string earns nothing any more
+ ❯ tests/unit/effectGate.contract.test.js:470:77
+ FAIL  tests/unit/effectGate.contract.test.js > P4: what leaves the context > a port takes no callback, there is no fourth one, the context is not exported
+ ❯ tests/unit/effectGate.contract.test.js:564:68
+ FAIL  tests/unit/effectGate.contract.test.js > P6: no extra system call per open > lstat, fstat, readlink, stat per open: the same with and without the gate, without a context and in a living session
+ ❯ tests/unit/effectGate.contract.test.js:616:32
+      Tests  32 failed | 12 passed (44)
+
+== Oracle: tests/unit/globalSinks.flags.test.js (new oracle against the old gate: all counted; the old oracle is shown below)
+   ❯ tests/unit/globalSinks.flags.test.js > round 13: every effect counts, wherever it lands > a write outside the recordings folder is an effect
+     → expected [] to deeply equal [ 'write' ]
+   ❯ tests/unit/globalSinks.flags.test.js > round 13: every effect counts, wherever it lands > what a cp filter does is counted on its own (the call does not hide it)
+     → expected 0 to be greater than 0
+   ❯ tests/unit/globalSinks.flags.test.js > round 13: every effect counts, wherever it lands > what an iterable does while it is written is counted on its own
+     → expected false to be true // Object.is equality
+   ❯ tests/unit/globalSinks.flags.test.js > round 13: every effect counts, wherever it lands > removing a temp file: only the removal an exclusive open earned is marked own, once
+     → expected [] to deeply equal [ true, false, false ]
+      Tests  4 failed | 9 passed (13)
+
+== P4/R-S7.5/R-S7.8 statics: tests/unit/sessionSweep.static.test.js
+   ❯ tests/unit/sessionSweep.static.test.js > static rules of the context contract (round 13) > R-S7.5: the context objects, .exit, .enterWith and .disable exist only in effect-g
+     → expected [ …(5) ] to deeply equal []
+   ❯ tests/unit/sessionSweep.static.test.js > static rules of the context contract (round 13) > R-S7.5: exactly three ports, each with its fixed data parameters
+     → expected [ 'ports: ' ] to deeply equal []
+   ❯ tests/unit/sessionSweep.static.test.js > static rules of the context contract (round 13) > R-S7.5: settings, updates, crash markers and the Sentry object are no part of the 
+     → expected 'const path = require(\'path\');\ncons…' not to match /\bSentry\s*\./
+      Tests  3 failed | 10 passed (13)
+
+== P5: tests/unit/sessionSweep.data.main.test.js on the old gate (the data held there too; the probe has to stay green through the rebuild)
+[sweep:data] {"upload":21,"upload, rename retry and fsync of the receipt":13,"recovery, real chain (WebM)":96,"recovery re-scan":98}
+      Tests  8 passed (8)
+
+== P3, P8: the mutants edit the lines of the new gate and have no meaning at e1e0a09. Each is red at round 13 with its controls green
+(tests/unit/sweepMutation.main.test.js).
+== P7: measured on the heads, tests/unit does not apply (.github/workflows/gate-measure.yml).
+== P9: E1-E10 and R-S1 to R-S6 are held by the suites of the earlier rounds; TUS fallback: no caller, nothing to reproduce.

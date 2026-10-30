@@ -421,6 +421,22 @@
           </div>
         </div>
         <div class="file-action">
+          <!-- Name or size the app refuses to process (never transferred) -->
+          <div
+            v-if="file.unsafe"
+            class="skipped-actions"
+            data-test="device-file-unsafe"
+          >
+            <q-icon
+              name="block"
+              size="16px"
+              color="grey-5"
+            />
+            <span
+              class="text-grey-5"
+              style="font-size: 12px;"
+            >{{ $t('deviceFileUnsafe') }}</span>
+          </div>
           <!-- Currently downloading this file — cancel JUST this file
                (batch continues with next queued file).
                Only surfaced during 'downloading' phase: protocol can abort
@@ -428,7 +444,7 @@
                to filesystem or uploading to cloud, "skip" has no handler yet.
                That path will come with the upload-queue work in Batch 2. -->
           <q-btn
-            v-if="deviceStore.currentSyncFile === file.file && deviceStore.syncPhase === 'downloading'"
+            v-else-if="deviceStore.currentSyncFile === file.file && deviceStore.syncPhase === 'downloading'"
             flat
             dense
             color="negative"
@@ -684,7 +700,8 @@ export default {
       }).onOk(async () => {
         try {
           $q.loading.show({ message: t('resettingDevice') });
-          const result = await deviceStore.resetDevice();
+          // The dialog's OK is the only caller allowed to format the recorder.
+          const result = await deviceStore.resetDevice({ confirmed: true });
           $q.loading.hide();
           if (result.success) {
             $q.notify({ type: 'positive', message: t('resetDeviceSuccess') });
