@@ -49,7 +49,7 @@ describe('sweep N=1..max over the real recovery chain (variants A, B, refresh co
 
   it('totals (for the round-10 report)', () => {
     // eslint-disable-next-line no-console
-    console.log(`[sweep:chain] runs=${totals.runs} points=${JSON.stringify(totals.points)}`);
+    console.log(`[sweep:chain] runs=${totals.runs} sample=${process.env.SWEEP_SAMPLE || 'full'} points=${JSON.stringify(totals.points)}`);
     expect(Object.keys(totals.points)).toHaveLength(CHAIN.length);
   });
 });

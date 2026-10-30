@@ -39,6 +39,12 @@ jobs:
         # Real fsync and FFmpeg tests share the runner's disk. Avoid competing
         # test files exhausting an unrelated persistence test's time budget.
         run: npm run test -- --maxWorkers=1 --minWorkers=1
+        env:
+          # The session sweeps run every point on Linux and macOS; Windows
+          # (about seven times slower per run) a fixed-seed sample of the
+          # points, always the first and last two. Mutants, named points and
+          # unit probes are never sampled (tests/unit/support/sweep.js).
+          SWEEP_SAMPLE: ${{ matrix.os == 'windows-latest' && '0.15' || '' }}
 
   build-validation:
     runs-on: ubuntu-latest

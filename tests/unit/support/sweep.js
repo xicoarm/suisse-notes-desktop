@@ -207,12 +207,44 @@ export async function refreshRun(entry, n, base) {
   }
 }
 
-/** The whole sweep of one entry: N=1..max, variants A and B, the refresh control. */
+/**
+ * The points N of one entry's sweep (review round 11, Windows CI time):
+ * all of 1..max by default. With SWEEP_SAMPLE=<fraction in (0,1)> (set by
+ * CI on the Windows runner only, where one run takes about seven times as
+ * long) a sample with a fixed seed (SWEEP_SEED, default 'r11'; per entry):
+ * the first two and the last two points always, each other point with the
+ * given probability. Linux and macOS run every point on every commit; the
+ * gate is the same JavaScript on all three, the Windows-specific parts
+ * (paths, CRLF, rename retries, letter case) are in the named points, the
+ * mutants and the unit probes, which are never sampled.
+ */
+export function sweepPoints(max, key, { sample = process.env.SWEEP_SAMPLE, seed = process.env.SWEEP_SEED || 'r11' } = {}) {
+  const all = Array.from({ length: max }, (_, i) => i + 1);
+  if (sample === undefined || sample === '' || Number(sample) === 1) return all;
+  const fraction = Number(sample);
+  if (!(fraction > 0 && fraction < 1)) throw new Error(`SWEEP_SAMPLE must be a fraction in (0, 1], got ${sample}`);
+  // FNV-1a of seed and entry, then mulberry32.
+  let h = 2166136261;
+  for (const ch of `${seed}:${key}`) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+  const next = () => {
+    h = (h + 0x6d2b79f5) >>> 0;
+    let t = h;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  return all.filter((n) => {
+    const draw = next();
+    return n <= 2 || n > max - 2 || draw < fraction;
+  });
+}
+
+/** The whole sweep of one entry: N=1..max (sweepPoints), variants A and B, the refresh control. */
 export async function sweepEntry(entry, { variants = ['A', 'B'], control = true, extra } = {}) {
   const base = await baseline(entry, extra);
   const violations = [];
   let runs = 0;
-  for (let n = 1; n <= base.max; n++) {
+  for (const n of sweepPoints(base.max, entry.name)) {
     for (const variant of variants) { violations.push(...await sweptRun(entry, n, variant, extra)); runs++; }
     if (control) { violations.push(...await refreshRun(entry, n, base)); runs++; }
   }

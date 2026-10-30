@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Module from 'node:module';
 import { createBackgroundRig, webmChunk } from './support/backgroundRig.js';
-import { ended, baseline, sweptRun, refreshRun } from './support/sweep.js';
+import { ended, baseline, sweptRun, refreshRun, sweepPoints } from './support/sweep.js';
 
 // Review round 9 (council 3, required test 2): dynamic sweep N=1..max over
 // every background entry of main. The REAL session authority, scope
@@ -203,7 +203,7 @@ describe('sweep N=1..max: a session change at every suspension point', () => {
       // The baseline itself runs through (no change).
       expect(entry.ended(base.result) && !entry.name.startsWith('recovery'), `${entry.name}: baseline ended`).toBe(false);
       const violations = [];
-      for (let n = 1; n <= base.max; n++) {
+      for (const n of sweepPoints(base.max, entry.name)) {
         for (const variant of ['A', 'B']) {
           violations.push(...await sweptRun(entry, n, variant));
           totals.runs++;
@@ -217,7 +217,7 @@ describe('sweep N=1..max: a session change at every suspension point', () => {
 
   it('totals (for the round-9 report)', () => {
     // eslint-disable-next-line no-console
-    console.log(`[sweep] runs=${totals.runs} points=${JSON.stringify(totals.points)}`);
+    console.log(`[sweep] runs=${totals.runs} sample=${process.env.SWEEP_SAMPLE || 'full'} points=${JSON.stringify(totals.points)}`);
     expect(Object.keys(totals.points)).toHaveLength(ENTRIES.length);
   });
 });
@@ -228,7 +228,10 @@ describe('mutation: alive() removed from commit and the publish gate', () => {
     const violations = [];
     for (const entry of ENTRIES.filter((e) => ['verify, rename retry (EBUSY)', 'recovery with finalization', 'verify + poll with 401 and refresh'].includes(e.name))) {
       const base = await baseline(entry, { registryFactory: factory });
-      for (let n = 1; n <= base.max; n++) violations.push(...await sweptRun(entry, n, 'A', { registryFactory: factory }));
+      // Killed once a file effect after the change is seen (round 11: stops there).
+      for (let n = 1; n <= base.max && !violations.some((v) => /effects after the change/.test(v)); n++) {
+        violations.push(...await sweptRun(entry, n, 'A', { registryFactory: factory }));
+      }
     }
     expect(violations.length).toBeGreaterThan(0);
     expect(violations.some((v) => /effects after the change/.test(v))).toBe(true);
@@ -241,7 +244,7 @@ describe('mutation: alive() removed from commit and the publish gate', () => {
     const entry = ENTRIES.find((e) => e.name === 'verify, rename retry (EBUSY)');
     const base = await baseline(entry, { registryFactory: factory });
     const violations = [];
-    for (let n = 1; n <= base.max; n++) violations.push(...await sweptRun(entry, n, 'A', { registryFactory: factory }));
+    for (let n = 1; n <= base.max && !violations.some((v) => /"rename:/.test(v)); n++) violations.push(...await sweptRun(entry, n, 'A', { registryFactory: factory }));
     expect(violations.some((v) => /"rename:/.test(v))).toBe(true);
   }, 900000);
 
@@ -274,7 +277,7 @@ describe('mutation: alive() removed from commit and the publish gate', () => {
     const violations = [];
     const entry = ENTRIES.find((e) => e.name === 'recovery with finalization');
     const base = await baseline(entry);
-    for (let n = 1; n <= base.max; n++) violations.push(...await sweptRun(entry, n, 'A'));
+    for (const n of sweepPoints(base.max, `control ${entry.name}`)) violations.push(...await sweptRun(entry, n, 'A'));
     expect(violations).toEqual([]);
   }, 900000);
 });
