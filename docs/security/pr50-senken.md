@@ -200,3 +200,53 @@ Windows-specific (paths and letter case, CRLF, rename retries) sits in the
 named points, the mutants and the unit probes, which are never sampled. The
 mutants of the scope (`sessionSweep.main`, «alive() removed») stop at the
 first violation that kills them, on every system.
+
+## Review round 12: the alias class, fail-closed
+
+Same course. Round 12 closes the class «path and descriptor alias», not only
+the three cases of the r11 review (F8-F10). Rule in the ended gated context:
+a call passes only when it is PROVEN that it does not reach the recordings
+folder; when that cannot be proven it is refused. Fail-first:
+`docs/security/pr50-r12-failfirst.txt`.
+
+| Gap (r11 review) | Before | Now | Test |
+|---|---|---|---|
+| F8 link plus «..» | `path.resolve` collapsed «..» before any link was read: `/out/link/../metadata.json` (link -> folder/c1/sub) passed and emptied `c1/metadata.json` | the path is resolved as the system does it, name by name with `lstat`, a link followed where it stands BEFORE a later «..» goes up from its target (at most 40 links); a missing name is appended as it is, «..» after it is not decidable; the parent for calls on the name itself; and, as a second reading, after collapsing «..» first (what Windows and Node there do); macOS/Windows: letter case folded, Windows: the system's own spelling of the existing part (short names), junctions are links | `effectGate.flags.test.js` (round 12 F8), class probe |
+| F8 not decidable | resolution errors fell back to the lexical path | a loop (ELOOP, > 40 links), no access, a name that is no folder, «..» after a missing name, an unreadable link, a device or drive-relative path (`\\?\`, `C:x`): refused after the end | same |
+| F8 hard links | not resolved (documented limit) | a write to the content or attributes of a file with a second name (`nlink > 1`) is refused after the end; calls on the name (unlink, rename, rm) of a hard link pass | same, class probe |
+| F9 provenance | the descriptor/handle kept its path; the decision was made at the first use, by the then current alias | every open (any flags, any context) holds what it found until the close: the file's identity (`fstat` dev/ino), the resolved path and whether it was a file of the folder or not decidable. A call on a descriptor passes only for a pipe, terminal or socket, or for a file its open found outside that is still the same file (dev/ino), still outside and has no second name; an unknown descriptor of a file is refused | same (round 12 F9: alias removed/renamed, after logout and after login B) |
+| F10 reading opens, attributes | only writing opens were remembered; fchmod/futimes on a reading descriptor passed | all opens remembered; fchmod, futimes, fchown, handle.chmod/utimes/chown, chmod, utimes, chown, lutimes, lchmod, lchown through the same sink | same (round 12 F10) |
+| Oracle F8-F10 | normalized before resolving; descriptors by path | its own resolution (the system's `realpath` of the raw path, missing names appended, a dangling link by its target), descriptors and handles by what their open found, else by identity (a file with the same dev/ino in the folder), FileHandle arguments of `fs.promises.writeFile` | `globalSinks.flags.test.js` (round 12) |
+| Oracle attributes | content compared only | the snapshot of every swept run compares bytes, mode and mtime (`attributes changed after the change`) | mutant `fs-attr-bypass` (utimes of metadata.json past the gate: counted AND seen) |
+
+The order of the checks changed: in a gated context the refusal of the
+context is asked first and the path examined only after the session ended
+(the gate-off mutants follow the new lines). Before the end and outside a
+gated context nothing is refused; only the open's findings are recorded.
+
+### Class probe (`tests/unit/effectGate.aliasClass.test.js`)
+
+A generative test, fixed seed `0x5e12` (it picks the writing open flags of
+each cell): path form {direct, relative, symlink to a file, symlink to a
+folder, symlink plus «..», chain of links, dangling link, hard link, letter
+case (macOS, Windows), junction (Windows)} x effect {open sync/callback/
+promise, writeFile (existing and new), appendFile, writev, truncate, chmod,
+utimes, chown, rename, unlink, link, copyFile, cp, mkdir, rm - each sync,
+callback and promise - and a write stream; on a descriptor or handle:
+write, writev, ftruncate, fchmod, futimes, fchown, writeFile, appendFile,
+write streams, fs.promises.writeFile(handle), fs.writeSync(handle.fd)} x
+origin {path call in the ended context; descriptor/handle opened in the
+ended context; opened in the foreground for reading or writing, the alias
+then removed or renamed}. Each cell: refused, bytes/mode/mtime of every
+entry of the folder unchanged, and the same call let through (session
+alive) counted by the oracle. Calls on a link itself (unlink, rename, rm,
+mkdir of a symlink or hard link outside) pass and are not counted; control
+cells outside the folder (log file, its links, a sibling `Recordings-old`,
+an update file; path and descriptor effects) pass. On Windows the «..» form
+is refused on its POSIX reading only (Node collapses «..» first, the call
+lands outside): the oracle has nothing to count there.
+
+Limits that remain: a path changed by another process between the check and
+the system call (no current caller; external race), file systems that fold
+the letter case on Linux, descriptors from outside the fs module (static
+rules as before).
