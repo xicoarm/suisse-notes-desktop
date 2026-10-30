@@ -31,6 +31,42 @@ function bumpRetry(queue, recordId, now = new Date().toISOString()) {
   if (!item) return undefined;
   item.retryCount = (item.retryCount || 0) + 1;
   item.lastRetry = now;
+  delete item.attempt;
+  return queue;
+}
+
+/**
+ * Review round 10 (F5): «attempt started» marker, written before the upload.
+ * The app may die during the upload (the same place at every start); the
+ * next run of the same session finds the marker without an outcome and
+ * counts it, so the retry limit is reached. @returns {Array|undefined}
+ */
+function startAttempt(queue, recordId, epoch, now = new Date().toISOString()) {
+  const item = queue.find((u) => u.recordId === recordId);
+  if (!item) return undefined;
+  item.attempt = { epoch, startedAt: now };
+  return queue;
+}
+
+/**
+ * A marker left by a run that never returned: counted as an attempt when it
+ * is of this session (`epoch`), cleared without counting when it is of
+ * another session (that attempt ended by a session change, R-S3).
+ * @returns {Array|undefined} undefined: no marker
+ */
+function settleAttempt(queue, recordId, epoch, now = new Date().toISOString()) {
+  const item = queue.find((u) => u.recordId === recordId);
+  if (!item || !item.attempt) return undefined;
+  if (item.attempt.epoch === epoch) return bumpRetry(queue, recordId, now);
+  delete item.attempt;
+  return queue;
+}
+
+/** Clears the marker of an attempt that ended without counting. @returns {Array|undefined} */
+function clearAttempt(queue, recordId) {
+  const item = queue.find((u) => u.recordId === recordId);
+  if (!item || !item.attempt) return undefined;
+  delete item.attempt;
   return queue;
 }
 
@@ -56,4 +92,4 @@ function uploadOutcome(recordings, recordId, result) {
   return recordings;
 }
 
-module.exports = { addToQueue, removeFromQueue, bumpRetry, changeHistory, uploadOutcome };
+module.exports = { addToQueue, removeFromQueue, bumpRetry, startAttempt, settleAttempt, clearAttempt, changeHistory, uploadOutcome };

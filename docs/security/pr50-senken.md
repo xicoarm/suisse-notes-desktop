@@ -147,3 +147,14 @@ boundary - and counts at the module boundaries (`tests/unit/support/globalSinks.
   event past `sendToRenderer`. Each must turn the sweep red with a
   violation of its kind; the controls (unmutated, the same new paths
   through their sinks) stay green and the new paths run in the baseline.
+
+### Retry count of the upload queue (round 10, F5)
+
+Before the upload the queue entry gets `attempt: { epoch, startedAt }`
+(`queueOps.startAttempt`, through `scope.update.queue`). The next run of the
+same session (same epoch: a crash, the app restarted) counts a marker left
+without an outcome as an attempt (`settleAttempt`), so the limit of 10
+removes an entry that crashes the app every time (history `failed`, the
+source file is kept). A marker of another session is cleared without
+counting (R-S3: an attempt ended by a session change is no attempt); an
+attempt with an outcome clears it (`bumpRetry`, removal on success).

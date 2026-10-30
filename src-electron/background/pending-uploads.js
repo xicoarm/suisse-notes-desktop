@@ -54,6 +54,12 @@ function createPendingUploadProcessor({ uploads, read, pure, hooks = {}, log }) 
           log.info(`Pending processor: ${item.recordId} already in flight (renderer path), skipping`);
           continue;
         }
+        // F5 (round 10): a marker without an outcome is an attempt of a run
+        // that never returned (the app died); counted only in its session.
+        if (item.attempt) {
+          scope.update.queue((q) => queueOps.settleAttempt(q, item.recordId, scope.ticket.epoch));
+          if (item.attempt.epoch === scope.ticket.epoch) item.retryCount = (item.retryCount || 0) + 1;
+        }
         if (item.retryCount >= 10 && !read.readUploadReceipt(item.recordId)?.audioFileId) {
           log.warn(`Upload ${item.recordId} exceeded max retries, removing from queue`);
           scope.update.queue((q) => queueOps.removeFromQueue(q, item.recordId));
@@ -72,6 +78,12 @@ function createPendingUploadProcessor({ uploads, read, pure, hooks = {}, log }) 
 
         log.info(`Retrying upload for ${item.recordId} (attempt ${item.retryCount + 1})`);
         if (!scope.claim(item.recordId)) continue;
+        try {
+          scope.update.queue((q) => queueOps.startAttempt(q, item.recordId, scope.ticket.epoch));
+        } catch (error) {
+          scope.release(item.recordId);
+          throw error;
+        }
         busy();
         let result;
         try {
@@ -87,7 +99,11 @@ function createPendingUploadProcessor({ uploads, read, pure, hooks = {}, log }) 
         // Signed out (or another session) while uploading: the upload was
         // aborted for that reason - the queue keeps the recording as it is.
         scope.assertAlive();
-        if (result?.sessionEnded) return { sessionEnded: true };
+        if (result?.sessionEnded) {
+          // Ended by a session change: no attempt (R-S3); the marker goes.
+          scope.update.queue((q) => queueOps.clearAttempt(q, item.recordId));
+          return { sessionEnded: true };
+        }
         // R-S3: an attempt counts only once it has an outcome in this
         // session (an attempt ended by a session change is no retry).
         if (!result?.success) scope.update.queue((q) => queueOps.bumpRetry(q, item.recordId));
