@@ -13,6 +13,9 @@ import { CHAIN, NAMED, chainEntry as entry, makeNativeTemplate, removeNativeTemp
 // the native recording (real Opus media). F1-F3 of review round 9 are named
 // cases of their own (each failed at 1f4d97d, docs/security/pr50-r10-failfirst.txt).
 
+beforeAll(makeNativeTemplate, 60000);
+afterAll(removeNativeTemplate);
+
 describe('F1-F3 of review round 9: named points of the real recovery chain', () => {
   const cases = Object.entries(NAMED).filter(([key]) => key !== 'PATH').map(([, c]) => c);
   for (const [title, name, point] of cases) {

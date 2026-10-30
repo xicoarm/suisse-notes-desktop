@@ -221,7 +221,8 @@ describe('actual main finalizer export guard', () => {
     const context = { getRecordingPath: () => directory, assertExportRecoveryReady,
       isExportRecoveryBusy: () => busy, path, FINALIZATION_PENDING_MARKER: 'finalization-pending.json',
       writeFileAtomic: vi.fn(async (file, value) => fs.promises.writeFile(file, value)),
-      canFinalizeRecording: checkSpace, activeAudioTee: { recordId: id }, stopSystemAudio: vi.fn(), log: { error: vi.fn() } };
+      canFinalizeRecording: checkSpace, activeAudioTee: { recordId: id }, stopSystemAudio: vi.fn(), log: { error: vi.fn() },
+      isSessionEnded: (error) => error?.code === 'SESSION_ENDED' };
     const run = vm.runInNewContext(body + '\nfinalizeRecording', context);
     return { run, context };
   }
