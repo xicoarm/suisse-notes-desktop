@@ -276,6 +276,8 @@ export function createBackgroundRig({
     sessionAuthority: s.authority,
     inFlightUploads: { has: (id) => !!scopes && scopes.inFlight.has(id) },
     resolveBundledBinaryPaths: () => ({ ffmpeg: STUB_FFMPEG, ffprobe: STUB_FFPROBE }),
+    // Main's effect gate is installed once per process; loading the chain
+    // again (each rig) replaces its folder with this one (effect-gate.js).
     getRecordingsPath: () => root,
     isExportRecoveryBusy: () => false,
     stopSystemAudio: async () => ({ success: true }),

@@ -47,7 +47,13 @@ function emptyOrphan(r, id) {
     fs.utimesSync(dir, OLD, OLD);
   });
 }
-const chunkSource = (r) => [path.join(r.root, 'c1', 'chunks', 'chunk_0.webm')];
+// The source chunk survives: in chunks/, or archived by a finalization that
+// completed (source-chunks/<n>/, after the resumption).
+const chunkSource = (r) => {
+  const archive = path.join(r.root, 'c1', 'source-chunks');
+  const archived = fs.existsSync(archive) ? fs.readdirSync(archive).map((n) => path.join(archive, n, 'chunk_0.webm')).filter((f) => fs.existsSync(f)) : [];
+  return archived.length ? archived : [path.join(r.root, 'c1', 'chunks', 'chunk_0.webm')];
+};
 
 /**
  * Entries: `opts` for the rig, `prepare(r)` (answers, files; may set
@@ -229,12 +235,14 @@ describe('mutation: alive() removed from commit and the publish gate', () => {
   }, 120000);
 
   it('the publish gate alone (commitRename): red', async () => {
+    // Without the publish gate there is no gated context either: the fs
+    // sink (effect-gate.js, round 10) checks only inside one, so this stays red.
     const factory = mutantRegistry([CUT_GATE]);
     const entry = ENTRIES.find((e) => e.name === 'verify, rename retry (EBUSY)');
     const base = await baseline(entry, { registryFactory: factory });
     const violations = [];
     for (let n = 1; n <= base.max; n++) violations.push(...await sweptRun(entry, n, 'A', { registryFactory: factory }));
-    expect(violations.some((v) => /"kind":"rename"/.test(v))).toBe(true);
+    expect(violations.some((v) => /"rename:/.test(v))).toBe(true);
   }, 120000);
 
   it('commit alone: the sweep cannot reach it (every background await resumes through settle()), the scope check is red', async () => {

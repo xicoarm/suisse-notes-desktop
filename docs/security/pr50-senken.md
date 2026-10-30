@@ -87,3 +87,46 @@ the background code is moved, and only the mixed helpers get ports.
 - Effects after a session change that remain, by design: the own
   unpublished temp file of an interrupted durable write is unlinked
   (`durable-files.js`, `writeFileAtomic` clean-up); nothing is published.
+
+## Review round 10: one checked sink per kind (lead decision)
+
+Every file, child-process and renderer effect of main's background work now
+goes through ONE checked sink per kind, checked synchronously right before
+the system call (no await in between). Another single path that bypasses
+it is a regression (switch it to the sink, add it to the ban list and the
+sweep), not a design question.
+
+| Kind | The sink | Check | Commit |
+|---|---|---|---|
+| Files (recordings folder) | `src-electron/effect-gate.js`, installed by main before any other module: every write-class call of the `fs` module (sync, callback, promise API) and every FileHandle write (`write`, `writev`, `writeFile`, `appendFile`, `truncate`) on a path, descriptor or handle of the recordings folder | the publish gate of the asynchronous context (`publishGate`, set by the scope for ports and durable writes) right before the call; refused with the scope's `SessionEndedError` | F1 |
+| Child processes | the same gate on `child_process.spawn/execFile/exec/fork` and the sync variants (every start in a gated context, also the ones fluent-ffmpeg makes from its own callbacks) | as above; a refused start returns an already-dead child that emits the error | F3 |
+| Renderer events | `sendToRenderer(channel, payload)` in main; the registry's `send` is the same function | `assertPublishAllowed()` right before `webContents.send` | F2 |
+| Stores (history, queue, active) | `scope.update.*` (commit) in `background/`; in the finalization chain `updateRecordingMetadataOnCompletion` and `clearActiveRecording`, each right after an explicit `assertPublishAllowed()`, synchronously | alive() / publish gate | r9, unchanged |
+
+Allowed after a change, by design: removing an own unpublished temp file
+(`<name>.<uuid>.tmp`); the internal calls of an fs call admitted before the
+change (rm walking its tree); a child process already running is not
+killed (its output is published only through the gate).
+
+### Audit of the mixed helpers of the recovery chain (round 10, F1)
+
+All of them run inside the port `finalizeForRecovery` (publish gate of the
+scope). Before round 10 each had direct system calls the gate did not see;
+now every one of them is a call at the fs/child_process boundary.
+
+| Helper (module) | Effects | Seen by r9 review | Now |
+|---|---|---|---|
+| `archiveChunkBatch` (durable-files) | readdir, mkdir(source-chunks), rename, mkdir(chunks) | F1: mkdir after readdir ungated | fs gate |
+| `writeFileAtomic`, `publishFile`, `concatenateFiles` (durable-files) | open(wx), handle.writeFile/sync, rename, write stream | handle writes not counted (F4) | fs gate (handle writes included) |
+| `createSessions` / `finalize` (recording-persistence) | mkdir(sessions), unlink(source_raw), plan/receipt writes, rm(superseded scratch) | F1: :42, :66 | fs gate |
+| `finalizeNative` / `build` (recording-persistence, native-source-finalization) | mkdtemp(scratch), plan writes, publish, ffmpeg via `run` | F3 | fs gate, process gate |
+| `inspectEncodedOpus` / `probeLines` (encoded-opus-evidence) | ffprobe spawns (two), reads | F3: second spawn after the first | process gate; `spawn` looked up at call time (no capture at load) |
+| `getAudioMetadata`, `probeDurationSeconds`, `ffmpegWithTimeout` (main) | execFile ffprobe, fluent-ffmpeg spawns | explicit assert at entry only, spawn later from callbacks | process gate |
+| `prepareRawSessionFile` (main) | write stream, unlinkSync, renameSync | not covered | fs gate |
+| `mergeSystemAudio`, `notifyMergeDegraded`, `recordCaptureWarning` (main) | unlink(merged), metadata write, `system:capture-warning` | F2: gate error swallowed, send after the change | `SESSION_ENDED` rethrown at once; send only via `sendToRenderer` |
+| `updateRecordingMetadataOnCompletion` (main) | metadata write, history store | error swallowed | rethrows `SESSION_ENDED`; fs gate + explicit assert before the store |
+| `finalizeRecording` (main) | pending marker unlink, all of the above | error turned into `{ success: false }` | rethrows `SESSION_ENDED` |
+
+The sweep (`tests/unit/sessionSweep.chain.main.test.js`) runs this whole
+chain as it is - only ffmpeg/ffprobe are replaced, at the child_process
+boundary - and counts at the module boundaries (`tests/unit/support/globalSinks.js`).

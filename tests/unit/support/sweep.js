@@ -16,11 +16,21 @@ export const ended = (res) => res?.sessionEnded === true;
 export const TEMP = /\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/;
 export const notTemp = (effects) => effects.filter((e) => !(e.kind === 'unlink' && TEMP.test(e.target)));
 
-export async function quiet(entry) {
-  for (let i = 0; i < 40; i++) await flush();
-  if (entry.slow) {
-    await new Promise((res) => setTimeout(res, 400));
+/**
+ * Waits until the background work is quiet: no new suspension point, effect
+ * or request over three rounds (a fixed number of flushes was too short
+ * under load: the re-scan's late points were missed).
+ */
+export async function quiet(entry, r) {
+  const mark = () => (r ? `${r.points.length}/${r.effects.length}/${r.requests.length}/${r.spawns.length}` : '');
+  let last = null;
+  let stable = 0;
+  for (let round = 0; round < 200 && stable < 3; round++) {
     for (let i = 0; i < 20; i++) await flush();
+    await new Promise((res) => setTimeout(res, entry.slow ? 60 : 5));
+    const now = mark();
+    stable = now === last ? stable + 1 : 0;
+    last = now;
   }
 }
 
@@ -45,7 +55,7 @@ export async function baseline(entry, extra) {
   try {
     const scope = r.scopes.open();
     const result = await entry.run(r, scope);
-    await quiet(entry);
+    await quiet(entry, r);
     return { result, max: r.points.length, shape: shape(r), labels: [...r.points] };
   } finally {
     await r.cleanup();
@@ -92,7 +102,7 @@ export async function sweptRun(entry, at, variant, extra) {
     const scope = r.scopes.open();
     let resultBeforeChange = false;
     const result = await entry.run(r, scope).then((value) => { resultBeforeChange = !r.sweep.fired; return value; });
-    await quiet(entry);
+    await quiet(entry, r);
     if (!r.sweep.fired) { fail('the change never fired'); return violations; }
     violations.push(...afterChange(r, name));
     // A result settled before the change (the change landed in follow-up
@@ -115,7 +125,7 @@ export async function sweptRun(entry, at, variant, extra) {
       r.signInA();
       const mark = r.requests.length;
       await r.background.startQueue(r.scopes);
-      await quiet(entry);
+      await quiet(entry, r);
       const transfers = r.requests.slice(mark).filter((q) => q.url.endsWith('/api/uploads/complete') || q.url.endsWith('/api/desktop/upload'));
       const rec = r.stores.history.data.recordings.find((x) => x.id === 'r1');
       if (transfers.length > 1) fail(`resumption uploaded ${transfers.length} times`);
@@ -126,7 +136,7 @@ export async function sweptRun(entry, at, variant, extra) {
       if (variant === 'B') r.signOut();
       r.signInA();
       const outcome = await r.background.startRecovery(r.scopes, 'sign-in');
-      await quiet(entry);
+      await quiet(entry, r);
       if (!outcome?.completed && !outcome?.skipped) fail(`recovery did not run again: ${JSON.stringify(outcome)}`);
       for (const source of entry.sources ? entry.sources(r) : []) if (!fs.existsSync(source)) fail(`source deleted: ${path.relative(r.root, source)}`);
       if (entry.afterResume) for (const problem of entry.afterResume(r)) fail(problem);
@@ -147,7 +157,7 @@ export async function refreshRun(entry, n, base) {
     r.sweep.action = () => { r.refresh(); };
     const scope = r.scopes.open();
     const result = await entry.run(r, scope);
-    await quiet(entry);
+    await quiet(entry, r);
     const problems = [];
     if (JSON.stringify(result) !== JSON.stringify(base.result)) problems.push(`result ${JSON.stringify(result)} != ${JSON.stringify(base.result)}`);
     if (JSON.stringify(shape(r)) !== JSON.stringify(base.shape)) problems.push(`effects differ: ${JSON.stringify(shape(r))} vs ${JSON.stringify(base.shape)}`);

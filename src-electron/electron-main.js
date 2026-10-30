@@ -1,6 +1,11 @@
 const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu, Tray, nativeImage, desktopCapturer, systemPreferences, powerMonitor, powerSaveBlocker, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
+// Effect gate (security review 10/2026, round 10): installed before any other
+// module is loaded. Every write into the recordings folder by background work
+// of a session that has ended is refused at the fs module boundary, right
+// before the system call (effect-gate.js).
+require('./effect-gate').installEffectGate({ roots: () => [getRecordingsPath()] });
 const { writeFileAtomic, writeFileAtomicSync, publishFile, concatenateFiles, archiveChunkBatch, listChunkBatches, syncDirectorySync, assertPublishAllowed } = require('./durable-files');
 const { createRecordingPersistence, readFinalizedRecording, listSessions } = require('./recording-persistence');
 const nativeSourcePersistence = require('./native-source-persistence');

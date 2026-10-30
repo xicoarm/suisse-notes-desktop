@@ -4,21 +4,16 @@ const realFs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
 const { pipeline } = require('stream/promises');
-const { AsyncLocalStorage } = require('async_hooks');
+const { publishGate, assertPublishAllowed } = require('./effect-gate');
 
-// Publish gate (security review 10/2026, round 9, council 3 R-S2/R-S4):
-// background work of a session (recovery finalization) runs inside
-// `publishGate.run(gate, fn)`. Every publishing system call below (each
-// rename - also every retry -, the temp file that becomes a published file,
-// the new chunk folder) calls assertPublishAllowed() in the same synchronous
-// continuation right before the call; after a session change the gate throws
-// and nothing is published. Foreground work (recording, stop) has no gate.
-const publishGate = new AsyncLocalStorage();
-
-function assertPublishAllowed() {
-  const gate = publishGate.getStore();
-  if (gate) gate.assertAlive();
-}
+// Publish gate (security review 10/2026, rounds 9 and 10): background work of
+// a session (recovery finalization, durable writes of the scope) runs inside
+// `publishGate.run(gate, fn)`. Since round 10 the gate is enforced at the fs
+// module boundary for every write into the recordings folder (effect-gate.js,
+// installed by main first); the calls below check it once more right before
+// each publishing system call (rename, also every retry; the temp file that
+// becomes a published file; the new chunk folder). Foreground work
+// (recording, stop) has no gate.
 
 function createDurableFiles(fs = realFs) {
   // A successful write means all bytes, including the directory entry, have been
