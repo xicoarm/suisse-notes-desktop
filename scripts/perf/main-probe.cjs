@@ -1,6 +1,6 @@
 'use strict';
 
-// Measurement probe of main (review round 13, P7), put in front of main's source
+// Measurement probe of main (review round 13, P7), put in front of the built main
 // by the measurement workflow only, the same on every head: event-loop delay and
 // open latency of the running app, written every two seconds and at the exit.
 // The open wrappers go on one turn later, above the gate of that head.
@@ -10,6 +10,7 @@ const path = require('path');
 const { monitorEventLoopDelay } = require('perf_hooks');
 
 const out = path.join(process.env.GATE_PROBE_DIR, `main-${process.pid}.json`);
+const startedAt = Date.now();
 const writeFileSync = fs.writeFileSync;
 const monitor = monitorEventLoopDelay({ resolution: 5 });
 monitor.enable();
@@ -36,6 +37,7 @@ function flush() {
   const sorted = [...opens].sort((a, b) => a - b);
   const at = (p) => (sorted.length ? Number(sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))].toFixed(1)) : null);
   writeFileSync(out, JSON.stringify({
+    started_at: startedAt,
     loop_p50_ms: Number((monitor.percentile(50) / 1e6).toFixed(3)),
     loop_p99_ms: Number((monitor.percentile(99) / 1e6).toFixed(3)),
     loop_max_ms: Number((monitor.max / 1e6).toFixed(3)),

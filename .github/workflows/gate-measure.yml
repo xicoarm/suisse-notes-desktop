@@ -83,16 +83,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Put the head under test in place, with the same main-process probe on every head
+      - name: Put the head under test in place
         env:
           HEAD_UNDER_TEST: ${{ matrix.head }}
-          PROBE_DIR: ${{ runner.temp }}/gate-probe
         run: |
-          mkdir -p "$PROBE_DIR"
           cp scripts/perf/main-probe.cjs "$RUNNER_TEMP/main-probe.cjs"
           if [ "$HEAD_UNDER_TEST" != this ]; then git checkout --detach "$HEAD_UNDER_TEST"; fi
-          { printf "try { process.env.GATE_PROBE_DIR = '%s'; eval('require')('%s'); } catch (e) { console.error(e); }\n" "$PROBE_DIR" "$RUNNER_TEMP/main-probe.cjs"; cat src-electron/electron-main.js; } > measure-main.js
-          mv measure-main.js src-electron/electron-main.js
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -103,6 +99,16 @@ jobs:
         timeout-minutes: 2
       - run: npx quasar build -m electron --skip-pkg
         timeout-minutes: 10
+      # In front of the built main, not its source: an eval or a changed source
+      # would change how the bundler wraps main, and the same on every head.
+      - name: Put the main-process probe in front of the built main
+        env:
+          PROBE_DIR: ${{ runner.temp }}/gate-probe
+        run: |
+          mkdir -p "$PROBE_DIR"
+          main=dist/electron/UnPackaged/electron-main.js
+          { printf "try { process.env.GATE_PROBE_DIR = '%s'; require('%s'); } catch (e) { console.error(e); }\n" "$PROBE_DIR" "$RUNNER_TEMP/main-probe.cjs"; cat "$main"; } > measure-main.js
+          mv measure-main.js "$main"
       - name: The synthetic capture qualification (s11-baseline among it)
         timeout-minutes: 23
         continue-on-error: true
