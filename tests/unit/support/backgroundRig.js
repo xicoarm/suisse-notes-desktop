@@ -22,7 +22,7 @@ const require = createRequire(import.meta.url);
 const axios = require('axios');
 const FormData = require('form-data');
 const { createScopeRegistry } = require('../../../src-electron/session-scope.js');
-const { createDurableFiles } = require('../../../src-electron/durable-files.js');
+const { createDurableFiles, assertPublishAllowed } = require('../../../src-electron/durable-files.js');
 const { installApiResilience } = require('../../../src-electron/api-resilience.js');
 const { createBackground } = require('../../../src-electron/background/index.js');
 const { tokenUserId, canUploadForUser, verifiedUploadResult } = require('../../../src-electron/upload-safety.js');
@@ -72,7 +72,10 @@ function defaultAnswer(config) {
  * @param {object} [opts.ports] overrides of the ports
  * @param {string} [opts.session] see below
  */
-export function createBackgroundRig({ session = 'signedIn', recordings = ['r1'], lateAnswers = false, read: readOverrides = {}, ports: portOverrides = {}, history, queue, active } = {}) {
+export function createBackgroundRig({
+  session = 'signedIn', recordings = ['r1'], lateAnswers = false, read: readOverrides = {}, ports: portOverrides = {},
+  history, queue, active, renameBusy = 0, registryFactory = createScopeRegistry,
+} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bg-rig-'));
   for (const id of recordings) {
     fs.mkdirSync(path.join(root, id), { recursive: true });
@@ -85,7 +88,25 @@ export function createBackgroundRig({ session = 'signedIn', recordings = ['r1'],
   const sleeps = [];
   const spawns = [];
   const streams = [];
-  const hooks = { onTimer: null, onEffect: null };
+  const hooks = { onTimer: null, onEffect: null, hold: null };
+  // Suspension points (sweep): every asynchronous edge counts once, right
+  // before the waiting code continues - HTTP answers, timers, fs promises
+  // (also file handles: write, sync, close), ports, async read helpers and
+  // the recording-lock queue. `sweep.at = N` fires `sweep.action` at the
+  // N-th point.
+  const points = [];
+  const sweep = { at: 0, action: null, fired: false, queueAtChange: null };
+  const hit = (label) => {
+    points.push(label);
+    if (!sweep.fired && sweep.at === points.length && sweep.action) { sweep.fired = true; sweep.action(label); }
+  };
+  // `hooks.hold(label)` may return a promise: the edge then waits for it
+  // (a delayed system call) before the waiting code continues.
+  const held = async (label) => { const h = hooks.hold && hooks.hold(label); if (h) await h; };
+  const after = (label, promise) => Promise.resolve(promise).then(
+    async (value) => { await held(label); hit(label); return value; },
+    async (error) => { await held(label); hit(label); throw error; }
+  );
   const effect = (kind, target) => {
     effects.push({ kind, target: String(target), after: mark.changed });
     if (hooks.onEffect) hooks.onEffect(kind, String(target));
@@ -93,6 +114,19 @@ export function createBackgroundRig({ session = 'signedIn', recordings = ['r1'],
 
   // Counting fs over the real one (durable-files and the scope use it).
   const p = fs.promises;
+  let busy = renameBusy;
+  const wrapHandle = (handle) => new Proxy(handle, {
+    get(target, prop) {
+      const value = target[prop];
+      if (typeof value !== 'function') return value;
+      if (['write', 'writeFile', 'sync', 'datasync', 'close', 'read', 'stat', 'truncate'].includes(prop)) {
+        return (...args) => after(`handle.${prop}`, value.apply(target, args));
+      }
+      return value.bind(target);
+    },
+  });
+  const promised = {};
+  for (const [name, fn] of Object.entries(p)) if (typeof fn === 'function') promised[name] = (...args) => after(`fs.${name}`, fn.apply(p, args));
   const writeFlag = (flags) => /[wa+]/.test(String(flags || 'r'));
   const countingFs = {
     ...fs,
@@ -106,12 +140,17 @@ export function createBackgroundRig({ session = 'signedIn', recordings = ['r1'],
     createReadStream: (f, o) => { streams.push(String(f)); return fs.createReadStream(f, o); },
     promises: {
       ...p,
-      rename: (a, b) => { effect('rename', b); return p.rename(a, b); },
-      open: (f, flags, ...rest) => { if (writeFlag(flags)) effect('open', f); return p.open(f, flags, ...rest); },
-      mkdir: (d, o) => { effect('mkdir', d); return p.mkdir(d, o); },
-      writeFile: (f, ...rest) => { effect('write', f); return p.writeFile(f, ...rest); },
-      unlink: (f) => { effect('unlink', f); return p.unlink(f); },
-      rm: (f, o) => { effect('rm', f); return p.rm(f, o); },
+      ...promised,
+      rename: (a, b) => {
+        if (busy > 0) { busy--; return after('fs.rename', Promise.reject(Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' }))); }
+        effect('rename', b);
+        return after('fs.rename', p.rename(a, b));
+      },
+      open: (f, flags, ...rest) => { if (writeFlag(flags)) effect('open', f); return after('fs.open', p.open(f, flags, ...rest).then(wrapHandle)); },
+      mkdir: (d, o) => { effect('mkdir', d); return after('fs.mkdir', p.mkdir(d, o)); },
+      writeFile: (f, ...rest) => { effect('write', f); return after('fs.writeFile', p.writeFile(f, ...rest)); },
+      unlink: (f) => { effect('unlink', f); return after('fs.unlink', p.unlink(f)); },
+      rm: (f, o) => { effect('rm', f); return after('fs.rm', p.rm(f, o)); },
     },
   };
 
@@ -140,7 +179,7 @@ export function createBackgroundRig({ session = 'signedIn', recordings = ['r1'],
       const i = overrides.findIndex((o) => o.match(entry, config));
       const next = i >= 0 ? overrides.splice(i, 1)[0].answer : defaultAnswer;
       const pending = Promise.resolve(typeof next === 'function' ? next(config) : next);
-      const settled = pending.then((a) => {
+      const settled = after('http', pending).then((a) => {
         if (a instanceof Error) throw a;
         const response = { data: a.data, status: a.status, statusText: String(a.status), headers: { 'content-type': 'application/json' }, config, request: {} };
         if (a.status >= 400) throw new axios.AxiosError(`HTTP ${a.status}`, a.status >= 500 ? 'ERR_BAD_RESPONSE' : 'ERR_BAD_REQUEST', config, {}, response);
@@ -153,7 +192,8 @@ export function createBackgroundRig({ session = 'signedIn', recordings = ['r1'],
       });
     },
   });
-  installApiResilience({ axios: http, log: quiet, getApiBaseUrl: () => API, sleep: async () => {} });
+  // The gateway-retry sleep is a timer of its own (a suspension point).
+  installApiResilience({ axios: http, log: quiet, getApiBaseUrl: () => API, sleep: (ms) => new Promise((res) => timers.setTimeout(res, ms)) });
   /** One answer for the next request that matches (method, url suffix or RegExp). */
   function answer(method, url, value) {
     const match = (e) => e.method === method && (url instanceof RegExp ? url.test(e.url) : e.url.endsWith(url));
@@ -163,7 +203,7 @@ export function createBackgroundRig({ session = 'signedIn', recordings = ['r1'],
   const timers = {
     setTimeout: (fn, ms) => {
       sleeps.push({ ms, after: mark.changed });
-      const handle = setTimeout(fn, 0);
+      const handle = setTimeout(() => { hit(`timer:${ms}`); fn(); }, 0);
       if (hooks.onTimer) { const h = hooks.onTimer; h(ms); }
       return handle;
     },
@@ -185,14 +225,19 @@ export function createBackgroundRig({ session = 'signedIn', recordings = ['r1'],
   if (session === 'held') disk.failRecordRead = true;
   if (session === 'unreadable') disk.record = '{broken';
   const s = boot(disk, { onAbort: () => scopes && scopes.abortAll() });
+  // The recording-lock queue of main (withRecordingLock): one more wait.
+  const lock = () => after('lock', null);
   if (session === 'signedIn') s.passwordSignIn('a').apply();
 
   const ports = {
-    probeDuration: async (filePath) => { spawns.push({ port: 'probeDuration', filePath, after: mark.changed }); return 45; },
-    probeAudio: async (filePath) => { spawns.push({ port: 'probeAudio', filePath, after: mark.changed }); return { format: { duration: '45' } }; },
+    probeDuration: (filePath) => { spawns.push({ port: 'probeDuration', filePath, after: mark.changed }); return after('port.probeDuration', 45); },
+    probeAudio: (filePath) => { spawns.push({ port: 'probeAudio', filePath, after: mark.changed }); return after('port.probeAudio', { format: { duration: '45' } }); },
     // As main's finalizeRecording: media work writes temporary files, the
     // output is published with a durable rename (publish gate of the scope).
     finalizeForRecovery: async (recordId) => {
+      await lock();
+      // As main: the lock queue may run this long after the request.
+      assertPublishAllowed();
       spawns.push({ port: 'finalizeForRecovery', recordId, after: mark.changed });
       const outputPath = path.join(root, recordId, 'audio.webm');
       await durable.writeFileAtomic(outputPath, Buffer.alloc(10, 2));
@@ -200,7 +245,7 @@ export function createBackgroundRig({ session = 'signedIn', recordings = ['r1'],
     },
     ...portOverrides,
   };
-  scopes = createScopeRegistry({
+  scopes = registryFactory({
     authority: s.authority, http, fs: countingFs, stores, timers, ports, log: quiet,
     send: (channel, payload) => sent.push({ channel, payload, after: mark.changed }),
   });
@@ -214,11 +259,11 @@ export function createBackgroundRig({ session = 'signedIn', recordings = ['r1'],
     readUploadReceipt: (id) => {
       try { return JSON.parse(fs.readFileSync(path.join(getRecordingPath(id), 'upload-receipt.json'), 'utf8')); } catch { return null; }
     },
-    assessRecordingUpload: async () => ({ allowed: true }),
+    assessRecordingUpload: () => after('read.assess', { allowed: true }),
     recordingState: (id) => ({ unsaved: false, locked: false, live: false, inFlight: scopes.inFlight.has(id) }),
     recordingInProgress: () => false,
     inFlight: (id) => scopes.inFlight.has(id),
-    readFinalizedRecording: () => null,
+    readFinalizedRecording: () => after('read.finalized', null),
     listSessions: () => [],
     listChunkBatches: () => [],
     usesNativeSources: () => false,
@@ -244,7 +289,10 @@ export function createBackgroundRig({ session = 'signedIn', recordings = ['r1'],
     log: quiet,
   });
 
-  const change = () => { mark.changed = true; };
+  const change = () => {
+    if (!mark.changed) sweep.queueAtChange = JSON.stringify(stores.queue.data);
+    mark.changed = true;
+  };
   const signOut = () => { change(); s.authority.signOut(); };
   const signInB = () => s.passwordSignIn('b').apply();
   const signOutThenB = () => { signOut(); signInB(); };
@@ -255,7 +303,7 @@ export function createBackgroundRig({ session = 'signedIn', recordings = ['r1'],
 
   return {
     root, fs: countingFs, disk, s, scopes, background, uploads: background.uploads, stores, http, answer, hooks, read, report,
-    effects, requests, sent, sleeps, spawns, streams, mark,
+    effects, requests, sent, sleeps, spawns, streams, mark, points, sweep, timers,
     change, signOut, signInB, signOutThenB, signInA, refresh, cleanup, filePath,
     effectsAfter: () => effects.filter((e) => e.after),
     requestsAfter: () => requests.filter((r) => r.after),

@@ -17,11 +17,12 @@ vi.mock('../../src/boot/sentry', () => ({ captureMessage: vi.fn(), addBreadcrumb
 
 // Keystore with per-key faults: failGet (get throws), failSet (set throws),
 // dropSet (set silently lost, the read-back differs).
-const disk = vi.hoisted(() => ({ ks: new Map(), prefs: new Map(), failGet: new Set(), failSet: new Set(), dropSet: new Set() }));
+const disk = vi.hoisted(() => ({ ks: new Map(), prefs: new Map(), failGet: new Set(), failSet: new Set(), dropSet: new Set(), failGetAfterSet: new Set() }));
 vi.mock('@capacitor/core', () => {
   const keystore = {
     get: async ({ key }) => {
       if (disk.failGet.has(key)) throw new Error('KEYSTORE_LOCKED');
+      if (disk.failGetAfterSet.has(key) && disk.ks.has(key)) throw new Error('KEYSTORE_READ_BACK');
       return { value: disk.ks.has(key) ? disk.ks.get(key) : null };
     },
     set: async ({ key, value }) => {
@@ -66,6 +67,7 @@ beforeEach(() => {
   disk.failGet.clear();
   disk.failSet.clear();
   disk.dropSet.clear();
+  disk.failGetAfterSet.clear();
   Object.assign(ls, { failRead: false, failWrite: false, dropWrite: false, failReadAfterWrite: false });
   localStorage.clear();
   vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (k) {
@@ -177,5 +179,25 @@ describe('migration error matrix (mobile): only a confirmed missing pair is a de
     expect(disk.ks.get('authToken')).toBe(OLD);
     await restart();
     expect(await authority.loadSession()).toMatchObject({ signedOut: false, token: OLD });
+  });
+});
+
+// r8-E8 rest (review round 9): the mark is written, its read-back throws -
+// a fault of its own, not the initial read error.
+describe('migration error matrix (mobile): mark read-back throws', () => {
+  it('held at two starts, nothing deleted; migrated at the first start without the fault', async () => {
+    legacy();
+    disk.failGetAfterSet.add(MARK);
+    for (let start = 1; start <= 2; start++) {
+      await restart();
+      expect(await authority.loadSession(), `start ${start}`).toEqual({ signedOut: true });
+      expect(authority.isSignedOut(), `start ${start}`).toBe(true);
+      expect(disk.ks.get('authToken'), `start ${start}`).toBe(OLD);
+      expect(disk.ks.get('userInfo'), `start ${start}`).toBe(OLD_USER);
+    }
+    disk.failGetAfterSet.delete(MARK);
+    await restart();
+    expect(await authority.loadSession()).toMatchObject({ signedOut: false, token: OLD, user: { id: 'old' } });
+    expect(disk.ks.get(MARK)).toBe('1');
   });
 });

@@ -1,0 +1,362 @@
+// @vitest-environment node
+import { describe, it, expect } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import Module from 'node:module';
+import { createBackgroundRig, flush } from './support/backgroundRig.js';
+
+// Review round 9 (council 3, required test 2): dynamic sweep N=1..max over
+// every background entry of main. The REAL session authority, scope
+// registry and background modules; every edge counts globally (HTTP, file
+// effects, stores, renderer events, child processes, timers), not only
+// through the scope, so a bypass is visible. At the N-th suspension point
+// (HTTP answer, timer, fs promise incl. file handle write/sync/close, port,
+// lock, retry sleep, rename retry) the session changes: (a) sign-out, (b)
+// sign-out and sign-in B.
+// Expected after the change: no request, no write, no event, no timer, no
+// child process; the queue byte-identical; the result `sessionEnded`; B's
+// registrations (claim, cancel handle) intact; after owner A signs in
+// again exactly one resumption. Control: the same sweep with a refresh of
+// the same session at point N - every entry runs through with the
+// baseline's effects; plus offline retry and a long (multi-block)
+// recording as entries of their own. Lower bound for max per entry; a
+// mutant scope without alive() in commit/the publish gate turns it red.
+
+const SCOPE_FILE = path.resolve('src-electron/session-scope.js');
+const OLD = (Date.now() - 10 * 24 * 3600 * 1000) / 1000;
+
+const queued = (r, id = 'r1') => [{ recordId: id, filePath: r.filePath(id), metadata: {}, userId: 'a', addedAt: '2026-10-29T10:00:00.000Z', retryCount: 0 }];
+const ended = (res) => res?.sessionEnded === true;
+
+function chunkDir(r, id, { fresh = false } = {}) {
+  const dir = path.join(r.root, id);
+  fs.mkdirSync(path.join(dir, 'chunks'), { recursive: true });
+  const chunk = path.join(dir, 'chunks', 'chunk_0');
+  fs.writeFileSync(chunk, Buffer.alloc(10, 3));
+  if (!fresh) fs.utimesSync(chunk, OLD, OLD);
+  fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ userId: 'a', startedAt: '2026-10-01T10:00:00.000Z' }));
+  return dir;
+}
+function emptyOrphan(r, id) {
+  const dir = path.join(r.root, id);
+  fs.mkdirSync(path.join(dir, 'chunks'), { recursive: true });
+  fs.utimesSync(dir, OLD, OLD);
+}
+
+/**
+ * Entries: `opts` for the rig, `prepare(r)` (answers, files; may set
+ * `r.queueInit`), `run(r, scope)`, `ended(result)`, `resumes` (carries
+ * recording r1: one resumption expected), `min` (lower bound of points).
+ */
+const ENTRIES = [
+  {
+    name: 'queue run',
+    prepare: (r) => { r.stores.queue.data.pendingUploads = queued(r); },
+    run: (r, scope) => r.background.pending.run(scope),
+    ended, resumes: true, min: 15,
+  },
+  {
+    name: 'upload:start',
+    run: (r, scope) => r.uploads.runUploadStart(scope, { recordId: 'r1', filePath: r.filePath(), metadata: {} }, { cancelled: () => false, quitting: () => false }),
+    ended, resumes: true, min: 15,
+  },
+  {
+    name: 'direct upload',
+    prepare: (r) => { r.stores.queue.data.pendingUploads = queued(r); },
+    run: (r, scope) => r.uploads.uploadWithRetry(scope, 'r1', r.filePath(), {}, 2),
+    ended, resumes: true, min: 15,
+  },
+  {
+    name: 'direct upload, offline retry',
+    prepare: (r) => {
+      r.stores.queue.data.pendingUploads = queued(r);
+      r.answer('post', '/api/uploads/init', Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }));
+    },
+    run: (r, scope) => r.uploads.uploadWithRetry(scope, 'r1', r.filePath(), {}, 2),
+    ended, resumes: true, min: 17,
+  },
+  {
+    name: 'direct upload, long recording (3 blocks)',
+    prepare: (r) => {
+      r.stores.queue.data.pendingUploads = queued(r);
+      r.answer('post', '/api/uploads/init', { status: 200, data: { mode: 'azure', sasUrl: 'https://blob.test/c/r?sig=1', audioFileId: 'audio-1', blockSize: 4, blobName: 'b' } });
+    },
+    run: (r, scope) => r.uploads.uploadWithRetry(scope, 'r1', r.filePath(), {}, 2),
+    ended, resumes: true, min: 17,
+  },
+  {
+    name: 'legacy upload',
+    prepare: (r) => {
+      r.stores.queue.data.pendingUploads = queued(r);
+      r.answer('post', '/api/uploads/init', { status: 200, data: { mode: 'fallback' } });
+    },
+    run: (r, scope) => r.uploads.uploadWithRetry(scope, 'r1', r.filePath(), {}, 2),
+    ended, resumes: true, min: 12,
+  },
+  {
+    name: 'verify + poll with 401 and refresh',
+    prepare: (r) => {
+      r.stores.queue.data.pendingUploads = queued(r);
+      r.answer('get', /\/status$/, { status: 401, data: { error: 'expired' } });
+    },
+    run: (r, scope) => r.uploads.verifyAcceptedUpload(scope, 'r1', r.filePath(), { success: true, audioFileId: 'audio-1' }, 'a', true, null),
+    ended, resumes: true, min: 12,
+  },
+  {
+    name: 'verify + poll with gateway 502',
+    prepare: (r) => {
+      r.stores.queue.data.pendingUploads = queued(r);
+      r.answer('get', /\/status$/, { status: 502, data: '<html>bad gateway</html>' });
+    },
+    run: (r, scope) => r.uploads.verifyAcceptedUpload(scope, 'r1', r.filePath(), { success: true, audioFileId: 'audio-1' }, 'a', true, null),
+    ended, resumes: true, min: 12,
+  },
+  {
+    name: 'verify, rename retry (EBUSY)',
+    opts: { renameBusy: 2 },
+    prepare: (r) => { r.stores.queue.data.pendingUploads = queued(r); },
+    run: (r, scope) => r.uploads.verifyAcceptedUpload(scope, 'r1', r.filePath(), { success: true, audioFileId: 'audio-1' }, 'a', true, null),
+    ended, resumes: true, min: 12, slow: true,
+  },
+  {
+    name: 'token refresh',
+    run: (r, scope) => r.uploads.refreshMainAuthToken(scope),
+    ended: (res) => res?.success === false, min: 1,
+  },
+  {
+    name: 'meeting status poll',
+    prepare: (r) => { r.answer('get', /\/meeting\/[^/]+\/status$/, { status: 200, data: { status: 'PROCESSING' } }); },
+    run: (r, scope) => r.uploads.pollMeetingTranscriptionStatus(scope, 'm1', 3),
+    ended: (res) => res?.status === 'AUTH_EXPIRED', min: 3,
+  },
+  {
+    name: 'recovery with finalization',
+    opts: { recordings: [], history: [] },
+    prepare: (r) => { chunkDir(r, 'c1'); },
+    run: (r, scope) => r.background.recovery.recoverOrphanedRecordings(scope),
+    ended, min: 8, recovery: true,
+  },
+  {
+    name: 'recovery re-scan',
+    opts: { recordings: [], history: [] },
+    prepare: (r) => {
+      const dir = chunkDir(r, 'c1', { fresh: true });
+      r.timerHook = (ms) => { if (ms === 120000) fs.utimesSync(path.join(dir, 'chunks', 'chunk_0'), OLD, OLD); };
+    },
+    run: (r, scope) => r.background.recovery.recoverOrphanedRecordings(scope),
+    // The first pass completes; the change may land in the re-scan.
+    ended: (res) => res?.completed === true || res?.sessionEnded === true, min: 8, recovery: true,
+  },
+  {
+    name: 'clean-up',
+    opts: { recordings: [], history: [] },
+    prepare: (r) => { emptyOrphan(r, 'o1'); emptyOrphan(r, 'o2'); },
+    run: (r, scope) => r.background.recovery.cleanupOldOrphanedDirectories(scope),
+    ended, min: 2,
+  },
+  {
+    name: 'blob clean-up of a cancel',
+    run: async (r, scope) => {
+      try { return await r.background.abortDirectUpload(scope, { recordId: 'r1', audioFileId: 'audio-1' }); } catch (e) { if (e.code === 'SESSION_ENDED') return { sessionEnded: true }; throw e; }
+    },
+    ended, min: 1,
+  },
+];
+
+async function quiet(entry) {
+  for (let i = 0; i < 40; i++) await flush();
+  if (entry.slow) {
+    await new Promise((res) => setTimeout(res, 400));
+    for (let i = 0; i < 20; i++) await flush();
+  }
+}
+
+function makeRig(entry, extra = {}) {
+  const r = createBackgroundRig({ ...(entry.opts || {}), ...extra });
+  if (entry.prepare) entry.prepare(r);
+  r.hooks.onTimer = (ms) => { if (r.timerHook) r.timerHook(ms); };
+  return r;
+}
+
+/** Effects as a comparable multiset (temp names without their random part). */
+const shape = (r) => ({
+  effects: r.effects.map((e) => `${e.kind}:${path.basename(e.target).replace(/\.[0-9a-f-]{36}\.tmp$/, '.tmp')}`).sort(),
+  requests: r.requests.map((q) => `${q.method} ${q.url.replace(/^https?:\/\/[^/]+/, '')}`).sort(),
+  sent: r.sent.map((e) => e.channel).sort(),
+});
+
+async function baseline(entry, extra) {
+  const r = makeRig(entry, extra);
+  try {
+    const scope = r.scopes.open();
+    const result = await entry.run(r, scope);
+    await quiet(entry);
+    return { result, max: r.points.length, shape: shape(r) };
+  } finally {
+    r.cleanup();
+  }
+}
+
+/** One swept run; returns the list of violations (empty: passed). */
+async function sweptRun(entry, n, variant, extra) {
+  const r = makeRig(entry, extra);
+  const violations = [];
+  const fail = (what) => violations.push(`${entry.name} N=${n} ${variant}: ${what}`);
+  let b = null;
+  r.sweep.at = n;
+  r.sweep.action = () => {
+    r.signOut();
+    if (variant === 'B') {
+      r.signInB();
+      // B's own registrations, made right at the change.
+      b = { scope: r.scopes.open(), controller: new AbortController() };
+      b.claimed = b.scope.claim('r1');
+      b.scope.registerCancel('r1', b.controller);
+    }
+  };
+  try {
+    const scope = r.scopes.open();
+    let resultBeforeChange = false;
+    const result = await entry.run(r, scope).then((value) => { resultBeforeChange = !r.sweep.fired; return value; });
+    await quiet(entry);
+    if (!r.sweep.fired) { fail('the change never fired'); return violations; }
+    // Own unpublished temp files may be removed; nothing else.
+    const effects = r.effectsAfter().filter((e) => !(e.kind === 'unlink' && /\.tmp$/.test(e.target)));
+    if (effects.length) fail(`effects after the change: ${JSON.stringify(effects)}`);
+    if (r.requestsAfter().length) fail(`requests after the change: ${JSON.stringify(r.requestsAfter().map((q) => q.url))}`);
+    if (r.sentAfter().length) fail(`events after the change: ${JSON.stringify(r.sentAfter().map((e) => e.channel))}`);
+    if (r.spawnsAfter().length) fail(`child processes after the change: ${JSON.stringify(r.spawnsAfter())}`);
+    const timersAfter = r.sleeps.filter((s) => s.after);
+    if (timersAfter.length) fail(`timers after the change: ${JSON.stringify(timersAfter)}`);
+    if (JSON.stringify(r.stores.queue.data) !== r.sweep.queueAtChange) fail('queue changed after the change');
+    // A result settled before the change (the change landed in follow-up
+    // work: queue kick, re-scan) need not be sessionEnded.
+    if (!resultBeforeChange && !entry.ended(result)) fail(`result not sessionEnded: ${JSON.stringify(result)}`);
+    const left = r.stores.queue.data.pendingUploads.find((u) => u.recordId === 'r1');
+    if (entry.name === 'queue run' && ended(result) && left && left.retryCount !== 0) {
+      fail('an attempt ended by the session change was counted as a retry');
+    }
+    if (variant === 'B') {
+      if (!b.claimed || !r.scopes.inFlight.has('r1')) fail('B lost its claim');
+      const cancel = r.scopes.cancelUpload('r1');
+      if (!cancel || cancel.scope !== b.scope) fail('B lost its cancel handle');
+      if (r.s.authority.getUser()?.id !== 'b' || !b.scope.alive()) fail('B session not intact');
+      b.scope.release('r1');
+    }
+    if (entry.resumes) {
+      // Owner A signs in again; main runs the queue (afterSessionApplied).
+      if (variant === 'B') r.signOut();
+      r.signInA();
+      const mark = r.requests.length;
+      await r.background.startQueue(r.scopes);
+      await quiet(entry);
+      const transfers = r.requests.slice(mark).filter((q) => q.url.endsWith('/api/uploads/complete') || q.url.endsWith('/api/desktop/upload'));
+      const rec = r.stores.history.data.recordings.find((x) => x.id === 'r1');
+      if (transfers.length > 1) fail(`resumption uploaded ${transfers.length} times`);
+      if (rec?.uploadStatus !== 'uploaded') fail(`no resumption (history ${rec?.uploadStatus})`);
+      if (r.stores.queue.data.pendingUploads.some((u) => u.recordId === 'r1')) fail('still queued after the resumption');
+    }
+    if (entry.recovery) {
+      if (variant === 'B') r.signOut();
+      r.signInA();
+      const outcome = await r.background.startRecovery(r.scopes, 'sign-in');
+      await quiet(entry);
+      if (!outcome?.completed && !outcome?.skipped) fail(`recovery did not run again: ${JSON.stringify(outcome)}`);
+      if (!fs.existsSync(path.join(r.root, 'c1', 'chunks', 'chunk_0'))) fail('chunks deleted');
+    }
+  } catch (error) {
+    fail(`threw ${error?.stack || error}`);
+  } finally {
+    r.cleanup();
+  }
+  return violations;
+}
+
+/** The control: a refresh of the same session at point N changes nothing. */
+async function refreshRun(entry, n, base) {
+  const r = makeRig(entry);
+  try {
+    r.sweep.at = n;
+    r.sweep.action = () => { r.refresh(); };
+    const scope = r.scopes.open();
+    const result = await entry.run(r, scope);
+    await quiet(entry);
+    const problems = [];
+    if (JSON.stringify(result) !== JSON.stringify(base.result)) problems.push(`result ${JSON.stringify(result)} != ${JSON.stringify(base.result)}`);
+    if (JSON.stringify(shape(r)) !== JSON.stringify(base.shape)) problems.push(`effects differ: ${JSON.stringify(shape(r))} vs ${JSON.stringify(base.shape)}`);
+    if (!scope.alive()) problems.push('scope ended by a refresh');
+    return problems.map((p) => `${entry.name} refresh N=${n}: ${p}`);
+  } finally {
+    r.cleanup();
+  }
+}
+
+/** A copy of session-scope.js without alive() in commit and the publish gate. */
+function mutantRegistry() {
+  let src = fs.readFileSync(SCOPE_FILE, 'utf8');
+  const cuts = [
+    ['    function commit(fn) {\n      assertAlive();', '    function commit(fn) {'],
+    ['return publishGate.run({ assertAlive }, fn);', 'return publishGate.run({ assertAlive: () => {} }, fn);'],
+  ];
+  for (const [from, to] of cuts) {
+    if (!src.includes(from)) throw new Error(`mutation anchor missing: ${from}`);
+    src = src.replace(from, to);
+  }
+  const m = new Module(SCOPE_FILE, null);
+  m.filename = SCOPE_FILE;
+  m.paths = Module._nodeModulePaths(path.dirname(SCOPE_FILE));
+  m._compile(src, SCOPE_FILE);
+  return m.exports.createScopeRegistry;
+}
+
+const totals = { runs: 0, points: {} };
+
+describe('sweep N=1..max: a session change at every suspension point', () => {
+  for (const entry of ENTRIES) {
+    it(`${entry.name}`, async () => {
+      const base = await baseline(entry);
+      totals.points[entry.name] = base.max;
+      expect(base.max, `${entry.name}: points`).toBeGreaterThanOrEqual(entry.min);
+      // The baseline itself runs through (no change).
+      expect(entry.ended(base.result) && !entry.name.startsWith('recovery'), `${entry.name}: baseline ended`).toBe(false);
+      const violations = [];
+      for (let n = 1; n <= base.max; n++) {
+        for (const variant of ['A', 'B']) {
+          violations.push(...await sweptRun(entry, n, variant));
+          totals.runs++;
+        }
+        violations.push(...await refreshRun(entry, n, base));
+        totals.runs++;
+      }
+      expect(violations).toEqual([]);
+    }, 120000);
+  }
+
+  it('totals (for the round-9 report)', () => {
+    // eslint-disable-next-line no-console
+    console.log(`[sweep] runs=${totals.runs} points=${JSON.stringify(totals.points)}`);
+    expect(Object.keys(totals.points)).toHaveLength(ENTRIES.length);
+  });
+});
+
+describe('mutation: alive() removed from commit and the publish gate', () => {
+  it('the sweep turns red (verify with rename retry, recovery publish)', async () => {
+    const factory = mutantRegistry();
+    const violations = [];
+    for (const entry of ENTRIES.filter((e) => ['verify, rename retry (EBUSY)', 'recovery with finalization', 'verify + poll with 401 and refresh'].includes(e.name))) {
+      const base = await baseline(entry, { registryFactory: factory });
+      for (let n = 1; n <= base.max; n++) violations.push(...await sweptRun(entry, n, 'A', { registryFactory: factory }));
+    }
+    expect(violations.length).toBeGreaterThan(0);
+    expect(violations.some((v) => /effects after the change/.test(v))).toBe(true);
+  }, 120000);
+
+  it('control: the unmutated scope passes the same runs', async () => {
+    const violations = [];
+    const entry = ENTRIES.find((e) => e.name === 'recovery with finalization');
+    const base = await baseline(entry);
+    for (let n = 1; n <= base.max; n++) violations.push(...await sweptRun(entry, n, 'A'));
+    expect(violations).toEqual([]);
+  }, 120000);
+});
+

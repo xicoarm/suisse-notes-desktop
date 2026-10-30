@@ -1,0 +1,125 @@
+Review round 9 (council 3): fail-first protocol of the new and rewritten tests
+==============================================================================
+Base: 7c121955 (round 8 head), checked out as a separate worktree; the test
+files and test support files of round 9 copied over unchanged; node_modules
+installed (the same tree as the branch, npm ci). Command:
+  npx vitest run <files> --reporter=verbose
+Expectation (council 3, section 4): every required test fails at the base.
+
+How each file fails at 7c121955
+- tusRemoved.static: assertions (main still has upload:startTUS/pause/resume,
+  preload exposes pause/resume).
+- sessionAuthority.mobile, block R-S5: assertions - the second loadSession()
+  answers {signedOut:true} (10 of 11 red; «a sign-out wins over a running
+  loadSession» is a guard that already held).
+- sessionScope.main, mainBackgroundTicket.main, recovery.session,
+  sessionSweep.main, legacyUpload.retry: no src-electron/session-scope.js and
+  no src-electron/background/ at the base (module not found). The base has no
+  session scope at all; the r7/r8 repros of the same paths failed at their
+  bases (82ab3187, see the round-8 protocol).
+- mainBackgroundStatic: src-electron/background/ missing (scandir ENOENT).
+- sessionMigrationMatrix.main: the round-9 test rig (support/queueRun.js)
+  needs background/; the E8 read-back case itself pins behaviour the base
+  already had (r8 named a missing test, not a code fault).
+- sessionMigrationMatrix.mobile: passes at the base (the E8 read-back case
+  pins existing behaviour; see above).
+
+Raw output (ANSI stripped)
+--------------------------
+ × tests/unit/tusRemoved.static.test.js > P1: no TUS upload in the main process > main registers no upload:startTUS, upload:pause or upload:resume handler and has no TUS client
+ × tests/unit/tusRemoved.static.test.js > P1: no TUS upload in the main process > the preload exposes no TUS start, pause or resume
+ × tests/unit/tusRemoved.static.test.js > P1: no TUS upload in the main process > nothing under src-electron or src mentions startTUS
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): every read or write error is held > record read throws: held at two starts, migrated at the first start without the fault
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): every read or write error is held > mark read throws (record missing): held at two starts, migrated at the first start without the fault
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): every read or write error is held > token read throws: held at two starts, migrated at the first start without the fault
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): every read or write error is held > user read throws: held at two starts, migrated at the first start without the fault
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): every read or write error is held > record write throws: held at two starts, migrated at the first start without the fault
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): every read or write error is held > record write lost (read-back differs): held at two starts, migrated at the first start without the fault
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): every read or write error is held > record read-back throws: held at two starts, migrated at the first start without the fault
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): every read or write error is held > mark write throws (reviewer repro r7 MEDIUM): held at two starts, migrated at the first start without the fault
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): every read or write error is held > mark write lost (read-back differs): held at two starts, migrated at the first start without the fault
+ ✓ tests/unit/sessionAuthority.mobile.test.js > R1: mobile - an open flow and a callback without state > no session, the flow keeps waiting, no navigation, sso_missing_state counted
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): every read or write error is held > record {0,false} present, mark read throws: held at two starts, migrated at the first start without the fault
+ ✓ tests/unit/sessionAuthority.mobile.test.js > R1: mobile - an open flow and a callback without state > without an open flow nothing is counted
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): every read or write error is held > record {0,false} present, mark write throws: held at two starts, migrated at the first start without the fault
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): every read or write error is held > record {0,false} present, mark write lost: held at two starts, migrated at the first start without the fault
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): only a confirmed missing pair is a decision > confirmed missing token: tombstone, mark, deleted
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): only a confirmed missing pair is a decision > tombstone or mark not writable: held, nothing deleted or marked
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): only a confirmed missing pair is a decision > a stored session that cannot be read at a normal start is held, not released and not deleted
+ ✓ tests/unit/sessionMigrationMatrix.mobile.test.js > migration error matrix (mobile): mark read-back throws > held at two starts, nothing deleted; migrated at the first start without the fault
+ ✓ tests/unit/sessionAuthority.mobile.test.js > R4: a stored flow is consumed only with a confirmed delete > storage() null exactly at the delete: refused, also after a restart
+ ✓ tests/unit/sessionAuthority.mobile.test.js > R4: a stored flow is consumed only with a confirmed delete > storage() null for the whole consume: refused in this run (the stored flow cannot be confirmed gone)
+ ✓ tests/unit/sessionAuthority.mobile.test.js > R4: a stored flow is consumed only with a confirmed delete > removeItem throws at the delete: refused, also after a restart
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E1: one record; unreadable = signed out > a corrupt record with a session in the keystore: signed out, no token
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E3: applySession and signOut are serialized (mutex) > a sign-out while the keystore write of a sign-in runs: signed out, also after a restart
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E3: applySession and signOut are serialized (mutex) > a password answer A after SSO B: B stays
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E3: applySession and signOut are serialized (mutex) > a refresh with another userId is dropped
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E4: a flow of an old epoch > a stored flow left behind by a session change is refused after a restart
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E5: sign-out order and outcome > record not writable and the keystore delete failing: the UI shows an error, signed out
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E5: sign-out order and outcome > no token is readable while the BLE clean-up runs; the tombstone is written before it
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E6: the tombstone wins > restart with tombstone and a token in the keystore: nothing restored, no request
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E8: no write failure counts as success > record not writable at sign-in: memory only, the next start is signed out
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E8: no write failure counts as success > keystore not writable at sign-in: the next start is signed out
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E1 addendum: one-time migration of a keystore session (mobile) > keystore token and user, no record, no marker: signed in, record {0,false}, mark set
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E1 addendum: one-time migration of a keystore session (mobile) > a second start without record after the mark: no second migration, signed out, deleted
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E1 addendum: one-time migration of a keystore session (mobile) > with the previous version's marker, another user, no userId or a plaintext Preferences session: signed out
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E1 addendum: one-time migration of a keystore session (mobile) > a corrupt record with a keystore session: signed out, never migrated
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E1 addendum: one-time migration of a keystore session (mobile) > record not writable during the migration: RAM lock, keystore untouched, the next start migrates
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E1 addendum: one-time migration of a keystore session (mobile) > keystore not readable during the migration: RAM lock, nothing deleted, the next start migrates
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E1 addendum: one-time migration of a keystore session (mobile) > mark not writable: RAM lock, nothing deleted; the confirmed record is read at the next start
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E9 double faults (mobile, r6 low findings) > invalidateTickets with the record not writable: marked unreadable
+ ✓ tests/unit/sessionAuthority.mobile.test.js > E9 double faults (mobile, r6 low findings) > sign-in with the record not writable and the old keystore session not deletable: refused, RAM lock
+ × tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > directly after a password sign-in: twice the same session
+ × tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > directly after a 2FA sign-in: twice the same session
+ × tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > directly after a registration sign-in: twice the same session
+ × tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > directly after SSO: twice the same session
+ × tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > after a refresh: the refreshed token, twice
+ × tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > after a restart: released once, then the same session on every call
+ × tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > after a migration: the same session on the next call
+ × tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > a memory-only session (record not writable at sign-in): twice, without a keystore read
+ × tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > a read error: held (signed out, nothing deleted); the next readable call gives the session again
+ × tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > a read error after invalidateTickets: the old tickets stay invalid once the session is read again
+ × tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > keystore token gone or of another user: signed out without deleting anything, invariant holds
+ ✓ tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > a sign-out wins over a running loadSession
+ × tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > store: checkSession() right after a sign-in keeps the user signed in
+ FAIL  tests/unit/legacyUpload.retry.test.js [ tests/unit/legacyUpload.retry.test.js ]
+ FAIL  tests/unit/mainBackgroundTicket.main.test.js [ tests/unit/mainBackgroundTicket.main.test.js ]
+ FAIL  tests/unit/recovery.session.test.js [ tests/unit/recovery.session.test.js ]
+ FAIL  tests/unit/sessionMigrationMatrix.main.test.js [ tests/unit/sessionMigrationMatrix.main.test.js ]
+ FAIL  tests/unit/sessionScope.main.test.js [ tests/unit/sessionScope.main.test.js ]
+ FAIL  tests/unit/sessionSweep.main.test.js [ tests/unit/sessionSweep.main.test.js ]
+Error: Cannot find module '../../../src-electron/session-scope.js'
+Serialized Error: { code: 'MODULE_NOT_FOUND', requireStack: [ 'tests/unit/support/queueRun.js' ] }
+ FAIL  tests/unit/mainBackgroundStatic.test.js [ tests/unit/mainBackgroundStatic.test.js ]
+Error: ENOENT: no such file or directory, scandir 'src-electron/background'
+Serialized Error: { errno: -2, code: 'ENOENT', syscall: 'scandir', path: 'src-electron/background' }
+ FAIL  tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > directly after a password sign-in: twice the same session
+ FAIL  tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > directly after a 2FA sign-in: twice the same session
+ FAIL  tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > directly after a registration sign-in: twice the same session
+AssertionError: expected { signedOut: true } to match object { signedOut: false, …(2) }
+ FAIL  tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > directly after SSO: twice the same session
+AssertionError: expected { signedOut: true } to match object { signedOut: false, …(2) }
+ FAIL  tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > after a refresh: the refreshed token, twice
+AssertionError: expected { signedOut: true } to match object { signedOut: false, …(2) }
+ FAIL  tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > after a restart: released once, then the same session on every call
+AssertionError: expected { signedOut: true } to match object { signedOut: false, …(2) }
+ FAIL  tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > after a migration: the same session on the next call
+AssertionError: expected { signedOut: true } to match object { signedOut: false, …(2) }
+ FAIL  tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > a memory-only session (record not writable at sign-in): twice, without a keystore read
+AssertionError: expected { signedOut: true } to match object { signedOut: false, …(2) }
+ FAIL  tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > a read error: held (signed out, nothing deleted); the next readable call gives the session again
+AssertionError: expected false to be true // Object.is equality
+ FAIL  tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > a read error after invalidateTickets: the old tickets stay invalid once the session is read again
+AssertionError: expected { signedOut: true } to match object { signedOut: false }
+ FAIL  tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > keystore token gone or of another user: signed out without deleting anything, invariant holds
+AssertionError: expected { signedOut: true } to match object { signedOut: true, mismatch: true }
+ FAIL  tests/unit/sessionAuthority.mobile.test.js > R-S5: loadSession() of a released session > store: checkSession() right after a sign-in keeps the user signed in
+AssertionError: expected false to be true // Object.is equality
+ FAIL  tests/unit/tusRemoved.static.test.js > P1: no TUS upload in the main process > main registers no upload:startTUS, upload:pause or upload:resume handler and has no TUS client
+AssertionError: upload:startTUS: expected 'const { app, BrowserWindow, ipcMain, …' not to contain '\'upload:startTUS\''
+ FAIL  tests/unit/tusRemoved.static.test.js > P1: no TUS upload in the main process > the preload exposes no TUS start, pause or resume
+AssertionError: expected 'const { contextBridge, ipcRenderer } …' not to match /upload:(startTUS|pause|resume)/
+ FAIL  tests/unit/tusRemoved.static.test.js > P1: no TUS upload in the main process > nothing under src-electron or src mentions startTUS
+AssertionError: expected [ Array(1) ] to deeply equal []
+ Test Files  9 failed | 1 passed (10)
+      Tests  15 failed | 41 passed (56)

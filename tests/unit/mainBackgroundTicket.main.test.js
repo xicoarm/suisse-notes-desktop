@@ -1,5 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect, afterEach } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import { createBackgroundRig, deferred, until, jwt } from './support/backgroundRig.js';
 
 // Reviewer repros of round 7 (refreshesAfterSessionChange=1,
@@ -157,5 +159,33 @@ describe('E7: a late upload success of an ended session writes no receipt and no
     const stale = (() => { r.signInA(); const sc = r.scopes.open(); r.signOut(); return sc; })();
     expect(await r.uploads.pollServerStatus(stale, 'audio-1', 1, 'a')).toMatchObject({ sessionEnded: true });
     expect(r.requests).toEqual([]);
+  });
+});
+
+// Red Team probe of council 3 (cheapest counter-proof): verifyAcceptedUpload
+// stopped right before its (delayed) rename, sign-out, sign-in, resumed -
+// the receipt on disk is unchanged, nothing is renamed, nothing is sent.
+describe('Red Team probe: a delayed receipt rename across sign-out and sign-in', () => {
+  it.each([['owner A again', 'signInA'], ['account B', 'signInB']])('sign-out, sign-in of %s while the rename waits: receipt unchanged', async (_, signIn) => {
+    const r = rig();
+    const receiptPath = path.join(r.root, 'r1', 'upload-receipt.json');
+    const before = JSON.stringify({ audioFileId: 'audio-0', ownerId: 'a', verified: false });
+    fs.writeFileSync(receiptPath, before);
+    const scope = r.scopes.open();
+    const gate = deferred();
+    let parked = false;
+    // The temp file's fsync is the last wait before the rename.
+    r.hooks.hold = (label) => { if (label === 'handle.sync' && !parked) { parked = true; return gate.promise; } return null; };
+    const done = r.uploads.verifyAcceptedUpload(scope, 'r1', r.filePath(), { success: true, audioFileId: 'audio-1' }, 'a', true, null);
+    await until(() => parked);
+    r.signOut();
+    r[signIn]();
+    gate.resolve();
+    expect(await done).toMatchObject({ success: false, sessionEnded: true });
+    expect(fs.readFileSync(receiptPath, 'utf8')).toBe(before);
+    expect(r.effects.filter((e) => e.kind === 'rename')).toEqual([]);
+    expect(r.requestsAfter()).toEqual([]);
+    expect(r.effects.filter((e) => e.kind === 'history')).toEqual([]);
+    expect(fs.readdirSync(path.join(r.root, 'r1')).filter((f) => f.endsWith('.tmp'))).toEqual([]);
   });
 });

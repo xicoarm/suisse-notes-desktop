@@ -71,8 +71,6 @@ function createPendingUploadProcessor({ uploads, read, pure, hooks = {}, log }) 
         }
 
         log.info(`Retrying upload for ${item.recordId} (attempt ${item.retryCount + 1})`);
-        scope.update.queue((q) => queueOps.bumpRetry(q, item.recordId));
-
         if (!scope.claim(item.recordId)) continue;
         busy();
         let result;
@@ -90,6 +88,9 @@ function createPendingUploadProcessor({ uploads, read, pure, hooks = {}, log }) 
         // aborted for that reason - the queue keeps the recording as it is.
         scope.assertAlive();
         if (result?.sessionEnded) return { sessionEnded: true };
+        // R-S3: an attempt counts only once it has an outcome in this
+        // session (an attempt ended by a session change is no retry).
+        if (!result?.success) scope.update.queue((q) => queueOps.bumpRetry(q, item.recordId));
 
         if (result) {
           if (!result.success && result.status === 401) {

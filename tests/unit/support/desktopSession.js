@@ -44,6 +44,7 @@ export const encrypted = (token) => fakeSafeStorage().encryptString(token).toStr
  * - failDelete: set of config keys whose delete throws
  * - failSet: set of config keys whose set throws
  * - failGet: set of config keys whose get throws (review round 8)
+ * - failGetAfterSet: set of config keys whose get throws once written (round 9, E8 read-back)
  * - dropSet: set of config keys whose set is silently lost (read-back differs)
  * - dropRecordWrite: the record write is silently lost
  * - failRecordReadAfterWrite: every record read throws once a record exists
@@ -63,6 +64,8 @@ export function createDisk() {
     failDelete: new Set(),
     failSet: new Set(),
     failGet: new Set(),
+    // Keys whose get throws once a value is stored (the read-back of a write).
+    failGetAfterSet: new Set(),
     dropSet: new Set(),
     dropRecordWrite: false,
     failRecordReadAfterWrite: false,
@@ -76,6 +79,7 @@ function configStore(disk) {
   return {
     get: (k, d) => {
       if (disk.failGet && disk.failGet.has(k)) throw new Error(`EIO get ${k}`);
+      if (disk.failGetAfterSet && disk.failGetAfterSet.has(k) && k in disk.config) throw new Error(`EIO read-back ${k}`);
       return k in disk.config ? clone(disk.config[k]) : d;
     },
     set: (k, v) => {

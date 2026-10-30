@@ -23,17 +23,17 @@ Classes:
 | Entry (7c121955) | Sinks at 7c121955 | After r9 |
 |---|---|---|
 | `processPendingUploads` (pending-uploads.js, factory :1095) | queue :1098/1099 via `removeFromUploadQueue`/`updateUploadQueueRetry`, history :1113, send :1117, timer :1120, `finally` inFlight.delete (pending-uploads.js:99) | `background/pending-uploads.js`, `run(scope)`; inFlight per (scope id, recordId) |
-| `upload:start` body (:4538) | queue :4561/:4587, send :4564/:4601, `uploadWithRetry` | handler keeps the IPC frame; work in `background/upload-start.js` with the scope opened at the entry |
+| `upload:start` body (:4538) | queue :4561/:4587, send :4564/:4601, `uploadWithRetry` | handler keeps the IPC frame (claim, power blocker); work in `background/upload.js` `runUploadStart(scope, …)` with the scope opened at the entry |
 | `uploadWithRetry` (:4027) | `activeAbortControllers` :4061/:4091, receipt via `verifyAcceptedUpload` | `background/upload.js`; cancel handle per (scope id, recordId) in the registry |
 | `tryDirectUpload` (:4101) + `upload-direct.js` | send :4116/:4121/:4138, ffprobe :4243, axios (upload-direct.js :154/:219/:321/:458/:574/:653) | `background/upload.js` + `background/upload-direct.js`, `scope.http`, `scope.port.probeDuration` |
 | `uploadWithRetryLegacy` (:4271) | send :4292/:4374, interval :4367, axios :4400 | `background/upload.js`, `scope.http`, `scope.interval`, `scope.notify` |
 | `verifyAcceptedUpload` (:658) | receipt write :664/:679, mkdir :663, history via `saveUploadOutcome` :669/:681 | `background/upload.js`, `scope.fs.writeFileAtomic` (rename via `commitRename`), `scope.update.history` |
 | `pollServerStatus` (:3833) | axios :3863 without signal, sleep, refresh | `background/upload.js`, `scope.http`, `scope.sleep` |
 | `pollMeetingTranscriptionStatus` (:3958) | axios :3972, sleep | `background/upload.js` |
-| `refreshMainAuthToken` (:2437) | axios :2448, `applySession(refresh)` | `background/refresh.js`, `scope.http`, `scope.applyRefresh` |
+| `refreshMainAuthToken` (:2437) | axios :2448, `applySession(refresh)` | `background/upload.js`, `scope.http`, `scope.applyRefresh` |
 | `recoverOrphanedRecordings` (:735) | history :899/:924, active :958 + `clearActiveRecording` :746/:949/:956, send :935/:982, queue via `addToUploadQueue` :974, rescan timer :999, ffprobe via `getAudioMetadata` :848, lock+finalize via `combineChunksForRecovery` :1017 | `background/recovery.js`; finalization through the port `scope.port.finalizeForRecovery` |
 | `cleanupOldOrphanedDirectories` (:1026) | rm via `rmDirSafeBestEffort` | `background/recovery.js`, `scope.fs.rmRecordingDir` |
-| recovery/cleanup start (whenReady timers :1785/:1793) | no session check at all | `startRecovery()` in main: no scope, no recovery; restarted by `afterSessionApplied` |
+| recovery/cleanup start (whenReady timers :1785/:1793) | no session check at all | `background.startRecovery(scopes)`: no scope, no recovery and no clean-up; started at startup and by `afterSessionApplied` (sign-in, SSO, release of a held start), once per session |
 | `upload:cancel` blob clean-up (:4744) | axios via `abortDirectUpload` | `background/upload-direct.js` `abortDirectUpload(scope, …)` |
 | `upload:startTUS` / `upload:pause` / `upload:resume` (:4626-4725) | tus requests, send :4675, `activeUploads` | **deleted** (no caller: preload exposes no `startTUS`; renderer calls only `start`/`cancel`) |
 
@@ -42,7 +42,7 @@ Classes:
 | Helper | Foreground callers | Background callers | Port |
 |---|---|---|---|
 | `finalizeRecording` (:3611) | `recording:combineChunks` | recovery (`combineChunksForRecovery`) | `finalizeForRecovery` port: runs in the durable-files publish gate of the scope (every rename in `durable-files.js` checks `scope.alive()` synchronously right before `fs.rename`), and the post steps (marker unlink, metadata/history, `clearActiveRecording`) go through `gate.assert()` |
-| `withRecordingLock` (:2532) | saveChunk, createSessionFile, combineChunks, export | recovery | `scope.port.withLock`: the queued callback runs only while the scope is alive |
+| `withRecordingLock` (:2532) | saveChunk, createSessionFile, combineChunks, export | recovery | inside the `finalizeForRecovery` port: the queued callback asserts the publish gate first (`assertPublishAllowed()`), so it runs only while the scope is alive |
 | `getAudioMetadata` / `validateAudioOutput` (:2567/:2854) | stop, import | recovery | `scope.port.probeAudio` (child process only while alive) |
 | `addToUploadQueue` / `removeFromUploadQueue` / `updateUploadQueueRetry` (:686/:713/:721) | `upload:cancel`, `upload:removeFromQueue` | queue run, upload:start, recovery | pure mutators in `background/queue-ops.js`; foreground writes the store directly, background only through `scope.update.queue` |
 | `saveUploadOutcome` (:639) | none left | verify, queue run | background only (`scope.update.history`) |
@@ -74,3 +74,16 @@ the background code is moved, and only the mixed helpers get ports.
 - Progress intervals of the legacy upload (:4367): `scope.interval`.
 
 `grep -rn startTUS src src-electron` is empty after P1.
+
+## After P3-P6 (state of the branch)
+
+- Moved: `src-electron/background/{upload,upload-direct,pending-uploads,recovery,queue-ops,ended,index}.js`.
+  Main keeps only the IPC frames and passes the scope (`scopes.open()`) or
+  the registry (`background.startQueue/startRecovery(scopes)`).
+- Static rule: `tests/unit/mainBackgroundStatic.test.js` (ban list, factory
+  keys, every `background.*` call with a scope first, moved names not
+  defined in main) with negative mutation tests.
+- Dynamic rule: `tests/unit/sessionSweep.main.test.js` (sweep N=1..max).
+- Effects after a session change that remain, by design: the own
+  unpublished temp file of an interrupted durable write is unlinked
+  (`durable-files.js`, `writeFileAtomic` clean-up); nothing is published.

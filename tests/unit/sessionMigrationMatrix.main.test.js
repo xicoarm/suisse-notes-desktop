@@ -102,6 +102,38 @@ describe('migration error matrix (desktop): every read or write error is held', 
   });
 });
 
+// r8-E8 rest (review round 9): the mark is written, but its read-back
+// throws - a fault of its own, not the initial read error. Held at two
+// starts (the second start finds the record {0,false} and the mark not
+// readable), nothing deleted; released at the first start without it.
+// r8 named a missing test, not a code fault: the authority at 7c121955
+// already holds here; this pins it (fail-first n/a, see the round-9 report).
+describe('migration error matrix (desktop): mark read-back throws', () => {
+  it('held at two starts, nothing deleted, no upload; migrated without the fault', async () => {
+    const disk = legacyDisk();
+    disk.failGetAfterSet.add(MARK);
+    for (let start = 1; start <= 2; start++) {
+      const app = boot(disk);
+      app.authority.startup();
+      const label = `start ${start}`;
+      expect(app.authority.state(), label).toMatchObject({ signedOut: true, migrationPending: true });
+      expect(app.authority.getToken(), label).toBeNull();
+      await app.processPendingUploads();
+      expect(app.requests, label).toEqual([]);
+      expect(disk.config.authToken, label).toBe(encrypted(OLD));
+      expect(disk.config.userInfo, label).toEqual(OLD_USER);
+      expect(disk.queue.map((i) => i.recordId), label).toEqual(['r-old']);
+      expect(JSON.parse(disk.record), label).toEqual({ epoch: 0, signedOut: false });
+    }
+    disk.failGetAfterSet.delete(MARK);
+    const fine = boot(disk);
+    expect(fine.authority.restore()).toMatchObject({ signedOut: false, token: OLD, user: { id: 'old' } });
+    expect(disk.config[MARK]).toBe(true);
+    await fine.processPendingUploads();
+    expect(fine.requests).toEqual([{ recordId: 'r-old', token: OLD }]);
+  });
+});
+
 describe('migration error matrix (desktop): only a confirmed missing pair is a decision', () => {
   /** No token (confirmed missing), a user of the previous version. */
   function userOnly() {
