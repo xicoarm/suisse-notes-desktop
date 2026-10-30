@@ -63,6 +63,7 @@ function installRecordingRoleObserver({ delayRole = null, delayMs = 14000 } = {}
   const OriginalContext = window.AudioContext;
   const originalWebkit = window.webkitAudioContext;
   const originalStart = MediaRecorder.prototype.start;
+  const originalStop = MediaRecorder.prototype.stop;
   const originalArrayBuffer = Blob.prototype.arrayBuffer;
   const destinations = new Set(), records = [], blobs = new WeakMap();
   const fault = { kind: 'blob-conversion-delay', targetRole: delayRole, requestedMs: delayMs,
@@ -81,14 +82,14 @@ function installRecordingRoleObserver({ delayRole = null, delayMs = 14000 } = {}
   if (originalWebkit === OriginalContext) window.webkitAudioContext = WrappedContext;
   const snapshot = () => ({ at: performance.now(), fault: { ...fault, samples: [...fault.samples] },
     records: records.map(entry => ({ id: entry.id, role: entry.role, trackIds: [...entry.trackIds],
-      startCalledAt: entry.startCalledAt, startedAt: entry.startedAt, stoppedAt: entry.stoppedAt,
+      startCalledAt: entry.startCalledAt, stopCalledAt: entry.stopCalledAt, startedAt: entry.startedAt, stoppedAt: entry.stoppedAt,
       timesliceMs: entry.timesliceMs, events: entry.events, bytes: entry.bytes, emptyEvents: entry.emptyEvents,
       convertedBytes: entry.convertedBytes, conversionCalls: entry.conversionCalls, state: entry.ref.state })) });
   MediaRecorder.prototype.start = function (...args) {
     const tracks = this.stream.getAudioTracks().map(track => track.id);
     if (tracks.length !== 1) throw new Error('Synthetic short capture requires one audio track per recorder');
     const role = tracks.every(id => destinations.has(id)) ? 'live-mix' : 'native-input';
-    const entry = { ref: this, id: records.length + 1, role, trackIds: tracks, startCalledAt: performance.now(),
+    const entry = { ref: this, id: records.length + 1, role, trackIds: tracks, startCalledAt: performance.now(), stopCalledAt: null,
       startedAt: null, stoppedAt: null, timesliceMs: args[0], events: 0, bytes: 0, emptyEvents: 0, convertedBytes: 0, conversionCalls: 0 };
     records.push(entry);
     const dataHandler = this.ondataavailable;
@@ -102,6 +103,11 @@ function installRecordingRoleObserver({ delayRole = null, delayMs = 14000 } = {}
     this.addEventListener('start', event => { entry.startedAt = event.timeStamp; });
     this.addEventListener('stop', event => { entry.stoppedAt = event.timeStamp; });
     return Reflect.apply(originalStart, this, args);
+  };
+  MediaRecorder.prototype.stop = function (...args) {
+    const entry = records.find(item => item.ref === this);
+    if (entry && entry.stopCalledAt === null && this.state !== 'inactive') entry.stopCalledAt = performance.now();
+    return Reflect.apply(originalStop, this, args);
   };
   Blob.prototype.arrayBuffer = async function (...args) {
     const owner = blobs.get(this);
@@ -125,6 +131,7 @@ function installRecordingRoleObserver({ delayRole = null, delayMs = 14000 } = {}
     },
     dispose: () => {
       MediaRecorder.prototype.start = originalStart;
+      MediaRecorder.prototype.stop = originalStop;
       Blob.prototype.arrayBuffer = originalArrayBuffer;
       window.AudioContext = OriginalContext;
       if (originalWebkit === OriginalContext) window.webkitAudioContext = originalWebkit;

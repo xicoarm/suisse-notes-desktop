@@ -99,7 +99,7 @@ function observerFixture(delayRole) {
     createMediaStreamDestination() { return { stream: { getAudioTracks: () => [{ id: 'mixed' }] } }; }
   }
   const window = { AudioContext: Context, webkitAudioContext: Context };
-  const originalStart = Recorder.prototype.start, originalArrayBuffer = BlobFixture.prototype.arrayBuffer;
+  const originalStart = Recorder.prototype.start, originalStop = Recorder.prototype.stop, originalArrayBuffer = BlobFixture.prototype.arrayBuffer;
   vm.runInNewContext('(' + installRecordingRoleObserver.toString() + ')(' + JSON.stringify({ delayRole }) + ')',
     { window, Blob: BlobFixture, MediaRecorder: Recorder, performance, setTimeout, clearTimeout });
   const native = new Recorder('mic'), mixed = new Recorder('mixed');
@@ -109,7 +109,7 @@ function observerFixture(delayRole) {
   };
   native.start(1000); // Real app starts archive before constructing its mixer.
   new window.AudioContext().createMediaStreamDestination(); mixed.start(1000);
-  return { window, native, mixed, BlobFixture, conversions, Recorder, originalStart, originalArrayBuffer, Context };
+  return { window, native, mixed, BlobFixture, conversions, Recorder, originalStart, originalStop, originalArrayBuffer, Context };
 }
 
 describe('deterministic source-specific Blob delay', () => {
@@ -135,6 +135,20 @@ describe('deterministic source-specific Blob delay', () => {
     await vi.advanceTimersByTimeAsync(3000); await fixture.conversions[0].promise;
     expect(fixture.window.__recordingRoleEvidence.snapshot().records[0].convertedBytes).toBe(1);
   });
+  it('takes the stop call synchronously and once, separately from the later stop event', async () => {
+    const fixture = observerFixture(null);
+    fixture.native.emit = function (type, data) { if (type !== 'stop' || this.lateStop) Object.getPrototypeOf(this).emit.call(this, type, data); };
+    await vi.advanceTimersByTimeAsync(5000);
+    fixture.native.stop();
+    const record = () => fixture.window.__recordingRoleEvidence.snapshot().records[0];
+    expect(record().stopCalledAt).toBe(5000);
+    expect(record().stoppedAt).toBeNull();
+    await vi.advanceTimersByTimeAsync(700);
+    fixture.native.stop(); // inactive by now: not a second stop
+    fixture.native.lateStop = true; fixture.native.emit('stop');
+    expect(record()).toMatchObject({ stopCalledAt: 5000, stoppedAt: 5700 });
+    expect(fixture.window.__recordingRoleEvidence.snapshot().records[1].stopCalledAt).toBeNull();
+  });
   it('observes baseline conversion and restores each wrapper without stopping native tracks', async () => {
     const fixture = observerFixture(null);
     fixture.native.emit('dataavailable', new fixture.BlobFixture(33));
@@ -142,6 +156,7 @@ describe('deterministic source-specific Blob delay', () => {
     expect(fixture.window.__recordingRoleEvidence.snapshot().fault.injected).toBe(false);
     fixture.window.__recordingRoleEvidence.dispose();
     expect(fixture.Recorder.prototype.start).toBe(fixture.originalStart);
+    expect(fixture.Recorder.prototype.stop).toBe(fixture.originalStop);
     expect(fixture.BlobFixture.prototype.arrayBuffer).toBe(fixture.originalArrayBuffer);
     expect(fixture.window.AudioContext).toBe(fixture.Context);
     expect(fixture.native.state).toBe('recording');

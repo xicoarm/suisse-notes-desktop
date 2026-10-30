@@ -319,7 +319,11 @@ chunks, with valid media, the real ffmpeg/ffprobe in the chain and the decoder a
 the judge: samples and their hash against the source (recordings encoded again:
 length and eight correlated windows), stated duration, and the object of the
 accepted upload is the file. Mutants: truncated, corrupted, short from the chain
-itself, chunk lost, wrong object.
+itself, chunk lost, wrong object. `tests/e2e-harness/qualification.js` (round 15):
+native timestamps against the synchronous start() and stop() calls, in both
+directions, threshold 0.5 s, and against the numbered frames; a run without both
+calls is invalid; the start event measure is an observation only
+(`docs/security/pr50-r15-failfirst.txt`).
 
 Round 14 (F16): the snapshot hides nothing by name, not in the recordings folder
 and not in the external canary folder. Exempt is only what the run proved: the
