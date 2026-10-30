@@ -158,3 +158,45 @@ removes an entry that crashes the app every time (history `failed`, the
 source file is kept). A marker of another session is cleared without
 counting (R-S3: an attempt ended by a session change is no attempt); an
 attempt with an outcome clears it (`bumpRetry`, removal on success).
+
+## Review round 11: the file sink at the system call, the oracle on its own
+
+Same course (one checked sink per effect kind); the file sink now closes
+what review round 10 showed at the system call itself (F6, point 3) and
+the sweep's oracle no longer shares its blind spot (F7). Fail-first:
+`docs/security/pr50-r11-failfirst.txt`.
+
+| Gap (r10 review) | Before | Now | Test |
+|---|---|---|---|
+| F6 numeric open flags | `writeFlags` read a number as digits: `openSync(p, O_WRONLY \| O_TRUNC)` emptied `metadata.json` after the end; its descriptor/handle was not remembered | flags by their bits (`O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, `O_APPEND`) or the string table; sync, callback, promise open, write streams (they open through `fs.open`), `readFile` with a writing flag | `effectGate.flags.test.js` (F6 block) |
+| F6 `open(path, callback)` | read as writing (the callback's text matched) | read | same, control |
+| Point 3 aliases | lexical comparison only | lexical first; otherwise the real path of the nearest existing ancestor (a dangling link to its target; for calls on the name itself - unlink, rename, mkdir, rm, link, symlink, l* - the parent's), letter case folded on macOS and Windows; `link` checked on both names | same, alias block |
+| Point 3 provenance | descriptors/handles counted only when opened for writing inside a gated context | every descriptor and handle opened for writing is remembered with its path (any context; removed at close, before the number can be reused); a write to it in a gated context after the end is refused if its path is in the folder | same, provenance block |
+| F7 oracle | `classify` used the same string-only flag test | its own reading (Node's string table: only r, rs, sr read; numbers by access mode and O_CREAT/O_TRUNC/O_APPEND; anything else counts); aliases resolved for effects; descriptors remembered before binding | `globalSinks.flags.test.js` |
+| F7 independent of the counters | - | every swept run snapshots the recordings folder at the change and compares it before the resumption: no file that existed changed its bytes, no file appeared (own `.uuid.tmp` files and the scratch of a running native child process aside; removals are counted effects) | `support/sweep.js` `contentAfter` |
+
+New mutants (`tests/unit/support/mutants.js`): `fs-open-flags-string-only`
+(the gate's round-10 flag test plus a numeric open through the sink - red),
+`fs-open-trunc-bypass` (O_WRONLY|O_TRUNC of metadata.json past the gate -
+red as a counted effect AND as changed content), `fs-open-creat-bypass`
+(O_WRONLY|O_CREAT past the gate - counted AND seen as a new file). The
+control `paths-through-sinks` adds a numeric O_WRONLY|O_CREAT|O_TRUNC open
+through the sink: it is counted in the baseline and the sweep stays green.
+
+Limits that remain (documented, not a gap of a current caller): a hard link
+to a file of the folder made outside the fs module or before the gate (main
+makes none; `link` is checked on both names), descriptors from outside the
+fs module (static rules: no `original-fs`, bindings or workers in main).
+
+### Windows CI time (round 11)
+
+Windows ran the sweeps about seven times slower per run than Linux (68 min
+for lint-and-test, the two sweep files 62 min of it). The sweeps keep every
+point on Linux and macOS on every commit; the Windows runner runs a sample
+(`SWEEP_SAMPLE=0.15`, fixed seed `r11`, per entry the first two and last two
+points always - about 28 % of the points of the main sweep, 18 % of the
+chain). The gate is the same JavaScript on all three systems; what is
+Windows-specific (paths and letter case, CRLF, rename retries) sits in the
+named points, the mutants and the unit probes, which are never sampled. The
+mutants of the scope (`sessionSweep.main`, «alive() removed») stop at the
+first violation that kills them, on every system.

@@ -1,0 +1,113 @@
+# PR #50 review round 11 - fail-first at production head 405652a9 (tests of commit 1 only, 367ca1d)
+# 2026-10-30T09:00:42+01:00 node v24.22.0, vitest; command: npx vitest run tests/unit/effectGate.flags.test.js tests/unit/globalSinks.flags.test.js tests/unit/sweepSample.test.js tests/unit/sweepMutation.main.test.js
+# git: HEAD 367ca1d (worktree of commit 1), src-electron identical to 405652a: yes
+
+Production code: src-electron at 405652a unchanged. Tests of commit 1: the file sink at the system call
+(effectGate.flags: numeric open flags, aliases, descriptor provenance), the oracle's own classification
+(globalSinks.flags), the sweep sample (sweepSample) and the mutants with numeric opens plus the content
+check of the recordings folder before the resumption (sweepMutation.main).
+
+## Summary
+
+ ❯ tests/unit/globalSinks.flags.test.js  (9 tests | 9 failed) 66ms
+ ❯ tests/unit/effectGate.flags.test.js  (45 tests | 31 failed | 1 skipped) 170ms
+ ❯ tests/unit/sweepSample.test.js  (4 tests | 4 failed) 16ms
+ ❯ tests/unit/sweepMutation.main.test.js  (12 tests | 4 failed) 16812ms
+ FAIL  tests/unit/effectGate.flags.test.js > aliases of the recordings folder > a dangling symlink into the folder: creating its target is refused
+ FAIL  tests/unit/effectGate.flags.test.js > aliases of the recordings folder > a symlink (junction) to a recording folder: writes through it are refused after the end
+ FAIL  tests/unit/effectGate.flags.test.js > aliases of the recordings folder > a symlink to a file of the folder: writing through it is refused, removing the link itself passes
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > a descriptor of the callback open with numeric flags before the end: refused after it
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > a descriptor opened with numeric flags before the end: its writes are refused after it
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > a handle of the promise open with numeric flags before the end: its writes are refused after it
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > a write stream with numeric flags after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > controls: reading opens (numeric O_RDONLY, no flags, r) pass after the end
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > fs.promises.open(metadata.json, O_RDONLY|O_TRUNC) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > fs.promises.open(metadata.json, O_RDWR) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > fs.promises.open(metadata.json, O_RDWR|O_CREAT) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > fs.promises.open(metadata.json, O_WRONLY|O_APPEND) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > fs.promises.open(metadata.json, O_WRONLY|O_CREAT|O_TRUNC) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > fs.promises.open(metadata.json, O_WRONLY|O_TRUNC) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > open(metadata.json, O_RDONLY|O_TRUNC, cb) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > open(metadata.json, O_RDWR, cb) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > open(metadata.json, O_RDWR|O_CREAT, cb) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > open(metadata.json, O_WRONLY|O_APPEND, cb) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > open(metadata.json, O_WRONLY|O_CREAT|O_TRUNC, cb) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > open(metadata.json, O_WRONLY|O_TRUNC, cb) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > openSync(metadata.json, O_RDONLY|O_TRUNC) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > openSync(metadata.json, O_RDWR) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > openSync(metadata.json, O_RDWR|O_CREAT) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > openSync(metadata.json, O_WRONLY|O_APPEND) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > openSync(metadata.json, O_WRONLY|O_CREAT|O_TRUNC) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > openSync(metadata.json, O_WRONLY|O_TRUNC) after the end: refused, content unchanged
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > O_WRONLY|O_CREAT of a new file after the end: refused, not created
+ FAIL  tests/unit/effectGate.flags.test.js > F6: numeric open flags open for writing > readFile with a writing flag after the end (w+ empties the file): refused
+ FAIL  tests/unit/effectGate.flags.test.js > provenance: descriptors and handles opened outside a gated context > a descriptor opened in the foreground and written by background work after its end: refused
+ FAIL  tests/unit/effectGate.flags.test.js > provenance: descriptors and handles opened outside a gated context > a handle opened in the foreground and written by background work after its end: refused
+ FAIL  tests/unit/effectGate.flags.test.js > provenance: descriptors and handles opened outside a gated context > a numeric descriptor opened in the foreground (O_WRONLY|O_APPEND): refused after the end
+ FAIL  tests/unit/globalSinks.flags.test.js > F7: the oracle counts numeric writing opens > controls: reading opens are no effect
+ FAIL  tests/unit/globalSinks.flags.test.js > F7: the oracle counts numeric writing opens > openSync(metadata.json, O_RDONLY|O_TRUNC) is an effect
+ FAIL  tests/unit/globalSinks.flags.test.js > F7: the oracle counts numeric writing opens > openSync(metadata.json, O_RDWR) is an effect
+ FAIL  tests/unit/globalSinks.flags.test.js > F7: the oracle counts numeric writing opens > openSync(metadata.json, O_WRONLY|O_APPEND) is an effect
+ FAIL  tests/unit/globalSinks.flags.test.js > F7: the oracle counts numeric writing opens > openSync(metadata.json, O_WRONLY|O_TRUNC) is an effect
+ FAIL  tests/unit/globalSinks.flags.test.js > F7: the oracle counts numeric writing opens > O_WRONLY|O_CREAT of a new file is an effect (sync, callback, promise)
+ FAIL  tests/unit/globalSinks.flags.test.js > F7: the oracle counts numeric writing opens > readFile with a writing flag is an effect
+ FAIL  tests/unit/globalSinks.flags.test.js > the oracle sees aliases and earlier descriptors > a write through a symlink (junction) into the folder is an effect
+ FAIL  tests/unit/globalSinks.flags.test.js > the oracle sees aliases and earlier descriptors > a write to a descriptor opened before the oracle was bound is an effect
+ FAIL  tests/unit/sweepMutation.main.test.js > mutants of the sinks: the sweep turns red > control: the new paths through their sinks pass, and they run in the baseline
+ FAIL  tests/unit/sweepMutation.main.test.js > mutants of the sinks: the sweep turns red > fs-open-creat-bypass: red with a violation of kind fs
+ FAIL  tests/unit/sweepMutation.main.test.js > mutants of the sinks: the sweep turns red > fs-open-flags-string-only: red with a violation of kind fs
+ FAIL  tests/unit/sweepMutation.main.test.js > mutants of the sinks: the sweep turns red > fs-open-trunc-bypass: red with a violation of kind fs
+ FAIL  tests/unit/sweepSample.test.js > sweep points > an invalid sample fails, it does not silently skip the sweep
+ FAIL  tests/unit/sweepSample.test.js > sweep points > a sample: the same points for the same seed and entry, the edges always in
+ FAIL  tests/unit/sweepSample.test.js > sweep points > full without a sample
+ FAIL  tests/unit/sweepSample.test.js > sweep points > short entries stay complete
+ Test Files  4 failed (4)
+      Tests  48 failed | 21 passed | 1 skipped (70)
+exit 1
+
+## Per point
+
+F6 (effect-gate.js:70/:110/:118/:131/:180): 18 numeric opens (sync, callback, promise; O_WRONLY|O_TRUNC,
+O_RDWR, O_WRONLY|O_APPEND, O_RDWR|O_CREAT, O_WRONLY|O_CREAT|O_TRUNC, O_RDONLY|O_TRUNC) pass after the end and
+empty or change metadata.json; O_CREAT creates a new file; descriptors and handles of numeric opens
+before the end are not remembered, their writes pass; a write stream with numeric flags and readFile
+with a writing flag (w+) pass. Control red too: open(path, callback) was read as writing (the callback's
+source text matched /[wa+]/). The string flags r+, a+, rs+ were already refused (regression cases, green).
+
+F7 (globalSinks.js:60/:84): the oracle counted none of the numeric opens (9 of 9 red, incl. alias and an
+earlier descriptor). Mutants: fs-open-trunc-bypass and fs-open-creat-bypass are seen only by the new
+content check ("content changed after the change: c1/metadata.json", "files created after the change:
+c1/merge-created.txt"), not as a counted file effect - red. The control with a numeric open through the
+sink is red: its open is missing from the baseline effects. fs-open-flags-string-only cannot apply at
+405652a (its edit targets the round-11 writeFlags) - red, green from commit 2 with 4 violations.
+
+Point 3 (effect-gate.js:100): a symlink/junction to a recording folder, a link to its metadata.json and a
+dangling link into it pass after the end (3 red); a descriptor (string and numeric flags) or handle opened
+in the foreground on a file of the folder can be written by background work after its end (3 red; the
+controls - outside the folder, a closed number reused - green). Letter case: on Linux skipped
+(case-sensitive), runs on macOS/Windows CI. The '..' path was already refused (green).
+
+Point 4: sweepPoints does not exist yet (4 of 4 red).
+
+## Mutation probe (violations per mutant at 367ca1d)
+
+[sweep:mutant] fs-gate-off: 6 violations
+[sweep:mutant] fs-gate-not-installed: 6 violations
+[sweep:mutant] fs-path-bypass: 4 violations
+[sweep:mutant] fs-open-trunc-bypass: 2 violations
+[sweep:mutant] fs-open-creat-bypass: 2 violations
+[sweep:mutant] spawn-gate-off: 4 violations
+[sweep:mutant] spawn-path-bypass: 2 violations
+[sweep:mutant] send-gate-off: 2 violations
+[sweep:mutant] send-path-bypass: 2 violations
+
+## Failing assertions of the mutation test
+
+ FAIL  tests/unit/sweepMutation.main.test.js > mutants of the sinks: the sweep turns red > control: the new paths through their sinks pass, and they run in the baseline
+AssertionError: expected [ 'active:activeSession', …(59) ] to include 'open:c1/merge-open.txt'
+ FAIL  tests/unit/sweepMutation.main.test.js > mutants of the sinks: the sweep turns red > fs-open-flags-string-only: red with a violation of kind fs
+AssertionError: The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+ FAIL  tests/unit/sweepMutation.main.test.js > mutants of the sinks: the sweep turns red > fs-open-trunc-bypass: red with a violation of kind fs
+AssertionError: fs-open-trunc-bypass: ["recovery, real chain with the system audio merge at the named point A: content changed after the change: [\"c1/metadata.json\"]","recovery, real chain with the system audio merge at the named point B: content changed after the change: [\"c1/metadata.json\"]"]: expected false to be true // Object.is equality
+ FAIL  tests/unit/sweepMutation.main.test.js > mutants of the sinks: the sweep turns red > fs-open-creat-bypass: red with a violation of kind fs
+AssertionError: fs-open-creat-bypass: ["recovery, real chain with the system audio merge at the named point A: files created after the change: [\"c1/merge-created.txt\"]","recovery, real chain with the system audio merge at the named point B: files created after the change: [\"c1/merge-created.txt\"]"]: expected false to be true // Object.is equality
