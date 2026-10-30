@@ -291,13 +291,12 @@ async function refreshRun(entry, n, base) {
   }
 }
 
-/** A copy of session-scope.js without alive() in commit and the publish gate. */
-function mutantRegistry() {
+/** A copy of session-scope.js without alive() in commit and/or the publish gate. */
+const CUT_COMMIT = ['    function commit(fn) {\n      assertAlive();', '    function commit(fn) {'];
+const CUT_GATE = ['return publishGate.run({ assertAlive }, fn);', 'return publishGate.run({ assertAlive: () => {} }, fn);'];
+
+function mutantRegistry(cuts = [CUT_COMMIT, CUT_GATE]) {
   let src = fs.readFileSync(SCOPE_FILE, 'utf8');
-  const cuts = [
-    ['    function commit(fn) {\n      assertAlive();', '    function commit(fn) {'],
-    ['return publishGate.run({ assertAlive }, fn);', 'return publishGate.run({ assertAlive: () => {} }, fn);'],
-  ];
   for (const [from, to] of cuts) {
     if (!src.includes(from)) throw new Error(`mutation anchor missing: ${from}`);
     src = src.replace(from, to);
@@ -349,6 +348,40 @@ describe('mutation: alive() removed from commit and the publish gate', () => {
     }
     expect(violations.length).toBeGreaterThan(0);
     expect(violations.some((v) => /effects after the change/.test(v))).toBe(true);
+  }, 120000);
+
+  it('the publish gate alone (commitRename): red', async () => {
+    const factory = mutantRegistry([CUT_GATE]);
+    const entry = ENTRIES.find((e) => e.name === 'verify, rename retry (EBUSY)');
+    const base = await baseline(entry, { registryFactory: factory });
+    const violations = [];
+    for (let n = 1; n <= base.max; n++) violations.push(...await sweptRun(entry, n, 'A', { registryFactory: factory }));
+    expect(violations.some((v) => /"kind":"rename"/.test(v))).toBe(true);
+  }, 120000);
+
+  it('commit alone: the sweep cannot reach it (every background await resumes through settle()), the scope check is red', async () => {
+    // Pinned finding of round 9: without alive() in commit the sweep stays
+    // green, because no background continuation reaches a commit after a
+    // change without passing a settled await or an explicit assertAlive.
+    // commit's check is defence in depth; its own probe:
+    const factory = mutantRegistry([CUT_COMMIT]);
+    const entry = ENTRIES.find((e) => e.name === 'queue run');
+    const base = await baseline(entry, { registryFactory: factory });
+    const violations = [];
+    for (let n = 1; n <= base.max; n++) violations.push(...await sweptRun(entry, n, 'A', { registryFactory: factory }));
+    expect(violations).toEqual([]);
+    for (const [label, registry] of [['mutant', factory], ['real', null]]) {
+      const r = createBackgroundRig(registry ? { registryFactory: registry } : {});
+      try {
+        const scope = r.scopes.open();
+        r.signOut();
+        let threw = false;
+        try { scope.update.queue(() => []); } catch { threw = true; }
+        expect({ label, threw, writes: r.effectsAfter().length }).toEqual(label === 'mutant' ? { label, threw: false, writes: 1 } : { label, threw: true, writes: 0 });
+      } finally {
+        r.cleanup();
+      }
+    }
   }, 120000);
 
   it('control: the unmutated scope passes the same runs', async () => {
