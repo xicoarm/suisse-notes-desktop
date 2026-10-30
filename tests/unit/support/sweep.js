@@ -80,14 +80,17 @@ export function afterChange(r, label) {
 // the change may still write there (council 3: temporary files only).
 const SCRATCH = /(^|[/\\])native-finalization-[^/\\]*([/\\]|$)/;
 
-/** Every file of the recordings root and its bytes (read past the counters). */
+/** Every file of the recordings root: its bytes, mode and mtime (read past the counters). */
 export function snapshot(r) {
   const files = new Map();
   const walk = (dir) => {
     for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
       const p = path.join(dir, d.name);
       if (d.isDirectory()) walk(p);
-      else if (d.isFile()) files.set(p, fs.readFileSync(p));
+      else if (d.isFile()) {
+        const st = fs.statSync(p);
+        files.set(p, { bytes: fs.readFileSync(p), attrs: `${st.mode.toString(8)} ${st.mtimeMs}` });
+      }
     }
   };
   r.quietly(() => { if (fs.existsSync(r.root)) walk(r.root); });
@@ -98,16 +101,21 @@ export function snapshot(r) {
  * Round 11 (F7): independent of how the counters classify a call, the
  * files themselves - every file that existed at the change has the same
  * bytes before the resumption, and no new file appeared (own temp files and
- * the scratch of a running child process aside). Removals are counted
- * effects (an rm admitted before the change may still walk its tree).
+ * the scratch of a running child process aside). Round 12 (F10): and the
+ * same mode and mtime (fchmod, futimes, chmod through a descriptor opened
+ * for reading). Removals are counted effects (an rm admitted before the
+ * change may still walk its tree).
  */
 export function contentAfter(r, before, label) {
   const now = snapshot(r);
   const own = (p) => TEMP.test(p) || SCRATCH.test(path.relative(r.root, p));
-  const changed = [...before].filter(([p, bytes]) => !own(p) && now.has(p) && !now.get(p).equals(bytes)).map(([p]) => where(r, p));
+  const kept = [...before].filter(([p]) => !own(p) && now.has(p));
+  const changed = kept.filter(([p, was]) => !now.get(p).bytes.equals(was.bytes)).map(([p]) => where(r, p));
+  const attrs = kept.filter(([p, was]) => now.get(p).attrs !== was.attrs).map(([p]) => where(r, p));
   const created = [...now.keys()].filter((p) => !own(p) && !before.has(p)).map((p) => where(r, p));
   const out = [];
   if (changed.length) out.push(`${label}: content changed after the change: ${JSON.stringify(changed)}`);
+  if (attrs.length) out.push(`${label}: attributes changed after the change: ${JSON.stringify(attrs)}`);
   if (created.length) out.push(`${label}: files created after the change: ${JSON.stringify(created)}`);
   return out;
 }
