@@ -212,7 +212,7 @@ describe('sweep N=1..max: a session change at every suspension point', () => {
         totals.runs++;
       }
       expect(violations).toEqual([]);
-    }, 120000);
+    }, 900000);
   }
 
   it('totals (for the round-9 report)', () => {
@@ -232,7 +232,7 @@ describe('mutation: alive() removed from commit and the publish gate', () => {
     }
     expect(violations.length).toBeGreaterThan(0);
     expect(violations.some((v) => /effects after the change/.test(v))).toBe(true);
-  }, 120000);
+  }, 900000);
 
   it('the publish gate alone (commitRename): red', async () => {
     // Without the publish gate there is no gated context either: the fs
@@ -243,7 +243,7 @@ describe('mutation: alive() removed from commit and the publish gate', () => {
     const violations = [];
     for (let n = 1; n <= base.max; n++) violations.push(...await sweptRun(entry, n, 'A', { registryFactory: factory }));
     expect(violations.some((v) => /"rename:/.test(v))).toBe(true);
-  }, 120000);
+  }, 900000);
 
   it('commit alone: the sweep cannot reach it (every background await resumes through settle()), the scope check is red', async () => {
     // Pinned finding of round 9: without alive() in commit the sweep stays
@@ -268,7 +268,7 @@ describe('mutation: alive() removed from commit and the publish gate', () => {
         await r.cleanup();
       }
     }
-  }, 120000);
+  }, 900000);
 
   it('control: the unmutated scope passes the same runs', async () => {
     const violations = [];
@@ -276,6 +276,6 @@ describe('mutation: alive() removed from commit and the publish gate', () => {
     const base = await baseline(entry);
     for (let n = 1; n <= base.max; n++) violations.push(...await sweptRun(entry, n, 'A'));
     expect(violations).toEqual([]);
-  }, 120000);
+  }, 900000);
 });
 

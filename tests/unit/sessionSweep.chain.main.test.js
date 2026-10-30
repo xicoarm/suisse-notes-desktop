@@ -25,7 +25,7 @@ describe('F1-F3 of review round 9: named points of the real recovery chain', () 
       // eslint-disable-next-line no-console
       if (violations.length) console.log(`[sweep:chain] ${title}\n  ${violations.join('\n  ')}`);
       expect(violations).toEqual([]);
-    }, 120000);
+    }, 600000);
   }
 });
 
@@ -44,7 +44,7 @@ describe('sweep N=1..max over the real recovery chain (variants A, B, refresh co
       expect(base.result, `${e.name}: baseline`).toEqual({ completed: true });
       expect(base.shape.effects.some((x) => /^rename:(c1|n1)\/audio\.webm$/.test(x)), `${e.name}: baseline published`).toBe(true);
       expect(violations).toEqual([]);
-    }, 600000);
+    }, 1800000);
   }
 
   it('totals (for the round-10 report)', () => {

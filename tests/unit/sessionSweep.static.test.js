@@ -18,6 +18,7 @@ const require = createRequire(import.meta.url);
 const acorn = require('acorn');
 const walk = require('acorn-walk');
 const SRC = 'src-electron';
+const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 const parse = (source) => acorn.parse(source, { ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true, allowReturnOutsideFunction: true });
 
 function files(dir) {
@@ -34,7 +35,7 @@ const SYSTEM = ['fs', 'fs/promises', 'child_process', 'node:fs', 'node:fs/promis
 
 describe('static rules of the sinks (round 10)', () => {
   it('main installs its effect gate before it loads any other module', () => {
-    const ast = parse(fs.readFileSync(path.join(SRC, 'electron-main.js'), 'utf8'));
+    const ast = parse(read(path.join(SRC, 'electron-main.js')));
     const install = ast.body.findIndex((n) => n.type === 'ExpressionStatement'
       && n.expression.type === 'CallExpression' && n.expression.callee.property?.name === 'installEffectGate'
       && isRequire(n.expression.callee.object, ['./effect-gate']));
@@ -50,7 +51,7 @@ describe('static rules of the sinks (round 10)', () => {
   it('no module of main captures fs or child_process functions at load', () => {
     const offenders = [];
     for (const file of MAIN_PROCESS) {
-      const ast = parse(fs.readFileSync(file, 'utf8'));
+      const ast = parse(read(file));
       for (const node of ast.body) {
         if (node.type !== 'VariableDeclaration') continue;
         for (const d of node.declarations) {
@@ -62,7 +63,7 @@ describe('static rules of the sinks (round 10)', () => {
           const captures = d.id.type === 'ObjectPattern'
             ? d.id.properties.some((p) => p.key?.name !== 'promises' && p.key?.name !== 'constants')
             : members.some((m) => m !== 'promises' && m !== 'constants');
-          if (captures) offenders.push(`${file}:${node.loc?.start?.line ?? ''} ${fs.readFileSync(file, 'utf8').slice(node.start, node.end).slice(0, 100)}`);
+          if (captures) offenders.push(`${file}:${node.loc?.start?.line ?? ''} ${read(file).slice(node.start, node.end).slice(0, 100)}`);
         }
       }
     }
@@ -70,15 +71,15 @@ describe('static rules of the sinks (round 10)', () => {
   });
 
   it('nothing reaches the system past fs and child_process', () => {
-    const offenders = MAIN_PROCESS.filter((file) => /require\(\s*['"]original-fs['"]\s*\)|process\.binding\s*\(|internalBinding\s*\(|require\(\s*['"](node:)?worker_threads['"]\s*\)/.test(fs.readFileSync(file, 'utf8')));
+    const offenders = MAIN_PROCESS.filter((file) => /require\(\s*['"]original-fs['"]\s*\)|process\.binding\s*\(|internalBinding\s*\(|require\(\s*['"](node:)?worker_threads['"]\s*\)/.test(read(file)));
     expect(offenders).toEqual([]);
   });
 
   it('renderer events only through sendToRenderer, the registry\'s send', () => {
-    const uses = MAIN_PROCESS.flatMap((file) => fs.readFileSync(file, 'utf8').split('\n')
+    const uses = MAIN_PROCESS.flatMap((file) => read(file).split('\n')
       .map((line, i) => [file, i + 1, line]).filter(([, , line]) => /webContents\s*\.\s*send\s*\(/.test(line)));
     expect(uses.map(([f, l]) => `${f}:${l}`)).toHaveLength(1);
-    const main = fs.readFileSync(path.join(SRC, 'electron-main.js'), 'utf8');
+    const main = read(path.join(SRC, 'electron-main.js'));
     const sink = main.slice(main.indexOf('function sendToRenderer('), main.indexOf('\n}\n', main.indexOf('function sendToRenderer(')));
     expect(sink).toMatch(/^function sendToRenderer\(channel, payload\) \{\n {2}assertPublishAllowed\(\);\n/);
     expect(sink).toContain('webContents.send(channel, payload)');
