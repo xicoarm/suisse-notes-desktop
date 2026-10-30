@@ -196,7 +196,7 @@ function installEffectGate({ roots, fs = require('fs'), childProcess = require('
       const at = path.join(dir, name);
       if (missing) { missing.push(name); dir = at; continue; }
       let st;
-      try { st = lstatSync.call(fs, at, { throwIfNoEntry: false }); } catch (_) { return null; }
+      try { st = lstatSync.call(fs, at, { throwIfNoEntry: false, bigint: true }); } catch (_) { return null; }
       if (!st) { missing = [name]; dir = at; stat = null; continue; }
       const last = todo.every((rest) => rest === '.');
       if (st.isSymbolicLink() && (!last || follow || trailing)) {
@@ -218,12 +218,15 @@ function installEffectGate({ roots, fs = require('fs'), childProcess = require('
       stat = st;
     }
     if (WIN) {
-      // Short (8.3) names and the letter case: the system's own spelling of the existing part.
-      const tail = missing ? missing.length : 0;
+      // Short (8.3) names and the letter case: the system's own spelling of
+      // the existing part - up to a link the call acts on itself, which the
+      // system's realpath would follow.
+      const tail = [...(missing || [])];
       let existing = dir;
-      for (let i = 0; i < tail; i++) existing = path.dirname(existing);
+      for (let i = 0; i < tail.length; i++) existing = path.dirname(existing);
+      if (stat && stat.isSymbolicLink()) { tail.unshift(path.basename(existing)); existing = path.dirname(existing); }
       try { existing = nativeRealpath.call(fs, existing); } catch (_) { return null; }
-      dir = path.join(existing, ...(missing || []));
+      dir = path.join(existing, ...tail);
     }
     return { real: dir, stat: stat || null };
   }
@@ -260,7 +263,7 @@ function installEffectGate({ roots, fs = require('fs'), childProcess = require('
   }
   const insideAny = (forms, target) => forms.some((root) => within(root, target));
   // A file with a second name: one of them may be in the folder.
-  const shared = (stat) => Boolean(stat) && !stat.isDirectory() && stat.nlink > 1;
+  const shared = (stat) => Boolean(stat) && !stat.isDirectory() && stat.nlink > 1n;
 
   /**
    * Round 12: may this call reach a file of the folders? Allowed only when it
@@ -287,7 +290,7 @@ function installEffectGate({ roots, fs = require('fs'), childProcess = require('
 
   /**
    * Round 12 (F9/F10): what an open found, held until the close: the file's
-   * identity (dev/ino of the descriptor) and its resolved path, and whether
+   * identity (dev/ino of the descriptor, as bigint: Windows file ids exceed 2^53) and its resolved path, and whether
    * it was a file of the folders then (or could not be decided). Losing the
    * alias later (the link removed or renamed) cannot weaken it.
    */
@@ -298,7 +301,7 @@ function installEffectGate({ roots, fs = require('fs'), childProcess = require('
     if (opening) return entry;
     opening = true;
     try {
-      const st = fstatSync.call(fs, fd);
+      const st = fstatSync.call(fs, fd, { bigint: true });
       entry.dev = st.dev;
       entry.ino = st.ino;
       const p = asPath(target);
@@ -321,7 +324,7 @@ function installEffectGate({ roots, fs = require('fs'), childProcess = require('
   function heldFd(fd, entry) {
     if (typeof fd !== 'number') return true;
     let st;
-    try { st = fstatSync.call(fs, fd); } catch (_) { return true; }
+    try { st = fstatSync.call(fs, fd, { bigint: true }); } catch (_) { return true; }
     if (!st.isFile() && !st.isDirectory()) return false;
     if (!entry || entry.held || entry.dev !== st.dev || entry.ino !== st.ino || shared(st)) return true;
     const forms = rootForms();

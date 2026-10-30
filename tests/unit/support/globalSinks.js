@@ -131,16 +131,17 @@ function install() {
   function sameFileInRoot(st) {
     const rec = state.rec;
     if (!rec || !st) return null;
+    // bigint: Windows file ids exceed 2^53 (a Number would round them together).
     const same = (s) => s.dev === st.dev && s.ino === st.ino;
     const walk = (dir) => {
       for (const d of original.fs.readdirSync(dir, { withFileTypes: true })) {
         const p = path.join(dir, d.name);
-        if (same(original.fs.lstatSync(p))) return p;
+        if (same(original.fs.lstatSync(p, { bigint: true }))) return p;
         if (d.isDirectory()) { const found = walk(p); if (found) return found; }
       }
       return null;
     };
-    try { return same(original.fs.lstatSync(rec.root)) ? rec.root : walk(rec.root); } catch { return null; }
+    try { return same(original.fs.lstatSync(rec.root, { bigint: true })) ? rec.root : walk(rec.root); } catch { return null; }
   }
   // Descriptors and handles: what their open found (round 12, F9): the raw
   // path and its real path then, whatever happens to the alias later.
@@ -158,7 +159,7 @@ function install() {
       if (mapped) return mapped;
     }
     let st;
-    try { st = original.fs.fstatSync(fd); } catch { return null; }
+    try { st = original.fs.fstatSync(fd, { bigint: true }); } catch { return null; }
     return sameFileInRoot(st);
   }
 
@@ -207,7 +208,7 @@ function install() {
       // The same file under another name (a hard link): its identity.
       if (!NAME_ONLY.has(name) && !(name === 'link' && value === args[1])) {
         let st;
-        try { st = (own ? original.fs.lstatSync : original.fs.statSync)(p, { throwIfNoEntry: false }); } catch { st = null; }
+        try { st = (own ? original.fs.lstatSync : original.fs.statSync)(p, { throwIfNoEntry: false, bigint: true }); } catch { st = null; }
         const same = st && !st.isDirectory() ? sameFileInRoot(st) : null;
         if (same) return same;
       }

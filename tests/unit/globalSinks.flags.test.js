@@ -143,12 +143,17 @@ describe('round 12: where a call really lands', () => {
   it('F10: attributes through a descriptor or handle opened for reading are effects', async () => {
     const fd = fs.openSync(meta, 'r');
     const handle = await fs.promises.open(meta, 'r');
+    // Counted before the call; Windows refuses times on a reading descriptor (EPERM).
+    const attempt = async (call) => { try { await call(); } catch (error) { if (error.code !== 'EPERM') throw error; } };
     sinks.bind(rec);
-    fs.fchmodSync(fd, 0o644);
-    fs.futimesSync(fd, new Date(), new Date());
-    await handle.chmod(0o644);
-    await handle.utimes(new Date(), new Date());
-    sinks.unbind(rec);
+    try {
+      await attempt(() => fs.fchmodSync(fd, 0o644));
+      await attempt(() => fs.futimesSync(fd, new Date(), new Date()));
+      await attempt(() => handle.chmod(0o644));
+      await attempt(() => handle.utimes(new Date(), new Date()));
+    } finally {
+      sinks.unbind(rec);
+    }
     fs.closeSync(fd);
     await handle.close();
     expect(counted()).toEqual(['attr:c1/metadata.json', 'attr:c1/metadata.json', 'attr:c1/metadata.json', 'attr:c1/metadata.json']);

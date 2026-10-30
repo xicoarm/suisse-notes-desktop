@@ -24,7 +24,9 @@ const PATH_SPAWN_BYPASS = "    globalThis.__sweepPreGate.cp.execFile(resolveBund
 // with O_WRONLY|O_CREAT|O_TRUNC and written. Past it: O_TRUNC empties the
 // existing metadata.json at the open (with O_CREAT: Windows refuses O_TRUNC
 // without it, EINVAL); O_CREAT creates a file without a write.
-const PATH_OPEN = "    { const fd = fs.openSync(path.join(recordPath, 'merge-open.txt'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC); fs.writeSync(fd, 'merged'); fs.closeSync(fd); }";
+// The descriptor is closed whatever the write does (Windows cannot remove a
+// folder with an open file in it).
+const PATH_OPEN = "    { const fd = fs.openSync(path.join(recordPath, 'merge-open.txt'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC); try { fs.writeSync(fd, 'merged'); } finally { fs.closeSync(fd); } }";
 const PATH_OPEN_TRUNC_BYPASS = "    { const pre = globalThis.__sweepPreGate.fs; pre.closeSync(pre.openSync(path.join(recordPath, 'metadata.json'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC)); }";
 const PATH_OPEN_CREAT_BYPASS = "    { const pre = globalThis.__sweepPreGate.fs; pre.closeSync(pre.openSync(path.join(recordPath, 'merge-created.txt'), fs.constants.O_WRONLY | fs.constants.O_CREAT)); }";
 // Round 12 (F10): an attribute past the gate - the mtime of metadata.json

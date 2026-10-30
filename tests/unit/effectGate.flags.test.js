@@ -501,7 +501,8 @@ describe('round 12, F10: reading opens and attributes', () => {
       const fd = fs.openSync(meta, 'r');
       const read = await outcome(() => fs.readSync(fd, Buffer.alloc(4), 0, 4, 0));
       fs.closeSync(fd);
-      const out = fs.openSync(other, 'r');
+      // r+: Windows refuses futimes on a descriptor opened for reading (EPERM).
+      const out = fs.openSync(other, 'r+');
       const attr = await outcome(() => { fs.fchmodSync(out, 0o644); fs.futimesSync(out, PAST, PAST); });
       fs.closeSync(out);
       return { read, attr };
