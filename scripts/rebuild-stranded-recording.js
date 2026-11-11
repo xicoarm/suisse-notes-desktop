@@ -34,13 +34,21 @@ const OUTPUT_FORMATS = {
 // logs are not needed: the build starts from the original sources only.
 const COPIED_ENTRIES = ['native-sources', 'chunks', 'system_audio.raw', 'native-capture.json', 'metadata.json', 'finalization-plan.json'];
 
-// Resolves symbolic links of the deepest existing ancestor (macOS /var -> /private/var),
+// Anything at this path, including a dangling symbolic link (existsSync says no).
+function present(file) {
+  try { fs.lstatSync(file); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+}
+
+// Resolves symbolic links of the deepest present ancestor (macOS /var -> /private/var),
 // so containment checks compare like with like even for paths not created yet.
+// A dangling link on the way fails realpath instead of being skipped.
 function realResolve(file) {
   let existing = path.resolve(file);
   const rest = [];
-  while (!fs.existsSync(existing) && path.dirname(existing) !== existing) { rest.unshift(path.basename(existing)); existing = path.dirname(existing); }
-  return path.join(fs.realpathSync(existing), ...rest);
+  while (!present(existing) && path.dirname(existing) !== existing) { rest.unshift(path.basename(existing)); existing = path.dirname(existing); }
+  try { return path.join(fs.realpathSync(existing), ...rest); } catch (error) {
+    throw new Error(`Cannot resolve ${existing} (dangling link?): ${error.message}`);
+  }
 }
 
 function within(parent, child) {
@@ -146,8 +154,12 @@ async function rebuildRecording({ input, output, expectedDurationSec, workDir = 
   const extension = path.extname(outputPath).toLowerCase();
   if (!Object.prototype.hasOwnProperty.call(OUTPUT_FORMATS, extension)) throw new Error('Output must end in .mp3, .wav or .webm');
   if (within(folder, outputPath)) throw new Error('Write the output outside the customer recording folder; it is only read');
-  if (fs.existsSync(outputPath)) throw new Error(`Output already exists: ${outputPath}`);
+  const reportPath = `${outputPath}.report.json`;
+  for (const file of [outputPath, reportPath]) if (present(file)) throw new Error(`Output already exists: ${file}`);
   if (within(folder, realResolve(workDir))) throw new Error('The work directory must be outside the recording folder');
+  // Created now, so a failure below still leaves its report beside the output.
+  await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
+  if (within(folder, fs.realpathSync(path.dirname(outputPath)))) throw new Error('Write the output outside the customer recording folder; it is only read');
 
   const binaries = resolveBinaries({ ffmpegPath, ffprobePath });
   const ffmpeg = require('fluent-ffmpeg');
@@ -199,23 +211,29 @@ async function rebuildRecording({ input, output, expectedDurationSec, workDir = 
         gapCount: item.timing?.gapCount, gapSeconds: item.timing ? item.timing.gapSamples / 48000 : undefined,
         overlapCount: item.timing?.overlapCount, resamplerFailure: item.timing?.resamplerFailure || null })) };
 
-    await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
+    // Render inside the sandbox; the exclusive copy never follows a link
+    // that appeared at the output path in the meantime.
     const options = OUTPUT_FORMATS[extension];
-    if (options) await run(ffmpeg(building).outputOptions(['-map_metadata', '-1', ...options]).output(outputPath), 45 * 60000, `Write ${extension}`);
-    else await fs.promises.copyFile(building, outputPath, fs.constants.COPYFILE_EXCL);
+    const rendered = options ? path.join(sandbox, `rebuilt${extension}`) : building;
+    if (options) await run(ffmpeg(building).outputOptions(['-map_metadata', '-1', ...options]).output(rendered), 45 * 60000, `Write ${extension}`);
+    await fs.promises.copyFile(rendered, outputPath, fs.constants.COPYFILE_EXCL);
     const duration = await new Promise((resolve, reject) => ffmpeg.ffprobe(outputPath, (error, data) => error ? reject(error) : resolve(Number(data.format.duration))));
     report.result = { path: outputPath, bytes: fs.statSync(outputPath).size, sha256: await sha256(outputPath), durationSeconds: duration };
   } catch (error) {
     report.error = { message: String(error.message), code: error.code || null };
     throw Object.assign(error, { report });
   } finally {
-    report.inputAfter = await inventory(folder);
-    report.inputUnchanged = report.inputAfter.sha256 === before.sha256;
-    if (!keepScratch && !report.error) await fs.promises.rm(sandbox, { recursive: true, force: true });
+    // Never let report bookkeeping replace the build's own error.
+    try {
+      report.inputAfter = await inventory(folder);
+      report.inputUnchanged = report.inputAfter.sha256 === before.sha256;
+    } catch (error) { report.inputUnchanged = false; report.inputCheckError = String(error.message); }
+    if (!keepScratch && !report.error) await fs.promises.rm(sandbox, { recursive: true, force: true }).catch(() => {});
     else report.scratchKept = sandbox;
-    const reportPath = `${outputPath}.report.json`;
-    if (!fs.existsSync(reportPath)) await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2));
-    report.reportPath = reportPath;
+    try {
+      await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), { flag: 'wx' });
+      report.reportPath = reportPath;
+    } catch (error) { report.reportError = String(error.message); }
   }
   if (!report.inputUnchanged) throw Object.assign(new Error('The original recording folder changed during the rebuild'), { report });
   return report;

@@ -119,5 +119,31 @@ describe('support rebuild of a stranded recording folder', () => {
     await expect(rebuildRecording({ input: folder, output: path.join(root, 'out.ogg') })).rejects.toThrow(/\.mp3, \.wav or \.webm/);
     expect(parseArguments([folder, '--out', 'x.wav', '--expected-duration', '12'])).toMatchObject({ input: folder, expectedDurationSec: 12 });
     expect(() => parseArguments([folder, '--bogus'])).toThrow(/Unsupported/);
+    if (process.platform !== 'win32') {
+      // A dangling link at the output path must not redirect a write into the folder.
+      fs.symlinkSync(path.join(folder, 'planted.mp3'), path.join(root, 'link.mp3'));
+      fs.symlinkSync(path.join(folder, 'planted.json'), path.join(root, 'real.mp3.report.json'));
+      await expect(rebuildRecording({ input: folder, output: path.join(root, 'link.mp3') })).rejects.toThrow(/dangling|already exists/);
+      await expect(rebuildRecording({ input: folder, output: path.join(root, 'real.mp3') })).rejects.toThrow(/already exists/);
+      expect(fs.existsSync(path.join(folder, 'planted.mp3')) || fs.existsSync(path.join(folder, 'planted.json'))).toBe(false);
+    }
   });
+
+  it('keeps the report and the scratch when the build fails before the output folder existed', async () => {
+    const folder = path.join(root, randomUUID()), sourceId = randomUUID();
+    await fs.promises.mkdir(folder);
+    await beginSource(folder, { sourceId, kind: 'microphone', startOffsetMs: 0, mimeType: 'audio/webm;codecs=opus', settings: { channelCount: 1 } });
+    await markSourceStarted(folder, sourceId, { startOffsetMs: 0 });
+    await saveSourceChunk(folder, sourceId, Buffer.from('not-a-recording-but-preserved-source-bytes'), 0);
+    await endSource(folder, sourceId, { endOffsetMs: 1000, chunkCount: 1, reason: 'stopped' });
+    const output = path.join(root, 'new', 'folder', 'out.mp3');
+    const error = await rebuildRecording({ input: folder, output, workDir: root }).catch(value => value);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).not.toMatch(/ENOENT/);
+    const report = JSON.parse(fs.readFileSync(`${output}.report.json`, 'utf8'));
+    expect(report.error.message).toBe(error.message);
+    expect(report.inputUnchanged).toBe(true);
+    expect(fs.existsSync(report.scratchKept)).toBe(true);
+    expect(fs.existsSync(output)).toBe(false);
+  }, 60000);
 });
