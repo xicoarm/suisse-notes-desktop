@@ -87,6 +87,17 @@ async function decoded(file) {
   const data = fs.readFileSync(raw);
   return { data, samples: data.length / 8 };
 }
+// Decodes only [from, to) of a long output; times inside are window-relative.
+async function decodedWindow(file, from, to) {
+  const raw = path.join(root, `window-${randomUUID()}.raw`);
+  await run(ffmpeg(file).audioFilters(`atrim=start_sample=${Math.round(from * 48000)}:end_sample=${Math.round(to * 48000)}`)
+    .audioCodec('pcm_f32le').audioFrequency(48000).audioChannels(2).format('f32le').output(raw));
+  const data = fs.readFileSync(raw);
+  return { data, samples: data.length / 8 };
+}
+// Six minutes without packets inside one encoder stream (sleep, stalled device).
+// The timestamp resampler would have to buffer all of it and fails (ELECTRON-7R).
+const LONG_GAP_SECONDS = 360;
 function amplitude(audio, hz, from, to, channel = 0) {
   const start = Math.round(from * 48000), end = Math.min(audio.samples, Math.round(to * 48000));
   let sine = 0, cosine = 0;
@@ -327,6 +338,59 @@ describe('native source finalization real-media custody', () => {
     if (mode === 'general') expect(amplitude(audio, 660, 2.2, 2.8)).toBeGreaterThan(0.08);
   }, 60000);
 
+  it.each(['fast', 'general'])('finalizes a clock gap too long for the timestamp resampler in the %s path, keeping speech at its time (ELECTRON-7R)', async mode => {
+    const webm = path.join(root, `${randomUUID()}.webm`);
+    await run(ffmpeg().input('sine=f=440:d=1:r=48000').inputFormat('lavfi').input('sine=f=880:d=1:r=48000').inputFormat('lavfi')
+      .complexFilter(`[0][1]concat=n=2:v=0:a=1,asetpts='if(gte(T,1),PTS+${LONG_GAP_SECONDS}/TB,PTS)'`).audioCodec('libopus').output(webm));
+    const end = (LONG_GAP_SECONDS + 2) * 1000;
+    const gapped = await source(fs.readFileSync(webm), { end });
+    if (mode === 'general') await source(await encoded(1, 660), { start: end, end: end + 1000 });
+    const result = await finalizer().build(root, path.join(root, 'audio_building.webm'));
+    expect(result.fastPathUsed).toBe(false);
+    if (mode === 'fast') expect(result.warnings).toContainEqual({ kind: 'native-source-fast-path-resample-fallback' });
+    expect(result.warnings).toContainEqual(expect.objectContaining({ kind: 'native-source-timestamp-resample-fallback', sourceId: gapped,
+      timeline: 'sample-order-restored-gaps', restoredGapCount: 1, onsetIsApproximate: true }));
+    const evidence = result.plan.sourceEvidence.find(item => item.sourceId === gapped);
+    expect(evidence.timing.resamplerFailure).toMatch(/Failed to compensate|Cannot allocate memory/);
+    expect(evidence.restoredGaps).toHaveLength(1);
+    expect(Math.abs(evidence.restoredGaps[0].silenceSamples - LONG_GAP_SECONDS * 48000)).toBeLessThan(960);
+    const expectedSamples = (LONG_GAP_SECONDS + (mode === 'fast' ? 2 : 3)) * 48000;
+    expect(Math.abs(result.plan.totalSamples - expectedSamples)).toBeLessThanOrEqual(96);
+    expect(result.plan.validation.observedDecodedSamples).toBe(result.plan.totalSamples);
+    const head = await decodedWindow(result.outputPath, 0, 2);
+    expect(amplitude(head, 440, 0.2, 0.8)).toBeGreaterThan(0.08);
+    // A collapsed timeline would put the second tone right here.
+    expect(amplitude(head, 880, 1.2, 1.8)).toBeLessThan(0.002);
+    const outage = await decodedWindow(result.outputPath, 100, 101);
+    for (const hz of [440, 880]) expect(amplitude(outage, hz, 0, 1)).toBeLessThan(0.002);
+    const resumed = await decodedWindow(result.outputPath, LONG_GAP_SECONDS, LONG_GAP_SECONDS + 3);
+    expect(amplitude(resumed, 880, 0.2, 0.9)).toBeLessThan(0.002);
+    expect(amplitude(resumed, 880, 1.1, 1.9)).toBeGreaterThan(0.08);
+    if (mode === 'general') expect(amplitude(resumed, 660, 2.2, 2.8)).toBeGreaterThan(0.08);
+    const archived = inspectNativeSources(root).find(item => item.sourceId === gapped);
+    expect(Buffer.concat(archived.chunkPaths.map(file => fs.readFileSync(file))).equals(fs.readFileSync(webm))).toBe(true);
+  }, 120000);
+
+  it('replays a source that both overlaps and exceeds the resampler buffer in plain sample order (ELECTRON-7R)', async () => {
+    const webm = path.join(root, `${randomUUID()}.webm`);
+    await run(ffmpeg().input('sine=f=440:d=1:r=48000').inputFormat('lavfi').input('sine=f=880:d=1:r=48000').inputFormat('lavfi')
+      .input('sine=f=660:d=1:r=48000').inputFormat('lavfi')
+      .complexFilter(`[0][1][2]concat=n=3:v=0:a=1,asetpts='if(gte(T,2),PTS+${LONG_GAP_SECONDS - 0.3}/TB,if(gte(T,1),PTS-0.3/TB,PTS))'`)
+      .audioCodec('libopus').output(webm));
+    const id = await source(fs.readFileSync(webm), { end: 3000 });
+    const result = await finalizer().build(root, path.join(root, 'audio_building.webm'));
+    expect(result.warnings).toContainEqual({ kind: 'native-source-fast-path-resample-fallback' });
+    expect(result.warnings).toContainEqual(expect.objectContaining({ kind: 'native-source-timestamp-overlap', sourceId: id, timeline: 'sample-order' }));
+    expect(result.warnings).toContainEqual(expect.objectContaining({ kind: 'native-source-timestamp-resample-fallback', sourceId: id,
+      timeline: 'sample-order', restoredGapCount: 0, onsetIsApproximate: true }));
+    const audio = await decoded(result.outputPath);
+    expect(audio.samples).toBeGreaterThanOrEqual(144000);
+    expect(audio.samples).toBeLessThan(150000);
+    expect(amplitude(audio, 440, 0.2, 0.8)).toBeGreaterThan(0.08);
+    expect(amplitude(audio, 880, 1.05, 1.9)).toBeGreaterThan(0.08);
+    expect(amplitude(audio, 660, 2.2, 2.8)).toBeGreaterThan(0.08);
+  }, 120000);
+
   it('includes active-time AudioTee PCM once and rejects simultaneous native system copies', async () => {
     await source(await encoded(1, 440), { end: 1000 });
     await fs.promises.writeFile(path.join(root, 'system_audio.raw'), wave(1, 660).subarray(44));
@@ -468,6 +532,20 @@ describe('native timeline policy', () => {
     expect(result.firstPts).toBe(origin);
     evidence.consume('[aresample] Failed to compensate for timestamp delta of 3600');
     expect(evidence.result().resamplerFailure).toContain('Failed to compensate');
+  });
+
+  it('records where long gaps sit in sample order and stops after a bounded number (ELECTRON-7R)', () => {
+    const evidence = createTimestampEvidence();
+    const frame = (index, pts) => evidence.consume(`[Parsed_ashowinfo_1] n:${index} pts:${pts} pts_time:0 rate:48000 nb_samples:960`);
+    let pts = 312;
+    frame(0, pts);
+    pts += 960 + 200 * 48000; frame(1, pts); // 200-s outage: restorable
+    pts += 960 + 4800; frame(2, pts); // 0.1-s gap: closes in sample order
+    expect(evidence.restorableGaps()).toEqual({ gaps: [{ decodedSamples: 960, timelineSample: 960 + 200 * 48000 }], overflow: false });
+    expect(evidence.result()).toMatchObject({ gapCount: 2, decodedSamples: 2880 });
+    for (let index = 3; index < 67; index++) { pts += 960 + 48000; frame(index, pts); }
+    expect(evidence.restorableGaps().gaps).toHaveLength(64);
+    expect(evidence.restorableGaps().overflow).toBe(true);
   });
 
   it('rejects ambiguous pause overlap while preserving an interrupted predecessor with no surviving successor', () => {

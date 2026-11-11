@@ -46,8 +46,18 @@ exceeded the nominal bitrate enough to threaten the five-hour upload-size budget
 the bounded policy still needs a real long upload against the deployed backend.
 
 Start-call offsets do not establish exact first-sample alignment. Pause overlap
-above 2 ms currently blocks with originals retained. Large internal timestamp
-gaps may exceed the bounded allocation policy and require further recovery work.
+above 2 ms currently blocks with originals retained. A large internal timestamp
+gap (about three minutes of stereo audio and more) exceeds the bounded
+allocation policy: the timestamp resampler must buffer the whole gap, fails its
+compensation, and earlier builds then refused the meeting (ELECTRON-7R). That
+source is now replayed in sample order (its decoded frame count must match), and,
+unless it also overlaps, every gap of at least one second returns as streamed
+silence at its timestamp (`native-source-timestamp-resample-fallback`, timeline
+`sample-order-restored-gaps`); shorter gaps close, so onsets stay approximate.
+With overlap, or more than 64 such gaps, the source plays in plain sample order.
+`scripts/rebuild-stranded-recording.js <copied-recording-folder>` runs the same
+finalization on a copy of a folder that a customer sent and writes one
+MP3/WAV/WebM plus a JSON report; the folder itself is only read.
 
 Hosted runners add a source-side artifact: Chromium's fake microphone
 (`FakeAudioWorker`) skips late 10 ms buffers instead of replaying them while
