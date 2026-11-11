@@ -664,6 +664,166 @@ function updateUploadQueueRetry(recordId) {
 // Recover recordings that were interrupted by app crash
 let isRecoveryRunning = false;
 
+// Never resurrect a recording the user finished with or explicitly dismissed.
+// Terminal states include upload success AND user intent (skipped/cancelled):
+// flipping those to 'pending' would re-upload a recording the user chose not to send.
+const RECOVERY_TERMINAL_STATUSES = ['completed', 'uploaded', 'skipped', 'cancelled', 'pending_verification'];
+
+// Puts a freshly finalized recovery into history with "pending" upload status.
+// Startup recovery and the history action "Restore and upload" share this, so
+// both upload into the account in metadata.json / history (the recording's owner).
+// Returns what to enqueue and what to announce; either may be null.
+function adoptRecoveredRecording(dir, result, activeSession = null) {
+  const dirPath = getRecordingPath(dir);
+  // Add/update the history entry with the recovered file + "pending"
+  // upload status. Read metadata.json for userId/startedAt/duration —
+  // this runs for BOTH the new-entry and existing-entry paths.
+  const recordings = historyStore.get('recordings', []);
+  const existingIndex = recordings.findIndex(r => r.id === dir);
+
+  let metadataUserId = null;
+  let metadataStartedAt = null;
+  let metadataDuration = 0;
+  const metadataPath = path.join(dirPath, 'metadata.json');
+  if (fs.existsSync(metadataPath)) {
+    try {
+      const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+      metadataUserId = metadata.userId;
+      metadataStartedAt = metadata.startedAt;
+      metadataDuration = metadata.duration || 0;
+      log.info(`Read metadata.json for ${dir}: userId=${metadataUserId}, startedAt=${metadataStartedAt}`);
+    } catch (e) {
+      log.warn(`Could not read metadata.json for ${dir}:`, e.message);
+    }
+  }
+
+  const recoveredFileSize = result.fileSize || parseFloat(result.fileSizeMb) * 1024 * 1024;
+  metadataDuration = result.duration || metadataDuration;
+
+  if (existingIndex === -1) {
+    // No history entry yet — create one for the recovered recording.
+    const matchingActive = activeSession?.recordId === dir ? activeSession : null;
+    const userId = metadataUserId || matchingActive?.userId || 'unknown';
+    const createdAt = metadataStartedAt || matchingActive?.startedAt || new Date().toISOString();
+    recordings.push(withCaptureWarnings({
+      id: dir,
+      userId,
+      createdAt,
+      duration: metadataDuration,
+      fileSize: recoveredFileSize,
+      filePath: result.outputPath,
+      uploadStatus: 'pending',
+      storagePreference: 'keep',
+      recovered: true
+    }, getRecordingsPath()));
+    historyStore.set('recordings', recordings);
+    log.info(`Added recovered recording to history: ${dir} (userId: ${userId})`);
+    return { upload: { recordId: dir, filePath: result.outputPath, metadata: { duration: String(metadataDuration || 0) } },
+      record: { id: dir, createdAt, durationSeconds: metadataDuration || 0 } };
+  }
+  // A history entry already EXISTS — it was created at record-start and
+  // is stuck at uploadStatus:'recording' with an empty filePath because
+  // the app died mid-recording (crash, power loss, forced sleep), or it is
+  // 'failed' because saving failed (ELECTRON-7R). The old code skipped this
+  // case entirely, stranding the recovered audio on disk: valid file, but
+  // invisible to the user and never uploaded. (Found via a real power-loss
+  // during the 5h endurance test.) Update it in place so the recovered file
+  // becomes visible and gets uploaded. Never clobber a terminal upload status.
+  const existing = recordings[existingIndex];
+  const terminal = RECOVERY_TERMINAL_STATUSES.includes(existing.uploadStatus);
+  recordings[existingIndex] = withCaptureWarnings({
+    ...repairRecoveredHistoryRecord(existing, { ...result, fileSize: recoveredFileSize, duration: metadataDuration }),
+    uploadStatus: terminal ? existing.uploadStatus : 'pending',
+    // A failure of the old attempt must not latch the new file's upload.
+    ...(terminal ? {} : { uploadError: null, uploadTerminal: null, retryCount: 0 }),
+    recovered: true
+  }, getRecordingsPath());
+  historyStore.set('recordings', recordings);
+  log.info(`Updated recovered recording history: ${dir} (status ${existing.uploadStatus} -> ${recordings[existingIndex].uploadStatus}, canonical filePath repaired)`);
+  if (terminal) return { upload: null, record: null };
+  const finalRec = recordings[existingIndex];
+  return { upload: { recordId: dir, filePath: finalRec.filePath, metadata: { duration: String(finalRec.duration || 0), ...(finalRec.prep || {}) } },
+    record: { id: dir, createdAt: finalRec.createdAt, durationSeconds: finalRec.duration || 0 } };
+}
+
+// Saving failed and the originals are retained. An unfinished history entry
+// becomes 'failed' with the reason, which offers "Restore and upload" there.
+function markRecoveryFailed(dir, reason) {
+  try {
+    const recordings = historyStore.get('recordings', []);
+    const index = recordings.findIndex(r => r.id === dir);
+    if (index === -1) return;
+    const existing = recordings[index];
+    if (!['recording', 'processing', 'stopped', 'pending', 'failed'].includes(existing.uploadStatus) ||
+        existing.source === 'device' || (existing.filePath && fs.existsSync(existing.filePath))) return;
+    recordings[index] = { ...existing, uploadStatus: 'failed', filePath: null,
+      uploadError: String(reason || 'Saving the recording failed; original audio is retained').slice(0, 500) };
+    historyStore.set('recordings', recordings);
+  } catch (e) {
+    log.warn(`Could not mark recovery failure for ${dir}:`, e.message);
+  }
+}
+
+// Kept originals: chunks, sessions, batches, native sources or system PCM.
+function hasRetainedSourceAudio(dirPath) {
+  const chunksPath = path.join(dirPath, 'chunks');
+  const pcmPath = path.join(dirPath, 'system_audio.raw');
+  return (fs.existsSync(chunksPath) && fs.readdirSync(chunksPath).some(name => name.startsWith('chunk_'))) ||
+    listSessions(dirPath).length > 0 || listChunkBatches(dirPath).length > 0 || usesNativeSources(dirPath) ||
+    (fs.existsSync(pcmPath) && fs.statSync(pcmPath).size > 0);
+}
+
+// Why a recovered recording's upload is held, or null when its owner is the
+// signed-in account. The owner always comes from history / metadata.json
+// (recordingOwner), never from whoever is signed in; the queue and every upload
+// path apply the same canUploadForUser gate.
+function heldUploadReason(ownerId, currentUserId) {
+  if (!ownerId || ownerId === 'unknown') return 'owner-unknown';
+  if (!currentUserId) return 'signed-out';
+  return canUploadForUser(ownerId, currentUserId) ? null : 'other-account';
+}
+
+// History action "Restore and upload" (ELECTRON-7R): the user rebuilds a
+// recording whose saving failed from the originals kept on this computer,
+// with the same pipeline as startup recovery, and it is queued for upload into
+// its owner's account. Only that owner, signed in here, may start it; the
+// renderer supplies no identity. Originals stay untouched whatever happens.
+async function restoreRetainedRecording(recordId) {
+  const dirPath = getRecordingPath(recordId);
+  if (!fs.existsSync(dirPath) || !hasRetainedSourceAudio(dirPath)) {
+    return { success: false, code: 'NO_RETAINED_AUDIO', error: 'No original audio is kept for this recording on this computer' };
+  }
+  const held = heldUploadReason(recordingOwner(recordId), tokenUserId(await getAuthToken()));
+  if (held === 'owner-unknown') return { success: false, code: 'OWNER_UNKNOWN', error: 'The account of this recording is unknown; it stays on this computer' };
+  if (held === 'signed-out') return { success: false, code: 'SIGNED_OUT', error: 'Sign in to the account this recording belongs to' };
+  if (held) return { success: false, code: 'NOT_OWNER', error: 'This recording belongs to another account' };
+  if (isRecoveryRunning || unsavedRecordingId === recordId || (isRecordingInProgress && getActiveRecording()?.recordId === recordId)) {
+    return { success: false, code: 'BUSY', error: 'The recording is still being saved' };
+  }
+  const result = await combineChunksForRecovery(recordId);
+  if (!result?.success) {
+    log.warn(`Restore of ${recordId} failed; originals retained: ${result?.error}`);
+    markRecoveryFailed(recordId, result?.error);
+    return { success: false, code: result?.code || null, diskFull: result?.diskFull === true,
+      error: result?.error || 'Saving the recording failed; original audio is retained' };
+  }
+  const adopted = adoptRecoveredRecording(recordId, result, getActiveRecording());
+  if (adopted.upload) {
+    addToUploadQueue(adopted.upload.recordId, adopted.upload.filePath, adopted.upload.metadata);
+    processPendingUploads().catch(err => log.error('restore: upload processing failed:', err));
+  }
+  log.info(`Restored ${recordId} from retained originals (${result.fileSizeMb}MB); upload queued: ${!!adopted.upload}`);
+  return { success: true, queued: !!adopted.upload, filePath: result.outputPath, duration: result.duration };
+}
+
+ipcMain.handle('recording:restoreRetained', async (event, recordId) => {
+  try {
+    return await restoreRetainedRecording(validateRecordId(recordId));
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 async function recoverOrphanedRecordings() {
   if (isRecoveryRunning) {
     log.warn('Recovery already in progress, skipping');
@@ -785,83 +945,12 @@ async function recoverOrphanedRecordings() {
         if (result.success) {
           recoveredCount++;
           log.info(`Successfully recovered recording: ${dir} (${result.fileSizeMb}MB)`);
-
-          // Add/update the history entry with the recovered file + "pending"
-          // upload status. Read metadata.json for userId/startedAt/duration —
-          // this runs for BOTH the new-entry and existing-entry paths.
-          const recordings = historyStore.get('recordings', []);
-          const existingIndex = recordings.findIndex(r => r.id === dir);
-
-          let metadataUserId = null;
-          let metadataStartedAt = null;
-          let metadataDuration = 0;
-          const metadataPath = path.join(dirPath, 'metadata.json');
-          if (fs.existsSync(metadataPath)) {
-            try {
-              const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
-              metadataUserId = metadata.userId;
-              metadataStartedAt = metadata.startedAt;
-              metadataDuration = metadata.duration || 0;
-              log.info(`Read metadata.json for ${dir}: userId=${metadataUserId}, startedAt=${metadataStartedAt}`);
-            } catch (e) {
-              log.warn(`Could not read metadata.json for ${dir}:`, e.message);
-            }
-          }
-
-          const recoveredFileSize = result.fileSize || parseFloat(result.fileSizeMb) * 1024 * 1024;
-          metadataDuration = result.duration || metadataDuration;
-
-          if (existingIndex === -1) {
-            // No history entry yet — create one for the recovered recording.
-            const matchingActive = activeSession?.recordId === dir ? activeSession : null;
-            const userId = metadataUserId || matchingActive?.userId || 'unknown';
-            const createdAt = metadataStartedAt || matchingActive?.startedAt || new Date().toISOString();
-            recordings.push(withCaptureWarnings({
-              id: dir,
-              userId,
-              createdAt,
-              duration: metadataDuration,
-              fileSize: recoveredFileSize,
-              filePath: result.outputPath,
-              uploadStatus: 'pending',
-              storagePreference: 'keep',
-              recovered: true
-            }, getRecordingsPath()));
-            historyStore.set('recordings', recordings);
-            log.info(`Added recovered recording to history: ${dir} (userId: ${userId})`);
-            recoveredForUpload.push({ recordId: dir, filePath: result.outputPath, metadata: { duration: String(metadataDuration || 0) } });
-            recoveredRecords.push({ id: dir, createdAt, durationSeconds: metadataDuration || 0 });
-          } else {
-            // A history entry already EXISTS — it was created at record-start and
-            // is stuck at uploadStatus:'recording' with an empty filePath because
-            // the app died mid-recording (crash, power loss, forced sleep). The
-            // old code skipped this case entirely, stranding the recovered audio
-            // on disk: valid file, but invisible to the user and never uploaded.
-            // (Found via a real power-loss during the 5h endurance test.) Update
-            // it in place so the recovered file becomes visible and gets uploaded.
-            // Never clobber an already-terminal upload status.
-            const existing = recordings[existingIndex];
-            // Never resurrect a recording the user finished with or explicitly
-            // dismissed. Terminal states include upload success AND user intent
-            // (skipped/cancelled) — flipping those to 'pending' would re-upload a
-            // recording the user chose not to send.
-            const TERMINAL_STATUSES = ['completed', 'uploaded', 'skipped', 'cancelled', 'pending_verification'];
-            const terminal = TERMINAL_STATUSES.includes(existing.uploadStatus);
-            recordings[existingIndex] = withCaptureWarnings({
-              ...repairRecoveredHistoryRecord(existing, { ...result, fileSize: recoveredFileSize, duration: metadataDuration }),
-              uploadStatus: terminal ? existing.uploadStatus : 'pending',
-              recovered: true
-            }, getRecordingsPath());
-            historyStore.set('recordings', recordings);
-            log.info(`Updated recovered recording history: ${dir} (status ${existing.uploadStatus} -> ${recordings[existingIndex].uploadStatus}, canonical filePath repaired)`);
-            if (!terminal) {
-              const finalRec = recordings[existingIndex];
-              recoveredForUpload.push({ recordId: dir, filePath: finalRec.filePath, metadata: { duration: String(finalRec.duration || 0), ...(finalRec.prep || {}) } });
-              recoveredRecords.push({ id: dir, createdAt: finalRec.createdAt, durationSeconds: finalRec.duration || 0 });
-            }
-          }
+          const adopted = adoptRecoveredRecording(dir, result, activeSession);
+          if (adopted.upload) recoveredForUpload.push(adopted.upload);
+          if (adopted.record) recoveredRecords.push(adopted.record);
         } else {
           log.warn(`Could not recover recording ${dir}: ${result.error}`);
+          markRecoveryFailed(dir, result.error);
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('system:capture-warning', { kind: 'recovery-failed', recordId: dir });
           }
@@ -904,6 +993,18 @@ async function recoverOrphanedRecordings() {
       for (const u of recoveredForUpload) {
         try { addToUploadQueue(u.recordId, u.filePath, u.metadata); } catch (e) { log.warn('recovery: enqueue failed:', e.message); }
       }
+      // The queue holds an upload until its owner is signed in here. Say so
+      // when another account is signed in or the owner is unknown, instead of
+      // leaving the user waiting for an upload that will never start for them.
+      try {
+        const currentUserId = tokenUserId(await getAuthToken());
+        const held = [...new Set(recoveredForUpload.map(u => heldUploadReason(recordingOwner(u.recordId), currentUserId)))]
+          .filter(reason => reason === 'other-account' || reason === 'owner-unknown');
+        for (const reason of held) {
+          log.warn(`recovery: upload held (${reason}); recording stays on this computer`);
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('system:capture-warning', { kind: 'recovered-upload-held', reason });
+        }
+      } catch (e) { log.warn('recovery: owner check for notice failed:', e.message); }
 
       // Give the user clear feedback and refresh the (now-stale) renderer history.
       // Count only recordings that actually came back to the user; a history

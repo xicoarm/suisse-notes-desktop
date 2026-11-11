@@ -133,6 +133,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
         finalizationTimeoutMs(expectedDurationSec),
         'Combine chunks'
       ),
+    // History "Restore and upload": rebuild a recording whose saving failed from
+    // the originals kept on this computer, then queue it for the owner's account.
+    // Main decides who is signed in; the renderer supplies no identity. The
+    // duration is unknown here, so allow the longest finalization.
+    restoreRetained: (id) =>
+      withTimeout(
+        ipcRenderer.invoke('recording:restoreRetained', id),
+        finalizationTimeoutMs(4 * 3600),
+        'Restore recording'
+      ),
     isRecoveryRunning: () => ipcRenderer.invoke('recording:isRecoveryRunning'),
     checkForChunks: (id, ext) =>
       withTimeout(

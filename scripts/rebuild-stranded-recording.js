@@ -1,9 +1,14 @@
 #!/usr/bin/env node
 'use strict';
 
-// Support tool: rebuild ONE audio file from a recording folder that a customer
-// copied off their machine (recordings/<id> in the app's user-data directory),
-// when the app could not finalize it (for example ELECTRON-7R, "timestamp
+// INTERNAL fallback for engineering only, never the customer path. Customers
+// recover a recording themselves in the app: startup recovery retries it, and
+// History offers "Restore and upload" for a failed recording whose originals
+// are kept. Never ask a customer to send their recording folder.
+//
+// Rebuilds ONE audio file from a copy of a recording folder (recordings/<id>
+// in the app's user-data directory), e.g. a test machine's folder when
+// diagnosing a finalization failure such as ELECTRON-7R ("timestamp
 // compensation failed"). It runs the app's own native finalization, including its
 // sample-order fallbacks, on a COPY in a temporary sandbox. The folder you pass
 // is only read; its files are hashed before and after to prove that.

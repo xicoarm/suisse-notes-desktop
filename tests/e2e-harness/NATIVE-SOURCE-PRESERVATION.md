@@ -55,9 +55,14 @@ unless it also overlaps, every gap of at least one second returns as streamed
 silence at its timestamp (`native-source-timestamp-resample-fallback`, timeline
 `sample-order-restored-gaps`); shorter gaps close, so onsets stay approximate.
 With overlap, or more than 64 such gaps, the source plays in plain sample order.
-`scripts/rebuild-stranded-recording.js <copied-recording-folder>` runs the same
-finalization on a copy of a folder that a customer sent and writes one
-MP3/WAV/WebM plus a JSON report; the folder itself is only read.
+A recording whose saving failed keeps its originals: startup recovery retries
+it, and History offers "Restore and upload" on a failed entry with retained
+originals, which re-runs this finalization and queues the upload into the
+owner's account. A startup failure marks an unfinished entry `failed` with the
+reason so that action appears. Customers never send recording folders.
+`scripts/rebuild-stranded-recording.js <recording-folder-copy>` is an internal
+engineering fallback only: the same finalization on a copy, one MP3/WAV/WebM
+plus a JSON report; the folder itself is only read.
 
 Hosted runners add a source-side artifact: Chromium's fake microphone
 (`FakeAudioWorker`) skips late 10 ms buffers instead of replaying them while
