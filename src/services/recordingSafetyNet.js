@@ -146,6 +146,14 @@ function handleCaptureWarning(data) {
       icon: 'warning', timeout: 0,
       actions: [{ label: t('ok', 'OK'), color: 'white' }]
     });
+  } else if (data.kind === 'recovered-upload-held') {
+    // A recovered recording uploads only into its owner's account (ELECTRON-7R).
+    Notify.create({
+      type: 'warning',
+      message: t(data.reason === 'owner-unknown' ? 'recoveredUploadHeldOwnerUnknown' : 'recoveredUploadHeldOtherAccount'),
+      icon: 'lock', timeout: 0,
+      actions: [{ label: t('ok', 'OK'), color: 'white' }]
+    });
   } else if (data.kind === 'ffmpeg-missing') {
     Notify.create({
       type: 'warning',

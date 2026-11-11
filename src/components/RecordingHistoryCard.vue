@@ -229,6 +229,24 @@
           <q-tooltip>{{ $t('resyncFromDevice') }}</q-tooltip>
         </q-btn>
 
+        <!-- Saving failed but the originals are kept on this computer: rebuild
+             them and upload into the owner's account (ELECTRON-7R). -->
+        <q-btn
+          v-else-if="recording.uploadStatus === 'failed' && !recording.filePath && recording.source !== 'device' && retainedAudio"
+          flat
+          dense
+          no-caps
+          icon="restore"
+          color="warning"
+          size="sm"
+          :label="$t('restoreAndUpload')"
+          :loading="restoring"
+          data-test="restore-and-upload"
+          @click="onRestore"
+        >
+          <q-tooltip>{{ $t('restoreAndUploadTooltip') }}</q-tooltip>
+        </q-btn>
+
         <!-- Failed without file (non-device): pick a new file and reupload -->
         <q-btn
           v-else-if="recording.uploadStatus === 'failed' && !recording.filePath && recording.source !== 'device'"
@@ -381,7 +399,7 @@
 </template>
 
 <script>
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useQuasar } from 'quasar';
 import { useRecordingsHistoryStore } from '../stores/recordings-history';
@@ -427,6 +445,54 @@ export default {
     const isDesktop = isElectron();
     const hasCaptureWarnings = computed(() => isDesktop &&
       [...(Array.isArray(props.recording.captureWarnings) ? props.recording.captureWarnings : []), ...recoveredCaptureWarnings.value].some(kind => typeof kind === 'string' && kind.trim()));
+
+    // A failed recording without an audio file may still have its originals on
+    // this computer (saving failed, ELECTRON-7R). Then the user restores it
+    // here instead of picking a file or sending anything to support.
+    const retainedAudio = ref(false);
+    const restoring = ref(false);
+    const checkRetainedAudio = async () => {
+      const recording = props.recording;
+      if (!isDesktop || recording.uploadStatus !== 'failed' || recording.filePath || recording.source === 'device') {
+        retainedAudio.value = false;
+        return;
+      }
+      try {
+        retainedAudio.value = !!(await window.electronAPI.recording.checkForChunks(recording.id, '.webm'))?.hasChunks;
+      } catch (_) {
+        retainedAudio.value = false; // the file picker stays available
+      }
+    };
+    watch(() => [props.recording.id, props.recording.uploadStatus, props.recording.filePath], checkRetainedAudio, { immediate: true });
+
+    // Refusals the user can act on get their own text; anything else shows the reason.
+    const RESTORE_REFUSALS = { BUSY: 'restoreAndUploadBusy', NOT_OWNER: 'restoreAndUploadOtherAccount',
+      SIGNED_OUT: 'restoreAndUploadSignIn', OWNER_UNKNOWN: 'restoreAndUploadOwnerUnknown' };
+    const onRestore = async () => {
+      if (restoring.value) return;
+      restoring.value = true;
+      try {
+        // Main checks that the signed-in account owns the recording.
+        const res = await window.electronAPI.recording.restoreRetained(props.recording.id);
+        if (res?.success) {
+          $q.notify({ type: 'positive', icon: 'restore', message: t('restoreAndUploadStarted') });
+        } else {
+          captureMessage(`history: restore failed code=${res?.code || 'none'} reason=${String(res?.error || 'unknown').slice(0, 200)}`, 'warning');
+          const refusal = RESTORE_REFUSALS[res?.code];
+          $q.notify({ type: 'negative', icon: 'warning', message: t(refusal || 'restoreAndUploadFailed'),
+            caption: refusal ? undefined : String(res?.error || '').slice(0, 200),
+            timeout: 0, actions: [{ label: t('ok', 'OK'), color: 'white' }] });
+        }
+      } catch (e) {
+        captureMessage(`history: restore threw — ${e?.name}: ${e?.message}`, 'error');
+        $q.notify({ type: 'negative', icon: 'warning', message: t('restoreAndUploadFailed'), caption: e?.message,
+          timeout: 0, actions: [{ label: t('ok', 'OK'), color: 'white' }] });
+      } finally {
+        restoring.value = false;
+        try { await historyStore.loadRecordings({ background: true }); } catch (_) { /* the list refreshes on the next load */ }
+        await checkRetainedAudio();
+      }
+    };
 
     // A known server ID enables the online actions. It is not proof that the
     // remote audio remains recoverable, so desktop deletion never selects the
@@ -606,6 +672,9 @@ export default {
       onExport,
       isDesktop,
       hasCaptureWarnings,
+      retainedAudio,
+      restoring,
+      onRestore,
       onDelete,
       confirmDelete
     };

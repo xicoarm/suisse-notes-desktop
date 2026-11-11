@@ -26,9 +26,20 @@ function silentFrameWav() {
 }
 const TIMING_TOLERANCE_SAMPLES = 96; // 2 ms: native WebM timestamps have millisecond precision.
 const MAX_DURATION_SECONDS = 31 * 24 * 60 * 60;
+// The timestamp resampler buffers an entire forward clock gap before it drains
+// it. Under -max_alloc 64 MiB that fails from about three minutes of stereo
+// audio (ELECTRON-7R). Its sample-order fallback re-inserts gaps of at least
+// one second as streamed silence; shorter ones close. Bounded evidence only.
+const RESTORE_GAP_MIN_SAMPLES = RATE;
+const MAX_RESTORED_GAPS = 64;
 
 function failure(message, code = 'NATIVE_FINALIZATION_INVALID') {
   return Object.assign(new Error(`${message}; original native audio is retained`), { code });
+}
+
+// FFmpeg concat lists use shell-like single-quote escaping, also on Windows.
+function concatList(files) {
+  return files.map(file => "file '" + file.replace(/\\/g, '/').replace(/'/g, "'\\''") + "'").join('\n');
 }
 
 function samples(seconds) {
@@ -40,7 +51,8 @@ function samples(seconds) {
 // ashowinfo's pts_time display losing precision during a five-hour meeting.
 // Only counters and a bounded set of examples are retained, never a frame log.
 function createTimestampEvidence() {
-  let previousEnd = null;
+  let previousEnd = null, restorableOverflow = false;
+  const restorable = [];
   const result = { frames: 0, firstPts: null, lastEndPts: null, decodedSamples: 0,
     gapCount: 0, gapSamples: 0, overlapCount: 0, overlapSamples: 0, resamplerFailure: null, examples: [] };
   return {
@@ -63,6 +75,12 @@ function createTimestampEvidence() {
           result[`${kind}Count`]++;
           result[`${kind}Samples`] += Math.abs(difference);
           if (result.examples.length < 100) result.examples.push({ kind, beforePts: previousEnd, afterPts: timestamp, samples: difference });
+          // Where this frame lands in a sample-order replay, and where its
+          // timestamp places it. Every decoded sample before it precedes it.
+          if (difference >= RESTORE_GAP_MIN_SAMPLES) {
+            if (restorable.length < MAX_RESTORED_GAPS) restorable.push({ decodedSamples: result.decodedSamples, timelineSample: timestamp - result.firstPts });
+            else restorableOverflow = true;
+          }
         }
       }
       result.frames++;
@@ -72,6 +90,7 @@ function createTimestampEvidence() {
       result.decodedSamples += duration;
     },
     result() { return { ...result, examples: result.examples.map(value => ({ ...value })) }; },
+    restorableGaps() { return { gaps: restorable.map(value => ({ ...value })), overflow: restorableOverflow }; },
   };
 }
 
@@ -239,6 +258,49 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
     // https://github.com/FFmpeg/FFmpeg/blob/e64a1d2953/libswresample/options.c
     const resample = 'aresample=48000:clev=1:async=1:first_pts=0:min_hard_comp=0.002:max_soft_comp=0';
     const rendered = path.join(scratchDirectory, 'rendered.webm');
+    const sourceTimeout = source => timeout(Math.max(options.expectedDurationSec || 0, (source.endOffsetMs || 0) / 1000));
+    let silenceInput = null;
+    async function renderSilence(segmentPath, count) {
+      if (!silenceInput) {
+        silenceInput = path.join(scratchDirectory, 'silence-frame.wav');
+        await writeFileAtomic(silenceInput, silentFrameWav());
+      }
+      await run(lossless(input(silenceInput).audioFilters(`apad=whole_len=${count},atrim=end_sample=${count},asetpts=PTS-STARTPTS`))
+        .output(segmentPath), timeout(count / RATE), 'Build native timeline segment');
+      if (Math.abs(samples(await validDuration(segmentPath, 'flac')) - count) > 1) throw failure('Native timeline segment has an incorrect length');
+    }
+    // ELECTRON-7R: ONE decode writes every audio piece between restored gaps.
+    // Separate outputs drain their split branches together, so no filter has
+    // to hold a gap; the concat demuxer then streams silence between pieces.
+    async function replayRestoringGaps(source, rawPath, normalizedPath, filters, gaps, evidence) {
+      const pieces = [...gaps.map((gap, index) => ({ start: index ? gaps[index - 1].atSample : 0, end: gap.atSample })),
+        { start: gaps[gaps.length - 1].atSample, end: null }];
+      const graph = [`[0:a]${filters.join(',')},asplit=${pieces.length}${pieces.map((_, index) => `[split${index}]`).join('')}`,
+        ...pieces.map((piece, index) => `[split${index}]atrim=start_sample=${piece.start}${piece.end === null ? '' : `:end_sample=${piece.end}`},asetpts=PTS-STARTPTS[piece${index}]`)];
+      const piecePaths = pieces.map((_, index) => path.join(scratchDirectory, `${source.sourceId}-piece-${index}.flac`));
+      // Only the refused timestamp render is replaced here; source chunks stay untouched.
+      await fs.promises.rm(normalizedPath, { force: true });
+      let command = input(rawPath).complexFilter(graph).on('stderr', line => evidence.consume(line));
+      for (const [index, piecePath] of piecePaths.entries()) command = lossless(command.output(piecePath)).outputOptions(['-map', `[piece${index}]`]);
+      await run(command, sourceTimeout(source), 'Replay native source in sample order');
+      const decodedSamples = evidence.result().decodedSamples;
+      const files = [];
+      for (const [index, piecePath] of piecePaths.entries()) {
+        const expected = (pieces[index].end === null ? decodedSamples : pieces[index].end) - pieces[index].start;
+        if (Math.abs(samples(await validDuration(piecePath, 'flac')) - expected) > 1) throw failure(`Native source ${source.sourceId} sample-order piece has an incorrect length`);
+        files.push(piecePath);
+        if (index < gaps.length) {
+          const silencePath = path.join(scratchDirectory, `${source.sourceId}-gap-${index}.flac`);
+          await renderSilence(silencePath, gaps[index].silenceSamples);
+          files.push(silencePath);
+        }
+      }
+      const listPath = path.join(scratchDirectory, `${source.sourceId}-restored-concat.txt`);
+      await writeFileAtomic(listPath, concatList(files));
+      const restoredSeconds = (decodedSamples + gaps.reduce((sum, gap) => sum + gap.silenceSamples, 0)) / RATE;
+      await run(lossless(input(listPath).inputOptions(['-f', 'concat', '-safe', '0'])).output(normalizedPath),
+        timeout(Math.max(restoredSeconds, options.expectedDurationSec || 0, (source.endOffsetMs || 0) / 1000)), 'Restore native source gaps');
+    }
     async function finish(candidate, plan, totalSamples, fastPathUsed) {
       Object.assign(plan, { version: 1, sampleRate: RATE, channels: CHANNELS, totalSamples, recovery: !!options.recovery,
         sourceIds: usable.map(source => source.sourceId), systemPcmIncluded: hasPcm, fastPathUsed,
@@ -323,11 +385,14 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
           }).output(candidate);
         await run(command, timeout(Math.max(targetSamples / RATE, sourceBytes / 8000)), 'Encode native recording directly');
         const fastWarnings = [...warnings], fastEvidence = [];
-        let observedEnd = 0, overlapped = false;
+        let observedEnd = 0, overlapped = false, resampleFailed = false;
         for (const lane of lanes) {
           const timing = lane.evidence.result();
           if (!timing.frames) throw failure('Native source has no decoded frame evidence');
-          if (timing.resamplerFailure) throw failure('Native timestamp compensation failed', 'NATIVE_SOURCE_TIMESTAMP_RESAMPLE_FAILED');
+          // A failed compensation leaves this render on a wrong timeline
+          // (ELECTRON-7R). Re-render per source below, which replays the
+          // affected source in sample order instead of stranding the meeting.
+          if (timing.resamplerFailure) resampleFailed = true;
           // The resampler would drop overlapped samples. Re-render per source
           // below, where overlap switches that source to a sample-count timeline.
           if (timing.overlapCount) overlapped = true;
@@ -343,13 +408,15 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
         // With two lanes, an unexpected tail beyond the common padded end can
         // change old amix's normalization. Preserve it through general planning
         // instead of trimming it or publishing an end-of-stream gain change.
-        if (!overlapped && (lanes.length === 1 || observedEnd <= targetSamples)) {
+        if (!overlapped && !resampleFailed && (lanes.length === 1 || observedEnd <= targetSamples)) {
           return await finish(candidate, { sourceEvidence: fastEvidence, lanes: lanes.map(lane => ({ kind: lane.kind,
             startSample: lane.startSample, mediaEndSample: lane.endSample })), warnings: fastWarnings }, Math.max(targetSamples, observedEnd), true);
         }
-        warnings.push(overlapped
-          ? { kind: 'native-source-fast-path-overlap-fallback' }
-          : { kind: 'native-source-fast-path-tail-fallback', observedEndSeconds: observedEnd / RATE, plannedEndSeconds: targetSamples / RATE });
+        warnings.push(resampleFailed
+          ? { kind: 'native-source-fast-path-resample-fallback' }
+          : overlapped
+            ? { kind: 'native-source-fast-path-overlap-fallback' }
+            : { kind: 'native-source-fast-path-tail-fallback', observedEndSeconds: observedEnd / RATE, plannedEndSeconds: targetSamples / RATE });
         await checkSpace(estimateScratchBytes({ sourceBytes, timelineSeconds: observedEnd / RATE,
           sourceSeconds: fastEvidence.reduce((sum, source) => sum + source.decodedDuration, 0) + (hasPcm ? pcm.duration : 0), lanes: estimatedLanes }));
       }
@@ -362,7 +429,7 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
         // before any output can replace the requested building file.
         // https://ffmpeg.org/ffmpeg-resampler.html
         const normalize = (filters, onStderr) => run(lossless(input(rawPath).audioFilters(filters))
-          .on('stderr', onStderr).output(normalizedPath), timeout(Math.max(options.expectedDurationSec || 0, (source.endOffsetMs || 0) / 1000)), 'Normalize native source');
+          .on('stderr', onStderr).output(normalizedPath), sourceTimeout(source), 'Normalize native source');
         await normalize([
           'asettb=1/48000', 'ashowinfo', 'asetpts=PTS-STARTPTS',
           // Copy mono center to BOTH speakers at unity, while preserving
@@ -371,32 +438,63 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
         ], line => evidence.consume(line));
         const timing = evidence.result();
         if (!timing.frames) throw failure(`Native source ${source.sourceId} has no decoded frame evidence`);
-        if (timing.resamplerFailure) throw failure(`Native source ${source.sourceId} timestamp compensation failed`, 'NATIVE_SOURCE_TIMESTAMP_RESAMPLE_FAILED');
         // Overlapping timestamps within one MediaRecorder stream (ELECTRON-68)
         // carry distinct encoded audio behind a backward clock step. Refusing
         // stranded the whole meeting, and the timestamp resampler would drop
         // that speech. Keep every decoded sample in order instead; gaps then
         // close too, so this lane's later onsets are approximate (warned).
-        const sequential = timing.overlapCount > 0;
+        // A forward gap too long for the resampler to buffer (ELECTRON-7R)
+        // fails its compensation and leaves a wrong timeline. That also
+        // stranded a meeting. Replay in sample order as well; without overlap,
+        // its long gaps return as streamed silence so lanes stay aligned.
+        const overlapped = timing.overlapCount > 0, resampleFailed = !!timing.resamplerFailure;
+        const sequential = overlapped || resampleFailed;
+        let timeline = 'timestamps', insertedSamples = 0, restoredGaps = [];
         if (sequential) {
           const replay = createTimestampEvidence();
-          await normalize(['asettb=1/48000', 'ashowinfo', 'asetpts=N/SR/TB', stereo, 'aresample=48000'], line => replay.consume(line));
-          if (replay.result().frames !== timing.frames) throw failure(`Native source ${source.sourceId} sample-order replay decoded a different stream`);
-          warnings.push({ kind: 'native-source-timestamp-overlap', sourceId: source.sourceId, timeline: 'sample-order',
-            count: timing.overlapCount, overlapSeconds: timing.overlapSamples / RATE,
-            collapsedGapCount: timing.gapCount, collapsedGapSeconds: timing.gapSamples / RATE, onsetIsApproximate: true });
+          const replayFilters = ['asettb=1/48000', 'ashowinfo', 'asetpts=N/SR/TB', stereo, 'aresample=48000'];
+          const gapPlan = evidence.restorableGaps();
+          if (resampleFailed && !overlapped && !gapPlan.overflow) {
+            for (const gap of gapPlan.gaps) {
+              // Silence that puts the following frame back at its timestamp;
+              // shorter closed gaps before it are absorbed here, not lost.
+              const silence = gap.timelineSample - (gap.decodedSamples + insertedSamples);
+              if (silence > 0) { restoredGaps.push({ atSample: gap.decodedSamples, silenceSamples: silence }); insertedSamples += silence; }
+            }
+          }
+          if (restoredGaps.length) {
+            timeline = 'sample-order-restored-gaps';
+            await replayRestoringGaps(source, rawPath, normalizedPath, replayFilters, restoredGaps, replay);
+            if (JSON.stringify(replay.restorableGaps()) !== JSON.stringify(gapPlan)) throw failure(`Native source ${source.sourceId} sample-order replay decoded a different stream`);
+          } else {
+            timeline = 'sample-order';
+            await normalize(replayFilters, line => replay.consume(line));
+          }
+          const replayed = replay.result();
+          if (replayed.frames !== timing.frames) throw failure(`Native source ${source.sourceId} sample-order replay decoded a different stream`);
+          if (replayed.resamplerFailure) throw failure(`Native source ${source.sourceId} sample-order replay failed`, 'NATIVE_SOURCE_TIMESTAMP_RESAMPLE_FAILED');
+          if (overlapped) {
+            warnings.push({ kind: 'native-source-timestamp-overlap', sourceId: source.sourceId, timeline: 'sample-order',
+              count: timing.overlapCount, overlapSeconds: timing.overlapSamples / RATE,
+              collapsedGapCount: timing.gapCount, collapsedGapSeconds: timing.gapSamples / RATE, onsetIsApproximate: true });
+          }
+          if (resampleFailed) {
+            warnings.push({ kind: 'native-source-timestamp-resample-fallback', sourceId: source.sourceId, timeline,
+              gapCount: timing.gapCount, gapSeconds: timing.gapSamples / RATE, restoredGapCount: restoredGaps.length,
+              restoredSilenceSeconds: insertedSamples / RATE, onsetIsApproximate: true });
+          }
         } else if (timing.gapCount) {
           warnings.push({ kind: 'native-source-timestamp-gaps', sourceId: source.sourceId,
             count: timing.gapCount, gapSeconds: timing.gapSamples / RATE });
         }
         const duration = await validDuration(normalizedPath, 'flac');
         const mediaSamples = samples(duration);
-        const span = sequential ? timing.decodedSamples : timing.lastEndPts - timing.firstPts;
+        const span = sequential ? timing.decodedSamples + insertedSamples : timing.lastEndPts - timing.firstPts;
         if (Math.abs(mediaSamples - span) > TIMING_TOLERANCE_SAMPLES) throw failure(`Native source ${source.sourceId} normalization changed its timestamp span`);
         normalized.push({ ...source, normalizedPath, mediaSamples, startSample: samples(source.startOffsetMs / 1000) });
         sourceEvidence.push({ sourceId: source.sourceId, kind: source.kind, rawPath, normalizedPath,
           startOffsetMs: source.startOffsetMs, endOffsetMs: source.endOffsetMs, decodedDuration: duration,
-          timing, onsetIsApproximate: true, interrupted: source.interrupted });
+          timing, timeline, ...(restoredGaps.length ? { restoredGaps } : {}), onsetIsApproximate: true, interrupted: source.interrupted });
       }
 
       const plans = [];
@@ -419,22 +517,19 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
       if (!totalSamples) throw failure('Native recording timeline is empty');
       const laneFiles = [];
       let sequence = 0;
-      let silenceInput = null;
       for (const plan of plans) {
         if (plan.samples < totalSamples) plan.segments.push({ kind: 'silence', samples: totalSamples - plan.samples });
         const files = [];
         for (const segment of plan.segments) {
           if (segment.kind === 'audio' && segment.samples === segment.originalSamples) { files.push(segment.input); continue; }
           const segmentPath = path.join(scratchDirectory, `segment-${sequence++}.flac`);
-          if (segment.kind === 'silence' && !silenceInput) {
-            silenceInput = path.join(scratchDirectory, 'silence-frame.wav');
-            await writeFileAtomic(silenceInput, silentFrameWav());
+          if (segment.kind === 'silence') {
+            await renderSilence(segmentPath, segment.samples);
+          } else {
+            await run(lossless(input(segment.input).audioFilters(`atrim=end_sample=${segment.samples},asetpts=PTS-STARTPTS`))
+              .output(segmentPath), timeout(segment.samples / RATE), 'Build native timeline segment');
+            if (Math.abs(samples(await validDuration(segmentPath, 'flac')) - segment.samples) > 1) throw failure('Native timeline segment has an incorrect length');
           }
-          const command = segment.kind === 'silence'
-            ? input(silenceInput).audioFilters(`apad=whole_len=${segment.samples},atrim=end_sample=${segment.samples},asetpts=PTS-STARTPTS`)
-            : input(segment.input).audioFilters(`atrim=end_sample=${segment.samples},asetpts=PTS-STARTPTS`);
-          await run(lossless(command).output(segmentPath), timeout(segment.samples / RATE), 'Build native timeline segment');
-          if (Math.abs(samples(await validDuration(segmentPath, 'flac')) - segment.samples) > 1) throw failure('Native timeline segment has an incorrect length');
           files.push(segmentPath);
         }
         if (files.length === 1) {
@@ -443,7 +538,7 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
           const listPath = path.join(scratchDirectory, `${plan.kind}-concat.txt`);
           // Concat demuxer opens one segment at a time, even after thousands of
           // device/pause epochs. Never open every epoch in one filter graph.
-          await writeFileAtomic(listPath, files.map(file => "file '" + file.replace(/\\/g, '/').replace(/'/g, "'\\''") + "'").join('\n'));
+          await writeFileAtomic(listPath, concatList(files));
           // Feed this demuxer directly to the final encoder. This avoids an
           // additional full-meeting FLAC copy, including on five-hour runs.
           laneFiles.push({ path: listPath, options: ['-f', 'concat', '-safe', '0'] });
