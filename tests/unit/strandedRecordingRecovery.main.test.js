@@ -103,9 +103,10 @@ function mainProcess(history = [], { signedIn = OWNER } = {}) {
   const code = [line('const RECOVERY_TERMINAL_STATUSES'), ...['function recordingOwner(', 'function addToUploadQueue(',
     'function removeFromUploadQueue(', 'function updateUploadQueueRetry(', 'async function processPendingUploads(',
     'function adoptRecoveredRecording(', 'function markRecoveryFailed(', 'function hasRetainedSourceAudio(',
-    'function heldUploadReason(', 'async function restoreRetainedRecording(', 'async function recoverOrphanedRecordings(',
+    'function heldUploadReason(', 'async function queueOwnerForUpload(', 'function requeueRecoveredUpload(',
+    'async function restoreRetainedRecording(', 'async function recoverOrphanedRecordings(',
     'async function combineChunksForRecovery(', 'async function finalizeRecording('].map(extract)].join('\n\n');
-  const api = vm.runInNewContext(`${code}\n({ recoverOrphanedRecordings, restoreRetainedRecording, processPendingUploads });`, context);
+  const api = vm.runInNewContext(`${code}\n({ recoverOrphanedRecordings, restoreRetainedRecording, processPendingUploads, queueOwnerForUpload });`, context);
   const sent = kind => context.mainWindow.webContents.send.mock.calls.filter(([channel, data]) => channel === 'system:capture-warning' && data.kind === kind).map(([, data]) => data);
   // Startup recovery starts the queue without awaiting it; wait until it is idle.
   const settle = () => vi.waitFor(() => { if (context.isProcessingUploads) throw new Error('queue busy'); }, { timeout: 10000 });
@@ -235,6 +236,36 @@ describe('a recovered recording uploads only into its owner\'s account', () => {
     }
     expect(main.sent('recovered-upload-held')).toEqual(held ? [{ kind: 'recovered-upload-held', reason: held }] : []);
   }, 120000);
+
+  it('gives the restored file a fresh retry budget instead of dropping it for an exhausted old entry', async () => {
+    const stranded = await strandedRecording({ gapSeconds: 1 });
+    const main = mainProcess([stranded.entry]);
+    main.context.uploadQueueStore.set('pendingUploads', [{ recordId: stranded.recordId, filePath: '/old/audio.webm', metadata: {}, userId: OWNER, retryCount: 10 }]);
+    await main.recoverOrphanedRecordings();
+    await main.settle();
+    expect(main.context.uploadWithRetry.mock.calls.map(call => call[0])).toEqual([stranded.recordId]);
+    expect(main.history()[0].uploadStatus).toBe('uploaded');
+  }, 120000);
+
+  it('never takes the signed-in account as owner of a recording made on this computer', async () => {
+    const main = mainProcess([], { signedIn: OTHER });
+    // Made here, owner in metadata.json: that owner.
+    const owned = await strandedRecording({ gapSeconds: 1, bytes: Buffer.from('preserved-bytes') });
+    expect(await main.queueOwnerForUpload(owned.recordId)).toBe(OWNER);
+    // Made here, owner missing: nobody, so every upload gate refuses it.
+    const orphan = await strandedRecording({ gapSeconds: 1, bytes: Buffer.from('preserved-bytes'), owner: null });
+    expect(await main.queueOwnerForUpload(orphan.recordId)).toBeNull();
+    expect(canUploadForUser(null, OTHER)).toBe(false);
+    // A file picked for upload (no recording folder, or only an upload receipt): the uploader.
+    expect(await main.queueOwnerForUpload(randomUUID())).toBe(OTHER);
+    const picked = randomUUID();
+    await fs.promises.mkdir(path.join(root, picked));
+    await fs.promises.writeFile(path.join(root, picked, 'upload-receipt.json'), '{}');
+    expect(await main.queueOwnerForUpload(picked)).toBe(OTHER);
+    // The real upload:start path uses this owner.
+    expect(MAIN).toContain('addToUploadQueue(recordId, filePath, metadata, await queueOwnerForUpload(recordId));');
+    expect(MAIN).not.toContain('recordingOwner(recordId) || tokenUserId(await getAuthToken())');
+  }, 60000);
 
   it.each(cases)('"Restore and upload" when $name', async ({ signedIn, owner, uploads, code }) => {
     const stranded = await strandedRecording({ gapSeconds: 1, owner });

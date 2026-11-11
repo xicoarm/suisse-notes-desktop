@@ -783,6 +783,25 @@ function heldUploadReason(ownerId, currentUserId) {
   return canUploadForUser(ownerId, currentUserId) ? null : 'other-account';
 }
 
+// Owner recorded for a new upload-queue entry. Only a file picked for upload
+// (no recording folder made by createSession) may take the signed-in account;
+// a recording made on this computer belongs to the account in its history or
+// metadata.json and, without one, is never uploaded (null fails every gate).
+async function queueOwnerForUpload(recordId) {
+  const ownerId = recordingOwner(recordId);
+  if (ownerId) return ownerId;
+  const recordPath = getRecordingPath(recordId);
+  if (fs.existsSync(path.join(recordPath, 'metadata.json')) || usesNativeSources(recordPath)) return null;
+  return tokenUserId(await getAuthToken());
+}
+
+// A recovered recording is a new file: its upload starts with a fresh retry
+// budget instead of inheriting one the failed attempt may have exhausted.
+function requeueRecoveredUpload(upload) {
+  removeFromUploadQueue(upload.recordId);
+  addToUploadQueue(upload.recordId, upload.filePath, upload.metadata);
+}
+
 // History action "Restore and upload" (ELECTRON-7R): the user rebuilds a
 // recording whose saving failed from the originals kept on this computer,
 // with the same pipeline as startup recovery, and it is queued for upload into
@@ -809,7 +828,7 @@ async function restoreRetainedRecording(recordId) {
   }
   const adopted = adoptRecoveredRecording(recordId, result, getActiveRecording());
   if (adopted.upload) {
-    addToUploadQueue(adopted.upload.recordId, adopted.upload.filePath, adopted.upload.metadata);
+    requeueRecoveredUpload(adopted.upload);
     processPendingUploads().catch(err => log.error('restore: upload processing failed:', err));
   }
   log.info(`Restored ${recordId} from retained originals (${result.fileSizeMb}MB); upload queued: ${!!adopted.upload}`);
@@ -991,7 +1010,7 @@ async function recoverOrphanedRecordings() {
       // never fired if the renderer wasn't authenticated; confirmed by the
       // power-loss recovery test where the file recovered but never uploaded.)
       for (const u of recoveredForUpload) {
-        try { addToUploadQueue(u.recordId, u.filePath, u.metadata); } catch (e) { log.warn('recovery: enqueue failed:', e.message); }
+        try { requeueRecoveredUpload(u); } catch (e) { log.warn('recovery: enqueue failed:', e.message); }
       }
       // The queue holds an upload until its owner is signed in here. Say so
       // when another account is signed in or the owner is unknown, instead of
@@ -4558,7 +4577,7 @@ ipcMain.handle('upload:start', async (event, params) => {
 
   try {
     // Persist before any network request; failures still release the upload lock.
-    addToUploadQueue(recordId, filePath, metadata, recordingOwner(recordId) || tokenUserId(await getAuthToken()));
+    addToUploadQueue(recordId, filePath, metadata, await queueOwnerForUpload(recordId));
     // Notify renderer that upload started
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('upload:started', { recordId });
