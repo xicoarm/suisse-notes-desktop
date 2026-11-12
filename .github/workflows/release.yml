@@ -32,7 +32,12 @@ jobs:
   # =============================================================================
   build-windows:
     needs: qualify
-    runs-on: windows-latest
+    # Pinned like the Windows audio qualification. On the windows-latest image
+    # 20261103 (windows-2025) the packaged app cannot start its GPU process
+    # ("GPU process isn't usable. Goodbye.", exit 0x80000003): 4.7.17 and
+    # 4.7.18 alike, unsigned as well, so the first-start smoke test below
+    # failed for every build (12.11.2026). windows-2022 starts it normally.
+    runs-on: windows-2022
 
     steps:
       - name: Checkout code
