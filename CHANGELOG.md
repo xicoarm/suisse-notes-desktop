@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.18](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.17...v4.7.18) (2026-11-11)
+
+
+### Features
+
+* **mobile:** App Store texts per language and the iPad screenshot slot via the API ([2b29d8d](https://github.com/xicoarm/suisse-notes-desktop/commit/2b29d8d6aabf8abde9ff3c738039bf88a784376c))
+* **mobile:** ios-submit can withdraw a version from App Store review ([7b9f6a1](https://github.com/xicoarm/suisse-notes-desktop/commit/7b9f6a13639aa891a9a6d9cbafae69052f1f27d6))
+* **mobile:** replace the iPhone App Store screenshots via the API ([1937b55](https://github.com/xicoarm/suisse-notes-desktop/commit/1937b554a9c32e36ace5d721e41636d2d4a18861))
+* **recorder:** customers restore a recording whose saving failed in the app, for its owner only ([10603eb](https://github.com/xicoarm/suisse-notes-desktop/commit/10603eb9a052d1c15765bb793379dff3e7aac792))
+
+
+### Bug Fixes
+
+* **mobile:** withdraw finds the version in a review submission ([477db77](https://github.com/xicoarm/suisse-notes-desktop/commit/477db7703893ec275565588a82cfa2d25440ce79))
+* **mobile:** withdraw looks only at open review submissions ([2da0d44](https://github.com/xicoarm/suisse-notes-desktop/commit/2da0d44c7f1d050063585da38f7b62bd47bf3b1e))
+* **recorder:** finalize native sources when the timestamp resampler fails (ELECTRON-7R) ([3521c2d](https://github.com/xicoarm/suisse-notes-desktop/commit/3521c2df87311c55b6c9b454db7185a0f1bc9744))
+* **support:** rebuild never writes through a planted link and keeps its report ([469209c](https://github.com/xicoarm/suisse-notes-desktop/commit/469209c39497d044911522734c0f396e60af54d1))
+* **upload:** a recording made here never takes the signed-in account as owner ([3a6da0e](https://github.com/xicoarm/suisse-notes-desktop/commit/3a6da0eaf83a93a7765cb61a6263f4744c9dcc4f))
+
 ### [4.7.17](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.16...v4.7.17) (2026-10-18)
 
 
