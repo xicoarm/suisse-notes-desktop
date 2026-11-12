@@ -330,8 +330,11 @@ Use `--merge`: it keeps the branch commits and their SHAs on `main`. Squash or r
 merges create new SHAs, and the tested internal Play build would then no longer come from
 a commit on `main` (§7.3 Way 1).
 
-- Every push to `main` that touches `src/**`, `src-capacitor/**` or `quasar.config.js` starts
-  **Mobile Release** automatically. Do **not** also dispatch it manually (double build).
+- Since 12.11.2026 **Mobile Release** and **Mobile Reliability** run only when dispatched by
+  hand. Desktop and mobile are separate products: the store apps are the native apps from
+  their own repository, and a desktop change in this repository never builds, tests or
+  uploads the old shared mobile app. Before, every push to `main` touching `src/**` started
+  Mobile Release, and App Store Connect refused 3.9.x against the approved native 4.0.0.
 - Commits whose first line starts with `chore(release):` or contains `[skip ci]` are skipped;
   those runs finish "green" in about 7 seconds without building anything.
 - **Never push a `v*` tag for a mobile release**: `v*` tags start the **desktop** release

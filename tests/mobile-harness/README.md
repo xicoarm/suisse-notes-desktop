@@ -81,10 +81,11 @@ standard location.
 
 ## CI
 
-`.github/workflows/mobile-reliability.yml` runs `all` for both personas on
-pull requests that touch `src/**`, and the 5h15 endurance run nightly on `main`.
-Adding the label **endurance** to a pull request starts the endurance run for
-that branch. Evidence (results, screenshots, console logs, captured uploads,
+`.github/workflows/mobile-reliability.yml` runs only when dispatched by hand
+(since 12.11.2026: desktop and mobile are separate products, the store apps are
+the native apps from their own repository, and desktop pull requests, pushes and
+the nightly schedule no longer start it). Choose the scenario and platform in the
+dispatch form. Evidence (results, screenshots, console logs, captured uploads,
 device file systems) is uploaded as a workflow artifact.
 
 ## What it does not cover

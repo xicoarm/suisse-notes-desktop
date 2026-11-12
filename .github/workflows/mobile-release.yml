@@ -1,14 +1,11 @@
 name: Mobile Release
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'src-capacitor/**'
-      - 'quasar.config.js'
-
-  # Allow manual trigger
+  # Manual only (12.11.2026): desktop and mobile are separate products. The
+  # store apps are the native apps from their own repository; a desktop change
+  # here must never build or upload the old shared mobile app. Before, every
+  # push to main touching src/ did, and App Store Connect refused it against
+  # the approved native 4.0.0 (run 43123637507).
   workflow_dispatch:
     inputs:
       platform:

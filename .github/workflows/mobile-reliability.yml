@@ -6,27 +6,10 @@ name: Mobile Reliability
 # audio and the adversarial mock backend. See tests/mobile-harness/README.md.
 
 on:
-  pull_request:
-    # `labeled`: adding the label "endurance" to a PR starts the 5h15 run for
-    # that PR (schedule and workflow_dispatch only work on the default branch).
-    types: [opened, synchronize, reopened, labeled]
-    paths:
-      - 'src/**'
-      - 'quasar.config.js'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'tests/mobile-harness/**'
-      - 'tests/e2e-harness/lib/**'
-      - '.github/workflows/mobile-reliability.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'quasar.config.js'
-      - 'tests/mobile-harness/**'
-  schedule:
-    # Nightly endurance run (5h15 recording) at 01:30 UTC
-    - cron: '30 1 * * *'
+  # Manual only (12.11.2026): desktop and mobile are separate products; the
+  # store apps are the native apps from their own repository. Desktop pull
+  # requests, pushes and the nightly schedule no longer start this harness
+  # for the old shared mobile app.
   workflow_dispatch:
     inputs:
       scenario:
