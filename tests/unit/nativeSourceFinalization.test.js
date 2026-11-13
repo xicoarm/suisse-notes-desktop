@@ -440,6 +440,83 @@ describe('native source finalization real-media custody', () => {
     expect((await decoded(result.outputPath)).samples).toBe(expectedSamples);
   }, 60000);
 
+  it('finalizes a source whose timestamps run ahead of its samples by less than the resampler threshold (ELECTRON-73)', async () => {
+    // One millisecond of clock jitter inside one encoder stream. It is below
+    // the resampler's 2 ms hard-compensation threshold, so no sample is
+    // inserted, while the timestamp span grows by that millisecond. The source
+    // reaches its planned end, so end padding cannot hide the difference: the
+    // one-command path predicts 48 samples more than the file can contain.
+    const webm = path.join(root, `${randomUUID()}.webm`);
+    await run(ffmpeg().input('sine=f=440:d=1:r=48000').inputFormat('lavfi')
+      .audioFilters("asetpts='if(gte(T,0.5),PTS+0.001/TB,PTS)'").audioCodec('libopus').output(webm));
+    const bytes = fs.readFileSync(webm), reference = await decoded(webm);
+    expect(reference.samples).toBe(48000);
+    const jittered = await source(bytes, { end: 1000 });
+    const estimates = [];
+    const result = await finalizer({ checkSpace: async size => estimates.push(size) })
+      .build(root, path.join(root, 'audio_building.webm'), { expectedDurationSec: 1 });
+    // The complete recording is published from measured source lengths
+    // instead of being stranded behind the timestamp prediction.
+    expect(result.fastPathUsed).toBe(false);
+    const fallback = result.plan.fastPathFallback;
+    expect(fallback).toMatchObject({ reason: 'sample-count', observedDecodedSamples: 48000 });
+    expect(fallback.expectedDecodedSamples - fallback.observedDecodedSamples).toBeGreaterThan(1);
+    expect(fallback.expectedDecodedSamples - fallback.observedDecodedSamples).toBeLessThanOrEqual(96);
+    // Every sample is kept, so History gets no "review audio" warning for it.
+    expect(result.warnings.some(warning => warning.kind.startsWith('native-source-fast-path'))).toBe(false);
+    expect(estimates).toHaveLength(2);
+    expect(estimates[1]).toBeGreaterThan(estimates[0]);
+    expect(result.plan.validation).toMatchObject({ status: 'passed', expectedDecodedSamples: 48000, observedDecodedSamples: 48000 });
+    const audio = await decoded(result.outputPath);
+    expect(audio.samples).toBe(48000);
+    // The generated tone has an amplitude of 1/8; the mono source reaches
+    // both channels at unity before and after the jitter.
+    for (const [from, to] of [[0.1, 0.4], [0.6, 0.9]]) {
+      for (const channel of [0, 1]) {
+        expect(amplitude(audio, 440, from, to, channel)).toBeGreaterThan(0.118);
+        expect(amplitude(audio, 440, from, to, channel)).toBeLessThan(0.132);
+      }
+    }
+    // The refused one-command render and its own plan stay as evidence;
+    // plan.json describes the measured rebuild that was published.
+    expect(fs.existsSync(path.join(result.scratchDirectory, 'fast-rendered.webm'))).toBe(true);
+    expect(JSON.parse(fs.readFileSync(path.join(result.scratchDirectory, 'fast-plan.json'), 'utf8'))).toMatchObject({ fastPathUsed: true,
+      validation: { status: 'failed', expectedDecodedSamples: fallback.expectedDecodedSamples, observedDecodedSamples: 48000,
+        error: { code: 'NATIVE_FINALIZATION_SAMPLE_COUNT' } } });
+    expect(JSON.parse(fs.readFileSync(path.join(result.scratchDirectory, 'plan.json'), 'utf8'))).toMatchObject({ fastPathUsed: false,
+      fastPathFallback: fallback, validation: { status: 'passed' } });
+    const archived = inspectNativeSources(root).find(item => item.sourceId === jittered);
+    expect(Buffer.concat(archived.chunkPaths.map(file => fs.readFileSync(file))).equals(bytes)).toBe(true);
+  }, 60000);
+
+  it('still refuses a recording whose sample count differs from its measured plan (ELECTRON-73)', async () => {
+    // The fallback replaces a timestamp prediction by measured lengths. A
+    // difference that survives measuring is a real defect and must never be
+    // published: here the measurement itself reports half a millisecond more
+    // than the source holds, so the encoded file is 24 samples short of it.
+    const webm = path.join(root, `${randomUUID()}.webm`);
+    await run(ffmpeg().input('sine=f=440:d=1:r=48000').inputFormat('lavfi')
+      .audioFilters("asetpts='if(gte(T,0.5),PTS+0.001/TB,PTS)'").audioCodec('libopus').output(webm));
+    const bytes = fs.readFileSync(webm);
+    const jittered = await source(bytes, { end: 1000 });
+    const output = path.join(root, 'audio_building.webm');
+    await fs.promises.writeFile(output, 'previous output');
+    const probe = async file => Number((await metadata(file)).format.duration) + (file.endsWith('.flac') ? 0.0005 : 0);
+    const error = await finalizer({ probe }).build(root, output, { expectedDurationSec: 1 }).catch(caught => caught);
+    expect(error).toMatchObject({ code: 'NATIVE_FINALIZATION_SAMPLE_COUNT', expectedDecodedSamples: 48024, actualDecodedSamples: 48000 });
+    // The failure still says which prediction sent the build into the rebuild.
+    expect(error.fastPathFallback).toMatchObject({ reason: 'sample-count', observedDecodedSamples: 48000 });
+    expect(error.fastPathFallback.expectedDecodedSamples).toBeGreaterThan(48024);
+    expect(fs.readFileSync(output, 'utf8')).toBe('previous output');
+    const plan = JSON.parse(fs.readFileSync(path.join(error.scratchDirectory, 'plan.json'), 'utf8'));
+    expect(plan).toMatchObject({ fastPathUsed: false, fastPathFallback: error.fastPathFallback,
+      validation: { status: 'failed', error: { code: 'NATIVE_FINALIZATION_SAMPLE_COUNT' } } });
+    expect(JSON.parse(fs.readFileSync(path.join(error.scratchDirectory, 'fast-plan.json'), 'utf8'))).toMatchObject({ fastPathUsed: true,
+      validation: { status: 'failed', error: { code: 'NATIVE_FINALIZATION_SAMPLE_COUNT' } } });
+    const archived = inspectNativeSources(root).find(item => item.sourceId === jittered);
+    expect(Buffer.concat(archived.chunkPaths.map(file => fs.readFileSync(file))).equals(bytes)).toBe(true);
+  }, 60000);
+
   it('preserves ordinary stopped tails and checks space again before a two-lane fallback', async () => {
     await source(await encoded(1.2, 440), { end: 1000 });
     await source(await encoded(1, 660), { kind: 'system', end: 1000 });
