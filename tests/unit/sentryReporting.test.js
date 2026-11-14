@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import {
-  installLogReporting, installWindowReporting, createOccurrenceSampler, scrub, describe as describeLog,
+  installLogReporting, installWindowReporting, createOccurrenceSampler, scrub, describe as describeLog, failedAttemptError,
   MAX_EVENTS_PER_SESSION, MAX_EVENTS_PER_LINE_PER_DAY, MAX_EVENTS_PER_DAY,
 } from '../../src-electron/sentry-reporting.js';
 
@@ -162,15 +162,46 @@ describe('main-process log reporting', () => {
     expect(Sentry.breadcrumbs).toHaveLength(2);
   });
 
-  it('files one event for a failed recovery: its finalization line is the breadcrumb that tells why', () => {
+  it('files one event for a failed recovery, an error with the cause and stack of the finalization: its own line is the breadcrumb', () => {
     installLogReporting({ log, Sentry });
-    log.emit('warn', 'Recording finalization failed during recovery; all source batches retained:', new Error('ENOSPC: no space left on device'));
-    log.emit('warn', 'Could not recover recording 1e0b1a44-0000-4000-8000-0000000c0ffe: ENOSPC: no space left on device');
-    expect(Sentry.events.map(event => event.message)).toEqual(['Could not recover recording 1e0b1a44-0000-4000-8000-0000000c0ffe: ENOSPC: no space left on device']);
+    const failure = Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+    log.emit('warn', 'Recording finalization failed during recovery; all source batches retained:', failure);
+    log.emit('error', 'Could not recover recording 1e0b1a44-0000-4000-8000-0000000c0ffe: code=ENOSPC',
+      failedAttemptError({ success: false, error: failure.message, code: 'ENOSPC', failure }));
+    expect(Sentry.events).toHaveLength(1);
+    expect(Sentry.events[0]).toMatchObject({ kind: 'exception', scope: { level: 'error' } });
+    expect(Sentry.events[0].error).toMatchObject({ name: 'Error', code: 'ENOSPC', message: 'ENOSPC: no space left on device, write' });
+    expect(Sentry.events[0].error.stack).toContain('sentryReporting.test.js');
+    expect(Sentry.events[0].scope.fingerprint).toEqual(['main-log', '^Could not recover recording .+: ', 'Error', 'ENOSPC']);
+    expect(Sentry.events[0].scope.extras.logLine)
+      .toBe('Could not recover recording 1e0b1a44-0000-4000-8000-0000000c0ffe: code=ENOSPC Error: ENOSPC: no space left on device, write');
     expect(Sentry.breadcrumbs[0]).toEqual({
       category: 'main-log', level: 'warning',
-      message: 'Recording finalization failed during recovery; all source batches retained: Error: ENOSPC: no space left on device',
+      message: 'Recording finalization failed during recovery; all source batches retained: Error: ENOSPC: no space left on device, write',
     });
+  });
+
+  it('files the causes of a failed restore as issues of their own, also when the attempt has no Error of its own', () => {
+    installLogReporting({ log, Sentry });
+    log.emit('error', 'Restore of rec-1 failed; originals retained: code=none',
+      failedAttemptError({ success: false, error: 'This recording is still uploading' }));
+    log.emit('error', 'Restore of rec-2 failed; originals retained: code=ENOSPC',
+      failedAttemptError({ success: false, error: 'ENOSPC: no space left on device', code: 'ENOSPC' }));
+    expect(Sentry.events.map(event => event.scope.fingerprint)).toEqual([
+      ['main-log', '^Restore of .+ failed; originals retained:', 'RecoveryFailed', ''],
+      ['main-log', '^Restore of .+ failed; originals retained:', 'RecoveryFailed', 'ENOSPC'],
+    ]);
+    expect(Sentry.events.map(event => event.scope.level)).toEqual(['error', 'error']);
+  });
+
+  it('gives a failed attempt the Error of its finalization, or one with its text and code', () => {
+    const failure = new Error('ffmpeg exited with code 1');
+    expect(failedAttemptError({ success: false, error: failure.message, failure })).toBe(failure);
+    const made = failedAttemptError({ success: false, error: 'The recording is still being saved', code: 'BUSY' });
+    expect(made).toBeInstanceOf(Error);
+    expect([made.name, made.message, made.code]).toEqual(['RecoveryFailed', 'The recording is still being saved', 'BUSY']);
+    expect(failedAttemptError(undefined)).toMatchObject({ name: 'RecoveryFailed', message: 'unknown failure' });
+    expect(failedAttemptError({ error: 'x' }).code).toBeUndefined();
   });
 
   it('does not file a second event for lines their own code path already reports', () => {
@@ -487,6 +518,20 @@ describe('window reporting', () => {
     expect(Sentry.events[0].scope.extras.preload).toBe('electron-preload.js');
   });
 
+  it('replaces the app folders in what a window failure reports, like in a log line', () => {
+    const Sentry = fakeSentry();
+    const folders = () => ({ userData: '\\\\fs01\\redirect$\\hmuster\\AppData\\Roaming\\Suisse Notes' });
+    const { attachWindow } = installWindowReporting({ Sentry, folders });
+    const window = fakeWindow();
+    attachWindow(window);
+    window.webContents.emit('preload-error', {}, 'electron-preload.js',
+      new Error("Cannot find module '\\\\fs01\\redirect$\\hmuster\\AppData\\Roaming\\Suisse Notes\\plugins\\a.js'"));
+    window.webContents.emit('did-fail-load', {}, -6, 'ERR_FILE_NOT_FOUND',
+      'file://\\\\fs01\\redirect$\\hmuster\\AppData\\Roaming\\Suisse Notes\\index.html', true);
+    expect(Sentry.events[0].scope.extras.message).toBe("Cannot find module '<userData>\\plugins\\a.js'");
+    expect(Sentry.events[1].scope.extras.url).toBe('file://<userData>\\index.html');
+  });
+
   it('files a window failure once: its log line is a breadcrumb, not a second event', () => {
     const log = fakeLog();
     const Sentry = fakeSentry();
@@ -722,6 +767,37 @@ describe('scrubbing credentials, addresses and quoted text', () => {
     // The same object logged as a string inside another object.
     expect(scrub('{"responseData":"{\\"token\\":\\"tk-3.secret\\",\\"ok\\":true}"}')).not.toContain('tk-3');
     expect(scrub('{"password": null, "token": 12345678}')).toBe('{"password": "<redacted>", "token": "<redacted>"}');
+  });
+
+  it('removes the value of every key that names a credential, also inside a longer or camelCase name', () => {
+    const { message } = describeLog(['Sign-in answer:', {
+      accessToken: 'a1', refreshToken: 'r2', tempToken: 't3', sessionToken: 's4', apiKey: 'k5', client_secret: 'c6',
+      id_token: 'i7', Password: 'p8', 'Set-Cookie': 'sid=c9', user_password: 'p10', recordId: 'rec-1', status: 200,
+    }]);
+    expect(message).toBe('Sign-in answer: {"accessToken":"<redacted>","refreshToken":"<redacted>","tempToken":"<redacted>",'
+      + '"sessionToken":"<redacted>","apiKey":"<redacted>","client_secret":"<redacted>","id_token":"<redacted>",'
+      + '"Password":"<redacted>","Set-Cookie":"<redacted>","user_password":"<redacted>","recordId":"rec-1","status":200}');
+  });
+
+  it('removes a credential whole when it is an object or a list, nested ones included, and keeps the text around it', () => {
+    expect(scrub('{"token":{"value":"s","exp":{"at":1}},"ok":true}')).toBe('{"token":"<redacted>","ok":true}');
+    expect(scrub('{"secrets":["a",{"b":"c]"}],"n":1}')).toBe('{"secrets":"<redacted>","n":1}');
+    expect(scrub('{"password":"a\\"b,c}d","n":1}')).toBe('{"password":"<redacted>","n":1}');
+    // The object inside a logged string, with a quote inside its value.
+    expect(scrub('{"body":"{\\"accessToken\\":{\\"v\\":\\"x\\\\\\"y\\"},\\"ok\\":1}"}'))
+      .toBe('{"body":"{\\"accessToken\\":\\"<redacted>\\",\\"ok\\":1}"}');
+    // A line cut inside the value.
+    expect(scrub('answer {"refreshToken":{"value":"abc')).toBe('answer {"refreshToken":"<redacted>"');
+  });
+
+  it('removes a code with the shape of a backup code, also in small letters, and a code that is an object', () => {
+    expect(scrub('{"code":"K7Q2XW9P"} {"code":"k7q2xw9p"} {"code":"ABCDEFGH"} {"code":"K7Q2-XW9P"} {"code":{"value":"K7Q2XW9P"}}'))
+      .toBe('{"code":"<redacted>"} {"code":"<redacted>"} {"code":"<redacted>"} {"code":"<redacted>"} {"code":"<redacted>"}');
+  });
+
+  it('removes a credential written as key=value or key: value, also an API key', () => {
+    expect(scrub('retry with apiKey=k-123 and api_key: k-456, passwd=p-1 now'))
+      .toBe('retry with apiKey=<redacted> and api_key=<redacted> passwd=<redacted> now');
   });
 
   it('keeps a code that is an error or machine code, and removes one that is a sign-in code', () => {

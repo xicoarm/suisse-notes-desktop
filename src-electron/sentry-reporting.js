@@ -188,12 +188,101 @@ function placePatterns(homeDir, userName, folders) {
   return placePatternsFor.patterns;
 }
 
-// A value of these keys in a logged object is a credential. (The look-behinds
-// here and below only keep the patterns from retrying inside one long run.)
-const SECRET_VALUE = /((?<!\\)\\*"(access_token|refresh_token|token|password|secret|authorization|code)\\*"\s*:\s*)(\\*"(?:\\.|[^"\\])*"?|[^\s,}\]"\\]+)/gi;
+// A credential in a logged object: the value of a key that names one, also
+// inside a longer or camelCase name (accessToken, refresh_token, tempToken,
+// sessionToken, client_secret, apiKey, Set-Cookie). The whole value goes, also
+// when it is an object or a list.
+const SECRET_KEY = /token|secret|passw(?:or)?d|api_?key|authorization|cookie|session|credential/i;
+// A key as JSON writes it, also inside a logged string, where every quote of
+// the object carries one backslash or more (group 1). (The look-behinds here
+// and below only keep the patterns from retrying inside one long run.)
+const OBJECT_KEY = /(?<!\\)(\\*)"([\w$.-]{1,80})\1"\s*:\s*/g;
 // "code" is also where errors carry "ECONNRESET", "invalid_code" or 404: that
-// is the diagnosis, not a sign-in code, and stays.
+// is the diagnosis, not a sign-in code, and stays, unless it has the shape of
+// the app's backup codes (auth-two-factor.js: four and four letters or digits).
 const PLAIN_CODE = /^(?:[A-Z][A-Z0-9_]{1,39}|[a-z_]{1,40}|\d{3})$/;
+const BACKUP_CODE = /^[A-Z0-9]{4}-?[A-Z0-9]{4}$/i;
+
+// Where the value ends that starts at `start`, for a key whose quotes carry
+// `escapes` backslashes: a string, an object or a list as a whole (nested ones
+// included), or a bare number or word. A quote is one of this level when the
+// backslashes in front of it are `escapes` plus escaped backslashes of this
+// level; with one escape more it stands inside a string of this level, and any
+// other quote closes the text the value stands in. A value that does not end
+// (a cut line) runs to the end of the text.
+function valueEnd(text, start, escapes) {
+  const width = 2 * (escapes + 1);
+  const backslashesBefore = index => {
+    let count = 0;
+    for (let i = index - 1; i >= start && text[i] === '\\'; i -= 1) count += 1;
+    return count;
+  };
+  const kind = index => {
+    const rest = backslashesBefore(index) % width;
+    return rest === escapes ? 'own' : rest === width - 1 ? 'inner' : 'outer';
+  };
+  const beforeOuter = index => index - backslashesBefore(index);
+  let lead = 0;
+  while (text[start + lead] === '\\') lead += 1;
+  if (text[start + lead] === '"' && lead === escapes) {
+    for (let i = start + lead + 1; i < text.length; i += 1) {
+      if (text[i] !== '"') continue;
+      const found = kind(i);
+      if (found === 'own') return i + 1;
+      if (found === 'outer') return beforeOuter(i);
+    }
+    return text.length;
+  }
+  if (text[start] === '{' || text[start] === '[') {
+    let depth = 0;
+    let inString = false;
+    for (let i = start; i < text.length; i += 1) {
+      const char = text[i];
+      if (char === '"') {
+        const found = kind(i);
+        if (found === 'own') inString = !inString;
+        else if (found === 'outer') return beforeOuter(i);
+      } else if (!inString) {
+        if (char === '{' || char === '[') depth += 1;
+        else if ((char === '}' || char === ']') && --depth === 0) return i + 1;
+      }
+    }
+    return text.length;
+  }
+  // A number, true or null; or something JSON does not write: to the next separator.
+  const bare = lead || text[start] === '"' ? /[^\s,}\]]*/y : /[^\s,}\]"\\]*/y;
+  bare.lastIndex = start;
+  bare.exec(text);
+  return bare.lastIndex;
+}
+
+// A value of "code" that is a diagnosis: the code of an error, quoted with the
+// quote of its key or bare. (Without a pattern: a long run of backslashes
+// would make one slow.)
+function isPlainCode(value, quote) {
+  const quoted = value.length >= 2 * quote.length && value.startsWith(quote) && value.endsWith(quote);
+  const code = quoted ? value.slice(quote.length, value.length - quote.length) : value;
+  return code.length <= 40 && PLAIN_CODE.test(code) && !BACKUP_CODE.test(code);
+}
+
+function redactSecretValues(text) {
+  const keys = new RegExp(OBJECT_KEY.source, 'g');
+  let out = '';
+  let kept = 0;
+  for (let match = keys.exec(text); match; match = keys.exec(text)) {
+    const [head, escaping, key] = match;
+    const isCode = key.toLowerCase() === 'code';
+    if (!isCode && !SECRET_KEY.test(key)) continue;
+    const start = match.index + head.length;
+    const end = valueEnd(text, start, escaping.length);
+    if (end === start || (isCode && isPlainCode(text.slice(start, end), `${escaping}"`))) continue;
+    out += `${text.slice(kept, start)}${escaping}"<redacted>${escaping}"`;
+    kept = end;
+    keys.lastIndex = end;
+  }
+  return out + text.slice(kept);
+}
+
 const EMAIL = /(?<![\p{L}\p{N}._%+-])[\p{L}\p{N}._%+-]+@[\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}_-]+)+/gu;
 const LINK = /((?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/[^\s"'?#]*)(\?[^\s"'#]*)?(#[^\s"']*)?/gi;
 
@@ -206,7 +295,7 @@ function scrub(text, homeDir = HOME_DIRECTORY, { userName = USER_NAME, folders =
   const patterns = placePatterns(homeDir, userName, folders);
   let result = String(text).slice(0, MAX_SCRUB_INPUT);
   for (const { find, put } of patterns.places) result = result.replace(find, () => put);
-  return result
+  const named = result
     // Any other profile folder. The name runs to the next separator, double
     // quote or line end, with its spaces and apostrophes ("Hans Muster",
     // "O'Brien"); on Windows also to a character no folder name can have.
@@ -214,11 +303,10 @@ function scrub(text, homeDir = HOME_DIRECTORY, { userName = USER_NAME, folders =
     .replace(/(\\Users\\+)[^\\/":*?<>|\r\n]+/gi, '$1<user>')
     .replace(/(\/(?:Users|home)\/)[^\\/"\r\n]+/gi, '$1<user>')
     .replace(patterns.userName || MATCHES_NOTHING, '<user>')
-    .replace(EMAIL, '<email>')
-    .replace(SECRET_VALUE, (all, head, key, value) => (
-      key.toLowerCase() === 'code' && PLAIN_CODE.test(value.replace(/^\\*"|"$/g, '')) ? all : `${head}"<redacted>"`))
+    .replace(EMAIL, '<email>');
+  return redactSecretValues(named)
     .replace(/\b(Bearer)\s+[\w.~+/=-]+/gi, '$1 <redacted>')
-    .replace(/(Bearer|token|password|secret|sas|sig)[=:]\s*\S+/gi, '$1=<redacted>')
+    .replace(/(Bearer|token|password|passwd|secret|api_?key|sas|sig)[=:]\s*\S+/gi, '$1=<redacted>')
     // A signed token, or any other encoded JSON object, wherever it stands.
     .replace(/\beyJ[\w-]{10,}(?:\.[\w-]+){0,2}/g, '<jwt>')
     // Any scheme, not only http: the app's own sign-in link carries the token
@@ -240,6 +328,18 @@ function scrubbedError(error, homeDir = HOME_DIRECTORY, places = {}) {
   if (error.stack) copy.stack = scrub(String(error.stack), homeDir, places);
   if (error.code !== undefined) copy.code = error.code;
   return copy;
+}
+
+// A failed recovery attempt as the Error its reported line carries: the
+// finalization's own Error, with its stack, when the result has it; otherwise
+// one with the result's text and code. Name and code tell the causes of one
+// line apart (the group key in installLogReporting).
+function failedAttemptError(result) {
+  if (result?.failure instanceof Error) return result.failure;
+  const error = new Error(String(result?.error || 'unknown failure'));
+  error.name = 'RecoveryFailed';
+  if (result?.code) error.code = String(result.code);
+  return error;
 }
 
 function textOf(value) {
@@ -431,9 +531,16 @@ function installLogReporting({
  * and a renderer document that never loads. Crashes of the renderer and of
  * Chromium's child processes are reported by their own handlers in
  * electron-main.js, which carry recording state this module does not have.
+ * `folders` is the function installLogReporting is given: what a window
+ * failure reports is scrubbed like a log line.
  */
-function installWindowReporting({ Sentry, log = null } = {}) {
+function installWindowReporting({ Sentry, log = null, folders = null } = {}) {
   if (!Sentry) throw new Error('Window reporting needs Sentry');
+  const clean = text => {
+    let known = null;
+    try { known = folders ? folders() : null; } catch (_) { known = null; }
+    return scrub(text, HOME_DIRECTORY, { userName: USER_NAME, folders: known });
+  };
   const report = (title, level, extra) => {
     try {
       Sentry.withScope(scope => {
@@ -461,12 +568,12 @@ function installWindowReporting({ Sentry, log = null } = {}) {
       report('window responsive again', 'warning', { unresponsiveSeconds: seconds, recording: isRecording() });
     });
     window.webContents?.on?.('preload-error', (_event, preloadPath, error) => {
-      report('preload script failed', 'fatal', { preload: path.basename(String(preloadPath || '')), message: scrub(error?.message || '') });
+      report('preload script failed', 'fatal', { preload: path.basename(String(preloadPath || '')), message: clean(error?.message || '') });
     });
     window.webContents?.on?.('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       if (!isMainFrame || errorCode === -3) return; // -3 is an aborted navigation
       report(`app window failed to load: ${errorDescription || errorCode}`, 'fatal',
-        { errorCode, url: scrub(String(validatedURL || '')) });
+        { errorCode, url: clean(String(validatedURL || '')) });
     });
   };
 
@@ -474,6 +581,6 @@ function installWindowReporting({ Sentry, log = null } = {}) {
 }
 
 module.exports = {
-  installLogReporting, installWindowReporting, createOccurrenceSampler, scrub, describe,
+  installLogReporting, installWindowReporting, createOccurrenceSampler, scrub, describe, failedAttemptError,
   REPORTED_LINES, MAX_EVENTS_PER_SESSION, MAX_EVENTS_PER_LINE_PER_DAY, MAX_EVENTS_PER_DAY,
 };
