@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.20](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.19...v4.7.20) (2026-11-14)
+
+
+### Bug Fixes
+
+* **recorder:** rebuild from measured lengths when the predicted length misses (ELECTRON-73) ([b063ade](https://github.com/xicoarm/suisse-notes-desktop/commit/b063adef3cfcdbd792a5fb9a1b0e494de103bbe4))
+* **recorder:** warn when a rebuild exceeds the timing tolerance (ELECTRON-73) ([75e06f9](https://github.com/xicoarm/suisse-notes-desktop/commit/75e06f9c4885b719d5048ba8698edbe1217a1f7c))
+
 ### [4.7.19](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.18...v4.7.19) (2026-11-12)
 
 ### [4.7.18](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.17...v4.7.18) (2026-11-11)
