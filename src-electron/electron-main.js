@@ -147,13 +147,24 @@ Sentry.init({
   }
 });
 
-// Everything the main process logs is now reported: an error line becomes a
-// Sentry event, a warning becomes a warning-level event, and info lines become
-// breadcrumbs. Before this, a failed AudioTee start, a failed finalization or a
-// refused IPC call existed only in the user's local main.log.
+// The main log is a reporting channel (sentry-reporting.js): a warning or
+// error on its list of reported lines becomes a Sentry event; every other
+// line, at any level, becomes a breadcrumb that the next event carries as
+// context. Before this, a failed finalization or a recording that could not be
+// recovered existed only in the user's local main.log.
 const sentryReporting = require('./sentry-reporting');
 const twoFactorAuth = require('./auth-two-factor');
-sentryReporting.installLogReporting({ log, Sentry });
+// What this installation has already reported today, so a failure that repeats
+// at every start does not report again at every start. The path is resolved
+// when it is used: userData can still be redirected further down.
+const mainLogBudgetFile = () => path.join(app.getPath('userData'), 'main-log-reporting.json');
+sentryReporting.installLogReporting({
+  log, Sentry,
+  budgetStore: {
+    read: () => JSON.parse(fs.readFileSync(mainLogBudgetFile(), 'utf8')),
+    write: budget => fs.writeFileSync(mainLogBudgetFile(), JSON.stringify(budget)),
+  },
+});
 const windowReporting = sentryReporting.installWindowReporting({ Sentry, log });
 
 // === Global Error Handlers ===
@@ -171,9 +182,8 @@ process.on('unhandledRejection', (reason, promise) => {
   // sleep/wake). The updater retries internally and surfaces a real failure
   // via autoUpdater.on('error') if it gives up — so this rejection is noise.
   if (/net::ERR_NETWORK_CHANGED|net::ERR_NETWORK_IO_SUSPENDED|net::ERR_INTERNET_DISCONNECTED/i.test(msg)) {
-    // Keep it out of the error stream, but no longer invisible: the log hook
-    // files it as a warning, so a download that really dies in this shape is
-    // still countable.
+    // Keep it out of the error stream, but not invisible: the warning stays in
+    // main.log and travels as a breadcrumb with the next Sentry event.
     log.warn('Transient net:: rejection (likely auto-updater during network change):', msg);
     return;
   }
@@ -1064,11 +1074,14 @@ async function recoverOrphanedRecordings() {
 // Expose recovery state to renderer so it can wait before starting a new recording
 ipcMain.handle('recording:isRecoveryRunning', () => isRecoveryRunning);
 
-// Internal function for recovery - similar to combineChunks but without IPC
+// Internal function for recovery - similar to combineChunks but without IPC.
+// Its two callers (start-up recovery, "Restore and upload") log a failed
+// attempt themselves, as a reported line; failureReportedByCaller keeps the
+// finalization's own failure line out of reporting, so one failure is one event.
 async function combineChunksForRecovery(recordId) {
   return withRecordingLock(recordId, () => inFlightUploads.has(recordId)
     ? { success: false, error: 'This recording is still uploading' }
-    : finalizeRecording(recordId, '.webm', 0, { recovery: true }));
+    : finalizeRecording(recordId, '.webm', 0, { recovery: true, failureReportedByCaller: true }));
 }
 
 // === Cleanup Old Orphaned Directories ===
@@ -2321,12 +2334,13 @@ ipcMain.handle('auth:register', async (event, email, password, name) => {
   } catch (error) {
     const failure = authFailureFromAxiosError(error);
     // Until 4.7.15 a failed registration left no trace anywhere: no log line,
-    // no Sentry event (08.10.2026: a prospect failed for 15 minutes). The
-    // log hook (sentry-reporting.js) turns this warning into a Sentry event.
+    // no Sentry event (08.10.2026: a prospect failed for 15 minutes). Now it
+    // is a line in main.log and a breadcrumb on the next Sentry event
+    // (sentry-reporting.js). It is not an event of its own: the warning also
+    // fires for a customer who is offline.
     // Status and codes only - never the e-mail, name or password. Refusals
     // the customer can fix (400 invalid input, 409 account exists, 429 too
-    // many attempts) stay in the local log (info = breadcrumb); server and
-    // network failures become Sentry warnings.
+    // many attempts) are info; server and network failures are warnings.
     const line = `auth:register failed: status=${failure.status || '-'} code=${failure.code || '-'} network=${failure.networkCode || '-'}${failure.nonJson ? ' non-json' : ''}`;
     if (isCustomerFixableRegisterRefusal(failure)) log.info(line);
     else log.warn(line);
@@ -3791,7 +3805,11 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
     if (getActiveRecording()?.recordId === recordId) clearActiveRecording();
     return result;
   } catch (error) {
-    log.error('Recording finalization failed; all source batches retained:', error);
+    // The first text is on the list of reported lines (sentry-reporting.js),
+    // the second is not: there the caller reports the failed attempt, and this
+    // line is the breadcrumb that tells why.
+    if (options.failureReportedByCaller === true) log.warn('Recording finalization failed during recovery; all source batches retained:', error);
+    else log.error('Recording finalization failed; all source batches retained:', error);
     // The predicted length missed and the rebuild from measured lengths failed
     // as well (ELECTRON-73). Without both counts this cannot be diagnosed.
     if (error.fastPathFallback) {

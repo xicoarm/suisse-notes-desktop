@@ -19,23 +19,32 @@
 // have been an event in a released version. A line is reported only after its
 // call site was read and it was put on the list.
 //
-// Four properties matter more than completeness here:
+// Five properties matter more than completeness here:
 //   - it can never break the app: the hook body is wrapped, and a failure
 //     inside reporting is swallowed after being disarmed;
 //   - it can never loop: Sentry's own errors are logged, and logging must not
 //     produce another event;
-//   - one failure cannot flood the quota: identical messages are bounded per
-//     session (the same power-of-two escalation the mobile client uses), so a
-//     failure that repeats every second still reports its first occurrences
-//     and then a logarithmic tail instead of thousands of events;
+//   - one failure cannot flood the quota: a listed line is one failure,
+//     whatever its variable text says, and is bounded per session (the same
+//     power-of-two escalation the mobile client uses), so a failure that
+//     repeats every second still reports its first occurrences and then a
+//     logarithmic tail instead of thousands of events;
 //   - one session cannot flood it either: this channel sends at most
-//     MAX_EVENTS_PER_SESSION events per app session, whatever is logged. Past
-//     that, lines are breadcrumbs only.
+//     MAX_EVENTS_PER_SESSION events per app session, whatever is logged;
+//   - restarting does not refill it: with a store for the budget, an
+//     installation sends at most MAX_EVENTS_PER_LINE_PER_DAY events per listed
+//     line and MAX_EVENTS_PER_DAY in total per day, across launches. A failure
+//     that repeats at every start, or one that hits every installation at
+//     once, stays a handful of events.
+// Past any of these limits a line is a breadcrumb only.
 
+const os = require('os');
 const path = require('path');
 
 const LEVEL_LIMITS = { fatal: 8, error: 8, warning: 4, log: 2, info: 2, debug: 1 };
 const MAX_EVENTS_PER_SESSION = 30;
+const MAX_EVENTS_PER_LINE_PER_DAY = 3;
+const MAX_EVENTS_PER_DAY = 30;
 
 // The log lines that become Sentry events. Each pattern is anchored to the
 // constant text of exactly one log.warn / log.error call of the main process
@@ -115,46 +124,85 @@ const ALREADY_REPORTED = [
 const BREADCRUMB_LEVELS = new Set(['info', 'log', 'verbose', 'debug', 'silly']);
 const EVENT_LEVELS = new Map([['error', 'error'], ['warn', 'warning']]);
 const MAX_MESSAGE = 900;
+// Scrubbing runs on at most this much text, so its patterns cannot run long on
+// a huge line and the cut to MAX_MESSAGE never splits something they replace.
+const MAX_SCRUB_INPUT = 4000;
 
-// A log line identifies its failure by its constant text: strip the parts that
-// differ per occurrence (ids, paths, numbers, quoted device names) so repeats
-// of the same failure group and count together.
-function fingerprintOf(text) {
-  return String(text)
-    .replace(/[A-Za-z]:\\[^\s"']+|\/(?:Users|home)\/[^\s"']+/g, '<path>')
-    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '<id>')
-    // Every number is per-occurrence detail: sizes, durations, chunk indices,
-    // status codes. "chunk_3610" and "chunk_3611" are the same failure.
-    .replace(/\d+(?:\.\d+)?/g, '<n>')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 160);
+function homeDirectory() {
+  try { return os.homedir(); } catch (_) { return ''; }
 }
+const HOME_DIRECTORY = homeDirectory();
+
+// The user's own folder, in the three ways a log line spells it: as it is,
+// with every backslash doubled (a path inside a logged object) and with
+// forward slashes. The name is its last part, whatever characters it has.
+let homePatternsFor = { directory: null, patterns: [] };
+function homePatterns(directory) {
+  if (homePatternsFor.directory === directory) return homePatternsFor.patterns;
+  const home = String(directory || '').replace(/[\\/]+$/, '');
+  const patterns = [];
+  if (Math.max(home.lastIndexOf('\\'), home.lastIndexOf('/')) >= 0) {
+    for (const form of new Set([home, home.replace(/\\/g, '\\\\'), home.replace(/\\/g, '/')])) {
+      const nameStart = Math.max(form.lastIndexOf('\\'), form.lastIndexOf('/')) + 1;
+      if (nameStart >= form.length) continue;
+      patterns.push({
+        find: new RegExp(`${form.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'giu'),
+        put: `${form.slice(0, nameStart)}<user>`,
+      });
+    }
+  }
+  homePatternsFor = { directory, patterns };
+  return patterns;
+}
+
+// A value of these keys in a logged object is a credential. (The look-behinds
+// here and below only keep the patterns from retrying inside one long run.)
+const SECRET_VALUE = /((?<!\\)\\*"(access_token|refresh_token|token|password|secret|authorization|code)\\*"\s*:\s*)(\\*"(?:\\.|[^"\\])*"?|[^\s,}\]"\\]+)/gi;
+// "code" is also where errors carry "ECONNRESET", "invalid_code" or 404: that
+// is the diagnosis, not a sign-in code, and stays.
+const PLAIN_CODE = /^(?:[A-Z][A-Z0-9_]{1,39}|[a-z_]{1,40}|\d{3})$/;
+const EMAIL = /(?<![\p{L}\p{N}._%+-])[\p{L}\p{N}._%+-]+@[\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}_-]+)+/gu;
+const LINK = /((?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/[^\s"'?#]*)(\?[^\s"'#]*)?(#[^\s"']*)?/gi;
 
 // Local paths, mail addresses and credentials are diagnostics only when they
 // are not personal data. Which directory a file lives in matters for triage,
 // the account name behind it does not — so only the user name is replaced.
-function scrub(text) {
-  return String(text)
-    .replace(/([A-Za-z]:\\Users\\)[^\\/"'\s]+/gi, '$1<user>')
-    .replace(/(\/(?:Users|home)\/)[^/"'\s]+/g, '$1<user>')
-    .replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, '<email>')
+// Where a rule cannot know where a name ends it takes too much rather than
+// too little: a profile folder may be "Hans Muster".
+function scrub(text, homeDir = HOME_DIRECTORY) {
+  let result = String(text).slice(0, MAX_SCRUB_INPUT);
+  for (const { find, put } of homePatterns(homeDir)) result = result.replace(find, () => put);
+  return result
+    // Any other profile folder. The name runs to the next separator, double
+    // quote or line end, with its spaces and apostrophes ("Hans Muster",
+    // "O'Brien"); on Windows also to a character no folder name can have.
+    // Backslashes may be doubled or more (paths inside logged objects).
+    .replace(/(\\Users\\+)[^\\/":*?<>|\r\n]+/gi, '$1<user>')
+    .replace(/(\/(?:Users|home)\/)[^\\/"\r\n]+/gi, '$1<user>')
+    .replace(EMAIL, '<email>')
+    .replace(SECRET_VALUE, (all, head, key, value) => (
+      key.toLowerCase() === 'code' && PLAIN_CODE.test(value.replace(/^\\*"|"$/g, '')) ? all : `${head}"<redacted>"`))
+    .replace(/\b(Bearer)\s+[\w.~+/=-]+/gi, '$1 <redacted>')
     .replace(/(Bearer|token|password|secret|sas|sig)[=:]\s*\S+/gi, '$1=<redacted>')
+    // A signed token, or any other encoded JSON object, wherever it stands.
+    .replace(/\beyJ[\w-]{10,}(?:\.[\w-]+){0,2}/g, '<jwt>')
     // Any scheme, not only http: the app's own sign-in link carries the token
-    // and the account in its query.
-    .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s"']+)\?[^\s"']*/gi, '$1?<redacted>')
+    // and the account in its query, other sign-in answers in the fragment.
+    .replace(LINK, (all, base, query, fragment) => `${base}${query ? '?<redacted>' : ''}${fragment ? '#<redacted>' : ''}`)
     // A JSON parse error quotes the text it could not read, which can be a
-    // recording's metadata (its title) or a sign-in answer.
-    .replace(/, "[\s\S]*? is not valid JSON/g, ', <text> is not valid JSON');
+    // recording's metadata (its title) or a sign-in answer: about twenty
+    // characters around the error, in several shapes.
+    .replace(/Unexpected token [\s\S]*? is not valid JSON/g, 'Unexpected token <text> is not valid JSON')
+    .replace(/"[^"\n]{0,40}" is not valid JSON/g, '<text> is not valid JSON');
 }
 
 // The Error behind a reported line travels with its stack. Its own text and
 // the paths in its stack get the same scrubbing as the line: an error message
 // can quote a file it could not read, and a stack names the user's folder.
-function scrubbedError(error) {
-  const copy = new Error(scrub(error.message));
+function scrubbedError(error, homeDir = HOME_DIRECTORY) {
+  const copy = new Error(scrub(error.message, homeDir));
   copy.name = error.name;
-  if (error.stack) copy.stack = scrub(String(error.stack));
+  if (error.stack) copy.stack = scrub(String(error.stack), homeDir);
   if (error.code !== undefined) copy.code = error.code;
   return copy;
 }
@@ -168,10 +216,10 @@ function textOf(value) {
 
 // electron-log passes the original console arguments; keep the error object so
 // Sentry gets its stack, and keep the readable line for the title.
-function describe(data) {
+function describe(data, homeDir = HOME_DIRECTORY) {
   const parts = Array.isArray(data) ? data : [data];
   const error = parts.find(part => part instanceof Error) || null;
-  const message = scrub(parts.map(textOf).join(' ')).slice(0, MAX_MESSAGE);
+  const message = scrub(parts.map(textOf).join(' '), homeDir).slice(0, MAX_MESSAGE);
   return { error, message };
 }
 
@@ -193,20 +241,70 @@ function createOccurrenceSampler(limits = LEVEL_LIMITS) {
   };
 }
 
+// What one installation may still send today. `store` reads and writes one
+// small object ({ day, total, lines }); this module does not know where it
+// lives. The store is read once, before the first event of a session, and
+// written only after an event was sent. It can never break reporting: what
+// cannot be read, or is not such an object, counts as an empty budget and is
+// replaced by the next write; a write that fails leaves the count in memory.
+function createDailyBudget({ store, now = () => new Date(), perLine = MAX_EVENTS_PER_LINE_PER_DAY, total = MAX_EVENTS_PER_DAY }) {
+  let state = null;
+  const today = () => {
+    const date = now(); // the local date: the budget is per day as the user has it
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  };
+  const current = () => {
+    const day = today();
+    if (!state) {
+      state = { day, total: 0, lines: {} };
+      try {
+        const stored = store.read();
+        if (stored && stored.day === day && Number.isInteger(stored.total) && stored.total >= 0
+          && stored.lines && typeof stored.lines === 'object' && !Array.isArray(stored.lines)) {
+          state.total = stored.total;
+          for (const [line, sent] of Object.entries(stored.lines)) {
+            if (Number.isInteger(sent) && sent > 0) state.lines[line] = sent;
+          }
+        }
+      } catch (_) { /* no file yet, unreadable or not JSON: an empty budget */ }
+    }
+    if (state.day !== day) state = { day, total: 0, lines: {} };
+    return state;
+  };
+  return {
+    allows(line) {
+      const { total: sent, lines } = current();
+      return sent < total && (lines[line] || 0) < perLine;
+    },
+    spend(line) {
+      const budget = current();
+      budget.total += 1;
+      budget.lines[line] = (budget.lines[line] || 0) + 1;
+      try { store.write(budget); } catch (_) { /* counted in memory for this session */ }
+    },
+  };
+}
+
 /**
  * Turn main-process logging into Sentry reporting.
  *
  * `log` is electron-log, `Sentry` is @sentry/electron/main. Both are injected
- * so this module stays unit-testable without Electron. `reported` is the list
- * of lines that become events, `maxEvents` the cap on events per session and
- * `limits` the per-line budget; tests lower them.
+ * so this module stays unit-testable without Electron. `budgetStore` is
+ * `{ read, write }` for the budget that outlives the session; without it only
+ * the limits of the session apply. `reported` is the list of lines that
+ * become events; `maxEvents`, `limits`, `maxEventsPerDay`,
+ * `maxEventsPerLinePerDay`, `now` and `homeDir` exist so tests can set them.
  */
 function installLogReporting({
   log, Sentry, limits, maxEvents = MAX_EVENTS_PER_SESSION, isEnabled = () => true,
   reported = REPORTED_LINES, alreadyReported = ALREADY_REPORTED,
+  budgetStore = null, now, maxEventsPerDay, maxEventsPerLinePerDay, homeDir = HOME_DIRECTORY,
 } = {}) {
   if (!log || !Sentry) throw new Error('Log reporting needs electron-log and Sentry');
   const sampler = createOccurrenceSampler(limits);
+  const dailyBudget = budgetStore
+    ? createDailyBudget({ store: budgetStore, now, perLine: maxEventsPerLinePerDay, total: maxEventsPerDay })
+    : null;
   let reporting = false; // re-entrancy guard: reporting must never report itself
   let disarmed = false;
   let eventsSent = 0;
@@ -223,33 +321,43 @@ function installLogReporting({
       const level = String(message?.level || '').toLowerCase();
       const eventLevel = EVENT_LEVELS.get(level);
       if (!eventLevel && !BREADCRUMB_LEVELS.has(level)) return message;
-      const { error, message: text } = describe(message?.data);
+      const { error, message: text } = describe(message?.data, homeDir);
       if (!text) return message;
       const leaveBreadcrumb = () => Sentry.addBreadcrumb({
         category: 'main-log', level: eventLevel || (level === 'info' ? 'info' : 'debug'), message: text,
       });
 
-      const listed = Boolean(eventLevel) && reported.some(pattern => pattern.test(text))
-        && !alreadyReported.some(pattern => pattern.test(text));
-      if (!listed) { leaveBreadcrumb(); return message; }
+      const pattern = eventLevel ? reported.find(entry => entry.test(text)) : null;
+      if (!pattern || alreadyReported.some(entry => entry.test(text))) { leaveBreadcrumb(); return message; }
 
-      const fingerprint = fingerprintOf(text);
-      const decision = sampler.shouldReport(eventLevel, fingerprint);
-      if (!decision.report || eventsSent >= maxEvents) { leaveBreadcrumb(); return message; }
+      // A listed line is one failure. Its budget and its Sentry issue go by
+      // the line, not by its text: an error message or an id in it would
+      // otherwise start a new budget and a new issue for every variant. The
+      // Error it carries tells real causes apart by name and code.
+      const line = pattern.source;
+      const group = error
+        ? [line, String(error.name).slice(0, 60), String(error.code ?? '').slice(0, 60)]
+        : [line];
+      const decision = sampler.shouldReport(eventLevel, group.join('|'));
+      if (!decision.report || eventsSent >= maxEvents || (dailyBudget && !dailyBudget.allows(line))) {
+        leaveBreadcrumb();
+        return message;
+      }
 
       eventsSent += 1;
       const scopeFor = scope => {
         scope.setLevel(eventLevel);
         scope.setTag('source', 'main-log');
-        scope.setFingerprint(['main-log', fingerprint]);
+        scope.setFingerprint(['main-log', ...group]);
         scope.setExtra('logLine', text);
         scope.setExtra('occurrence', decision.occurrence);
         // Which event of this session it is: the last one before the cap says so.
         scope.setExtra('sessionEvent', `${eventsSent}/${maxEvents}`);
         if (message?.scope) scope.setTag('logScope', String(message.scope).slice(0, 60));
       };
-      if (error) Sentry.withScope(scope => { scopeFor(scope); Sentry.captureException(scrubbedError(error)); });
+      if (error) Sentry.withScope(scope => { scopeFor(scope); Sentry.captureException(scrubbedError(error, homeDir)); });
       else Sentry.withScope(scope => { scopeFor(scope); Sentry.captureMessage(text, eventLevel); });
+      if (dailyBudget) dailyBudget.spend(line);
       // After its own event the line joins the trail, so a later event shows it.
       leaveBreadcrumb();
     } catch (failure) {
@@ -320,6 +428,6 @@ function installWindowReporting({ Sentry, log = null } = {}) {
 }
 
 module.exports = {
-  installLogReporting, installWindowReporting, createOccurrenceSampler, fingerprintOf, scrub, describe,
-  REPORTED_LINES, MAX_EVENTS_PER_SESSION,
+  installLogReporting, installWindowReporting, createOccurrenceSampler, scrub, describe,
+  REPORTED_LINES, MAX_EVENTS_PER_SESSION, MAX_EVENTS_PER_LINE_PER_DAY, MAX_EVENTS_PER_DAY,
 };

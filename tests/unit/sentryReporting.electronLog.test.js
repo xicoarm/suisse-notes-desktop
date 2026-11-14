@@ -83,4 +83,28 @@ describe('log reporting on the installed electron-log', () => {
     expect(Sentry.events).toEqual([{ kind: 'exception', error: failure }]);
     expect(Sentry.breadcrumbs).toHaveLength(1);
   });
+
+  it('keeps the daily budget in a file, as the main process wires it, over starts and a damaged file', () => {
+    const budgetFile = path.join(directory, 'main-log-reporting.json');
+    const budgetStore = {
+      read: () => JSON.parse(fs.readFileSync(budgetFile, 'utf8')),
+      write: budget => fs.writeFileSync(budgetFile, JSON.stringify(budget)),
+    };
+    const start = () => {
+      const logger = electronLog.create({ logId: `reporting-test-${path.basename(directory)}-${Math.random()}` });
+      logger.transports.file.resolvePathFn = () => logFile;
+      logger.transports.console.writeFn = () => {};
+      const sentry = fakeSentry();
+      installLogReporting({ log: logger, Sentry: sentry, budgetStore });
+      for (let i = 0; i < 5; i++) logger.warn(`Could not recover recording rec-${i}: ffprobe failed`);
+      return sentry.events.length;
+    };
+    expect(fs.existsSync(budgetFile)).toBe(false); // the first start of an installation: nothing to read
+    expect(start()).toBe(3);
+    expect(JSON.parse(fs.readFileSync(budgetFile, 'utf8'))).toMatchObject({ total: 3, lines: { '^Could not recover recording .+: ': 3 } });
+    expect(start()).toBe(0); // the next start: this line has had its three of the day
+    fs.writeFileSync(budgetFile, '{"day":"20'); // cut off while it was written
+    expect(start()).toBe(3);
+    expect(JSON.parse(fs.readFileSync(budgetFile, 'utf8')).total).toBe(3); // replaced by a whole one
+  });
 });
