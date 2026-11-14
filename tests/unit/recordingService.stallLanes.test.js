@@ -410,6 +410,63 @@ describe('a stalled live mix and the source lanes (capture recovery)', () => {
     expect(Date.now() - wokeAt).toBeLessThanOrEqual(320000);
   });
 
+  /** A long meeting with a stalled live mix and saving lanes; a level report just after the last timer; then the lid closes. */
+  async function sleepRightAfterALevelReport(store) {
+    // The audio engine cannot be resumed: only the give-up window could end this episode.
+    ctrl.contextStuck = true;
+    for (const context of contexts) if (context.state === 'running') context.state = 'suspended';
+    await stallLiveMix();
+    await runUntil(31 * 60); // more than 30 awake minutes, the lanes saving all the time
+    expect(events.recoveryFailed).toEqual([]);
+    expect(events.lanes).toEqual([true]);
+    // The lanes' last sign of saving is newer than the last timer that ran.
+    await vi.advanceTimersByTimeAsync(230);
+    levelReport(store.recordId);
+    // Frozen for ten minutes; nothing new arrives before the first timers after the wake.
+    ctrl.systemAudioFor = null;
+    ctrl.micLaneFlows = false;
+    vi.setSystemTime(Date.now() + 10 * 60 * 1000);
+    return Date.now();
+  }
+
+  it('desktop: a sleep right after a level report does not end a long stalled recording whose lanes save audio', async () => {
+    installDesktop();
+    const store = createStore();
+    ctrl.systemAudioFor = store.recordId;
+    await startRecording(store, { systemAudio: true });
+    await sleepRightAfterALevelReport(store);
+
+    // The first ticks after the wake: the sleep is not ten minutes of lanes standing still.
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(events.recoveryFailed).toEqual([]);
+    expect(events.lanes).toEqual([true]); // and the banner does not flip to "stop and save"
+    expect(recordingService.getState().isRecording).toBe(true);
+
+    // The lanes save again: the recording goes on.
+    ctrl.systemAudioFor = store.recordId;
+    ctrl.micLaneFlows = true;
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    expect(events.recoveryFailed).toEqual([]);
+    expect(events.lanes).toEqual([true]);
+    expect(recordingService.getState().isRecording).toBe(true);
+  });
+
+  it('desktop: after such a sleep a recording whose lanes stay silent is stopped about 5 minutes after the wake', async () => {
+    installDesktop();
+    const store = createStore();
+    ctrl.systemAudioFor = store.recordId;
+    await startRecording(store, { systemAudio: true });
+    const wokeAt = await sleepRightAfterALevelReport(store);
+
+    await vi.advanceTimersByTimeAsync(290000);
+    expect(events.recoveryFailed).toEqual([]);
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(events.recoveryFailed).toHaveLength(1);
+    expect(events.recoveryFailed[0].gaveUp).toBe(true);
+    expect(Date.now() - wokeAt).toBeLessThanOrEqual(320000);
+    expect(events.lanes).toEqual([true, false]);
+  });
+
   it('desktop: a muted microphone is re-opened at most six times per episode while system audio keeps the recording going', async () => {
     installDesktop();
     const store = createStore();

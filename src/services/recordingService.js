@@ -835,11 +835,14 @@ function noteTimerHeartbeat(now = Date.now()) {
   if (captureRecoveryTimer && captureRecoveryStartedAt && captureRecoveryStartedAt <= gapStartedAt) {
     captureRecoverySuspendedMs += gapMs;
     // The lanes saved nothing while the process was frozen; that is no
-    // evidence that they stood still. Only a time from before the gap moves:
-    // a level report handled after the wake, before this first timer, is
-    // already on the new clock, and moving it too would put it into the
+    // evidence that they stood still, so the time they were last seen saving
+    // moves with the gap, but never past now. A time from before the last
+    // heartbeat moves exactly. One set after it and before the sleep (level
+    // reports come several times per second) lands on now, which is right to
+    // within one heartbeat. One set after the wake, before this first timer,
+    // is already on the new clock and stays: moved, it would lie in the
     // future and keep both stops off for the length of the sleep.
-    if (captureRecoveryLaneAdvancedAt && captureRecoveryLaneAdvancedAt <= gapStartedAt) captureRecoveryLaneAdvancedAt += gapMs;
+    if (captureRecoveryLaneAdvancedAt) captureRecoveryLaneAdvancedAt = Math.min(now, captureRecoveryLaneAdvancedAt + gapMs);
   }
   captureRecoveryHealthyTicks = 0;
   if (systemAudioSilentSince) systemAudioSilentSince = now;
