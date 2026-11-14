@@ -275,7 +275,89 @@ async function handleRecordingRecovered(data) {
   captureMessage(`safety-net: notified user of ${count} recovered recording(s)`, 'info');
 }
 
-export function initRecordingSafetyNet() {
+// ── Microphone not heard: tell the person outside the app window ──
+// The red warning for a microphone that stays silent after its re-open, or that
+// was lost and not recovered, lives inside the app window. In a meeting that
+// window is behind the meeting app: a recording ran 42 minutes without its
+// microphone and nobody saw it. While this lasts, the main process shows a
+// system notification and signals in the dock or taskbar: once when the state
+// becomes "critical", then every 10 minutes. It ends when the microphone is
+// healthy again, the recording pauses or stops, or the microphone is muted in
+// the app. Nothing switches microphones: silence can be a headset muted on
+// purpose, and the text says so.
+// The first notification waits 10 s, and longer while a microphone is being
+// checked: a lost microphone reads "critical" within 100 ms although the
+// automatic recovery usually brings one back within 2 s, and after a pause or
+// an in-app mute the state shown is the old one until the next measurements.
+const MIC_ALERT_CONFIRM_MS = 10 * 1000;
+const MIC_ALERT_REPEAT_MS = 10 * 60 * 1000;
+let micUnheardSince = null; // when the current silence or loss began, for the text
+let micAlert = null;        // { timer, shown } while an episode lasts
+
+function sendMicAlert(health) {
+  const lost = health.reasonCode === recordingService.MIC_HEALTH_REASON.TRACK_ENDED;
+  const at = new Date(micUnheardSince);
+  const time = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+  try {
+    Promise.resolve(window.electronAPI.system.showMicrophoneAlert({
+      title: t('micAlertTitle'),
+      body: t(lost ? 'micAlertLostBody' : 'micAlertSilentBody', { device: health.trackLabel || t('micGenericDevice'), time }),
+      // While the window is focused on the Record page the in-app warning is
+      // in view: main holds the alert until the window loses the focus.
+      onRecordPage: recordPageActive
+    })).catch(() => {});
+  } catch (e) { /* the in-app warning remains */ }
+}
+
+function endMicAlert() {
+  const alert = micAlert;
+  if (!alert) return;
+  micAlert = null;
+  clearTimeout(alert.timer);
+  if (!alert.shown) return; // nothing reached the main process yet
+  try {
+    Promise.resolve(window.electronAPI.system.clearMicrophoneAlert()).catch(() => {});
+  } catch (e) { /* nothing left to clear */ }
+}
+
+// Only the two states that mean "this microphone delivers nothing". Quiet
+// rooms (no audio / no voice detected) reach "critical" too and must not alert.
+// "degraded" counts while an episode runs: with system audio the state swings
+// back to it for three minutes in the middle of one silence.
+function micUnheard(health) {
+  const { MIC_HEALTH_STATUS: STATUS, MIC_HEALTH_REASON: REASON } = recordingService;
+  return health.status !== STATUS.OK &&
+    (health.reasonCode === REASON.ZERO_SIGNAL || health.reasonCode === REASON.TRACK_ENDED);
+}
+
+function micAlertDue(health) {
+  return micUnheard(health) && useRecordingStore().isRecording && !recordingService.getState().micMuted;
+}
+
+function micAlertTick() {
+  if (!micAlert) return;
+  const health = recordingService.getMicHealthState();
+  if (!micAlertDue(health)) { endMicAlert(); return; } // a missed event must not keep it going
+  if (!micAlert.shown && health.verifying) { // a microphone is still being checked
+    micAlert.timer = setTimeout(micAlertTick, MIC_ALERT_CONFIRM_MS);
+    return;
+  }
+  micAlert.shown = true;
+  sendMicAlert(health);
+  micAlert.timer = setTimeout(micAlertTick, MIC_ALERT_REPEAT_MS);
+}
+
+function updateMicAlert() {
+  const health = recordingService.getMicHealthState();
+  if (!micUnheard(health)) micUnheardSince = null;
+  else if (micUnheardSince === null) micUnheardSince = health.silenceSince || Date.now();
+  if (!micAlertDue(health)) { endMicAlert(); return; }
+  // "degraded" alone never starts an episode.
+  if (micAlert || health.status !== recordingService.MIC_HEALTH_STATUS.CRITICAL) return;
+  micAlert = { shown: false, timer: setTimeout(micAlertTick, MIC_ALERT_CONFIRM_MS) };
+}
+
+export function initRecordingSafetyNet({ router = null } = {}) {
   if (initialized) return;
   initialized = true;
 
@@ -298,6 +380,15 @@ export function initRecordingSafetyNet() {
     // History page" got no renderer flush at all.
     window.electronAPI.system.onSuspend(handleSystemSuspend);
     window.electronAPI.system.onResume(handleSystemResume);
+    if (window.electronAPI.system.showMicrophoneAlert) {
+      recordingService.addEventListener('healthChange', updateMicAlert);
+      recordingService.addEventListener('micMuteChange', updateMicAlert);
+      recordingService.addEventListener('stateChange', state => (state?.isRecording ? updateMicAlert() : endMicAlert()));
+      // The notification was clicked: main has brought the window to the front.
+      window.electronAPI.system.onShowRecordPage?.(() => {
+        Promise.resolve(router?.push('/record')).catch(() => {});
+      });
+    }
   }
 
   console.log('Recording safety net initialized');

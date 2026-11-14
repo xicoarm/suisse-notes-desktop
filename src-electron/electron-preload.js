@@ -369,6 +369,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onRecordingRecovered: (callback) => {
       ipcRenderer.on('recording:recovered', (event, data) => callback(data));
     },
+    // A running recording's microphone is not heard: system notification plus
+    // dock or taskbar signal, so the warning reaches a person in another
+    // window. alert = { title, body, onRecordPage }, texts already translated.
+    showMicrophoneAlert: (alert) => ipcRenderer.invoke('system:showMicrophoneAlert', alert),
+    clearMicrophoneAlert: () => ipcRenderer.invoke('system:clearMicrophoneAlert'),
+    // That notification was clicked. The subscriber is the app-level safety
+    // net, so this is deliberately NOT cleared by removeAllListeners.
+    onShowRecordPage: (callback) => {
+      ipcRenderer.on('system:show-record-page', () => callback());
+    },
     // Remove all system listeners
     removeAllListeners: () => {
       ipcRenderer.removeAllListeners('recording:suspend');
