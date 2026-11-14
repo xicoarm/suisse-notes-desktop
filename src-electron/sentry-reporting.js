@@ -3,29 +3,110 @@
 // Main-process failure reporting.
 //
 // Before this, only explicit Sentry calls and uncaught exceptions reached
-// Sentry from main. Everything the main process merely logged — an AudioTee
-// error, a failed finalization, a refused IPC request, a killed child process —
-// existed only in the user's local main.log, so a customer report could not be
-// diagnosed without asking for that file. This module turns the log itself into
-// the reporting channel: every error the main process writes becomes a Sentry
-// event, warnings become events at warning level, and the surrounding info
-// lines become breadcrumbs so an event carries its context.
+// Sentry from main. Everything the main process merely logged — a failed
+// finalization, a recording that could not be recovered — existed only in the
+// user's local main.log, so a customer report could not be diagnosed without
+// asking for that file. This module makes the log a reporting channel:
+//   - a warning or error whose text is in REPORTED_LINES becomes a Sentry
+//     event, at warning or error level;
+//   - every other line becomes a breadcrumb with its level, so the next event
+//     carries it as context. That is info and below, and every warning and
+//     error that is not listed: lines of libraries that log through the same
+//     logger (the updater), and any line added later.
 //
-// Three properties matter more than completeness here:
-//   - it can never break the app: every hook body is wrapped, and a failure
+// "Breadcrumb" is the default on purpose. An installed app cannot be called
+// back, so a line that turns out to fire for every offline user must never
+// have been an event in a released version. A line is reported only after its
+// call site was read and it was put on the list.
+//
+// Four properties matter more than completeness here:
+//   - it can never break the app: the hook body is wrapped, and a failure
 //     inside reporting is swallowed after being disarmed;
 //   - it can never loop: Sentry's own errors are logged, and logging must not
 //     produce another event;
-//   - it can never flood the quota: identical messages are bounded per session
-//     (the same power-of-two escalation the mobile client uses), so a failure
-//     that repeats every second still reports its first occurrences and then
-//     a logarithmic tail instead of thousands of events.
+//   - one failure cannot flood the quota: identical messages are bounded per
+//     session (the same power-of-two escalation the mobile client uses), so a
+//     failure that repeats every second still reports its first occurrences
+//     and then a logarithmic tail instead of thousands of events;
+//   - one session cannot flood it either: this channel sends at most
+//     MAX_EVENTS_PER_SESSION events per app session, whatever is logged. Past
+//     that, lines are breadcrumbs only.
 
 const path = require('path');
 
 const LEVEL_LIMITS = { fatal: 8, error: 8, warning: 4, log: 2, info: 2, debug: 1 };
-// Lines whose code path already sends a richer Sentry event of its own. They
-// stay breadcrumbs here so one failure is not filed twice.
+const MAX_EVENTS_PER_SESSION = 30;
+
+// The log lines that become Sentry events. Each pattern is anchored to the
+// constant text of exactly one log.warn / log.error call of the main process
+// and is tested against the scrubbed line. A unit test reads the sources and
+// fails when a pattern no longer matches exactly one call, so a reworded line
+// cannot drop out of reporting unnoticed.
+//
+// Not listed, deliberately: lines whose code path sends its own Sentry event
+// (they would be filed twice), and everything that is expected in normal use:
+// no network, an expired sign-in, a failed update check, retries, a refused
+// user action.
+const REPORTED_LINES = [
+  // A recording could not be saved, recovered or restored. The audio stays on
+  // the computer, but the user has no recording until someone looks at it.
+  /^Recording finalization failed; all source batches retained:/,
+  /^Could not recover recording .+: /,
+  /^Error processing directory .+ for recovery:/,
+  /^Error recovering orphaned recordings:/,
+  /^Error in recovery re-scan:/,
+  /^Restore of .+ failed; originals retained:/,
+
+  // A finished recording did not get into the upload queue, or the queue
+  // itself could not run or keep its state: it would stay on the computer
+  // without anyone noticing.
+  /^recovery: enqueue failed:/,
+  /^recovery: upload processing failed:/,
+  /^restore: upload processing failed:/,
+  /^Error processing pending uploads:/,
+  /^Error processing pending uploads after login:/,
+  /^Periodic upload retry failed:/,
+  /^Error locking recording:/,
+  /^Error unlocking recording:/,
+  /^\[uploadDirect\] onSession callback threw:/,
+
+  // The server did not keep an upload it had accepted.
+  /^Server reported upload failed for .+:/,
+  /^Server has not confirmed the recording \(404\); retaining local audio/,
+
+  // What recovery and the history rely on could not be written or read:
+  // crash and warning notes, the stream header, the recording's metadata.
+  /^Failed to write crash metadata:/,
+  /^Could not persist capture warning:/,
+  /^Could not persist init segment:/,
+  /^Could not parse existing metadata, creating new:/,
+  /^Could not inspect raw session head:/,
+
+  // System audio broke during a recording, or capture could not be stopped or
+  // flushed when the window crashed, the computer went to sleep or the app quit.
+  /^System audio capture failed:/,
+  /^Failed to stop AudioTee after renderer crash:/,
+  /^AudioTee suspend-stop failed:/,
+  /^Suspend flush timed out after 3s/,
+  /^Quit flush timed out after 2s \(reason: .+\)/,
+
+  // Checks that are written never to fail.
+  /^Binary health probe threw:/,
+  /^Error checking disk space:/,
+
+  // Sign-in answers the app cannot use, and a stored token of another account.
+  /^CRITICAL SECURITY: Token user mismatch!/,
+  /^SSO: failed to parse callback URL/,
+  /^auth:register: answer without a token \(HTTP .+\)/,
+
+  // A downloaded update cannot be installed.
+  /^quitAndInstall failed:/,
+  /^Update failed due to signature verification\. App needs code signing or manual reinstall\./,
+];
+
+// Lines whose code path already sends a richer Sentry event of its own. None
+// of them is listed above; this second check keeps them breadcrumbs even if a
+// pattern above ever matches one, so one failure is not filed twice.
 const ALREADY_REPORTED = [
   /^Uncaught Exception/i, /^Unhandled Rejection/i,
   /^Renderer process gone/i, /^Child process gone/i,
@@ -59,7 +140,23 @@ function scrub(text) {
     .replace(/(\/(?:Users|home)\/)[^/"'\s]+/g, '$1<user>')
     .replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, '<email>')
     .replace(/(Bearer|token|password|secret|sas|sig)[=:]\s*\S+/gi, '$1=<redacted>')
-    .replace(/(https?:\/\/[^\s"']+)\?[^\s"']*/g, '$1?<redacted>');
+    // Any scheme, not only http: the app's own sign-in link carries the token
+    // and the account in its query.
+    .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s"']+)\?[^\s"']*/gi, '$1?<redacted>')
+    // A JSON parse error quotes the text it could not read, which can be a
+    // recording's metadata (its title) or a sign-in answer.
+    .replace(/, "[\s\S]*? is not valid JSON/g, ', <text> is not valid JSON');
+}
+
+// The Error behind a reported line travels with its stack. Its own text and
+// the paths in its stack get the same scrubbing as the line: an error message
+// can quote a file it could not read, and a stack names the user's folder.
+function scrubbedError(error) {
+  const copy = new Error(scrub(error.message));
+  copy.name = error.name;
+  if (error.stack) copy.stack = scrub(String(error.stack));
+  if (error.code !== undefined) copy.code = error.code;
+  return copy;
 }
 
 function textOf(value) {
@@ -100,46 +197,61 @@ function createOccurrenceSampler(limits = LEVEL_LIMITS) {
  * Turn main-process logging into Sentry reporting.
  *
  * `log` is electron-log, `Sentry` is @sentry/electron/main. Both are injected
- * so this module stays unit-testable without Electron.
+ * so this module stays unit-testable without Electron. `reported` is the list
+ * of lines that become events, `maxEvents` the cap on events per session and
+ * `limits` the per-line budget; tests lower them.
  */
-function installLogReporting({ log, Sentry, limits, isEnabled = () => true, alreadyReported = ALREADY_REPORTED } = {}) {
+function installLogReporting({
+  log, Sentry, limits, maxEvents = MAX_EVENTS_PER_SESSION, isEnabled = () => true,
+  reported = REPORTED_LINES, alreadyReported = ALREADY_REPORTED,
+} = {}) {
   if (!log || !Sentry) throw new Error('Log reporting needs electron-log and Sentry');
   const sampler = createOccurrenceSampler(limits);
   let reporting = false; // re-entrancy guard: reporting must never report itself
   let disarmed = false;
+  let eventsSent = 0;
 
-  const hook = (message, transport) => {
-    // electron-log runs hooks once per transport; act on one of them only.
-    if (disarmed || !transport || transport.name !== 'file') return message;
+  // electron-log calls every hook once per transport, as
+  // hook(message, transportFunction, transportName). Act for the file
+  // transport only, by its name: the function itself is called "transport"
+  // for every transport, so it cannot tell them apart.
+  const hook = (message, _transport, transportName) => {
+    if (disarmed || transportName !== 'file') return message;
     if (reporting || !isEnabled()) return message;
     try {
       reporting = true;
       const level = String(message?.level || '').toLowerCase();
+      const eventLevel = EVENT_LEVELS.get(level);
+      if (!eventLevel && !BREADCRUMB_LEVELS.has(level)) return message;
       const { error, message: text } = describe(message?.data);
       if (!text) return message;
-      if (BREADCRUMB_LEVELS.has(level)) {
-        Sentry.addBreadcrumb({ category: 'main-log', level: level === 'info' ? 'info' : 'debug', message: text });
-        return message;
-      }
-      const eventLevel = EVENT_LEVELS.get(level);
-      if (!eventLevel) return message;
-      if (alreadyReported.some(pattern => pattern.test(text))) {
-        Sentry.addBreadcrumb({ category: 'main-log', level: eventLevel, message: text });
-        return message;
-      }
+      const leaveBreadcrumb = () => Sentry.addBreadcrumb({
+        category: 'main-log', level: eventLevel || (level === 'info' ? 'info' : 'debug'), message: text,
+      });
+
+      const listed = Boolean(eventLevel) && reported.some(pattern => pattern.test(text))
+        && !alreadyReported.some(pattern => pattern.test(text));
+      if (!listed) { leaveBreadcrumb(); return message; }
+
       const fingerprint = fingerprintOf(text);
       const decision = sampler.shouldReport(eventLevel, fingerprint);
-      if (!decision.report) return message;
+      if (!decision.report || eventsSent >= maxEvents) { leaveBreadcrumb(); return message; }
+
+      eventsSent += 1;
       const scopeFor = scope => {
         scope.setLevel(eventLevel);
         scope.setTag('source', 'main-log');
         scope.setFingerprint(['main-log', fingerprint]);
         scope.setExtra('logLine', text);
         scope.setExtra('occurrence', decision.occurrence);
+        // Which event of this session it is: the last one before the cap says so.
+        scope.setExtra('sessionEvent', `${eventsSent}/${maxEvents}`);
         if (message?.scope) scope.setTag('logScope', String(message.scope).slice(0, 60));
       };
-      if (error) Sentry.withScope(scope => { scopeFor(scope); Sentry.captureException(error); });
+      if (error) Sentry.withScope(scope => { scopeFor(scope); Sentry.captureException(scrubbedError(error)); });
       else Sentry.withScope(scope => { scopeFor(scope); Sentry.captureMessage(text, eventLevel); });
+      // After its own event the line joins the trail, so a later event shows it.
+      leaveBreadcrumb();
     } catch (failure) {
       // Reporting must never take the app down, and a broken hook must not run
       // on every log line for the rest of the session.
@@ -152,7 +264,10 @@ function installLogReporting({ log, Sentry, limits, isEnabled = () => true, alre
   };
 
   log.hooks.push(hook);
-  return { hook, sampler, remove: () => { log.hooks = log.hooks.filter(entry => entry !== hook); } };
+  return {
+    hook, sampler, eventsSent: () => eventsSent,
+    remove: () => { log.hooks = log.hooks.filter(entry => entry !== hook); },
+  };
 }
 
 /**
@@ -204,4 +319,7 @@ function installWindowReporting({ Sentry, log = null } = {}) {
   return { report, attachWindow };
 }
 
-module.exports = { installLogReporting, installWindowReporting, createOccurrenceSampler, fingerprintOf, scrub, describe };
+module.exports = {
+  installLogReporting, installWindowReporting, createOccurrenceSampler, fingerprintOf, scrub, describe,
+  REPORTED_LINES, MAX_EVENTS_PER_SESSION,
+};
