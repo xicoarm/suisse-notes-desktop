@@ -153,9 +153,17 @@ async function main() {
     }
     console.log('  app info done');
 
+    // Creating the app info language also creates the version language.
+    if (!verBy[locale]) {
+      const fresh = (await api('GET', `/v1/appStoreVersions/${v.id}/appStoreVersionLocalizations?limit=50`)).data || [];
+      const found = fresh.find((l) => l.attributes.locale === locale);
+      if (found) verBy[locale] = found;
+    }
     if (verBy[locale]) {
+      const fill = pick((pVer && pVer.attributes) || {}, ['supportUrl', 'marketingUrl']);
+      for (const k of Object.keys(fill)) if (verBy[locale].attributes[k]) delete fill[k];
       await api('PATCH', `/v1/appStoreVersionLocalizations/${verBy[locale].id}`, {
-        data: { type: 'appStoreVersionLocalizations', id: verBy[locale].id, attributes: verAttrs },
+        data: { type: 'appStoreVersionLocalizations', id: verBy[locale].id, attributes: { ...fill, ...verAttrs } },
       });
     } else {
       await api('POST', '/v1/appStoreVersionLocalizations', {

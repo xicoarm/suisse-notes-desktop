@@ -33,6 +33,11 @@ on:
         required: false
         default: false
         type: boolean
+      keep_notes:
+        description: 'Keep the what-is-new texts already set per language (do not write the notes below)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   submit:
@@ -84,5 +89,5 @@ jobs:
             --app 6758680707 \
             --version "${{ inputs.version }}" \
             --build "${{ inputs.build }}" \
-            --notes-file /tmp/release-notes.txt \
+            ${{ !inputs.keep_notes && '--notes-file /tmp/release-notes.txt' || '' }} \
             ${{ inputs.submit && '--submit' || '' }}
