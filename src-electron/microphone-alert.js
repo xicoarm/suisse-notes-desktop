@@ -75,12 +75,14 @@ function createMicrophoneAlert({ Notification, getWindow, getDock = () => null, 
   }
 
   function openRecordPage() {
-    const win = currentWindow();
-    if (!win) return;
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
-    win.webContents.send('system:show-record-page');
+    try {
+      const win = currentWindow();
+      if (!win) return;
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+      win.webContents.send('system:show-record-page');
+    } catch (error) { log?.warn?.('Microphone alert: opening the Record page failed:', error); }
   }
 
   function present(win, title, body) {

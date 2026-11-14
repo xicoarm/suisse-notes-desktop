@@ -1538,6 +1538,7 @@ function destroyRecordingTray() {
 const microphoneAlert = createMicrophoneAlert({ Notification, getWindow: () => mainWindow, getDock: () => app.dock, log });
 ipcMain.handle('system:showMicrophoneAlert', (event, alert) => microphoneAlert.show(alert));
 ipcMain.handle('system:clearMicrophoneAlert', () => microphoneAlert.clear());
+app.on('before-quit', () => microphoneAlert.clear());
 
 // Resolve preload path - use environment variable in dev, or relative path in prod
 const preloadPath = process.env.QUASAR_ELECTRON_PRELOAD

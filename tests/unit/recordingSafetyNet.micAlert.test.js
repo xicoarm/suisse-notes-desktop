@@ -16,7 +16,7 @@ const h = vi.hoisted(() => ({
 }));
 vi.mock('quasar', () => ({ Notify: { create: vi.fn() } }));
 vi.mock('../../src/boot/i18n', () => ({
-  i18n: { global: { t: (key, params) => (params && Object.keys(params).length ? `${key}|${params.device}|${params.time}` : key) } }
+  i18n: { global: { t: (key, params) => (params && Object.keys(params).length ? `${key}|${Object.keys(params).join(',')}|${params.time}` : key) } }
 }));
 vi.mock('../../src/services/recordingService', () => ({
   addEventListener: (event, callback) => { (h.listeners[event] ||= []).push(callback); },
@@ -75,6 +75,7 @@ describe('system notification while the microphone is not heard', () => {
     vi.setSystemTime(at(9, 42, 24));
     h.service.micMuted = false;
     setRecordPageActive(false);
+    recordingState(false); // every test is a new recording: no gap from an earlier notification
     recordingState(true);
     health('ok', null, { trackLabel: 'Headset', silenceSince: null });
     show.mockClear(); clear.mockClear(); router.push.mockClear();
@@ -91,7 +92,7 @@ describe('system notification while the microphone is not heard', () => {
     expect(clear).not.toHaveBeenCalled();
   });
 
-  it('asks for exactly one notification 10 s after the state became critical, naming the microphone and the start of the silence', () => {
+  it('asks for exactly one notification 10 s after the state became critical, with the start of the silence and no device name', () => {
     health('degraded', 'zero_signal', { silenceSince: at(9, 40, 19) });
     // The re-open keeps the state while it checks, then reports the fresh stream as silent too.
     health('degraded', 'zero_signal', { verifying: true });
@@ -101,7 +102,7 @@ describe('system notification while the microphone is not heard', () => {
     vi.advanceTimersByTime(1);
     expect(show).toHaveBeenCalledTimes(1);
     expect(show).toHaveBeenCalledWith({
-      title: 'micAlertTitle', body: 'micAlertSilentBody|Headset|09:40', onRecordPage: false
+      title: 'micAlertTitle', body: 'micAlertSilentBody|time|09:40', onRecordPage: false
     });
     // Further events of the same state: system audio toggled, device details refreshed.
     emit('healthChange', { ...h.health });
@@ -135,7 +136,7 @@ describe('system notification while the microphone is not heard', () => {
     expect(show).toHaveBeenCalledTimes(3);
     vi.advanceTimersByTime(2 * TEN_MINUTES);
     expect(show).toHaveBeenCalledTimes(5);
-    expect(show).toHaveBeenLastCalledWith(expect.objectContaining({ body: 'micAlertSilentBody|Headset|09:42' }));
+    expect(show).toHaveBeenLastCalledWith(expect.objectContaining({ body: 'micAlertSilentBody|time|09:42' }));
   });
 
   it('stops when the microphone has signal again, and a later silence is a new episode', () => {
@@ -150,7 +151,49 @@ describe('system notification while the microphone is not heard', () => {
     health('critical', 'zero_signal');
     vi.advanceTimersByTime(CONFIRM);
     expect(show).toHaveBeenCalledTimes(2);
-    expect(show).toHaveBeenLastCalledWith(expect.objectContaining({ body: 'micAlertSilentBody|Headset|11:05' }));
+    expect(show).toHaveBeenLastCalledWith(expect.objectContaining({ body: 'micAlertSilentBody|time|11:05' }));
+  });
+
+  it('does not notify again sooner than 10 minutes when a silence keeps ending and starting (blips, a noise gate)', () => {
+    health('critical', 'zero_signal');
+    vi.advanceTimersByTime(CONFIRM);
+    expect(show).toHaveBeenCalledTimes(1);
+    // A blip ends the episode, 45 s later the silence is critical again: ten times.
+    for (let i = 0; i < 10; i++) {
+      vi.advanceTimersByTime(5000);
+      health('degraded', 'low_level');
+      vi.advanceTimersByTime(45000);
+      health('critical', 'zero_signal');
+    }
+    expect(Date.now() - at(9, 42, 34)).toBeLessThan(TEN_MINUTES);
+    vi.advanceTimersByTime(CONFIRM);
+    expect(show).toHaveBeenCalledTimes(1);
+    // Ten minutes after the last notification the still silent microphone is told again, once.
+    vi.advanceTimersByTime(at(9, 52, 34) - Date.now());
+    expect(show).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(TEN_MINUTES - 1);
+    expect(show).toHaveBeenCalledTimes(2);
+  });
+
+  it('tells at once when a microphone that was silent is then lost, and a new recording may tell at once', () => {
+    health('critical', 'zero_signal');
+    vi.advanceTimersByTime(CONFIRM);
+    health('ok');
+    health('critical', 'track_ended');
+    vi.advanceTimersByTime(CONFIRM);
+    expect(show).toHaveBeenCalledTimes(2);
+    expect(show).toHaveBeenLastCalledWith(expect.objectContaining({ body: 'micAlertLostBody|time|09:42' }));
+    // A lost microphone that is lost again within the gap waits.
+    health('ok');
+    health('critical', 'track_ended');
+    vi.advanceTimersByTime(CONFIRM);
+    expect(show).toHaveBeenCalledTimes(2);
+    // The recording ends; the next one is a new recording.
+    recordingState(false);
+    recordingState(true);
+    health('critical', 'zero_signal');
+    vi.advanceTimersByTime(CONFIRM);
+    expect(show).toHaveBeenCalledTimes(3);
   });
 
   it('says nothing about a lost microphone that the automatic recovery brings back within seconds', () => {
@@ -175,7 +218,7 @@ describe('system notification while the microphone is not heard', () => {
     health('degraded', 'zero_signal', { afterSwitch: true, silenceSince: Date.now() });
     vi.advanceTimersByTime(CONFIRM);
     expect(show).toHaveBeenCalledTimes(1);
-    expect(show).toHaveBeenCalledWith(expect.objectContaining({ body: 'micAlertSilentBody|Headset|09:42' }));
+    expect(show).toHaveBeenCalledWith(expect.objectContaining({ body: 'micAlertSilentBody|time|09:42' }));
   });
 
   it('stops when the recording pauses and after a resume tells again only if the microphone is still not heard', () => {
@@ -221,13 +264,13 @@ describe('system notification while the microphone is not heard', () => {
     expect(clear).toHaveBeenCalledTimes(1);
   });
 
-  it('says that a lost microphone is not available, and falls back to a generic name', () => {
+  it('says that a lost microphone is not available, without its name', () => {
     health('degraded', 'track_ended', { trackLabel: '' });
     vi.advanceTimersByTime(3000);
     health('critical', 'track_ended', { trackLabel: '' });
     vi.advanceTimersByTime(CONFIRM);
     expect(show).toHaveBeenCalledTimes(1);
-    expect(show).toHaveBeenCalledWith(expect.objectContaining({ body: 'micAlertLostBody|micGenericDevice|09:42' }));
+    expect(show).toHaveBeenCalledWith(expect.objectContaining({ body: 'micAlertLostBody|time|09:42' }));
   });
 
   it('stays quiet while the microphone is muted in the app, which is deliberate', () => {
@@ -276,7 +319,7 @@ describe('system notification while the microphone is not heard', () => {
     expect(() => vi.advanceTimersByTime(CONFIRM)).not.toThrow();
     expect(() => health('ok')).not.toThrow();
     health('critical', 'zero_signal');
-    vi.advanceTimersByTime(CONFIRM);
+    vi.advanceTimersByTime(TEN_MINUTES);
     expect(show).toHaveBeenCalledTimes(2);
   });
 
@@ -287,16 +330,16 @@ describe('system notification while the microphone is not heard', () => {
 });
 
 describe('texts of the system notification', () => {
-  it('exist in all four languages, name microphone and time, allow for a deliberate mute and never call the recording lost', async () => {
+  it('exist in all four languages, name the time but no device, allow for a deliberate mute and never call the recording lost', async () => {
     const { i18n, SUPPORTED_LOCALES } = await vi.importActual('../../src/boot/i18n');
     for (const locale of SUPPORTED_LOCALES) {
       const text = i18n.global.messages.value[locale];
       expect(text.micAlertTitle.length).toBeGreaterThan(10);
       for (const key of ['micAlertSilentBody', 'micAlertLostBody']) {
-        expect(text[key]).toContain('{device}');
+        expect(text[key]).not.toContain('{device}');
         expect(text[key]).toContain('{time}');
         expect(text[key]).toContain('Suisse Meets');
-        expect(text[key].length).toBeLessThan(200);
+        expect(text[key].length).toBeLessThan(230);
       }
       expect(text.micAlertSilentBody).toMatch(/\(.+\?\)/); // "(muted?)"
       const all = `${text.micAlertTitle} ${text.micAlertSilentBody} ${text.micAlertLostBody}`;

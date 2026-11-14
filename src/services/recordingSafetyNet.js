@@ -291,8 +291,15 @@ async function handleRecordingRecovered(data) {
 // an in-app mute the state shown is the old one until the next measurements.
 const MIC_ALERT_CONFIRM_MS = 10 * 1000;
 const MIC_ALERT_REPEAT_MS = 10 * 60 * 1000;
+// A new episode does not notify sooner than this after the last notification:
+// a microphone that delivers zeros with an occasional blip, a noise-gated
+// input, or a device that drops again and again would otherwise start an
+// episode, and a notification, every minute. Only a microphone that is lost
+// after it was silent is told at once: that is a new thing to do.
+const MIC_ALERT_MIN_GAP_MS = MIC_ALERT_REPEAT_MS;
 let micUnheardSince = null; // when the current silence or loss began, for the text
 let micAlert = null;        // { timer, shown } while an episode lasts
+let micLastShown = null;    // { at, lost } of the last notification of this recording
 
 function sendMicAlert(health) {
   const lost = health.reasonCode === recordingService.MIC_HEALTH_REASON.TRACK_ENDED;
@@ -301,7 +308,10 @@ function sendMicAlert(health) {
   try {
     Promise.resolve(window.electronAPI.system.showMicrophoneAlert({
       title: t('micAlertTitle'),
-      body: t(lost ? 'micAlertLostBody' : 'micAlertSilentBody', { device: health.trackLabel || t('micGenericDevice'), time }),
+      // No device name: it can carry a person's name, and the notification can
+      // be seen by others (a shared screen, the notification centre). The
+      // in-app warning names the microphone.
+      body: t(lost ? 'micAlertLostBody' : 'micAlertSilentBody', { time }),
       // While the window is focused on the Record page the in-app warning is
       // in view: main holds the alert until the window loses the focus.
       onRecordPage: recordPageActive
@@ -342,7 +352,16 @@ function micAlertTick() {
     micAlert.timer = setTimeout(micAlertTick, MIC_ALERT_CONFIRM_MS);
     return;
   }
+  const lost = health.reasonCode === recordingService.MIC_HEALTH_REASON.TRACK_ENDED;
+  if (!micAlert.shown && micLastShown && !(lost && !micLastShown.lost)) {
+    const since = Date.now() - micLastShown.at;
+    if (since >= 0 && since < MIC_ALERT_MIN_GAP_MS) {
+      micAlert.timer = setTimeout(micAlertTick, MIC_ALERT_MIN_GAP_MS - since);
+      return;
+    }
+  }
   micAlert.shown = true;
+  micLastShown = { at: Date.now(), lost };
   sendMicAlert(health);
   micAlert.timer = setTimeout(micAlertTick, MIC_ALERT_REPEAT_MS);
 }
@@ -383,7 +402,11 @@ export function initRecordingSafetyNet({ router = null } = {}) {
     if (window.electronAPI.system.showMicrophoneAlert) {
       recordingService.addEventListener('healthChange', updateMicAlert);
       recordingService.addEventListener('micMuteChange', updateMicAlert);
-      recordingService.addEventListener('stateChange', state => (state?.isRecording ? updateMicAlert() : endMicAlert()));
+      recordingService.addEventListener('stateChange', state => {
+        if (state?.isRecording) { updateMicAlert(); return; }
+        endMicAlert();
+        if (!state?.isPaused) micLastShown = null; // a new recording may tell at once
+      });
       // The notification was clicked: main has brought the window to the front.
       window.electronAPI.system.onShowRecordPage?.(() => {
         Promise.resolve(router?.push('/record')).catch(() => {});
