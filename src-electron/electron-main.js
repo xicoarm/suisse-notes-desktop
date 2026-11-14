@@ -3758,6 +3758,28 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
         });
       } catch (_) { /* telemetry never breaks saving */ }
     }
+    // The one-command render missed its predicted length and the recording was
+    // rebuilt from measured source lengths (ELECTRON-73). Within the timing
+    // tolerance that is the known timestamp rounding: info, field evidence
+    // only. A larger miss means the one-command render itself lost or added
+    // audio. The rebuild saved the meeting, but if that became the rule every
+    // recording would silently take the slow path: warning, its own issue.
+    const fastPathFallback = result.plan?.fastPathFallback;
+    if (fastPathFallback) {
+      const rounding = fastPathFallback.withinTimingTolerance === true;
+      log[rounding ? 'info' : 'warn'](`Finalization rebuilt ${recordId} from measured source lengths: predicted ${fastPathFallback.expectedDecodedSamples} samples, encoded ${fastPathFallback.observedDecodedSamples}`);
+      try {
+        Sentry.captureMessage(rounding
+          ? 'finalization: predicted length missed, recording rebuilt from measured source lengths'
+          : 'finalization: one-command render missed its length by more than the timing tolerance, recording rebuilt from measured source lengths', {
+          level: rounding ? 'info' : 'warning',
+          fingerprint: [rounding ? 'finalization-fast-path-sample-count-fallback' : 'finalization-fast-path-sample-count-fallback-over-tolerance'],
+          tags: { operation: 'finalization', recovery: String(!!options.recovery) },
+          extra: { recordId, expectedDecodedSamples: fastPathFallback.expectedDecodedSamples,
+            observedDecodedSamples: fastPathFallback.observedDecodedSamples },
+        });
+      } catch (_) { /* telemetry never breaks saving */ }
+    }
     if (result.supersededScratchLeft) log.warn(`Superseded finalization scratch could not be removed for ${recordId}: ${result.supersededScratchLeft}`);
     for (const warning of result.warnings || []) {
       recordCaptureWarning(recordId, typeof warning === 'string' ? warning : warning.kind || warning.code || 'native-source-recovery');
@@ -3770,6 +3792,21 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
     return result;
   } catch (error) {
     log.error('Recording finalization failed; all source batches retained:', error);
+    // The predicted length missed and the rebuild from measured lengths failed
+    // as well (ELECTRON-73). Without both counts this cannot be diagnosed.
+    if (error.fastPathFallback) {
+      log.error(`Finalization of ${recordId} failed after a rebuild from measured source lengths: predicted ${error.fastPathFallback.expectedDecodedSamples} samples, encoded ${error.fastPathFallback.observedDecodedSamples}`);
+      try {
+        Sentry.captureMessage('finalization: predicted length missed and the rebuild from measured source lengths failed', {
+          level: 'warning',
+          fingerprint: ['finalization-fast-path-sample-count-fallback-failed'],
+          tags: { operation: 'finalization', recovery: String(!!options.recovery), code: String(error.code || 'unknown') },
+          extra: { recordId, expectedDecodedSamples: error.fastPathFallback.expectedDecodedSamples,
+            observedDecodedSamples: error.fastPathFallback.observedDecodedSamples,
+            rebuildExpectedDecodedSamples: error.expectedDecodedSamples ?? null, rebuildDecodedSamples: error.actualDecodedSamples ?? null },
+        });
+      } catch (_) { /* telemetry never breaks saving */ }
+    }
     const diskFull = error.code === 'ENOSPC' || /no space left|not enough space|disk full/i.test(error.message || '');
     return { success: false, diskFull, requiresRecovery: error.code === 'PCM_CAPTURE_RECOVERY_REQUIRED', error: error.message, code: error.code || null };
   }

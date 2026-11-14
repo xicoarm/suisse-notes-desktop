@@ -342,6 +342,7 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
           sourceSeconds: plan.sourceEvidence.reduce((sum, source) => sum + source.decodedDuration, 0) + (hasPcm ? pcm.duration : 0),
           lanes: plan.lanes.length, fastPath: fastPathUsed }) };
     }
+    let fastPathFallback = null;
     try {
       // Recovery without a closed epoch has no trustworthy final duration. Its
       // compressed-byte estimate is explicitly approximate; ENOSPC remains a
@@ -409,15 +410,37 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
         // change old amix's normalization. Preserve it through general planning
         // instead of trimming it or publishing an end-of-stream gain change.
         if (!overlapped && !resampleFailed && (lanes.length === 1 || observedEnd <= targetSamples)) {
-          return await finish(candidate, { sourceEvidence: fastEvidence, lanes: lanes.map(lane => ({ kind: lane.kind,
-            startSample: lane.startSample, mediaEndSample: lane.endSample })), warnings: fastWarnings }, Math.max(targetSamples, observedEnd), true);
+          try {
+            return await finish(candidate, { sourceEvidence: fastEvidence, lanes: lanes.map(lane => ({ kind: lane.kind,
+              startSample: lane.startSample, mediaEndSample: lane.endSample })), warnings: fastWarnings }, Math.max(targetSamples, observedEnd), true);
+          } catch (error) {
+            // This path predicts its length from source timestamps, which have
+            // millisecond precision, while the resampler passes disagreements
+            // below its 2 ms threshold through. A source that reaches the
+            // planned end can therefore hold a few samples more or fewer than
+            // predicted (ELECTRON-73), and refusing stranded a complete
+            // meeting. Re-render below from measured source lengths; a
+            // difference that survives measuring is still refused there.
+            if (error.code !== 'NATIVE_FINALIZATION_SAMPLE_COUNT') throw error;
+            // Timestamp rounding explains a miss up to the timing tolerance.
+            // A larger one means this render itself lost or added audio.
+            fastPathFallback = { reason: 'sample-count', expectedDecodedSamples: error.expectedDecodedSamples,
+              observedDecodedSamples: error.actualDecodedSamples,
+              withinTimingTolerance: Math.abs(error.expectedDecodedSamples - error.actualDecodedSamples) <= TIMING_TOLERANCE_SAMPLES };
+            // The refused render and its plan stay in scratch as evidence.
+            // plan.json then only ever describes the measured rebuild, also
+            // when that stops before its own validation.
+            await fs.promises.rename(path.join(scratchDirectory, 'plan.json'), path.join(scratchDirectory, 'fast-plan.json')).catch(() => {});
+          }
         }
-        warnings.push(resampleFailed
+        // A missed length prediction is no capture event: every sample is
+        // kept. It is recorded in the plan, never as a warning for History.
+        if (!fastPathFallback) warnings.push(resampleFailed
           ? { kind: 'native-source-fast-path-resample-fallback' }
           : overlapped
             ? { kind: 'native-source-fast-path-overlap-fallback' }
             : { kind: 'native-source-fast-path-tail-fallback', observedEndSeconds: observedEnd / RATE, plannedEndSeconds: targetSamples / RATE });
-        await checkSpace(estimateScratchBytes({ sourceBytes, timelineSeconds: observedEnd / RATE,
+        await checkSpace(estimateScratchBytes({ sourceBytes, timelineSeconds: Math.max(observedEnd, fastPathFallback ? targetSamples : 0) / RATE,
           sourceSeconds: fastEvidence.reduce((sum, source) => sum + source.decodedDuration, 0) + (hasPcm ? pcm.duration : 0), lanes: estimatedLanes }));
       }
       for (const source of usable) {
@@ -555,9 +578,11 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
       // Simultaneous peaks can clip in final encoding, as in the live mixer;
       // original stereo source files remain available without this summing.
       await run(opus(command).output(rendered), timeout(totalSamples / RATE), 'Encode native recording');
-      return await finish(rendered, { sourceEvidence, lanes: plans, warnings }, totalSamples, false);
+      return await finish(rendered, { sourceEvidence, lanes: plans, warnings, ...(fastPathFallback ? { fastPathFallback } : {}) }, totalSamples, false);
     } catch (error) {
       error.scratchDirectory = scratchDirectory;
+      // A rebuild that fails too keeps the counts that sent it there.
+      if (fastPathFallback) error.fastPathFallback = fastPathFallback;
       throw error;
     }
   }
