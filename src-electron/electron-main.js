@@ -158,8 +158,19 @@ const twoFactorAuth = require('./auth-two-factor');
 // at every start does not report again at every start. The path is resolved
 // when it is used: userData can still be redirected further down.
 const mainLogBudgetFile = () => path.join(app.getPath('userData'), 'main-log-reporting.json');
+// The folders reporting replaces by their names. With a redirected AppData or
+// Documents they are not below the home folder, and their path is named after
+// the user. Asked for at every line, for the same reason as the path above.
+const reportingFolders = () => {
+  const folders = {};
+  for (const name of ['userData', 'appData', 'documents', 'downloads', 'temp']) {
+    try { folders[name] = app.getPath(name); } catch (_) { /* a folder Electron cannot give is skipped */ }
+  }
+  return folders;
+};
 sentryReporting.installLogReporting({
   log, Sentry,
+  folders: reportingFolders,
   budgetStore: {
     read: () => JSON.parse(fs.readFileSync(mainLogBudgetFile(), 'utf8')),
     write: budget => fs.writeFileSync(mainLogBudgetFile(), JSON.stringify(budget)),

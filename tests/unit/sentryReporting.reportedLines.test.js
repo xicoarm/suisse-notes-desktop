@@ -181,4 +181,10 @@ describe('reported log lines', () => {
     expect(main).toMatch(/installLogReporting\(\{[^;]*budgetStore: \{[^;]*read: [^;]*write: [^;]*\}\);/);
     expect(main).toMatch(/app\.getPath\('userData'\), 'main-log-reporting\.json'/);
   });
+
+  it('is given the folders of the app by the main process, each asked for on its own', () => {
+    const main = fs.readFileSync(path.join(SOURCE_DIR, 'electron-main.js'), 'utf8');
+    expect(main).toMatch(/installLogReporting\(\{[^;]*folders: reportingFolders,/);
+    expect(main).toMatch(/const reportingFolders = \(\) => \{\s*const folders = \{\};\s*for \(const name of \['userData', 'appData', 'documents', 'downloads', 'temp'\]\) \{\s*try \{ folders\[name\] = app\.getPath\(name\); \} catch/);
+  });
 });

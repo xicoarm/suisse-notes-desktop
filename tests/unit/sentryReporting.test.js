@@ -106,6 +106,32 @@ describe('main-process log reporting', () => {
     expect(Sentry.breadcrumbs.at(-1).message).toContain('"filePath":"C:\\\\Users\\\\<user>\\\\AppData\\\\Roaming\\\\Suisse Notes\\\\recordings\\\\r1\\\\audio.webm"');
   });
 
+  it('asks for the folders of the app at every line: a folder redirected later is still replaced', () => {
+    let userData = 'C:\\Users\\hmuster\\AppData\\Roaming\\Suisse Notes', asked = 0;
+    installLogReporting({ log, Sentry, homeDir: 'C:\\Users\\hmuster', userName: 'hmuster', folders: () => { asked += 1; return { userData }; } });
+    log.emit('info', 'Read metadata.json in C:\\Users\\hmuster\\AppData\\Roaming\\Suisse Notes\\recordings\\r1');
+    userData = '\\\\fs01\\redirect$\\hmuster\\Suisse Notes';
+    const failure = Object.assign(new Error("EPERM: operation not permitted, open '\\\\fs01\\redirect$\\hmuster\\Suisse Notes\\recordings\\r1\\metadata.json'"), { code: 'EPERM' });
+    failure.stack = `Error: ${failure.message}\n    at save (C:\\Users\\hmuster\\AppData\\Local\\Programs\\Suisse Meets\\resources\\app.asar\\electron-main.js:1:1)`;
+    log.emit('error', 'Failed to write crash metadata:', failure, { dirPath: '\\\\fs01\\redirect$\\hmuster\\Suisse Notes\\recordings\\r1' });
+    expect(asked).toBe(2);
+    expect(Sentry.breadcrumbs[0].message).toBe('Read metadata.json in <userData>\\recordings\\r1');
+    const [event] = Sentry.events;
+    expect(event.error.message).toBe("EPERM: operation not permitted, open '<userData>\\recordings\\r1\\metadata.json'");
+    expect(event.error.stack).toContain('at save (C:\\Users\\<user>\\AppData\\Local\\Programs\\Suisse Meets\\resources\\app.asar\\electron-main.js:1:1)');
+    expect(event.scope.extras.logLine).toContain('{"dirPath":"<userData>\\\\recordings\\\\r1"}');
+    expect(JSON.stringify([Sentry.breadcrumbs, event.error.message, event.error.stack, event.scope.extras])).not.toMatch(/hmuster/i);
+  });
+
+  it('keeps reporting, with the other rules, when the folders cannot be asked for', () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    installLogReporting({ log, Sentry, homeDir: 'C:\\Users\\hmuster', userName: 'hmuster', folders: () => { throw new Error('app is not ready'); } });
+    log.emit('error', 'Error locking recording:', "EPERM: operation not permitted, open '\\\\fs01\\redirect$\\hmuster\\Suisse Notes\\locks.json'");
+    expect(Sentry.events.map(event => event.message)).toEqual(["Error locking recording: EPERM: operation not permitted, open '\\\\fs01\\redirect$\\<user>\\Suisse Notes\\locks.json'"]);
+    expect(consoleError).not.toHaveBeenCalled(); // the hook did not disarm
+    consoleError.mockRestore();
+  });
+
   it('files a listed warning as a warning and info as a breadcrumb', () => {
     installLogReporting({ log, Sentry });
     log.emit('info', 'Recording metadata written: rec-1');
@@ -504,6 +530,8 @@ describe('scrubbing the user folder', () => {
     expect(scrub("open '/Users/ann o'brien/Library/a.webm'", NONE)).toBe("open '/Users/<user>/Library/a.webm'");
     // The folder itself, in quotes: the rest of the line goes with the name.
     expect(scrub("scandir 'C:\\Users\\Ann O'Brien' failed\nnext line", NONE)).toBe("scandir 'C:\\Users\\<user>\nnext line");
+    // Where it is the home directory, the home is replaced exactly, its apostrophe
+    // included; the quote after it ends the path.
     expect(scrub("scandir 'C:\\Users\\Ann O'Brien' failed", "C:\\Users\\Ann O'Brien")).toBe("scandir 'C:\\Users\\<user>' failed");
   });
 
@@ -544,9 +572,130 @@ describe('scrubbing the user folder', () => {
     expect(scrub('open C:\\Users\\hansjoerg\\a.webm', 'C:\\Users\\hans')).toBe('open C:\\Users\\<user>\\a.webm');
   });
 
+  it('leaves a longer sibling of the home directory to the general rule, whole', () => {
+    const home = 'C:\\Users\\Hans', places = { userName: 'Hans' };
+    for (const sibling of ['Hans Muster', 'Hans.FIRMA', 'Hans_x']) {
+      expect(scrub(`open C:\\Users\\${sibling}\\a.webm`, home, places)).toBe('open C:\\Users\\<user>\\a.webm');
+      expect(scrub(`{"path":"C:\\\\Users\\\\${sibling}\\\\a.webm"}`, home, places)).toBe('{"path":"C:\\\\Users\\\\<user>\\\\a.webm"}');
+      expect(scrub(`file:///C:/Users/${sibling}/a.webm`, home, places)).toBe('file:///C:/Users/<user>/a.webm');
+    }
+    // The real home is still replaced exactly: here no general rule would do it.
+    expect(scrub('open D:\\Profiles\\Hans\\a.webm, not D:\\Profiles\\Hans Muster\\a.webm', 'D:\\Profiles\\Hans', { userName: '' }))
+      .toBe('open D:\\Profiles\\<user>\\a.webm, not D:\\Profiles\\Hans Muster\\a.webm');
+    expect(scrub('{"cwd":"D:\\\\Profiles\\\\Hans"} and D:\\Profiles\\Hans\r\nD:/Profiles/Hans', 'D:\\Profiles\\Hans', { userName: '' }))
+      .toBe('{"cwd":"D:\\\\Profiles\\\\<user>"} and D:\\Profiles\\<user>\r\nD:/Profiles/<user>');
+  });
+
   it('works without a usable home directory', () => {
     for (const home of ['', null, undefined, 'hans', '/', 'C:\\']) {
       expect(scrub('open /Users/hans/a.webm at 3/4', home === undefined ? NONE : home)).toBe('open /Users/<user>/a.webm at 3/4');
+    }
+  });
+});
+
+describe('scrubbing the folders of the app and the user name', () => {
+  const HOME = 'C:\\Users\\hmuster';
+  // AppData\Roaming and Documents redirected to a share that is named after
+  // the user: the recordings (userData) are not below the home directory.
+  const FOLDERS = {
+    userData: '\\\\fs01\\redirect$\\hmuster\\AppData\\Roaming\\Suisse Notes',
+    appData: '\\\\fs01\\redirect$\\hmuster\\AppData\\Roaming',
+    documents: '\\\\fs01\\redirect$\\hmuster\\Documents',
+    downloads: 'C:\\Users\\hmuster\\Downloads',
+    temp: 'C:\\Users\\HMUSTE~1\\AppData\\Local\\Temp',
+  };
+  const known = { userName: 'hmuster', folders: FOLDERS };
+  const onlyFolders = { userName: '', folders: FOLDERS };
+  const onlyName = { userName: 'hmuster', folders: null };
+  const OPEN = "ENOENT: no such file or directory, open '\\\\fs01\\redirect$\\hmuster\\AppData\\Roaming\\Suisse Notes\\recordings\\rec-1\\metadata.json'";
+
+  it('replaces the user name and the home directory also where Node ends a quoted path', () => {
+    expect(scrub("ENOTEMPTY: directory not empty, rmdir '\\\\server\\profiles$\\hmuster'", HOME, onlyName))
+      .toBe("ENOTEMPTY: directory not empty, rmdir '\\\\server\\profiles$\\<user>'");
+    expect(scrub("EPERM: operation not permitted, scandir 'C:\\Users\\hmuster' failed", HOME, onlyName))
+      .toBe("EPERM: operation not permitted, scandir 'C:\\Users\\<user>' failed");
+  });
+
+  it('replaces a redirected userData by its name and keeps the rest of the path', () => {
+    const expected = "ENOENT: no such file or directory, open '<userData>\\recordings\\rec-1\\metadata.json'";
+    expect(scrub(OPEN, HOME, known)).toBe(expected);
+    expect(scrub(OPEN, HOME, onlyFolders)).toBe(expected);
+    // Before this, with the home directory alone, the line went out as it was.
+    expect(scrub(OPEN, HOME, { userName: '' })).toBe(OPEN);
+  });
+
+  it('finds it inside a logged object, where every backslash is doubled', () => {
+    const { message } = describeLog(['Cleanup failed:', { dirPath: '\\\\fs01\\redirect$\\hmuster\\AppData\\Roaming\\Suisse Notes\\recordings\\rec-1', code: 'EBUSY' }], HOME, known);
+    expect(message).toBe('Cleanup failed: {"dirPath":"<userData>\\\\recordings\\\\rec-1","code":"EBUSY"}');
+    expect(scrub('{"cwd":"\\\\\\\\fs01\\\\redirect$\\\\hmuster\\\\AppData\\\\Roaming\\\\Suisse Notes"}', HOME, onlyFolders)).toBe('{"cwd":"<userData>"}');
+  });
+
+  it('finds it written with forward slashes', () => {
+    expect(scrub('playing //fs01/redirect$/hmuster/AppData/Roaming/Suisse Notes/recordings/rec-1/audio.webm', HOME, known))
+      .toBe('playing <userData>/recordings/rec-1/audio.webm');
+  });
+
+  it('names each folder, the longest first, and the home directory for everything else', () => {
+    expect(scrub('read \\\\fs01\\redirect$\\hmuster\\AppData\\Roaming\\Other App\\config.json', HOME, known)).toBe('read <appData>\\Other App\\config.json');
+    expect(scrub('saved \\\\fs01\\redirect$\\hmuster\\Documents\\Protokoll.docx', HOME, known)).toBe('saved <documents>\\Protokoll.docx');
+    expect(scrub('saved C:\\Users\\hmuster\\Downloads\\audio.wav', HOME, known)).toBe('saved <downloads>\\audio.wav');
+    expect(scrub('wrote C:\\Users\\HMUSTE~1\\AppData\\Local\\Temp\\concat_list.txt', HOME, known)).toBe('wrote <temp>\\concat_list.txt');
+    expect(scrub('spawn C:\\Users\\hmuster\\AppData\\Local\\Programs\\Suisse Meets\\ffmpeg.exe', HOME, known))
+      .toBe('spawn C:\\Users\\<user>\\AppData\\Local\\Programs\\Suisse Meets\\ffmpeg.exe');
+    // The folder itself: at the end of the text, of a line, before a double quote.
+    expect(scrub('cwd \\\\fs01\\redirect$\\hmuster\\AppData\\Roaming\ncwd \\\\fs01\\redirect$\\hmuster\\Documents', HOME, onlyFolders)).toBe('cwd <appData>\ncwd <documents>');
+    // Not a folder that only starts like one of them.
+    expect(scrub('read \\\\fs01\\redirect$\\hmuster\\Documents 2019\\a.txt', HOME, onlyFolders)).toBe('read \\\\fs01\\redirect$\\hmuster\\Documents 2019\\a.txt');
+  });
+
+  it('replaces a userData on another drive', () => {
+    const places = { userName: '', folders: { userData: 'D:\\Daten\\Hans Muster\\Suisse Notes', appData: 'D:\\Daten\\Hans Muster' } };
+    expect(scrub("EPERM: operation not permitted, rename 'D:\\Daten\\Hans Muster\\Suisse Notes\\recordings\\r1\\audio.webm.tmp'", HOME, places))
+      .toBe("EPERM: operation not permitted, rename '<userData>\\recordings\\r1\\audio.webm.tmp'");
+    expect(scrub('{"path":"D:\\\\Daten\\\\Hans Muster\\\\Other\\\\a.json"}', HOME, places)).toBe('{"path":"<appData>\\\\Other\\\\a.json"}');
+  });
+
+  it('replaces the user name where it is a whole part of a path no known folder matches', () => {
+    expect(scrub('open \\\\server\\profiles$\\hmuster\\x.json', HOME, onlyName)).toBe('open \\\\server\\profiles$\\<user>\\x.json');
+    expect(scrub('{"path":"\\\\\\\\server\\\\profiles$\\\\hmuster\\\\x.json"}', HOME, onlyName)).toBe('{"path":"\\\\\\\\server\\\\profiles$\\\\<user>\\\\x.json"}');
+    expect(scrub('open file://server/profiles$/hmuster/x.json', HOME, onlyName)).toBe('open file://server/profiles$/<user>/x.json');
+    expect(scrub('cwd \\\\server\\profiles$\\hmuster', HOME, onlyName)).toBe('cwd \\\\server\\profiles$\\<user>');
+    expect(scrub('{"cwd":"//server/profiles$/hmuster"}\nnext', HOME, onlyName)).toBe('{"cwd":"//server/profiles$/<user>"}\nnext');
+    // The redirected folder of the first test, without knowing the app's folders.
+    expect(scrub(OPEN, HOME, onlyName)).toBe("ENOENT: no such file or directory, open '\\\\fs01\\redirect$\\<user>\\AppData\\Roaming\\Suisse Notes\\recordings\\rec-1\\metadata.json'");
+  });
+
+  it('leaves a longer part that only starts or ends with the user name', () => {
+    for (const line of ['open \\\\server\\profiles$\\hmuster2\\x.json', 'open \\\\server\\profiles$\\hmuster backup\\x.json',
+      'open \\\\server\\profiles$\\hmuster.old\\x.json', 'open \\\\server\\profiles$\\xhmuster\\x.json', 'open //server/hmuster-archive/x.json']) {
+      expect(scrub(line, HOME, onlyName)).toBe(line);
+    }
+  });
+
+  it('is not fooled by upper and lower case', () => {
+    expect(scrub('open \\\\FS01\\Redirect$\\HMuster\\appdata\\roaming\\SUISSE NOTES\\Recordings\\a.webm', HOME, known)).toBe('open <userData>\\Recordings\\a.webm');
+    expect(scrub('open \\\\server\\profiles$\\HMUSTER\\x.json', HOME, onlyName)).toBe('open \\\\server\\profiles$\\<user>\\x.json');
+  });
+
+  it('skips the user-name rule for an empty name and for one character', () => {
+    const line = 'open \\\\server\\profiles$\\h\\x.json and D:\\a\\b';
+    for (const userName of ['', 'h', 'a', null, undefined, 42]) {
+      expect(scrub(line, HOME, { userName: userName === undefined ? '' : userName })).toBe(line);
+    }
+  });
+
+  it('replaces the user name after the profile rules, so a name like "Users" or "home" hides no profile folder', () => {
+    expect(scrub('open C:\\Users\\Hans Muster\\a.webm', 'D:\\Users', { userName: 'Users' })).toBe('open C:\\<user>\\<user>\\a.webm');
+    expect(scrub('open /home/hans/a.webm', '/srv/home', { userName: 'home' })).toBe('open /<user>/<user>/a.webm');
+  });
+
+  it('leaves a line without any of this unchanged, and survives folders it cannot use', () => {
+    const lines = ['Recovery complete: 1 recording(s) recovered in 3/4 of a second',
+      'spawn C:\\Program Files\\Suisse Meets\\resources\\ffmpeg.exe ENOENT', 'GET https://example.invalid/api/desktop/upload/abc/status 404'];
+    for (const line of lines) {
+      expect(scrub(line, HOME, known)).toBe(line);
+      expect(scrub(line, HOME, { userName: 'hmuster', folders: { userData: undefined, appData: 42, documents: 'C:\\', downloads: null, temp: '' } })).toBe(line);
+      expect(scrub(line, HOME, { userName: 'hmuster', folders: 'not an object' })).toBe(line);
     }
   });
 });

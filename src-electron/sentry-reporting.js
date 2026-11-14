@@ -131,28 +131,61 @@ const MAX_SCRUB_INPUT = 4000;
 function homeDirectory() {
   try { return os.homedir(); } catch (_) { return ''; }
 }
+function osUserName() {
+  try { return os.userInfo().username; } catch (_) { return ''; }
+}
 const HOME_DIRECTORY = homeDirectory();
+const USER_NAME = osUserName();
 
-// The user's own folder, in the three ways a log line spells it: as it is,
-// with every backslash doubled (a path inside a logged object) and with
-// forward slashes. The name is its last part, whatever characters it has.
-let homePatternsFor = { directory: null, patterns: [] };
-function homePatterns(directory) {
-  if (homePatternsFor.directory === directory) return homePatternsFor.patterns;
-  const home = String(directory || '').replace(/[\\/]+$/, '');
-  const patterns = [];
-  if (Math.max(home.lastIndexOf('\\'), home.lastIndexOf('/')) >= 0) {
-    for (const form of new Set([home, home.replace(/\\/g, '\\\\'), home.replace(/\\/g, '/')])) {
-      const nameStart = Math.max(form.lastIndexOf('\\'), form.lastIndexOf('/')) + 1;
-      if (nameStart >= form.length) continue;
-      patterns.push({
-        find: new RegExp(`${form.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'giu'),
-        put: `${form.slice(0, nameStart)}<user>`,
-      });
+// What must follow a folder or a name for it to be that one and not a longer
+// sibling: a separator, a double quote, a line end or the end of the text.
+// Without it, home "C:\Users\Hans" would turn "C:\Users\Hans Muster" into
+// "C:\Users\<user> Muster" and keep the general rule below from taking it whole.
+// A single quote ends a path too: Node quotes the path of a failed file call (rmdir '...').
+const PATH_END = '(?=[\\\\/"\'\\r\\n]|$)';
+const literally = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const MATCHES_NOTHING = /(?!)/g;
+
+// The places that carry the user's name, as patterns:
+//   - the home directory: its last part becomes <user>;
+//   - the folders the app is given (userData, appData, documents, downloads,
+//     temp): with a redirected AppData or Documents they lie outside the home
+//     directory, on a share that is named after the user. Each becomes its
+//     name in angle brackets, the rest of the path stays;
+//   - any part of a path that is the operating system's user name.
+// A folder is matched in the three ways a log line spells it: as it is, with
+// every backslash doubled (a path inside a logged object) and with forward
+// slashes; the longest first, because userData lies inside appData. The
+// patterns are rebuilt only when one of the places changed.
+const compiled = source => {
+  try { return new RegExp(source, 'giu'); } catch (_) { return null; /* a name no pattern can hold */ }
+};
+let placePatternsFor = { key: null, patterns: null };
+function placePatterns(homeDir, userName, folders) {
+  const named = folders && typeof folders === 'object' ? Object.entries(folders) : [];
+  const key = [homeDir, userName, ...named.map(([name, folder]) => `${name}=${folder}`)].join('\n');
+  if (placePatternsFor.key === key) return placePatternsFor.patterns;
+  const literals = [];
+  const add = (folder, placeholder) => {
+    const plain = typeof folder === 'string' ? folder.replace(/[\\/]+$/, '') : '';
+    if (Math.max(plain.lastIndexOf('\\'), plain.lastIndexOf('/')) < 0) return;
+    for (const form of new Set([plain, plain.replace(/\\/g, '\\\\'), plain.replace(/\\/g, '/')])) {
+      literals.push({ form, put: placeholder(form) });
     }
-  }
-  homePatternsFor = { directory, patterns };
-  return patterns;
+  };
+  add(homeDir, form => `${form.slice(0, Math.max(form.lastIndexOf('\\'), form.lastIndexOf('/')) + 1)}<user>`);
+  for (const [name, folder] of named) add(folder, () => `<${name}>`);
+  literals.sort((a, b) => b.form.length - a.form.length);
+  const places = literals
+    .map(({ form, put }) => ({ find: compiled(literally(form) + PATH_END), put }))
+    .filter(({ find }) => find);
+  // Only a whole part of a path, never the start of a longer one ("hmuster2").
+  // It runs after the general profile rules, so a user called "Users" or
+  // "home" cannot hide the profile folder behind it from them.
+  const name = typeof userName === 'string' ? userName : '';
+  const userNamePattern = name.length > 1 ? compiled(`(?<=[\\\\/])${literally(name)}${PATH_END}`) : null;
+  placePatternsFor = { key, patterns: { places, userName: userNamePattern } };
+  return placePatternsFor.patterns;
 }
 
 // A value of these keys in a logged object is a credential. (The look-behinds
@@ -169,9 +202,10 @@ const LINK = /((?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/[^\s"'?#]*)(\?[^\s"'#]*)?(#
 // the account name behind it does not — so only the user name is replaced.
 // Where a rule cannot know where a name ends it takes too much rather than
 // too little: a profile folder may be "Hans Muster".
-function scrub(text, homeDir = HOME_DIRECTORY) {
+function scrub(text, homeDir = HOME_DIRECTORY, { userName = USER_NAME, folders = null } = {}) {
+  const patterns = placePatterns(homeDir, userName, folders);
   let result = String(text).slice(0, MAX_SCRUB_INPUT);
-  for (const { find, put } of homePatterns(homeDir)) result = result.replace(find, () => put);
+  for (const { find, put } of patterns.places) result = result.replace(find, () => put);
   return result
     // Any other profile folder. The name runs to the next separator, double
     // quote or line end, with its spaces and apostrophes ("Hans Muster",
@@ -179,6 +213,7 @@ function scrub(text, homeDir = HOME_DIRECTORY) {
     // Backslashes may be doubled or more (paths inside logged objects).
     .replace(/(\\Users\\+)[^\\/":*?<>|\r\n]+/gi, '$1<user>')
     .replace(/(\/(?:Users|home)\/)[^\\/"\r\n]+/gi, '$1<user>')
+    .replace(patterns.userName || MATCHES_NOTHING, '<user>')
     .replace(EMAIL, '<email>')
     .replace(SECRET_VALUE, (all, head, key, value) => (
       key.toLowerCase() === 'code' && PLAIN_CODE.test(value.replace(/^\\*"|"$/g, '')) ? all : `${head}"<redacted>"`))
@@ -199,10 +234,10 @@ function scrub(text, homeDir = HOME_DIRECTORY) {
 // The Error behind a reported line travels with its stack. Its own text and
 // the paths in its stack get the same scrubbing as the line: an error message
 // can quote a file it could not read, and a stack names the user's folder.
-function scrubbedError(error, homeDir = HOME_DIRECTORY) {
-  const copy = new Error(scrub(error.message, homeDir));
+function scrubbedError(error, homeDir = HOME_DIRECTORY, places = {}) {
+  const copy = new Error(scrub(error.message, homeDir, places));
   copy.name = error.name;
-  if (error.stack) copy.stack = scrub(String(error.stack), homeDir);
+  if (error.stack) copy.stack = scrub(String(error.stack), homeDir, places);
   if (error.code !== undefined) copy.code = error.code;
   return copy;
 }
@@ -216,10 +251,10 @@ function textOf(value) {
 
 // electron-log passes the original console arguments; keep the error object so
 // Sentry gets its stack, and keep the readable line for the title.
-function describe(data, homeDir = HOME_DIRECTORY) {
+function describe(data, homeDir = HOME_DIRECTORY, places = {}) {
   const parts = Array.isArray(data) ? data : [data];
   const error = parts.find(part => part instanceof Error) || null;
-  const message = scrub(parts.map(textOf).join(' '), homeDir).slice(0, MAX_MESSAGE);
+  const message = scrub(parts.map(textOf).join(' '), homeDir, places).slice(0, MAX_MESSAGE);
   return { error, message };
 }
 
@@ -291,14 +326,18 @@ function createDailyBudget({ store, now = () => new Date(), perLine = MAX_EVENTS
  * `log` is electron-log, `Sentry` is @sentry/electron/main. Both are injected
  * so this module stays unit-testable without Electron. `budgetStore` is
  * `{ read, write }` for the budget that outlives the session; without it only
- * the limits of the session apply. `reported` is the list of lines that
- * become events; `maxEvents`, `limits`, `maxEventsPerDay`,
- * `maxEventsPerLinePerDay`, `now` and `homeDir` exist so tests can set them.
+ * the limits of the session apply. `folders` is a function that gives the
+ * app's folders by name ({ userData, appData, … }) for scrubbing; it is asked
+ * at every line, because a folder can still be redirected after this is
+ * installed. `reported` is the list of lines that become events; `maxEvents`,
+ * `limits`, `maxEventsPerDay`, `maxEventsPerLinePerDay`, `now`, `homeDir` and
+ * `userName` exist so tests can set them.
  */
 function installLogReporting({
   log, Sentry, limits, maxEvents = MAX_EVENTS_PER_SESSION, isEnabled = () => true,
   reported = REPORTED_LINES, alreadyReported = ALREADY_REPORTED,
-  budgetStore = null, now, maxEventsPerDay, maxEventsPerLinePerDay, homeDir = HOME_DIRECTORY,
+  budgetStore = null, now, maxEventsPerDay, maxEventsPerLinePerDay,
+  homeDir = HOME_DIRECTORY, userName = USER_NAME, folders = null,
 } = {}) {
   if (!log || !Sentry) throw new Error('Log reporting needs electron-log and Sentry');
   const sampler = createOccurrenceSampler(limits);
@@ -308,6 +347,12 @@ function installLogReporting({
   let reporting = false; // re-entrancy guard: reporting must never report itself
   let disarmed = false;
   let eventsSent = 0;
+  // Folders that cannot be asked for are left to the other rules.
+  const places = () => {
+    let known = null;
+    try { known = folders ? folders() : null; } catch (_) { known = null; }
+    return { userName, folders: known };
+  };
 
   // electron-log calls every hook once per transport, as
   // hook(message, transportFunction, transportName). Act for the file
@@ -321,7 +366,8 @@ function installLogReporting({
       const level = String(message?.level || '').toLowerCase();
       const eventLevel = EVENT_LEVELS.get(level);
       if (!eventLevel && !BREADCRUMB_LEVELS.has(level)) return message;
-      const { error, message: text } = describe(message?.data, homeDir);
+      const where = places();
+      const { error, message: text } = describe(message?.data, homeDir, where);
       if (!text) return message;
       const leaveBreadcrumb = () => Sentry.addBreadcrumb({
         category: 'main-log', level: eventLevel || (level === 'info' ? 'info' : 'debug'), message: text,
@@ -355,7 +401,7 @@ function installLogReporting({
         scope.setExtra('sessionEvent', `${eventsSent}/${maxEvents}`);
         if (message?.scope) scope.setTag('logScope', String(message.scope).slice(0, 60));
       };
-      if (error) Sentry.withScope(scope => { scopeFor(scope); Sentry.captureException(scrubbedError(error, homeDir)); });
+      if (error) Sentry.withScope(scope => { scopeFor(scope); Sentry.captureException(scrubbedError(error, homeDir, where)); });
       else Sentry.withScope(scope => { scopeFor(scope); Sentry.captureMessage(text, eventLevel); });
       if (dailyBudget) dailyBudget.spend(line);
       // After its own event the line joins the trail, so a later event shows it.
