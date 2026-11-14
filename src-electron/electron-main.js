@@ -3759,15 +3759,21 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
       } catch (_) { /* telemetry never breaks saving */ }
     }
     // The one-command render missed its predicted length and the recording was
-    // rebuilt from measured source lengths (ELECTRON-73). Info only: field
-    // evidence for how large the difference is, never an alert.
+    // rebuilt from measured source lengths (ELECTRON-73). Within the timing
+    // tolerance that is the known timestamp rounding: info, field evidence
+    // only. A larger miss means the one-command render itself lost or added
+    // audio. The rebuild saved the meeting, but if that became the rule every
+    // recording would silently take the slow path: warning, its own issue.
     const fastPathFallback = result.plan?.fastPathFallback;
     if (fastPathFallback) {
-      log.info(`Finalization rebuilt ${recordId} from measured source lengths: predicted ${fastPathFallback.expectedDecodedSamples} samples, encoded ${fastPathFallback.observedDecodedSamples}`);
+      const rounding = fastPathFallback.withinTimingTolerance === true;
+      log[rounding ? 'info' : 'warn'](`Finalization rebuilt ${recordId} from measured source lengths: predicted ${fastPathFallback.expectedDecodedSamples} samples, encoded ${fastPathFallback.observedDecodedSamples}`);
       try {
-        Sentry.captureMessage('finalization: predicted length missed, recording rebuilt from measured source lengths', {
-          level: 'info',
-          fingerprint: ['finalization-fast-path-sample-count-fallback'],
+        Sentry.captureMessage(rounding
+          ? 'finalization: predicted length missed, recording rebuilt from measured source lengths'
+          : 'finalization: one-command render missed its length by more than the timing tolerance, recording rebuilt from measured source lengths', {
+          level: rounding ? 'info' : 'warning',
+          fingerprint: [rounding ? 'finalization-fast-path-sample-count-fallback' : 'finalization-fast-path-sample-count-fallback-over-tolerance'],
           tags: { operation: 'finalization', recovery: String(!!options.recovery) },
           extra: { recordId, expectedDecodedSamples: fastPathFallback.expectedDecodedSamples,
             observedDecodedSamples: fastPathFallback.observedDecodedSamples },

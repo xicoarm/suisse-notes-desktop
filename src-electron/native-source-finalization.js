@@ -422,8 +422,11 @@ function createNativeSourceFinalization({ ffmpeg, run, validate, probe, ffprobeP
             // meeting. Re-render below from measured source lengths; a
             // difference that survives measuring is still refused there.
             if (error.code !== 'NATIVE_FINALIZATION_SAMPLE_COUNT') throw error;
+            // Timestamp rounding explains a miss up to the timing tolerance.
+            // A larger one means this render itself lost or added audio.
             fastPathFallback = { reason: 'sample-count', expectedDecodedSamples: error.expectedDecodedSamples,
-              observedDecodedSamples: error.actualDecodedSamples };
+              observedDecodedSamples: error.actualDecodedSamples,
+              withinTimingTolerance: Math.abs(error.expectedDecodedSamples - error.actualDecodedSamples) <= TIMING_TOLERANCE_SAMPLES };
             // The refused render and its plan stay in scratch as evidence.
             // plan.json then only ever describes the measured rebuild, also
             // when that stops before its own validation.

@@ -459,7 +459,8 @@ describe('native source finalization real-media custody', () => {
     // instead of being stranded behind the timestamp prediction.
     expect(result.fastPathUsed).toBe(false);
     const fallback = result.plan.fastPathFallback;
-    expect(fallback).toMatchObject({ reason: 'sample-count', observedDecodedSamples: 48000 });
+    // A miss within the timing tolerance is marked as the known rounding.
+    expect(fallback).toMatchObject({ reason: 'sample-count', observedDecodedSamples: 48000, withinTimingTolerance: true });
     expect(fallback.expectedDecodedSamples - fallback.observedDecodedSamples).toBeGreaterThan(1);
     expect(fallback.expectedDecodedSamples - fallback.observedDecodedSamples).toBeLessThanOrEqual(96);
     // Every sample is kept, so History gets no "review audio" warning for it.
@@ -515,6 +516,28 @@ describe('native source finalization real-media custody', () => {
       validation: { status: 'failed', error: { code: 'NATIVE_FINALIZATION_SAMPLE_COUNT' } } });
     const archived = inspectNativeSources(root).find(item => item.sourceId === jittered);
     expect(Buffer.concat(archived.chunkPaths.map(file => fs.readFileSync(file))).equals(bytes)).toBe(true);
+  }, 60000);
+
+  it('does not rebuild after a one-command render that is refused for another reason (ELECTRON-73)', async () => {
+    // Only a missed length prediction is answered with the measured rebuild.
+    // Here the encoded file itself reports no usable length: it stays refused.
+    await source(await encoded(1, 440), { end: 1000 });
+    const output = path.join(root, 'audio_building.webm');
+    await fs.promises.writeFile(output, 'previous output');
+    const estimates = [];
+    const probe = async file => path.basename(file) === 'fast-rendered.webm' ? 0 : Number((await metadata(file)).format.duration);
+    const error = await finalizer({ probe, checkSpace: async size => estimates.push(size) })
+      .build(root, output, { expectedDurationSec: 1 }).catch(caught => caught);
+    expect(error.code).toBe('NATIVE_FINALIZATION_INVALID');
+    expect(error.message).toBe('Native audio decoded to an empty or invalid timeline; original native audio is retained');
+    expect(error.fastPathFallback).toBeUndefined();
+    // One space check only: the rebuild, which checks space again, never ran.
+    expect(estimates).toHaveLength(1);
+    expect(fs.readFileSync(output, 'utf8')).toBe('previous output');
+    expect(fs.existsSync(path.join(error.scratchDirectory, 'fast-plan.json'))).toBe(false);
+    const plan = JSON.parse(fs.readFileSync(path.join(error.scratchDirectory, 'plan.json'), 'utf8'));
+    expect(plan).toMatchObject({ fastPathUsed: true, validation: { status: 'failed', error: { code: 'NATIVE_FINALIZATION_INVALID' } } });
+    expect(plan.fastPathFallback).toBeUndefined();
   }, 60000);
 
   it('preserves ordinary stopped tails and checks space again before a two-lane fallback', async () => {
