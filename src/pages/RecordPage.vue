@@ -496,7 +496,9 @@
             </q-banner>
           </div>
 
-          <!-- Capture-stall watchdog: no audio saved for a while while still "recording" -->
+          <!-- Capture-stall watchdog: no audio saved for a while while still "recording".
+               Desktop: while the recording is still being saved from its separate
+               sources, a calm notice replaces the warning and its advice to stop. -->
           <div
             v-if="captureStalled"
             class="warning-section"
@@ -507,12 +509,17 @@
             >
               <template #avatar>
                 <q-icon
-                  name="warning"
-                  color="negative"
+                  :name="captureStalledSaving ? 'info_outline' : 'warning'"
+                  :color="captureStalledSaving ? 'warning' : 'negative'"
                 />
               </template>
-              {{ $t('captureStalledWarning', 'Recording may have stalled — no audio has been saved for a while. Please verify; stop and save if it does not recover.') }}
-              <template #action>
+              {{ captureStalledSaving
+                ? $t('captureStalledSavingNotice')
+                : $t('captureStalledWarning', 'Recording may have stalled — no audio has been saved for a while. Please verify; stop and save if it does not recover.') }}
+              <template
+                v-if="!captureStalledSaving"
+                #action
+              >
                 <!-- INT-2: runs a recovery attempt inside a user gesture — iOS
                      may refuse AudioContext.resume() from a timer but allows
                      it here. -->
@@ -969,6 +976,7 @@ const {
   recordingHealthMessage,
   // Capture-stall watchdog (data-loss prevention)
   captureStalled,
+  captureStalledSaving,
   // INT-2: interruption auto-recovery succeeded — surface the gap
   captureRecoveredInfo,
   // INT-2: in-place recovery exhausted — emergency stop-with-save happened

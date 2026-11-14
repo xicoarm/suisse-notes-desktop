@@ -52,6 +52,11 @@ export function useRecorder() {
   // Capture-reliability surfacing (data-loss work): a stalled recorder and
   // chunk-save failures must be visible to the user, not silently swallowed.
   const captureStalled = ref(null); // null | { secondsSinceLastChunk, savedChunks }
+  // Desktop: the live mix stands still, but the recording is still being
+  // saved from its separate sources. The stall banner then shows a calm
+  // notice instead of the advice to stop: stopping is the only way to lose
+  // the rest of the meeting here.
+  const captureStalledSaving = ref(false);
   const chunkSaveError = ref(null); // null | { consecutiveErrors, error, diskFull }
   // INT-2: set when the interruption-recovery loop restores capture after a
   // stall (e.g. incoming-call audio-session interruption). The page shows a
@@ -352,6 +357,11 @@ export function useRecorder() {
     console.warn('Capture stalled (watchdog):', data);
     captureStalled.value = data;
   };
+  // The service says when a stalled episode enters and leaves "still being
+  // saved"; when the sources stop saving too, the normal warning comes back.
+  const handleCaptureStallLanes = (data) => {
+    captureStalledSaving.value = data?.lanesSaving === true;
+  };
   const handleCaptureRecovered = (data) => {
     captureStalled.value = null;
     // Only surface real gaps — sub-15s recoveries (transient suspends) would
@@ -492,6 +502,7 @@ export function useRecorder() {
     systemAudioCaptureError.value = null;
     micCaptureError.value = null;
     captureStalled.value = null;
+    captureStalledSaving.value = false;
     captureRecoveredInfo.value = null;
     captureRecoveryFailed.value = null;
     chunkSaveError.value = null;
@@ -669,6 +680,7 @@ export function useRecorder() {
     recordingService.addEventListener('healthRecovered', handleHealthChange);
     recordingService.addEventListener('chunkSaveFailure', handleChunkSaveFailure);
     recordingService.addEventListener('captureStalled', handleCaptureStalled);
+    recordingService.addEventListener('captureStallLanes', handleCaptureStallLanes);
     recordingService.addEventListener('captureRecovered', handleCaptureRecovered);
     recordingService.addEventListener('captureRecoveryFailed', handleCaptureRecoveryFailed);
     recordingService.addEventListener('micSwitchVerified', handleMicSwitchVerified);
@@ -730,6 +742,7 @@ export function useRecorder() {
     recordingService.removeEventListener('healthRecovered', handleHealthChange);
     recordingService.removeEventListener('chunkSaveFailure', handleChunkSaveFailure);
     recordingService.removeEventListener('captureStalled', handleCaptureStalled);
+    recordingService.removeEventListener('captureStallLanes', handleCaptureStallLanes);
     recordingService.removeEventListener('captureRecovered', handleCaptureRecovered);
     recordingService.removeEventListener('captureRecoveryFailed', handleCaptureRecoveryFailed);
     recordingService.removeEventListener('micSwitchVerified', handleMicSwitchVerified);
@@ -787,6 +800,7 @@ export function useRecorder() {
     isMicHealthy,
     recordingHealthMessage,
     captureStalled,
+    captureStalledSaving,
     captureRecoveredInfo,
     captureRecoveryFailed,
     chunkSaveError,

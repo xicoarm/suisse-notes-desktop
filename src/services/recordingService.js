@@ -144,6 +144,32 @@ let captureRecoveryGeneration = 0;
 // Suspended time inside the current episode: excluded from the give-up
 // window, but still part of the gap reported to the user.
 let captureRecoverySuspendedMs = 0;
+// Desktop: the saved file is built from the separate source lanes (the
+// microphone lane and system audio), not from the live mix this loop watches.
+// A live mix that stands still while a lane keeps saving audio is a recording
+// that still works, and stopping it loses the rest of the meeting: a Mac's
+// live mix came back 5s before the six-tick rule would have stopped a 2-hour
+// recording with nobody at the computer. So the loop never stops a recording
+// whose lanes saved audio within the last two ticks, and when no lane saves
+// either, the recorder gets 5 minutes (60 ticks) instead of 30 seconds: a
+// desktop that stalls with the user away has nobody to start a new recording.
+const CAPTURE_RECOVERY_WEDGED_TICKS_DESKTOP = 60;
+const CAPTURE_RECOVERY_LANE_FRESH_MS = 2 * CAPTURE_RECOVERY_RETRY_MS;
+let captureRecoveryLaneChunks = null;     // lane chunks saved as of the previous tick
+let captureRecoveryLaneAdvancedAt = 0;    // last time a lane was seen saving audio
+let captureRecoveryLanesReported = false; // one report per episode
+let captureRecoveryLanesShown = false;    // what the page was last told (captureStallLanes)
+let stopCaptureRecoverySystemAudioWatch = null;
+// Desktop: step 3 of the loop re-opens a microphone that is not live or is
+// muted on every tick. That was bounded while an episode ended after six
+// ticks. Now another lane (system audio) can keep an episode alive for a whole
+// meeting, and every successful re-open starts a new microphone segment for
+// finalization to join. So an episode gets six attempts, then the lanes rule
+// decides. A microphone that comes back later is still picked up: an unmuted
+// track needs no re-open, and a returning device belongs to the device-loss
+// recovery (handleMicDeviceChange), which this cap does not touch.
+const CAPTURE_RECOVERY_MIC_REACQUIRES_DESKTOP = 6;
+let captureRecoveryMicReacquires = 0;
 
 // Flush synchronization: resolved when ondataavailable saves the chunk after a flush request
 let flushResolvers = [];
@@ -808,6 +834,15 @@ function noteTimerHeartbeat(now = Date.now()) {
   // before any timer) contains none of it.
   if (captureRecoveryTimer && captureRecoveryStartedAt && captureRecoveryStartedAt <= gapStartedAt) {
     captureRecoverySuspendedMs += gapMs;
+    // The lanes saved nothing while the process was frozen; that is no
+    // evidence that they stood still, so the time they were last seen saving
+    // moves with the gap, but never past now. A time from before the last
+    // heartbeat moves exactly. One set after it and before the sleep (level
+    // reports come several times per second) lands on now, which is right to
+    // within one heartbeat. One set after the wake, before this first timer,
+    // is already on the new clock and stays: moved, it would lie in the
+    // future and keep both stops off for the length of the sleep.
+    if (captureRecoveryLaneAdvancedAt) captureRecoveryLaneAdvancedAt = Math.min(now, captureRecoveryLaneAdvancedAt + gapMs);
   }
   captureRecoveryHealthyTicks = 0;
   if (systemAudioSilentSince) systemAudioSilentSince = now;
@@ -1719,10 +1754,26 @@ function scheduleCaptureRecovery(reason) {
   captureRecoverySuspendedMs = 0;
   captureRecoveryReason = reason;
   captureRecoveryHealthyTicks = 0;
+  captureRecoveryLaneChunks = null;
+  captureRecoveryLaneAdvancedAt = 0;
+  captureRecoveryLanesReported = false;
+  captureRecoveryMicReacquires = 0;
   captureMessage(`recording: capture recovery started (reason=${reason}, savedChunks=${savedChunkCount})`, 'warning');
   captureRecoveryTimer = setInterval(() => {
     attemptCaptureRecovery().catch(e => console.warn('Capture recovery attempt failed:', e));
   }, CAPTURE_RECOVERY_RETRY_MS);
+  // Desktop: the system-audio capture runs in the main process. It reports a
+  // level only for bytes it has already written to its file, a few times per
+  // second, so a report during the episode means that lane is saving audio.
+  // The one exception is a last report when the capture closes: it carries
+  // no audio and still counts here, which restarts the desktop window once.
+  if (nativeArchive) {
+    try {
+      stopCaptureRecoverySystemAudioWatch = window.electronAPI?.systemAudio?.onLevel?.(level => {
+        if (level?.recordId === recordingStoreRef?.recordId) captureRecoveryLaneAdvancedAt = Date.now();
+      }) || null;
+    } catch (e) { /* without it the microphone lane alone decides */ }
+  }
   // Kick immediately — a declined call frees the session within seconds.
   attemptCaptureRecovery().catch(e => console.warn('Capture recovery attempt failed:', e));
 }
@@ -1734,7 +1785,30 @@ function stopCaptureRecovery() {
     clearInterval(captureRecoveryTimer);
     captureRecoveryTimer = null;
   }
+  if (stopCaptureRecoverySystemAudioWatch) {
+    try { stopCaptureRecoverySystemAudioWatch(); } catch (e) { /* listener already gone */ }
+    stopCaptureRecoverySystemAudioWatch = null;
+  }
+  // The episode is over: the page must not keep the calm notice for the next.
+  if (captureRecoveryLanesShown) {
+    captureRecoveryLanesShown = false;
+    emit('captureStallLanes', { lanesSaving: false });
+  }
   captureRecoveryBusy = false;
+}
+
+/**
+ * Desktop only (the phone has no source lanes): is the recording still being
+ * written although the live mix stands still? True while a source lane saved
+ * a chunk, or the system-audio capture reported written audio, within the
+ * last two ticks. Call once per tick: it moves the chunk baseline.
+ */
+function captureRecoveryLanesRecording(now = Date.now()) {
+  if (!nativeArchive) return false;
+  const chunks = nativeArchive.getState().sources.reduce((total, source) => total + source.chunkCount, 0);
+  if (captureRecoveryLaneChunks !== null && chunks > captureRecoveryLaneChunks) captureRecoveryLaneAdvancedAt = now;
+  captureRecoveryLaneChunks = chunks;
+  return now - captureRecoveryLaneAdvancedAt < CAPTURE_RECOVERY_LANE_FRESH_MS;
 }
 
 /**
@@ -1788,7 +1862,21 @@ async function attemptCaptureRecovery() {
     // toast), instead of sitting "recording" nothing with a stall banner that may
     // no longer be mounted if the user navigated away (reliability audit GAP-3).
     // Every chunk before the interruption is safely persisted either way.
-    if (Date.now() - captureRecoveryStartedAt - captureRecoverySuspendedMs > CAPTURE_RECOVERY_GIVE_UP_MS) {
+    // Desktop: not while the source lanes still save audio — the file is
+    // built from them, and a stop here ends a recording that works. Once the
+    // lanes were seen saving in this episode, a quiet moment is not the end
+    // either: the stop waits until they saved nothing for the desktop window.
+    const lanesRecording = captureRecoveryLanesRecording();
+    // Tell the page when this changes: while the lanes save audio its stall
+    // banner must not advise stopping a recording that works, and once they
+    // stop saving the advice has to come back.
+    if (lanesRecording !== captureRecoveryLanesShown) {
+      captureRecoveryLanesShown = lanesRecording;
+      emit('captureStallLanes', { lanesSaving: lanesRecording });
+    }
+    const lanesStoodStill = !captureRecoveryLaneAdvancedAt ||
+      Date.now() - captureRecoveryLaneAdvancedAt > CAPTURE_RECOVERY_WEDGED_TICKS_DESKTOP * CAPTURE_RECOVERY_RETRY_MS;
+    if (lanesStoodStill && Date.now() - captureRecoveryStartedAt - captureRecoverySuspendedMs > CAPTURE_RECOVERY_GIVE_UP_MS) {
       const stalledForSeconds = Math.round((Date.now() - captureRecoveryStartedAt) / 1000);
       captureMessage(`recording: capture recovery GAVE UP after ${Math.round(CAPTURE_RECOVERY_GIVE_UP_MS / 60000)}min (reason=${captureRecoveryReason})`, 'error');
       emit('captureRecoveryFailed', { stalledForSeconds, reason: captureRecoveryReason, gaveUp: true });
@@ -1813,7 +1901,11 @@ async function attemptCaptureRecovery() {
     //    lifetime and often does NOT unmute it afterwards) → full re-acquire.
     const micTrack = stream?.getAudioTracks?.()[0];
     const micDead = !micTrack || micTrack.readyState !== 'live' || micTrack.muted;
-    if (micDead) {
+    //    Desktop: after six attempts in this episode the re-open is skipped
+    //    and steps 4 and 5 run, so the lanes rule decides. A device-loss
+    //    recovery pass in flight still stands this tick down, as before.
+    const micReacquiresSpent = Boolean(nativeArchive) && captureRecoveryMicReacquires >= CAPTURE_RECOVERY_MIC_REACQUIRES_DESKTOP;
+    if (micDead && (micAutoRecovering || !micReacquiresSpent)) {
       // A device-loss recovery pass owns the microphone and verifies what it
       // picks; an unverified re-acquire here would end that pass.
       if (micAutoRecovering) {
@@ -1842,6 +1934,7 @@ async function attemptCaptureRecovery() {
       // MSIG: skipVerify — INT-2's success metric is chunk flow (checked at
       // the top of every tick), and running a signal probe during an OS
       // audio-session interruption would false-positive "silent".
+      captureRecoveryMicReacquires++;
       const result = await switchMicrophoneStream(targetDeviceId || 'default', { skipVerify: true, verifyContext: 'capture-recovery' });
       if (!isCurrent()) return;
       if (!result.success) {
@@ -1874,8 +1967,20 @@ async function attemptCaptureRecovery() {
       captureRecoveryHealthyTicks = 0;
       return;
     }
+    //    LANES: on the desktop the live mix is not what gets saved. While the
+    //    source lanes keep saving audio, only the live mix is wedged: the
+    //    stall banner stays, the recording goes on, and this is reported once.
+    //    The count below runs only while no lane saves audio either.
+    if (lanesRecording) {
+      if (!captureRecoveryLanesReported) {
+        captureRecoveryLanesReported = true;
+        captureMessage(`recording: live mix still stalled but the source lanes keep saving audio — recording continues (reason=${captureRecoveryReason}, savedChunks=${savedChunkCount}, laneChunks=${captureRecoveryLaneChunks})`, 'warning');
+      }
+      captureRecoveryHealthyTicks = 0;
+      return;
+    }
     captureRecoveryHealthyTicks++;
-    if (captureRecoveryHealthyTicks >= CAPTURE_RECOVERY_WEDGED_TICKS) {
+    if (captureRecoveryHealthyTicks >= (isElectron() ? CAPTURE_RECOVERY_WEDGED_TICKS_DESKTOP : CAPTURE_RECOVERY_WEDGED_TICKS)) {
       captureMessage(`recording: capture recovery FAILED — recorder wedged with healthy pipeline for ${captureRecoveryHealthyTicks} ticks (reason=${captureRecoveryReason}, savedChunks=${savedChunkCount})`, 'error');
       emit('captureRecoveryFailed', {
         reason: captureRecoveryReason,
