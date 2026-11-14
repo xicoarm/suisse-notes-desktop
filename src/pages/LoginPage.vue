@@ -245,6 +245,26 @@
             </template>
           </q-input>
 
+          <!-- Error Banner -->
+          <div
+            v-if="authStore.error"
+            class="error-banner q-mb-md"
+          >
+            <q-icon
+              name="error_outline"
+              color="negative"
+            />
+            <span>{{ authStore.error }}</span>
+            <q-btn
+              flat
+              round
+              size="sm"
+              icon="close"
+              color="grey-7"
+              @click="authStore.clearError()"
+            />
+          </div>
+
           <!-- Where to sign in instead (SSO / Apple account, failed password) -->
           <div
             v-if="discoverHints.length"
@@ -269,26 +289,6 @@
               class="discover-use-password"
               @click.prevent="usePasswordInstead"
             >{{ $t('discoverUsePassword') }}</a>
-          </div>
-
-          <!-- Error Banner -->
-          <div
-            v-if="authStore.error"
-            class="error-banner q-mb-md"
-          >
-            <q-icon
-              name="error_outline"
-              color="negative"
-            />
-            <span>{{ authStore.error }}</span>
-            <q-btn
-              flat
-              round
-              size="sm"
-              icon="close"
-              color="grey-7"
-              @click="authStore.clearError()"
-            />
           </div>
 
           <q-btn
