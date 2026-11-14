@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu, Tray, nativeImage, desktopCapturer, systemPreferences, powerMonitor, powerSaveBlocker, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu, Tray, nativeImage, desktopCapturer, systemPreferences, powerMonitor, powerSaveBlocker, clipboard, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { writeFileAtomic, writeFileAtomicSync, publishFile, concatenateFiles, archiveChunkBatch, listChunkBatches, syncDirectorySync } = require('./durable-files');
@@ -21,6 +21,7 @@ const ffmpeg = require('fluent-ffmpeg');
 const { Upload } = require('tus-js-client');
 const { autoUpdater } = require('electron-updater');
 const { createUpdateChecks, isPersistentDownloadError, UPDATE_CHECK_INTERVAL_MS, UPDATE_CHECK_AFTER_WAKE_MS, UPDATE_CHECK_MIN_GAP_MS } = require('./update-checks');
+const { createMicrophoneAlert } = require('./microphone-alert');
 const log = require('electron-log');
 const Sentry = require('@sentry/electron/main');
 const { machineIdSync } = require('node-machine-id');
@@ -1531,6 +1532,14 @@ function destroyRecordingTray() {
   recordingStartTime = null;
   log.info('Recording tray indicator removed');
 }
+
+// === Microphone alert outside the app window ===
+// The renderer asks for it while a running recording's microphone is not heard
+// and clears it when that ends (see microphone-alert.js).
+const microphoneAlert = createMicrophoneAlert({ Notification, getWindow: () => mainWindow, getDock: () => app.dock, log });
+ipcMain.handle('system:showMicrophoneAlert', (event, alert) => microphoneAlert.show(alert));
+ipcMain.handle('system:clearMicrophoneAlert', () => microphoneAlert.clear());
+app.on('before-quit', () => microphoneAlert.clear());
 
 // Resolve preload path - use environment variable in dev, or relative path in prod
 const preloadPath = process.env.QUASAR_ELECTRON_PRELOAD
@@ -3367,6 +3376,7 @@ ipcMain.handle('recording:setInProgress', (event, inProgress) => {
     createRecordingTray();
   } else {
     destroyRecordingTray();
+    microphoneAlert.clear(); // no recording, nothing to warn about
   }
 
   return { success: true };
