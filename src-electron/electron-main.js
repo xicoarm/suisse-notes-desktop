@@ -473,6 +473,7 @@ if (!app.isPackaged || process.env.SUISSE_E2E_HOOKS === '1') {
 // Uses config.js for environment detection
 const { getApiUrl, getEnvironmentInfo } = require('./config');
 const API_BASE_URL = getApiUrl();
+const loginDiscovery = require('./login-discovery');
 log.info('Environment:', getEnvironmentInfo());
 // Backend restarts answer 502-504 for a few seconds: idempotent requests are
 // retried, and an HTML page in place of JSON becomes a transient error.
@@ -2178,10 +2179,11 @@ function getDeviceId() {
 // redirects through Microsoft/Google and ultimately back to suissenotes://
 // auth/callback, which the OS routes to handleSSOUrl() above. Actual login
 // completion arrives asynchronously via the 'auth:ssoCallback' event.
-async function openSSOBrowser(provider) {
+async function openSSOBrowser(provider, loginHint) {
   try {
-    const url = `${API_BASE_URL}/api/auth/${provider}/login?client=desktop`;
-    log.info(`SSO: launching system browser for ${provider} login`);
+    // A valid address goes along as login_hint (login recognition); anything else is dropped.
+    const url = loginDiscovery.buildSsoLoginUrl(API_BASE_URL, provider, loginHint);
+    log.info(`SSO: launching system browser for ${provider} login${url.includes('login_hint=') ? ' (with login hint)' : ''}`);
     await shell.openExternal(url);
     return { success: true };
   } catch (error) {
@@ -2190,8 +2192,12 @@ async function openSSOBrowser(provider) {
   }
 }
 
-ipcMain.handle('auth:loginWithMicrosoft', () => openSSOBrowser('microsoft'));
-ipcMain.handle('auth:loginWithGoogle', () => openSSOBrowser('google'));
+ipcMain.handle('auth:loginWithMicrosoft', (event, loginHint) => openSSOBrowser('microsoft', loginHint));
+ipcMain.handle('auth:loginWithGoogle', (event, loginHint) => openSSOBrowser('google', loginHint));
+
+// Login recognition: which method an address uses, and which form the server switch allows.
+ipcMain.handle('auth:discover', (event, email) => loginDiscovery.discover(axios, API_BASE_URL, email));
+ipcMain.handle('auth:loginMode', () => loginDiscovery.loginMode(axios, API_BASE_URL));
 
 // Authentication - Production only (no demo mode)
 ipcMain.handle('auth:login', async (event, email, password) => {

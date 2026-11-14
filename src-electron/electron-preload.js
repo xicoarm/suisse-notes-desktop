@@ -65,8 +65,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     refreshToken: () => ipcRenderer.invoke('auth:refreshToken'),
     createWebSession: () => ipcRenderer.invoke('auth:createWebSession'),
     // SSO via system browser + suissenotes:// custom protocol
-    loginWithMicrosoft: () => ipcRenderer.invoke('auth:loginWithMicrosoft'),
-    loginWithGoogle: () => ipcRenderer.invoke('auth:loginWithGoogle'),
+    // Optional address for the provider's login_hint (main checks it again).
+    loginWithMicrosoft: (loginHint) => ipcRenderer.invoke('auth:loginWithMicrosoft', typeof loginHint === 'string' ? loginHint : null),
+    loginWithGoogle: (loginHint) => ipcRenderer.invoke('auth:loginWithGoogle', typeof loginHint === 'string' ? loginHint : null),
+    // Login recognition (POST /api/auth/discover, GET /api/auth/login-mode).
+    discover: (email) => ipcRenderer.invoke('auth:discover', String(email ?? '')),
+    loginMode: () => ipcRenderer.invoke('auth:loginMode'),
     onSSOCallback: (callback) => {
       ipcRenderer.on('auth:ssoCallback', (_event, data) => callback(data));
     },
