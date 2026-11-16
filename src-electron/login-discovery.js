@@ -10,11 +10,15 @@
  * Microsoft/Google in the system browser get the address as login_hint, so
  * the provider opens that account directly. The address is checked strictly
  * here again (the renderer is not trusted with what goes into a URL).
+ * Apple ignores a login hint, so none is ever sent there.
  */
 
 const DISCOVER_PATH = '/api/auth/discover';
 const LOGIN_MODE_PATH = '/api/auth/login-mode';
-const SSO_PROVIDERS = new Set(['microsoft', 'google']);
+const SSO_PROVIDERS = new Set(['microsoft', 'google', 'apple']);
+const HINT_PROVIDERS = new Set(['microsoft', 'google']);
+// The only start route of an Apple answer the app follows (contract 16.11.2026).
+const APPLE_START_PATH = '/api/auth/apple/login';
 const NEXT_METHODS = new Set(['password', 'microsoft', 'google', 'apple']);
 const LOGIN_MODES = new Set(['classic', 'identifier-first', 'test']);
 const REQUEST_TIMEOUT_MS = 10000;
@@ -35,19 +39,28 @@ function normalizeLoginEmail(raw) {
   return email;
 }
 
-/** Start URL of the system-browser sign-in; a valid login hint is added url-encoded, anything else is dropped. */
+/**
+ * Start URL of the system-browser sign-in; a valid login hint is added
+ * url-encoded for Microsoft/Google, anything else is dropped. Apple never
+ * gets a hint.
+ */
 function buildSsoLoginUrl(apiBase, provider, loginHint) {
   if (!SSO_PROVIDERS.has(provider)) throw new Error('unknown provider');
   const url = `${apiBase}/api/auth/${provider}/login?client=desktop`;
-  const hint = normalizeLoginEmail(loginHint);
+  const hint = HINT_PROVIDERS.has(provider) ? normalizeLoginEmail(loginHint) : null;
   return hint ? `${url}&login_hint=${encodeURIComponent(hint)}` : url;
 }
 
-/** Only the contract fields of a discover answer; anything else becomes "unusable" (status 0). */
+/**
+ * Only the contract fields of a discover answer; anything else becomes
+ * "unusable" (status 0). `start` passes only for Apple and only as the exact
+ * Apple start route: it tells the page that Apple works in this app.
+ */
 function pickDiscoverAnswer(status, data) {
   const body = data && typeof data === 'object' ? data : {};
   if (status === 200) {
     if (!NEXT_METHODS.has(body.next)) return { status: 0 };
+    if (body.next === 'apple' && body.start === APPLE_START_PATH) return { status, next: body.next, start: APPLE_START_PATH };
     return { status, next: body.next };
   }
   if (status === 400 && body.error === 'invalid_email') return { status, error: 'invalid_email' };
@@ -84,9 +97,10 @@ function testOptIn(argv = process.argv, env = process.env) {
 }
 
 /**
- * GET /api/auth/login-mode -> { mode, testOptIn }. A server without the
+ * GET /api/auth/login-mode -> { mode, testOptIn, apple }. A server without the
  * endpoint (404), an error or an unknown value is "classic": the form as
- * before, so the switch keeps the new form dark.
+ * before, so the switch keeps the new form dark. `apple` is true only when
+ * the server says so (older servers send nothing: no Apple button).
  */
 async function loginMode(axios, apiBase, { argv, env } = {}) {
   const optIn = testOptIn(argv, env);
@@ -95,12 +109,11 @@ async function loginMode(axios, apiBase, { argv, env } = {}) {
       timeout: REQUEST_TIMEOUT_MS,
       validateStatus: () => true
     });
-    const mode = response.status === 200 && response.data && LOGIN_MODES.has(response.data.mode)
-      ? response.data.mode
-      : 'classic';
-    return { mode, testOptIn: optIn };
+    const ok = response.status === 200 && !!response.data && typeof response.data === 'object';
+    const mode = ok && LOGIN_MODES.has(response.data.mode) ? response.data.mode : 'classic';
+    return { mode, testOptIn: optIn, apple: ok && response.data.apple === true };
   } catch {
-    return { mode: 'classic', testOptIn: optIn };
+    return { mode: 'classic', testOptIn: optIn, apple: false };
   }
 }
 

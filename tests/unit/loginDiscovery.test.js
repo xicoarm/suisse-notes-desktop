@@ -119,6 +119,25 @@ describe('login recognition: discover answer (contract section 6)', () => {
     expect(interpretDiscover(429, {})).toEqual({ kind: 'rate_limited', retryAfter: 60 });
   });
 
+  it('Apple with the exact start route is a sign-in like Microsoft/Google; anything else keeps the hint', () => {
+    expect(interpretDiscover(200, { next: 'apple', start: '/api/auth/apple/login' })).toEqual({ kind: 'sso', provider: 'apple' });
+    for (const start of [undefined, null, '', '/api/auth/apple/login?client=web', 'https://evil.example/api/auth/apple/login',
+      '/api/auth/google/login', '/api/auth/apple/login/', 42, ['/api/auth/apple/login']]) {
+      expect(interpretDiscover(200, { next: 'apple', start }), String(start)).toEqual({ kind: 'apple' });
+    }
+    // The Apple start route never turns another method into Apple.
+    expect(interpretDiscover(200, { next: 'google', start: '/api/auth/apple/login' })).toEqual({ kind: 'sso', provider: 'google' });
+    expect(interpretDiscover(200, { next: 'password', start: '/api/auth/apple/login' })).toEqual({ kind: 'password' });
+    expect(interpretDiscover(404, { next: 'apple', start: '/api/auth/apple/login' })).toEqual({ kind: 'unavailable' });
+  });
+
+  it('Apple on phones: the platform start route, never with a login hint', () => {
+    expect(mobileSsoUrl('https://app.suisse-meets.ch', 'apple', 'ios', 'Anna@Firma.ch'))
+      .toBe('https://app.suisse-meets.ch/api/auth/apple/login?client=ios');
+    expect(mobileSsoUrl('https://app.suisse-meets.ch', 'apple', 'android', null))
+      .toBe('https://app.suisse-meets.ch/api/auth/apple/login?client=android');
+  });
+
   it('404, 5xx, odd bodies and unknown methods fall back to the classic form', () => {
     for (const [status, body] of [[404, {}], [500, null], [502, 'html'], [200, { next: 'saml' }], [200, null], [0, undefined], [400, { error: 'x' }]]) {
       expect(interpretDiscover(status, body)).toEqual({ kind: 'unavailable' });
@@ -144,11 +163,11 @@ describe('login recognition: desktop goes through the main process', () => {
     expect(discoverClient()).toBe('desktop');
     await expect(discoverSignIn('a@b.ch')).resolves.toEqual({ kind: 'sso', provider: 'google' });
     expect(window.electronAPI.auth.discover).toHaveBeenCalledWith('a@b.ch');
-    await expect(fetchLoginMode()).resolves.toEqual({ mode: 'test', testOptIn: true });
+    await expect(fetchLoginMode()).resolves.toEqual({ mode: 'test', testOptIn: true, apple: false });
 
     window.electronAPI = { auth: {} };
     await expect(discoverSignIn('a@b.ch')).resolves.toEqual({ kind: 'unavailable' });
-    await expect(fetchLoginMode()).resolves.toEqual({ mode: 'classic', testOptIn: false });
+    await expect(fetchLoginMode()).resolves.toEqual({ mode: 'classic', testOptIn: false, apple: false });
   });
 
   it('a failing IPC is never a dead end', async () => {
@@ -157,6 +176,22 @@ describe('login recognition: desktop goes through the main process', () => {
       loginMode: vi.fn(async () => { throw new Error('ipc'); })
     } };
     await expect(discoverSignIn('a@b.ch')).resolves.toEqual({ kind: 'unavailable' });
-    await expect(fetchLoginMode()).resolves.toEqual({ mode: 'classic', testOptIn: false });
+    await expect(fetchLoginMode()).resolves.toEqual({ mode: 'classic', testOptIn: false, apple: false });
+  });
+
+  it('Apple: the flag from main (true only when true) and the Apple discover answer', async () => {
+    window.electronAPI = { auth: {
+      discover: vi.fn(async () => ({ status: 200, next: 'apple', start: '/api/auth/apple/login' })),
+      loginMode: vi.fn(async () => ({ mode: 'classic', testOptIn: false, apple: true }))
+    } };
+    await expect(fetchLoginMode()).resolves.toEqual({ mode: 'classic', testOptIn: false, apple: true });
+    await expect(discoverSignIn('a@b.ch')).resolves.toEqual({ kind: 'sso', provider: 'apple' });
+    for (const apple of [undefined, false, 'true', 1]) {
+      window.electronAPI.auth.loginMode = vi.fn(async () => ({ mode: 'identifier-first', testOptIn: false, apple }));
+      await expect(fetchLoginMode(), String(apple)).resolves.toEqual({ mode: 'identifier-first', testOptIn: false, apple: false });
+    }
+    // An older main without the start pass-through: today's Apple hint.
+    window.electronAPI.auth.discover = vi.fn(async () => ({ status: 200, next: 'apple' }));
+    await expect(discoverSignIn('a@b.ch')).resolves.toEqual({ kind: 'apple' });
   });
 });

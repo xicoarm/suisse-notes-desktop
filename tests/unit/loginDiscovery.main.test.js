@@ -18,20 +18,33 @@ describe('main process: system-browser sign-in with login hint', () => {
     }
   });
 
-  it('only Microsoft and Google', () => {
-    expect(() => ld.buildSsoLoginUrl(BASE, 'apple', 'a@b.ch')).toThrow();
+  it('only Microsoft, Google and Apple', () => {
+    expect(() => ld.buildSsoLoginUrl(BASE, 'facebook', 'a@b.ch')).toThrow();
     expect(() => ld.buildSsoLoginUrl(BASE, '../x', null)).toThrow();
+    expect(() => ld.buildSsoLoginUrl(BASE, 'Apple', null)).toThrow();
   });
 
-  it('electron-main uses it for both providers and registers discover + login mode', () => {
+  it('Apple: the desktop start route, never with a login hint', () => {
+    const apple = `${BASE}/api/auth/apple/login?client=desktop`;
+    expect(ld.buildSsoLoginUrl(BASE, 'apple')).toBe(apple);
+    expect(ld.buildSsoLoginUrl(BASE, 'apple', null)).toBe(apple);
+    expect(ld.buildSsoLoginUrl(BASE, 'apple', 'Anna@Firma.ch')).toBe(apple);
+    expect(ld.buildSsoLoginUrl(BASE, 'apple', 'a@b.ch&client=web')).toBe(apple);
+  });
+
+  it('electron-main uses it for every provider and registers discover + login mode', () => {
     const main = fs.readFileSync('src-electron/electron-main.js', 'utf8');
     expect(main).toMatch(/loginDiscovery\.buildSsoLoginUrl\(API_BASE_URL, provider, loginHint\)/);
     expect(main).toMatch(/ipcMain\.handle\('auth:loginWithMicrosoft', \(event, loginHint\) => openSSOBrowser\('microsoft', loginHint\)\)/);
     expect(main).toMatch(/ipcMain\.handle\('auth:loginWithGoogle', \(event, loginHint\) => openSSOBrowser\('google', loginHint\)\)/);
+    expect(main).toMatch(/ipcMain\.handle\('auth:loginWithApple', \(\) => openSSOBrowser\('apple', null\)\)/);
+    // A password answer use_sso may name Apple; the auth store lets it through only with the login mode's apple flag.
+    expect(main).toMatch(/provider: isObject && \['microsoft', 'google', 'apple'\]\.includes\(data\.provider\) \? data\.provider : undefined,/);
     expect(main).toMatch(/ipcMain\.handle\('auth:discover'/);
     expect(main).toMatch(/ipcMain\.handle\('auth:loginMode'/);
     const preload = fs.readFileSync('src-electron/electron-preload.js', 'utf8');
     expect(preload).toMatch(/discover: \(email\) => ipcRenderer\.invoke\('auth:discover', String\(email \?\? ''\)\)/);
+    expect(preload).toMatch(/loginWithApple: \(\) => ipcRenderer\.invoke\('auth:loginWithApple'\)/);
   });
 });
 
@@ -58,21 +71,56 @@ describe('main process: discover request', () => {
     await expect(answer(400, { error: 'invalid_email' })).resolves.toEqual({ status: 400, error: 'invalid_email' });
     await expect(ld.discover({ post: async () => { throw new Error('ECONNREFUSED'); } }, BASE, 'a@b.ch')).resolves.toEqual({ status: 0 });
   });
+
+  it('Apple: the start route passes only as the exact Apple route', async () => {
+    const answer = async (data) => ld.discover({ post: async () => ({ status: 200, data }) }, BASE, 'a@b.ch');
+    await expect(answer({ next: 'apple', start: '/api/auth/apple/login' }))
+      .resolves.toEqual({ status: 200, next: 'apple', start: '/api/auth/apple/login' });
+    // Older server or switch off: no start, today's hint.
+    await expect(answer({ next: 'apple' })).resolves.toEqual({ status: 200, next: 'apple' });
+    for (const start of [
+      '/api/auth/apple/login?client=web', '/api/auth/apple/login/', 'https://evil.example/api/auth/apple/login',
+      '//evil.example/api/auth/apple/login', '/api/auth/google/login', ' /api/auth/apple/login', '/API/AUTH/APPLE/LOGIN',
+      '', null, 42, ['/api/auth/apple/login'], { toString: () => '/api/auth/apple/login' }
+    ]) {
+      await expect(answer({ next: 'apple', start }), String(start)).resolves.toEqual({ status: 200, next: 'apple' });
+    }
+    // Never for another method.
+    await expect(answer({ next: 'google', start: '/api/auth/apple/login' })).resolves.toEqual({ status: 200, next: 'google' });
+    await expect(answer({ next: 'password', start: '/api/auth/apple/login' })).resolves.toEqual({ status: 200, next: 'password' });
+    expect(ld.pickDiscoverAnswer(200, { next: 'apple', start: '/api/auth/apple/login', name: 'x' }))
+      .toEqual({ status: 200, next: 'apple', start: '/api/auth/apple/login' });
+  });
 });
 
 describe('main process: login mode (server switch)', () => {
   const get = (status, data) => ({ get: vi.fn(async () => ({ status, data })) });
 
   it('reads the mode; a server without the endpoint is classic', async () => {
-    await expect(ld.loginMode(get(200, { mode: 'identifier-first' }), BASE, { argv: [], env: {} })).resolves.toEqual({ mode: 'identifier-first', testOptIn: false });
-    await expect(ld.loginMode(get(404, 'not found'), BASE, { argv: [], env: {} })).resolves.toEqual({ mode: 'classic', testOptIn: false });
-    await expect(ld.loginMode(get(200, { mode: 'all' }), BASE, { argv: [], env: {} })).resolves.toEqual({ mode: 'classic', testOptIn: false });
-    await expect(ld.loginMode({ get: async () => { throw new Error('offline'); } }, BASE, { argv: [], env: {} })).resolves.toEqual({ mode: 'classic', testOptIn: false });
+    await expect(ld.loginMode(get(200, { mode: 'identifier-first' }), BASE, { argv: [], env: {} })).resolves.toEqual({ mode: 'identifier-first', testOptIn: false, apple: false });
+    await expect(ld.loginMode(get(404, 'not found'), BASE, { argv: [], env: {} })).resolves.toEqual({ mode: 'classic', testOptIn: false, apple: false });
+    await expect(ld.loginMode(get(200, { mode: 'all' }), BASE, { argv: [], env: {} })).resolves.toEqual({ mode: 'classic', testOptIn: false, apple: false });
+    await expect(ld.loginMode({ get: async () => { throw new Error('offline'); } }, BASE, { argv: [], env: {} })).resolves.toEqual({ mode: 'classic', testOptIn: false, apple: false });
   });
 
   it('test opt-in by start argument or environment', async () => {
-    await expect(ld.loginMode(get(200, { mode: 'test' }), BASE, { argv: ['app', '--login-discovery'], env: {} })).resolves.toEqual({ mode: 'test', testOptIn: true });
-    await expect(ld.loginMode(get(200, { mode: 'test' }), BASE, { argv: [], env: { SUISSE_MEETS_LOGIN_DISCOVERY: '1' } })).resolves.toEqual({ mode: 'test', testOptIn: true });
+    await expect(ld.loginMode(get(200, { mode: 'test' }), BASE, { argv: ['app', '--login-discovery'], env: {} })).resolves.toEqual({ mode: 'test', testOptIn: true, apple: false });
+    await expect(ld.loginMode(get(200, { mode: 'test' }), BASE, { argv: [], env: { SUISSE_MEETS_LOGIN_DISCOVERY: '1' } })).resolves.toEqual({ mode: 'test', testOptIn: true, apple: false });
     expect(ld.testOptIn([], { SUISSE_MEETS_LOGIN_DISCOVERY: 'yes' })).toBe(false);
+  });
+
+  it('Apple flag: true only when the server says true; missing, odd values and errors are false', async () => {
+    const mode = async (status, data) => ld.loginMode(get(status, data), BASE, { argv: [], env: {} });
+    await expect(mode(200, { mode: 'classic', apple: true })).resolves.toEqual({ mode: 'classic', testOptIn: false, apple: true });
+    await expect(mode(200, { mode: 'identifier-first', apple: true })).resolves.toEqual({ mode: 'identifier-first', testOptIn: false, apple: true });
+    // Older server: no `apple` field.
+    await expect(mode(200, { mode: 'identifier-first' })).resolves.toMatchObject({ apple: false });
+    for (const apple of [false, 'true', 1, null, {}]) {
+      await expect(mode(200, { mode: 'classic', apple }), String(apple)).resolves.toMatchObject({ apple: false });
+    }
+    await expect(mode(404, { apple: true })).resolves.toEqual({ mode: 'classic', testOptIn: false, apple: false });
+    await expect(mode(500, { mode: 'classic', apple: true })).resolves.toMatchObject({ apple: false });
+    await expect(mode(200, null)).resolves.toEqual({ mode: 'classic', testOptIn: false, apple: false });
+    await expect(ld.loginMode({ get: async () => { throw new Error('timeout'); } }, BASE, { argv: [], env: {} })).resolves.toMatchObject({ apple: false });
   });
 });

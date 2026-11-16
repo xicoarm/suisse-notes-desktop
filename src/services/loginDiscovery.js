@@ -25,6 +25,8 @@ export const AUTO_REDIRECT_KEY = 'suisse-meets-login-auto-redirect';
 export const LOGIN_MODE_CACHE_KEY = 'suisse-meets-login-mode';
 export const AUTO_REDIRECT_TTL_MS = 10 * 60 * 1000;
 const DISCOVER_TIMEOUT_MS = 10000;
+// The only start route of an Apple discover answer the app follows.
+const APPLE_START_PATH = '/api/auth/apple/login';
 
 const LOCAL_PART = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*$/;
 const DOMAIN = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
@@ -127,6 +129,9 @@ export function interpretDiscover(status, body) {
   }
   if (status !== 200) return { kind: 'unavailable' };
   if (data.next === 'microsoft' || data.next === 'google') return { kind: 'sso', provider: data.next };
+  // Apple with its exact start route: Apple works in this app. Without it
+  // (older server, switch off): the hint where this account signs in.
+  if (data.next === 'apple' && data.start === APPLE_START_PATH) return { kind: 'sso', provider: 'apple' };
   if (data.next === 'apple') return { kind: 'apple' };
   if (data.next === 'password') return { kind: 'password' };
   return { kind: 'unavailable' };
@@ -162,27 +167,34 @@ export async function discoverSignIn(email) {
   }
 }
 
-/** GET /api/auth/login-mode -> { mode, testOptIn }. Never throws; anything unusable is classic. */
+/**
+ * GET /api/auth/login-mode -> { mode, testOptIn, apple }. Never throws;
+ * anything unusable is classic. `apple` (show the Apple button) only when
+ * the server says true; older servers send nothing.
+ */
 export async function fetchLoginMode() {
   try {
     if (isElectron()) {
       const auth = window.electronAPI?.auth;
-      if (typeof auth?.loginMode !== 'function') return { mode: 'classic', testOptIn: false };
+      if (typeof auth?.loginMode !== 'function') return { mode: 'classic', testOptIn: false, apple: false };
       const answer = await auth.loginMode();
       const mode = answer?.mode === 'identifier-first' || answer?.mode === 'test' ? answer.mode : 'classic';
-      return { mode, testOptIn: answer?.testOptIn === true };
+      return { mode, testOptIn: answer?.testOptIn === true, apple: answer?.apple === true };
     }
     const { status, body } = await requestJson('/api/auth/login-mode', { method: 'GET', retryGateway: false });
     const mode = status === 200 && (body?.mode === 'identifier-first' || body?.mode === 'test') ? body.mode : 'classic';
-    return { mode, testOptIn: false };
+    return { mode, testOptIn: false, apple: status === 200 && body?.apple === true };
   } catch {
-    return { mode: 'classic', testOptIn: false };
+    return { mode: 'classic', testOptIn: false, apple: false };
   }
 }
 
-/** Phone start URL of Microsoft/Google with the url-encoded login hint (a bad address is dropped). */
+/**
+ * Phone start URL of Microsoft/Google with the url-encoded login hint (a bad
+ * address is dropped); Apple never gets a hint.
+ */
 export function mobileSsoUrl(apiBase, provider, platform, loginHint) {
   const url = `${apiBase}/api/auth/${provider}/login?client=${platform}`;
-  const hint = normalizeLoginEmail(loginHint);
+  const hint = provider === 'apple' ? null : normalizeLoginEmail(loginHint);
   return hint ? `${url}&login_hint=${encodeURIComponent(hint)}` : url;
 }

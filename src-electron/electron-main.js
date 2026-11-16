@@ -2218,6 +2218,7 @@ async function openSSOBrowser(provider, loginHint) {
 
 ipcMain.handle('auth:loginWithMicrosoft', (event, loginHint) => openSSOBrowser('microsoft', loginHint));
 ipcMain.handle('auth:loginWithGoogle', (event, loginHint) => openSSOBrowser('google', loginHint));
+ipcMain.handle('auth:loginWithApple', () => openSSOBrowser('apple', null));
 
 // Login recognition: which method an address uses, and which form the server switch allows.
 ipcMain.handle('auth:discover', (event, email) => loginDiscovery.discover(axios, API_BASE_URL, email));
@@ -2390,7 +2391,7 @@ function authFailureFromAxiosError(error) {
       success: false,
       status: error.response.status,
       code: authErrorCode(data),
-      provider: isObject && (data.provider === 'google' || data.provider === 'microsoft') ? data.provider : undefined,
+      provider: isObject && ['microsoft', 'google', 'apple'].includes(data.provider) ? data.provider : undefined,
       nonJson: !!error.nonJson || !isObject,
       serverError: isObject && typeof data.error === 'string' ? data.error.slice(0, 200) : undefined
     };
