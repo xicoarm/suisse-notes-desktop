@@ -338,7 +338,7 @@
             outline
             no-caps
             class="sso-btn full-width"
-            :class="{ 'sso-btn--suggested': suggestedProvider === 'google' }"
+            :class="{ 'q-mb-sm': showAppleButton, 'sso-btn--suggested': suggestedProvider === 'google' }"
             size="md"
             :disable="authStore.loading || discoverChecking"
             @click="handleGoogleLogin"
@@ -356,6 +356,31 @@
               v-html="googleLogoSvg"
             />
             <span>{{ $t('signInWithGoogle') }}</span>
+          </q-btn>
+          <!-- Apple: only when the server says it works here (GET /api/auth/login-mode apple:true) -->
+          <q-btn
+            v-if="showAppleButton"
+            outline
+            no-caps
+            class="sso-btn sso-btn-apple full-width"
+            :class="{ 'sso-btn--suggested': suggestedProvider === 'apple' }"
+            size="md"
+            :disable="authStore.loading || discoverChecking"
+            @click="handleAppleLogin"
+          >
+            <q-spinner
+              v-if="ssoLoading === 'apple'"
+              class="sso-logo"
+              size="18px"
+              color="primary"
+            />
+            <!-- eslint-disable-next-line vue/no-v-html -->
+            <span
+              v-else
+              class="sso-logo"
+              v-html="appleLogoSvg"
+            />
+            <span>{{ $t('signInWithApple') }}</span>
           </q-btn>
           <div
             v-if="ssoLoading"
@@ -458,7 +483,7 @@ const { t } = useI18n();
 const { languages, currentLang, currentLangShort, setLanguage, initLanguage } = useLanguage();
 const isDesktopApp = isElectron();
 const isMobileApp = isCapacitor();
-// null | 'microsoft' | 'google' — which SSO flow is currently in flight. Kept
+// null | 'microsoft' | 'google' | 'apple' — which SSO flow is currently in flight. Kept
 // in the auth store: the result is handled app-wide by boot/sso.js.
 const ssoLoading = computed(() => authStore.ssoProvider);
 
@@ -517,6 +542,8 @@ watch(() => authStore.ssoOutcome.seq, () => {
 // Brand marks — inlined to avoid extra image fetches
 const microsoftLogoSvg = '<svg viewBox="0 0 21 21" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="1" width="9" height="9" fill="#F25022"/><rect x="11" y="1" width="9" height="9" fill="#7FBA00"/><rect x="1" y="11" width="9" height="9" fill="#00A4EF"/><rect x="11" y="11" width="9" height="9" fill="#FFB900"/></svg>';
 const googleLogoSvg = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>';
+// Apple logo: Simple Icons (CC0), in the button's text colour.
+const appleLogoSvg = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>';
 
 // Set white status bar icons for purple background on mobile
 onMounted(async () => {
@@ -560,7 +587,8 @@ const currentYear = new Date().getFullYear();
 // «Continue» asks POST /api/auth/discover which method the address uses:
 // password -> the password field; Microsoft/Google -> straight to the system
 // browser (desktop) or the in-app browser session (phones) with the address
-// as login hint, at most once per attempt; anything unusable -> the classic
+// as login hint, at most once per attempt (Apple the same way when the server
+// gives its start route, never with a hint); anything unusable -> the classic
 // form. Only the address is remembered on the device («Not me» removes it).
 const localStore = browserStorage('localStorage');
 const sessionStore = browserStorage('sessionStorage');
@@ -593,25 +621,35 @@ const emailRules = computed(() => (step.value === 'email'
 
 const providerLabel = (provider) => (provider === 'google' ? 'Google' : provider === 'apple' ? 'Apple' : 'Microsoft');
 
+// Sign in with Apple: the button shows when the server says Apple works here
+// (the login mode's separate `apple` flag, kept in the auth store so a use_sso
+// answer may name Apple; older servers: no button). It also stays while an
+// Apple sign-in runs or discover has just sent this address to Apple.
+const appleAvailable = computed(() => authStore.appleSignIn === true);
+const showAppleButton = computed(() => appleAvailable.value || authStore.ssoProvider === 'apple' ||
+  (step.value === 'choice' && suggestedProvider.value === 'apple'));
+
 const discoverHints = computed(() => {
-  if (step.value === 'choice' && (suggestedProvider.value === 'microsoft' || suggestedProvider.value === 'google')) {
+  if (step.value === 'choice' && ['microsoft', 'google', 'apple'].includes(suggestedProvider.value)) {
     return [{ key: 'discoverSsoHint', params: { provider: providerLabel(suggestedProvider.value) } }];
   }
   const hints = [];
   if (step.value === 'password' && suggestedProvider.value === 'apple') {
-    hints.push({ key: isMobileApp ? 'discoverAppleHintApp' : 'discoverAppleHint' });
+    hints.push({ key: showAppleButton.value ? 'discoverAppleHintBelow' : isMobileApp ? 'discoverAppleHintApp' : 'discoverAppleHint' });
   }
   if (passwordFailed.value && (step.value === 'password' || step.value === 'classic')) {
     hints.push({ key: 'discoverFailedPasswordHint' });
-    hints.push({ key: isMobileApp ? 'discoverAppleRelayHintApp' : 'discoverAppleRelayHint' });
+    hints.push({ key: showAppleButton.value ? 'discoverAppleRelayHintBelow' : isMobileApp ? 'discoverAppleRelayHintApp' : 'discoverAppleRelayHint' });
   }
   return hints;
 });
 
 /** Takes the server's switch position; a form the user is already working in stays as it is. */
 async function applyLoginMode(pending) {
-  const { mode, testOptIn } = await pending;
+  const { mode, testOptIn, apple } = await pending;
   cacheLoginMode(localStore, mode);
+  // The Apple flag changes no form in use: it follows the server at once.
+  authStore.appleSignIn = apple === true;
   const changes = identifierFirstEnabled(mode, testOptIn) !== identifierFirst.value;
   const busy = discoverChecking.value || authStore.loading || !!password.value ||
     discoveredStep.value !== 'email' || !!authStore.ssoProvider;
@@ -685,8 +723,8 @@ const handleContinue = async () => {
     }
     return;
   }
-  // password, apple (no Apple sign-in in this app: the hint says where), or
-  // rate_limited (never a dead end: the password field).
+  // password, apple without the start route (older server or switch off: the
+  // hint says where), or rate_limited (never a dead end: the password field).
   if (outcome.kind === 'apple') suggestedProvider.value = 'apple';
   discoveredStep.value = 'password';
 };
@@ -717,8 +755,9 @@ const handleLogin = async () => {
     tracker.rejected(result.reason);
     // The classic form (switch off, or discover had no answer) behaves exactly as before.
     if (step.value === 'classic') return;
-    if (result.reason === 'use_sso' && (result.provider === 'microsoft' || result.provider === 'google')) {
-      // The account signs in with Microsoft/Google: go there (once per attempt).
+    if (result.reason === 'use_sso' && (result.provider === 'microsoft' || result.provider === 'google' ||
+      (result.provider === 'apple' && appleAvailable.value))) {
+      // The account signs in with Microsoft/Google (Apple when it works here): go there (once per attempt).
       password.value = '';
       suggestedProvider.value = result.provider;
       if (step.value === 'password') discoveredStep.value = 'choice';
@@ -863,12 +902,15 @@ async function startSSOFlow(provider) {
   authStore.beginSSO(provider);
   tracker.sent(`sso_${provider}`);
   startSSOTimeout();
-  const loginHint = loginHintForSSO();
+  // Apple ignores a login hint: it is never sent there.
+  const loginHint = provider === 'apple' ? null : loginHintForSSO();
   try {
     if (isDesktopApp && window.electronAPI?.auth) {
       const fn = provider === 'microsoft'
         ? window.electronAPI.auth.loginWithMicrosoft
-        : window.electronAPI.auth.loginWithGoogle;
+        : provider === 'apple'
+          ? window.electronAPI.auth.loginWithApple
+          : window.electronAPI.auth.loginWithGoogle;
       const result = await (loginHint ? fn(loginHint) : fn());
       if (!result?.success) {
         throw new Error('browser could not be opened');
@@ -900,6 +942,7 @@ async function startSSOFlow(provider) {
 
 const handleMicrosoftLogin = () => startSSOFlow('microsoft');
 const handleGoogleLogin = () => startSSOFlow('google');
+const handleAppleLogin = () => startSSOFlow('apple');
 
 const openForgotPassword = async () => {
   const url = 'https://app.suisse-meets.ch/forgot-password';

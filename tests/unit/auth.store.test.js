@@ -109,6 +109,28 @@ describe('Auth Store', () => {
       i18n.global.locale.value = 'en';
     });
 
+    it('use_sso naming Apple: only when the login mode says Apple works here, otherwise as before', async () => {
+      const store = useAuthStore();
+      i18n.global.locale.value = 'en';
+      mockElectronAPI.auth.login.mockResolvedValue({ success: false, status: 400, code: 'use_sso', provider: 'apple' });
+
+      // Login mode apple:false / older server: today's answer (no provider, the general text).
+      expect(store.appleSignIn).toBe(false);
+      const before = await store.login('a@b.ch', 'x');
+      expect(before).toEqual({ success: false, error: en('loginUseSso'), reason: 'use_sso' });
+
+      store.appleSignIn = true;
+      const after = await store.login('a@b.ch', 'x');
+      expect(after).toEqual({ success: false, error: en('loginUseSsoApple'), reason: 'use_sso', provider: 'apple' });
+      expect(store.error).toBe(en('loginUseSsoApple'));
+
+      // Microsoft/Google unchanged either way; an unknown provider never passes.
+      mockElectronAPI.auth.login.mockResolvedValue({ success: false, status: 400, code: 'use_sso', provider: 'saml' });
+      expect(await store.login('a@b.ch', 'x')).toEqual({ success: false, error: en('loginUseSso'), reason: 'use_sso' });
+      mockElectronAPI.auth.login.mockResolvedValue({ success: false, status: 400, code: 'use_sso', provider: 'microsoft' });
+      expect((await store.login('a@b.ch', 'x')).provider).toBe('microsoft');
+    });
+
     it('treats a gateway page during a restart as "briefly unavailable", not as wrong credentials', async () => {
       const store = useAuthStore();
       i18n.global.locale.value = 'en';

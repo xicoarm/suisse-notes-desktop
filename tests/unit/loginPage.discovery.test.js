@@ -26,6 +26,8 @@ function page({ mode = 'identifier-first', desktop = true, mobile = false, disco
     loading: false,
     error: null,
     ssoProvider: null,
+    // Login mode apple flag (store default false = older server / apple:false).
+    appleSignIn: false,
     ssoOutcome: { seq: 0, success: false },
     login: vi.fn(login || (async () => ({ success: true }))),
     clearError: vi.fn(() => { authStore.error = null; })
@@ -51,7 +53,7 @@ function page({ mode = 'identifier-first', desktop = true, mobile = false, disco
   const api = new Function(...Object.keys(deps), source.slice(first, last) + `
     return { email, password, step, discoveredStep, suggestedProvider, passwordFailed, discoverHints, showNotMe,
       showEmailField, showPasswordField, rememberedEmail, handleSubmit, useOtherEmail, forgetEmail,
-      usePasswordInstead, applyLoginMode, loginHintForSSO, identifierFirst };`)(...Object.values(deps));
+      usePasswordInstead, applyLoginMode, loginHintForSSO, identifierFirst, showAppleButton };`)(...Object.values(deps));
   return { ...api, deps, authStore, local, session };
 }
 
@@ -165,7 +167,7 @@ describe('login page: e-mail first', () => {
     expect(p.step.value).toBe('password');
   });
 
-  it('Apple account: password field plus where to sign in (no Apple in this app)', async () => {
+  it('Apple account: password field plus where to sign in (no Apple in this app: login mode apple:false)', async () => {
     const p = page({ discover: async () => ({ kind: 'apple' }) });
     p.email.value = 'anna@firma.ch';
     await p.handleSubmit();
@@ -209,7 +211,7 @@ describe('login page: after the password', () => {
     return p;
   }
 
-  it('a wrong password shows every way in: SSO hint, Apple relay hint, «Check email»', async () => {
+  it('a wrong password shows every way in: SSO hint, Apple relay hint, «Check email» (login mode apple:false)', async () => {
     const p = await atPassword(async () => ({ success: false, reason: 'invalid_credentials' }));
     expect(p.passwordFailed.value).toBe(true);
     expect(hintKeys(p)).toEqual(['discoverFailedPasswordHint', 'discoverAppleRelayHint']);
@@ -299,5 +301,192 @@ describe('login page: review round (races, fallback, shared device)', () => {
     p.password.value = 'pw';
     await p.handleSubmit();
     expect(p.deps.startSSOFlow).not.toHaveBeenCalled();
+  });
+});
+
+describe('login page: Sign in with Apple', () => {
+  it('the button follows the server flag (login mode apple:true); older servers: no button', async () => {
+    const p = page({ mode: 'classic' });
+    expect(p.showAppleButton.value).toBe(false);
+    await p.applyLoginMode(Promise.resolve({ mode: 'classic', testOptIn: false, apple: true }));
+    expect(p.showAppleButton.value).toBe(true);
+    expect(p.authStore.appleSignIn).toBe(true);
+    // A separate flag: never mixed into the mode, never stored on the device.
+    expect(p.step.value).toBe('classic');
+    expect(p.identifierFirst.value).toBe(false);
+    expect([...p.local.map.keys(), ...p.local.map.values()].join(' ')).not.toMatch(/apple/i);
+    // Also in the classic form, and while the user is typing (no form flips).
+    p.password.value = 'typing';
+    await p.applyLoginMode(Promise.resolve({ mode: 'identifier-first', testOptIn: false }));
+    expect(p.showAppleButton.value).toBe(false);
+    expect(p.step.value).toBe('classic');
+    await p.applyLoginMode(Promise.resolve({ mode: 'classic', testOptIn: false, apple: 'true' }));
+    expect(p.showAppleButton.value).toBe(false);
+  });
+
+  it('an Apple sign-in in flight keeps its button', () => {
+    const p = page();
+    p.authStore.ssoProvider = 'apple';
+    expect(p.showAppleButton.value).toBe(true);
+  });
+
+  it('discover with the Apple start route: straight to Apple, once per attempt, the Apple button emphasised', async () => {
+    const p = page({ discover: async () => ({ kind: 'sso', provider: 'apple' }) });
+    p.email.value = 'anna@firma.ch';
+    await p.handleSubmit();
+    expect(p.deps.startSSOFlow).toHaveBeenCalledTimes(1);
+    expect(p.deps.startSSOFlow).toHaveBeenCalledWith('apple');
+    expect(p.step.value).toBe('choice');
+    expect(p.suggestedProvider.value).toBe('apple');
+    expect(p.showAppleButton.value).toBe(true);
+    expect(p.discoverHints.value).toEqual([{ key: 'discoverSsoHint', params: { provider: 'Apple' } }]);
+    await p.handleSubmit();
+    expect(p.deps.startSSOFlow).toHaveBeenCalledTimes(1);
+    p.usePasswordInstead();
+    expect(p.step.value).toBe('password');
+  });
+
+  it('Apple account without the start route: the hint says «below» only when the button is there', async () => {
+    const p = page({ discover: async () => ({ kind: 'apple' }) });
+    await p.applyLoginMode(Promise.resolve({ mode: 'identifier-first', testOptIn: false, apple: true }));
+    p.email.value = 'anna@firma.ch';
+    await p.handleSubmit();
+    expect(p.step.value).toBe('password');
+    expect(p.deps.startSSOFlow).not.toHaveBeenCalled();
+    expect(hintKeys(p)).toEqual(['discoverAppleHintBelow']);
+    const m = page({ desktop: false, mobile: true, discover: async () => ({ kind: 'apple' }) });
+    await m.applyLoginMode(Promise.resolve({ mode: 'identifier-first', testOptIn: false, apple: true }));
+    m.email.value = 'anna@firma.ch';
+    await m.handleSubmit();
+    expect(hintKeys(m)).toEqual(['discoverAppleHintBelow']);
+    // Without the button: today's texts.
+    const q = page({ discover: async () => ({ kind: 'apple' }) });
+    q.email.value = 'anna@firma.ch';
+    await q.handleSubmit();
+    expect(hintKeys(q)).toEqual(['discoverAppleHint']);
+  });
+
+  it('a wrong password: the Apple relay hint points to the button when it is there', async () => {
+    const p = page({ discover: async () => ({ kind: 'password' }), login: async () => ({ success: false, reason: 'invalid_credentials' }) });
+    await p.applyLoginMode(Promise.resolve({ mode: 'identifier-first', testOptIn: false, apple: true }));
+    p.email.value = 'anna@firma.ch';
+    await p.handleSubmit();
+    p.password.value = 'pw';
+    await p.handleSubmit();
+    expect(hintKeys(p)).toEqual(['discoverFailedPasswordHint', 'discoverAppleRelayHintBelow']);
+    const m = page({ desktop: false, mobile: true, discover: async () => ({ kind: 'password' }), login: async () => ({ success: false, reason: 'invalid_credentials' }) });
+    m.email.value = 'anna@firma.ch';
+    await m.handleSubmit();
+    m.password.value = 'pw';
+    await m.handleSubmit();
+    expect(hintKeys(m)).toEqual(['discoverFailedPasswordHint', 'discoverAppleRelayHintApp']);
+  });
+
+  it('use_sso naming Apple: to Apple once per attempt when Apple works here; otherwise as before', async () => {
+    const login = async () => ({ success: false, reason: 'use_sso', provider: 'apple' });
+    const p = page({ discover: async () => ({ kind: 'password' }), login });
+    await p.applyLoginMode(Promise.resolve({ mode: 'identifier-first', testOptIn: false, apple: true }));
+    p.email.value = 'anna@firma.ch';
+    await p.handleSubmit();
+    p.password.value = 'pw';
+    await p.handleSubmit();
+    expect(p.deps.startSSOFlow).toHaveBeenCalledTimes(1);
+    expect(p.deps.startSSOFlow).toHaveBeenCalledWith('apple');
+    expect(p.step.value).toBe('choice');
+    expect(p.suggestedProvider.value).toBe('apple');
+    expect(p.password.value).toBe('');
+    expect(p.showAppleButton.value).toBe(true);
+    p.usePasswordInstead();
+    p.password.value = 'pw';
+    await p.handleSubmit();
+    expect(p.deps.startSSOFlow).toHaveBeenCalledTimes(1);
+
+    // Login mode apple:false (or an older server): today's behaviour.
+    const q = page({ discover: async () => ({ kind: 'password' }), login });
+    q.email.value = 'anna@firma.ch';
+    await q.handleSubmit();
+    q.password.value = 'pw';
+    await q.handleSubmit();
+    expect(q.deps.startSSOFlow).not.toHaveBeenCalled();
+    expect(q.step.value).toBe('password');
+    expect(q.suggestedProvider.value).toBeNull();
+    expect(q.showAppleButton.value).toBe(false);
+  });
+
+  it('the template: Apple after Google, only with showAppleButton, Simple Icons logo in currentColor', () => {
+    const source = fs.readFileSync('src/pages/LoginPage.vue', 'utf8').replace(/\r\n/g, '\n');
+    const google = source.indexOf('@click="handleGoogleLogin"');
+    const apple = source.indexOf('@click="handleAppleLogin"');
+    expect(google).toBeGreaterThan(0);
+    expect(apple).toBeGreaterThan(google);
+    const appleButton = source.slice(source.lastIndexOf('<q-btn', apple), source.indexOf('</q-btn>', apple));
+    expect(appleButton).toMatch(/v-if="showAppleButton"/);
+    expect(appleButton).toMatch(/'sso-btn--suggested': suggestedProvider === 'apple'/);
+    expect(appleButton).toMatch(/v-if="ssoLoading === 'apple'"/);
+    expect(appleButton).toMatch(/v-html="appleLogoSvg"/);
+    expect(appleButton).toMatch(/\$t\('signInWithApple'\)/);
+    expect(source).toMatch(/const appleLogoSvg = '<svg viewBox="0 0 24 24" xmlns="http:\/\/www\.w3\.org\/2000\/svg" fill="currentColor"><path d="M12\.152 6\.896c/);
+    expect(source).toMatch(/const handleAppleLogin = \(\) => startSSOFlow\('apple'\);/);
+  });
+
+});
+
+// The real start of a browser sign-in (desktop), compiled with narrow dependencies.
+function ssoStart({ hint = 'anna@firma.ch', auth } = {}) {
+  const source = fs.readFileSync('src/pages/LoginPage.vue', 'utf8').replace(/\r\n/g, '\n');
+  const first = source.indexOf('/**\n * Open the IdP login URL');
+  const last = source.indexOf('const openForgotPassword', first);
+  if (first < 0 || last < first) throw new Error('Missing SSO start block');
+  const authStore = { error: null, beginSSO: vi.fn(), abandonSSO: vi.fn() };
+  const electronAuth = auth || {
+    loginWithMicrosoft: vi.fn(async () => ({ success: true })),
+    loginWithGoogle: vi.fn(async () => ({ success: true })),
+    loginWithApple: vi.fn(async () => ({ success: true }))
+  };
+  const deps = {
+    authStore,
+    tracker: { sent: vi.fn(), rejected: vi.fn() },
+    startSSOTimeout: vi.fn(),
+    clearSSOTimeoutHandle: vi.fn(),
+    loginHintForSSO: vi.fn(() => hint),
+    isDesktopApp: true,
+    isMobileApp: false,
+    window: { electronAPI: { auth: electronAuth } },
+    getPlatform: () => 'electron',
+    mobileSsoUrl: discovery.mobileSsoUrl,
+    t: key => key,
+    captureMessage: vi.fn()
+  };
+  const api = new Function(...Object.keys(deps), source.slice(first, last) + `
+    return { startSSOFlow, handleMicrosoftLogin, handleGoogleLogin, handleAppleLogin };`)(...Object.values(deps));
+  return { ...api, deps, authStore, electronAuth };
+}
+
+describe('login page: starting Sign in with Apple on the desktop', () => {
+  it('Apple opens through main without any login hint; Microsoft and Google keep theirs', async () => {
+    const s = ssoStart();
+    await s.handleAppleLogin();
+    expect(s.authStore.beginSSO).toHaveBeenCalledWith('apple');
+    expect(s.deps.tracker.sent).toHaveBeenCalledWith('sso_apple');
+    expect(s.electronAuth.loginWithApple).toHaveBeenCalledTimes(1);
+    expect(s.electronAuth.loginWithApple).toHaveBeenCalledWith();
+    expect(s.deps.loginHintForSSO).not.toHaveBeenCalled();
+    expect(s.electronAuth.loginWithGoogle).not.toHaveBeenCalled();
+    expect(s.electronAuth.loginWithMicrosoft).not.toHaveBeenCalled();
+    await s.handleMicrosoftLogin();
+    expect(s.electronAuth.loginWithMicrosoft).toHaveBeenCalledWith('anna@firma.ch');
+    await s.handleGoogleLogin();
+    expect(s.electronAuth.loginWithGoogle).toHaveBeenCalledWith('anna@firma.ch');
+    expect(s.authStore.error).toBeNull();
+  });
+
+  it('a browser that does not open ends the wait with the text', async () => {
+    const s = ssoStart({ auth: { loginWithApple: vi.fn(async () => ({ success: false })) } });
+    await s.handleAppleLogin();
+    expect(s.authStore.abandonSSO).toHaveBeenCalled();
+    expect(s.authStore.error).toBe('ssoOpenFailed');
+    expect(s.deps.tracker.rejected).toHaveBeenCalledWith('sso_open_failed');
+    expect(s.deps.captureMessage).toHaveBeenCalledWith('auth: SSO sign-in could not be started', 'warning',
+      expect.objectContaining({ tags: { sso_provider: 'apple' } }));
   });
 });

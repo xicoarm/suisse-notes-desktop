@@ -68,6 +68,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Optional address for the provider's login_hint (main checks it again).
     loginWithMicrosoft: (loginHint) => ipcRenderer.invoke('auth:loginWithMicrosoft', typeof loginHint === 'string' ? loginHint : null),
     loginWithGoogle: (loginHint) => ipcRenderer.invoke('auth:loginWithGoogle', typeof loginHint === 'string' ? loginHint : null),
+    // Apple ignores a login hint: none is passed.
+    loginWithApple: () => ipcRenderer.invoke('auth:loginWithApple'),
     // Login recognition (POST /api/auth/discover, GET /api/auth/login-mode).
     discover: (email) => ipcRenderer.invoke('auth:discover', String(email ?? '')),
     loginMode: () => ipcRenderer.invoke('auth:loginMode'),

@@ -79,6 +79,24 @@ describe('auth store: completeSSO', () => {
     expect(result.success).toBe(true);
     expect(store.token).toBe('late');
   });
+
+  it('Sign in with Apple: the spinner is on Apple, apple_link_required shows its own text', async () => {
+    const store = useAuthStore();
+    store.beginSSO('apple');
+    expect(store.ssoProvider).toBe('apple');
+    const result = await store.completeSSO({
+      error: 'An account with this e-mail address already exists. Please sign in the way you usually do (password, Google or Microsoft).',
+      code: 'apple_link_required'
+    });
+    expect(result).toEqual({ success: false, cancelled: false, reason: 'apple_link_required' });
+    expect(store.error).toBe(en('appleLinkRequired'));
+    expect(store.ssoProvider).toBeNull();
+    expect(sentry.captureMessage).toHaveBeenCalledWith('auth: SSO sign-in failed (apple_link_required)', 'warning',
+      expect.objectContaining({ tags: { sso_reason: 'apple_link_required', sso_provider: 'apple' } }));
+    // Unknown providers still fall back to Microsoft, as before.
+    store.beginSSO('facebook');
+    expect(store.ssoProvider).toBe('microsoft');
+  });
 });
 
 describe('app-wide SSO result handler (boot/sso.js)', () => {
