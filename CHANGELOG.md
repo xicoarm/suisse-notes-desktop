@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.21](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.20...v4.7.21) (2026-11-14)
+
+
+### Features
+
+* **login:** e-mail first, then the right sign-in method, when the server switch allows it ([e1e92db](https://github.com/xicoarm/suisse-notes-desktop/commit/e1e92db), [49b5cae](https://github.com/xicoarm/suisse-notes-desktop/commit/49b5cae)), #63
+
+
+### Bug Fixes
+
+* **recorder:** a stalled live mix no longer stops a recording whose lanes still save audio ([9ef35ab](https://github.com/xicoarm/suisse-notes-desktop/commit/9ef35ab), [c042a59](https://github.com/xicoarm/suisse-notes-desktop/commit/c042a59), [7828112](https://github.com/xicoarm/suisse-notes-desktop/commit/7828112)), #60
+
 ### [4.7.20](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.19...v4.7.20) (2026-11-14)
 
 

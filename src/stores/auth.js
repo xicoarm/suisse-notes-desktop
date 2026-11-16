@@ -325,7 +325,13 @@ export const useAuthStore = defineStore('auth', {
         } else {
           const failure = describeLoginFailure(result);
           this.error = tr(failure.key);
-          return { success: false, error: this.error, reason: failure.reason };
+          // use_sso names the provider, so the page can go there (login recognition).
+          const provider = failure.reason === 'use_sso' && (result.provider === 'microsoft' || result.provider === 'google')
+            ? result.provider
+            : undefined;
+          return provider
+            ? { success: false, error: this.error, reason: failure.reason, provider }
+            : { success: false, error: this.error, reason: failure.reason };
         }
       } catch (error) {
         if (isNetworkFailure(error)) {
