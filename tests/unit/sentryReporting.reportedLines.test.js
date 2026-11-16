@@ -169,11 +169,20 @@ describe('reported log lines', () => {
     expect(main.match(/failureReportedByCaller: true/g)).toHaveLength(1);
     expect(main).toMatch(/async function combineChunksForRecovery\(recordId\) \{\n[\s\S]{0,300}?failureReportedByCaller: true \}\)\);\n\}/);
     expect(main.match(/combineChunksForRecovery\(/g)).toHaveLength(3); // itself, start-up recovery, restore
-    // … and each of them logs its reported line when the attempt fails.
+    // … and each of them logs its reported line when the attempt fails: as an
+    // error, with the result's code in the text and the attempt's Error, so a
+    // failure that puts a recording at risk keeps its level, stack and cause.
     for (const reported of [/^Could not recover recording .+: /, /^Restore of .+ failed; originals retained:/]) {
       expect(REPORTED_LINES.map(String)).toContain(String(reported));
-      expect(matchesOf(reported).map(entry => entry.file)).toEqual(['electron-main.js']);
+      const calls = matchesOf(reported);
+      expect(calls.map(entry => [entry.file, entry.level])).toEqual([['electron-main.js', 'error']]);
+      expect(calls[0].text).toMatch(/: code=x$/);
+      expect(calls[0].written).toMatch(/, sentryReporting\.failedAttemptError\(result\)\);$/);
     }
+    // A refusal because the recording is still uploading has its own code, so it groups apart.
+    expect(main).toContain("? { success: false, code: 'UPLOADING', error: 'This recording is still uploading' }");
+    // The finalization hands its Error to those callers only.
+    expect(main).toMatch(/\.\.\.\(options\.failureReportedByCaller === true \? \{ failure: error \} : \{\}\)/);
   });
 
   it('is given the store of the daily budget by the main process', () => {
@@ -185,6 +194,7 @@ describe('reported log lines', () => {
   it('is given the folders of the app by the main process, each asked for on its own', () => {
     const main = fs.readFileSync(path.join(SOURCE_DIR, 'electron-main.js'), 'utf8');
     expect(main).toMatch(/installLogReporting\(\{[^;]*folders: reportingFolders,/);
+    expect(main).toMatch(/installWindowReporting\(\{ Sentry, log, folders: reportingFolders \}\)/);
     expect(main).toMatch(/const reportingFolders = \(\) => \{\s*const folders = \{\};\s*for \(const name of \['userData', 'appData', 'documents', 'downloads', 'temp'\]\) \{\s*try \{ folders\[name\] = app\.getPath\(name\); \} catch/);
   });
 });

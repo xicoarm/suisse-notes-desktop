@@ -78,6 +78,8 @@ function mainProcess(history = [], { signedIn = OWNER } = {}) {
     setTimeout: (fn, ms) => setTimeout(fn, Math.min(ms, 5)),
     log: { info: () => {}, warn: () => {}, error: () => {} },
     Sentry: { captureMessage: vi.fn(), captureException: vi.fn() },
+    // The recovery lines hand their failed attempt to reporting as an Error.
+    sentryReporting: { failedAttemptError: require('../../src-electron/sentry-reporting').failedAttemptError },
     historyStore: memoryStore({ recordings: history }), uploadQueueStore: memoryStore(), activeRecordingStore: memoryStore(),
     getRecordingsPath: () => root, getRecordingPath: id => path.join(root, id),
     getActiveRecording: () => null, clearActiveRecording: () => {},
