@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu, Tray, nativeImage, desktopCapturer, systemPreferences, powerMonitor, powerSaveBlocker, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu, Tray, nativeImage, desktopCapturer, systemPreferences, powerMonitor, powerSaveBlocker, clipboard, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { writeFileAtomic, writeFileAtomicSync, publishFile, concatenateFiles, archiveChunkBatch, listChunkBatches, syncDirectorySync } = require('./durable-files');
@@ -21,6 +21,7 @@ const ffmpeg = require('fluent-ffmpeg');
 const { Upload } = require('tus-js-client');
 const { autoUpdater } = require('electron-updater');
 const { createUpdateChecks, isPersistentDownloadError, UPDATE_CHECK_INTERVAL_MS, UPDATE_CHECK_AFTER_WAKE_MS, UPDATE_CHECK_MIN_GAP_MS } = require('./update-checks');
+const { createMicrophoneAlert } = require('./microphone-alert');
 const log = require('electron-log');
 const Sentry = require('@sentry/electron/main');
 const { machineIdSync } = require('node-machine-id');
@@ -176,7 +177,7 @@ sentryReporting.installLogReporting({
     write: budget => fs.writeFileSync(mainLogBudgetFile(), JSON.stringify(budget)),
   },
 });
-const windowReporting = sentryReporting.installWindowReporting({ Sentry, log });
+const windowReporting = sentryReporting.installWindowReporting({ Sentry, log, folders: reportingFolders });
 
 // === Global Error Handlers ===
 // Catch uncaught exceptions in main process
@@ -843,7 +844,7 @@ async function restoreRetainedRecording(recordId) {
   }
   const result = await combineChunksForRecovery(recordId);
   if (!result?.success) {
-    log.warn(`Restore of ${recordId} failed; originals retained: ${result?.error}`);
+    log.error(`Restore of ${recordId} failed; originals retained: code=${result?.code || 'none'}`, sentryReporting.failedAttemptError(result));
     markRecoveryFailed(recordId, result?.error);
     return { success: false, code: result?.code || null, diskFull: result?.diskFull === true,
       error: result?.error || 'Saving the recording failed; original audio is retained' };
@@ -990,7 +991,7 @@ async function recoverOrphanedRecordings() {
           if (adopted.upload) recoveredForUpload.push(adopted.upload);
           if (adopted.record) recoveredRecords.push(adopted.record);
         } else {
-          log.warn(`Could not recover recording ${dir}: ${result.error}`);
+          log.error(`Could not recover recording ${dir}: code=${result.code || 'none'}`, sentryReporting.failedAttemptError(result));
           markRecoveryFailed(dir, result.error);
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('system:capture-warning', { kind: 'recovery-failed', recordId: dir });
@@ -1088,11 +1089,12 @@ ipcMain.handle('recording:isRecoveryRunning', () => isRecoveryRunning);
 
 // Internal function for recovery - similar to combineChunks but without IPC.
 // Its two callers (start-up recovery, "Restore and upload") log a failed
-// attempt themselves, as a reported line; failureReportedByCaller keeps the
+// attempt themselves, as a reported error line with the result's code and the
+// finalization's Error (result.failure); failureReportedByCaller keeps the
 // finalization's own failure line out of reporting, so one failure is one event.
 async function combineChunksForRecovery(recordId) {
   return withRecordingLock(recordId, () => inFlightUploads.has(recordId)
-    ? { success: false, error: 'This recording is still uploading' }
+    ? { success: false, code: 'UPLOADING', error: 'This recording is still uploading' }
     : finalizeRecording(recordId, '.webm', 0, { recovery: true, failureReportedByCaller: true }));
 }
 
@@ -1555,6 +1557,14 @@ function destroyRecordingTray() {
   recordingStartTime = null;
   log.info('Recording tray indicator removed');
 }
+
+// === Microphone alert outside the app window ===
+// The renderer asks for it while a running recording's microphone is not heard
+// and clears it when that ends (see microphone-alert.js).
+const microphoneAlert = createMicrophoneAlert({ Notification, getWindow: () => mainWindow, getDock: () => app.dock, log });
+ipcMain.handle('system:showMicrophoneAlert', (event, alert) => microphoneAlert.show(alert));
+ipcMain.handle('system:clearMicrophoneAlert', () => microphoneAlert.clear());
+app.on('before-quit', () => microphoneAlert.clear());
 
 // Resolve preload path - use environment variable in dev, or relative path in prod
 const preloadPath = process.env.QUASAR_ELECTRON_PRELOAD
@@ -3393,6 +3403,7 @@ ipcMain.handle('recording:setInProgress', (event, inProgress) => {
     createRecordingTray();
   } else {
     destroyRecordingTray();
+    microphoneAlert.clear(); // no recording, nothing to warn about
   }
 
   return { success: true };
@@ -3823,9 +3834,10 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
     if (getActiveRecording()?.recordId === recordId) clearActiveRecording();
     return result;
   } catch (error) {
-    // The first text is on the list of reported lines (sentry-reporting.js),
-    // the second is not: there the caller reports the failed attempt, and this
-    // line is the breadcrumb that tells why.
+    // In a recovery the caller reports the failed attempt, its reported line
+    // carrying this Error (result.failure, see combineChunksForRecovery), and
+    // this line is only the breadcrumb that tells why; everywhere else the
+    // second line is the reported one (sentry-reporting.js).
     if (options.failureReportedByCaller === true) log.warn('Recording finalization failed during recovery; all source batches retained:', error);
     else log.error('Recording finalization failed; all source batches retained:', error);
     // The predicted length missed and the rebuild from measured lengths failed
@@ -3844,7 +3856,11 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
       } catch (_) { /* telemetry never breaks saving */ }
     }
     const diskFull = error.code === 'ENOSPC' || /no space left|not enough space|disk full/i.test(error.message || '');
-    return { success: false, diskFull, requiresRecovery: error.code === 'PCM_CAPTURE_RECOVERY_REQUIRED', error: error.message, code: error.code || null };
+    return {
+      success: false, diskFull, requiresRecovery: error.code === 'PCM_CAPTURE_RECOVERY_REQUIRED', error: error.message, code: error.code || null,
+      // Only for the recovery helper, whose result does not cross IPC.
+      ...(options.failureReportedByCaller === true ? { failure: error } : {}),
+    };
   }
 }
 
