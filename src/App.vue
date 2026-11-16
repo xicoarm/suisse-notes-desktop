@@ -5,6 +5,7 @@
 
 <script setup>
 import { onMounted, onUnmounted, watch, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import { useConfigStore } from './stores/config';
 import { useRecordingStore } from './stores/recording';
 import { isMobile, isElectron } from './utils/platform';
@@ -14,6 +15,7 @@ const isElectronPlatform = isElectron();
 
 const configStore = useConfigStore();
 const recordingStore = useRecordingStore();
+const router = useRouter();
 const mobileRetryInterval = ref(null);
 const failedRetryInterval = ref(null);
 
@@ -28,7 +30,7 @@ onMounted(async () => {
   // page — the recording survives navigation, so its safety handlers must too.
   try {
     const { initRecordingSafetyNet } = await import('./services/recordingSafetyNet');
-    initRecordingSafetyNet();
+    initRecordingSafetyNet({ router }); // the router opens the Record page from a system notification
   } catch (e) {
     console.error('Recording safety net init failed:', e);
   }
