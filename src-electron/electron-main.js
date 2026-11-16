@@ -1093,7 +1093,7 @@ ipcMain.handle('recording:isRecoveryRunning', () => isRecoveryRunning);
 // finalization's own failure line out of reporting, so one failure is one event.
 async function combineChunksForRecovery(recordId) {
   return withRecordingLock(recordId, () => inFlightUploads.has(recordId)
-    ? { success: false, error: 'This recording is still uploading' }
+    ? { success: false, code: 'UPLOADING', error: 'This recording is still uploading' }
     : finalizeRecording(recordId, '.webm', 0, { recovery: true, failureReportedByCaller: true }));
 }
 

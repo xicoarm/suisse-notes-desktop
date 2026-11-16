@@ -192,7 +192,13 @@ function placePatterns(homeDir, userName, folders) {
 // inside a longer or camelCase name (accessToken, refresh_token, tempToken,
 // sessionToken, client_secret, apiKey, Set-Cookie). The whole value goes, also
 // when it is an object or a list.
-const SECRET_KEY = /token|secret|passw(?:or)?d|api_?key|authorization|cookie|session|credential/i;
+const SECRET_KEY =
+  /token|secret|passw(?:or)?d|pwd|passphrase|api[_-]?key|private_?key|access_?key|authorization|cookie|session|credential|signature|(?:otp|totp|mfa|backup|verification)_?code|^(?:otp|totp|auth)$/i;
+// Keys that name whose credential it is, how many or until when - diagnosis, not the credential
+// ("CRITICAL SECURITY: Token user mismatch!" needs tokenUserId). true, false and null carry nothing
+// either and always stay.
+const SAFE_KEY = /(?:user_?id|count|expires_?(?:at|in))$/i;
+const BARE_LITERAL = /^(?:true|false|null)$/;
 // A key as JSON writes it, also inside a logged string, where every quote of
 // the object carries one backslash or more (group 1). (The look-behinds here
 // and below only keep the patterns from retrying inside one long run.)
@@ -202,6 +208,7 @@ const OBJECT_KEY = /(?<!\\)(\\*)"([\w$.-]{1,80})\1"\s*:\s*/g;
 // the app's backup codes (auth-two-factor.js: four and four letters or digits).
 const PLAIN_CODE = /^(?:[A-Z][A-Z0-9_]{1,39}|[a-z_]{1,40}|\d{3})$/;
 const BACKUP_CODE = /^[A-Z0-9]{4}-?[A-Z0-9]{4}$/i;
+const ERRNO_NAME = /^E[A-Z]{3,}$/;
 
 // Where the value ends that starts at `start`, for a key whose quotes carry
 // `escapes` backslashes: a string, an object or a list as a whole (nested ones
@@ -262,7 +269,8 @@ function valueEnd(text, start, escapes) {
 function isPlainCode(value, quote) {
   const quoted = value.length >= 2 * quote.length && value.startsWith(quote) && value.endsWith(quote);
   const code = quoted ? value.slice(quote.length, value.length - quote.length) : value;
-  return code.length <= 40 && PLAIN_CODE.test(code) && !BACKUP_CODE.test(code);
+  // An errno name (ENOTCONN, ENETDOWN) can have the backup-code shape; it is the diagnosis.
+  return code.length <= 40 && PLAIN_CODE.test(code) && (ERRNO_NAME.test(code) || !BACKUP_CODE.test(code));
 }
 
 function redactSecretValues(text) {
@@ -272,10 +280,11 @@ function redactSecretValues(text) {
   for (let match = keys.exec(text); match; match = keys.exec(text)) {
     const [head, escaping, key] = match;
     const isCode = key.toLowerCase() === 'code';
-    if (!isCode && !SECRET_KEY.test(key)) continue;
+    if (!isCode && (!SECRET_KEY.test(key) || SAFE_KEY.test(key))) continue;
     const start = match.index + head.length;
     const end = valueEnd(text, start, escaping.length);
-    if (end === start || (isCode && isPlainCode(text.slice(start, end), `${escaping}"`))) continue;
+    if (end === start || BARE_LITERAL.test(text.slice(start, end))) continue;
+    if (isCode && isPlainCode(text.slice(start, end), `${escaping}"`)) continue;
     out += `${text.slice(kept, start)}${escaping}"<redacted>${escaping}"`;
     kept = end;
     keys.lastIndex = end;
@@ -306,7 +315,7 @@ function scrub(text, homeDir = HOME_DIRECTORY, { userName = USER_NAME, folders =
     .replace(EMAIL, '<email>');
   return redactSecretValues(named)
     .replace(/\b(Bearer)\s+[\w.~+/=-]+/gi, '$1 <redacted>')
-    .replace(/(Bearer|token|password|passwd|secret|api_?key|sas|sig)[=:]\s*\S+/gi, '$1=<redacted>')
+    .replace(/(Bearer|token|password|passwd|secret|api[_-]?key|sas|sig)[=:]\s*\S+/gi, '$1=<redacted>')
     // A signed token, or any other encoded JSON object, wherever it stands.
     .replace(/\beyJ[\w-]{10,}(?:\.[\w-]+){0,2}/g, '<jwt>')
     // Any scheme, not only http: the app's own sign-in link carries the token
@@ -338,6 +347,8 @@ function failedAttemptError(result) {
   if (result?.failure instanceof Error) return result.failure;
   const error = new Error(String(result?.error || 'unknown failure'));
   error.name = 'RecoveryFailed';
+  // The caller's frame on top, not this helper's.
+  if (typeof Error.captureStackTrace === 'function') Error.captureStackTrace(error, failedAttemptError);
   if (result?.code) error.code = String(result.code);
   return error;
 }

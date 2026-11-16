@@ -202,6 +202,8 @@ describe('main-process log reporting', () => {
     expect([made.name, made.message, made.code]).toEqual(['RecoveryFailed', 'The recording is still being saved', 'BUSY']);
     expect(failedAttemptError(undefined)).toMatchObject({ name: 'RecoveryFailed', message: 'unknown failure' });
     expect(failedAttemptError({ error: 'x' }).code).toBeUndefined();
+    // The caller's frame on top of the stack, not the helper's (review of #65).
+    expect(String(made.stack).split('\n')[1]).not.toContain('failedAttemptError');
   });
 
   it('does not file a second event for lines their own code path already reports', () => {
@@ -766,7 +768,7 @@ describe('scrubbing credentials, addresses and quoted text', () => {
       + '"password":"<redacted>","secret":"<redacted>","Authorization":"<redacted>","code":"<redacted>","status":200}');
     // The same object logged as a string inside another object.
     expect(scrub('{"responseData":"{\\"token\\":\\"tk-3.secret\\",\\"ok\\":true}"}')).not.toContain('tk-3');
-    expect(scrub('{"password": null, "token": 12345678}')).toBe('{"password": "<redacted>", "token": "<redacted>"}');
+    expect(scrub('{"password": null, "token": 12345678}')).toBe('{"password": null, "token": "<redacted>"}');
   });
 
   it('removes the value of every key that names a credential, also inside a longer or camelCase name', () => {
@@ -793,6 +795,23 @@ describe('scrubbing credentials, addresses and quoted text', () => {
   it('removes a code with the shape of a backup code, also in small letters, and a code that is an object', () => {
     expect(scrub('{"code":"K7Q2XW9P"} {"code":"k7q2xw9p"} {"code":"ABCDEFGH"} {"code":"K7Q2-XW9P"} {"code":{"value":"K7Q2XW9P"}}'))
       .toBe('{"code":"<redacted>"} {"code":"<redacted>"} {"code":"<redacted>"} {"code":"<redacted>"} {"code":"<redacted>"}');
+  });
+
+  it('keeps who a credential belongs to, how many and until when, and true/false/null (review of #65)', () => {
+    // The reported line "CRITICAL SECURITY: Token user mismatch!" is only useful with tokenUserId.
+    expect(scrub('{"tokenUserId":"u-1","storedUserId":"u-2","hasAuthToken":true,"sessionCount":3,"tokenExpiresAt":"2026-11-16","refresh_token_expires_in":60,"token":"abc","cookie":false}'))
+      .toBe('{"tokenUserId":"u-1","storedUserId":"u-2","hasAuthToken":true,"sessionCount":3,"tokenExpiresAt":"2026-11-16","refresh_token_expires_in":60,"token":"<redacted>","cookie":false}');
+  });
+
+  it('removes the value of more credential key names (review of #65)', () => {
+    const input = '{"x-api-key":"k1","Api-Key":"k2","pwd":"p","passphrase":"p2","privateKey":"pk","accessKey":"ak","backupCode":"b","otp":"1","totp":"2","mfaCode":"3","verificationCode":"4","signature":"s","auth":"a","author":"keep","otpEnabled":true}';
+    expect(scrub(input)).toBe('{"x-api-key":"<redacted>","Api-Key":"<redacted>","pwd":"<redacted>","passphrase":"<redacted>","privateKey":"<redacted>","accessKey":"<redacted>","backupCode":"<redacted>","otp":"<redacted>","totp":"<redacted>","mfaCode":"<redacted>","verificationCode":"<redacted>","signature":"<redacted>","auth":"<redacted>","author":"keep","otpEnabled":true}');
+    expect(scrub('sent x-api-key: k-9 and api-key=k-8')).toBe('sent x-api-key=<redacted> and api-key=<redacted>');
+  });
+
+  it('keeps errno names that have the backup-code shape (review of #65)', () => {
+    expect(scrub('{"code":"ENOTCONN"} {"code":"ENETDOWN"} {"code":"EALREADY"}')).toBe('{"code":"ENOTCONN"} {"code":"ENETDOWN"} {"code":"EALREADY"}');
+    expect(scrub('{"code":"K7Q2XW9P"}')).toBe('{"code":"<redacted>"}');
   });
 
   it('removes a credential written as key=value or key: value, also an API key', () => {

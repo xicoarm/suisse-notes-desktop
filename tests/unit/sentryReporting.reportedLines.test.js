@@ -179,6 +179,8 @@ describe('reported log lines', () => {
       expect(calls[0].text).toMatch(/: code=x$/);
       expect(calls[0].written).toMatch(/, sentryReporting\.failedAttemptError\(result\)\);$/);
     }
+    // A refusal because the recording is still uploading has its own code, so it groups apart.
+    expect(main).toContain("? { success: false, code: 'UPLOADING', error: 'This recording is still uploading' }");
     // The finalization hands its Error to those callers only.
     expect(main).toMatch(/\.\.\.\(options\.failureReportedByCaller === true \? \{ failure: error \} : \{\}\)/);
   });
