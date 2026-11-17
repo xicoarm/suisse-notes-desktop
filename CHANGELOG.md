@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.23](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.22...v4.7.23) (2026-11-17)
+
+
+### Features
+
+* add report-content entry points (About page, history cards) ([0a04934](https://github.com/xicoarm/suisse-notes-desktop/commit/0a04934e327925575097477ed408dd36f7ef1f84))
+
 ### [4.7.22](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.21...v4.7.22) (2026-11-16)
 
 
