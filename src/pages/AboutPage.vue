@@ -224,6 +224,22 @@
 
       <!-- Legal Section -->
       <section class="legal-section">
+        <div
+          class="report-ai"
+          data-test="about-report-ai"
+        >
+          <q-btn
+            outline
+            no-caps
+            color="primary"
+            icon="flag"
+            :label="$t('aboutReportAiContent')"
+            @click="openReportAiContent"
+          />
+          <p class="report-ai-hint">
+            {{ $t('aboutReportAiContentHint') }}
+          </p>
+        </div>
         <div class="legal-links">
           <a
             href="#"
@@ -271,6 +287,7 @@ import { computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 import { isElectron, isCapacitor } from '../utils/platform';
+import { buildReportAiContentUrl } from '../utils/reportAiContent';
 
 const router = useRouter();
 const authStore = useAuthStore();
@@ -319,6 +336,8 @@ const openLegalLink = async (url) => {
     window.open(url, '_blank');
   }
 };
+
+const openReportAiContent = () => openLegalLink(buildReportAiContentUrl());
 </script>
 
 <style lang="scss" scoped>
@@ -694,6 +713,18 @@ const openLegalLink = async (url) => {
   text-align: center;
   border-top: 1px solid #e2e8f0;
   margin-top: 16px;
+}
+
+.report-ai {
+  margin-bottom: 20px;
+  text-align: center;
+}
+
+.report-ai-hint {
+  margin: 8px auto 0;
+  max-width: 480px;
+  font-size: 12px;
+  color: #64748b;
 }
 
 .legal-links {

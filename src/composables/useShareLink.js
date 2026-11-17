@@ -4,6 +4,7 @@ import { isElectron, isCapacitor, isAndroid } from '../utils/platform';
 import { useAuthStore } from '../stores/auth';
 import { getApiUrlSync, fetchWithTimeout, parseJsonSafe } from '../services/api';
 import { captureMessage, addBreadcrumb } from '../boot/sentry';
+import { withReportAiFlag } from '../utils/reportAiContent';
 
 // Shared across every card/page: one in-app browser open at a time. A second
 // launch while one is starting kills the just-opened Custom Tab and, on
@@ -97,11 +98,13 @@ export function useShareLink() {
   /**
    * Open a recording in the system's default browser (Safari, Chrome, etc.)
    * @param {string} audioFileId - The server-assigned audio file ID
+   * @param {{ reportAi?: boolean }} [options] - reportAi opens the report dialog on the meeting page
    */
-  const openInBrowser = async (audioFileId) => {
+  const openInBrowser = async (audioFileId, { reportAi = false } = {}) => {
     if (!audioFileId) return;
 
-    const url = await generateTranscriptUrl(audioFileId);
+    let url = await generateTranscriptUrl(audioFileId);
+    if (reportAi && url) url = withReportAiFlag(url);
 
     if (isElectron()) {
       if (!url.includes('session=')) {

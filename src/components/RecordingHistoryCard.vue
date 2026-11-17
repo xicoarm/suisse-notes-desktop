@@ -273,6 +273,22 @@
           <q-tooltip>{{ $t('copyLinkTooltip') }}</q-tooltip>
         </q-btn>
 
+        <!-- Report inappropriate AI-generated content (opens the meeting in the web app) -->
+        <q-btn
+          v-if="isUploaded && !linkLoading"
+          flat
+          round
+          icon="flag"
+          color="grey-7"
+          size="sm"
+          data-test="history-report-ai"
+          :data-record-id="recording.id"
+          :aria-label="$t('reportAiContent')"
+          @click="onReportAi"
+        >
+          <q-tooltip>{{ $t('reportAiContent') }}</q-tooltip>
+        </q-btn>
+
         <!-- Open file location (desktop only) -->
         <q-btn
           v-if="isDesktop && recording.filePath && !uploading"
@@ -578,6 +594,16 @@ export default {
       }
     };
 
+    const onReportAi = async () => {
+      if (!isUploaded.value || linkLoading.value) return;
+      linkLoading.value = true;
+      try {
+        await openInBrowser(props.recording.audioFileId, { reportAi: true });
+      } finally {
+        linkLoading.value = false;
+      }
+    };
+
     const onCancelTransfer = () => {
       $q.dialog({
         title: t('cancelSyncTitle'),
@@ -667,6 +693,7 @@ export default {
       statusLabel,
       onCardClick,
       onCopyLink,
+      onReportAi,
       onCancelTransfer,
       openFileLocation,
       onExport,
