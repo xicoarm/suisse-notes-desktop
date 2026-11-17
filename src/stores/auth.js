@@ -285,10 +285,14 @@ export const useAuthStore = defineStore('auth', {
     sessionChecked: false,  // Track if initial session check is complete
     loading: false,
     error: null,
-    // SSO flow in flight: null | 'microsoft' | 'google'. Lives here (not in
+    // SSO flow in flight: null | 'microsoft' | 'google' | 'apple'. Lives here (not in
     // the login page) because the result is handled app-wide - it may arrive
     // while another page is shown, or minutes later after a 2FA step.
     ssoProvider: null,
+    // Sign in with Apple works in this app: the login mode's separate `apple`
+    // flag (GET /api/auth/login-mode apple:true), set by the login page.
+    // Older servers send nothing: false.
+    appleSignIn: false,
     // Last SSO outcome; `seq` increments per result so a screen can react.
     ssoOutcome: { seq: 0, success: false, cancelled: false, reason: null },
     // Password sign-in waiting for the second factor:
@@ -324,8 +328,16 @@ export const useAuthStore = defineStore('auth', {
           return { success: false, requiresTwoFactor: true, method: this.twoFactor.method };
         } else {
           const failure = describeLoginFailure(result);
-          this.error = tr(failure.key);
-          return { success: false, error: this.error, reason: failure.reason };
+          // use_sso names the provider, so the page can go there (login recognition).
+          // Apple only when the login mode says Apple works here; otherwise as before.
+          const ssoProviders = this.appleSignIn === true ? ['microsoft', 'google', 'apple'] : ['microsoft', 'google'];
+          const provider = failure.reason === 'use_sso' && ssoProviders.includes(result.provider)
+            ? result.provider
+            : undefined;
+          this.error = tr(provider === 'apple' ? 'loginUseSsoApple' : failure.key);
+          return provider
+            ? { success: false, error: this.error, reason: failure.reason, provider }
+            : { success: false, error: this.error, reason: failure.reason };
         }
       } catch (error) {
         if (isNetworkFailure(error)) {
@@ -521,7 +533,7 @@ export const useAuthStore = defineStore('auth', {
     /** An SSO flow was started in the browser (shows the spinner on the login page). */
     beginSSO(provider) {
       this.error = null;
-      this.ssoProvider = provider === 'google' ? 'google' : 'microsoft';
+      this.ssoProvider = provider === 'google' || provider === 'apple' ? provider : 'microsoft';
       addBreadcrumb({ category: 'sso', message: `SSO started provider=${this.ssoProvider}`, level: 'info' });
     },
 

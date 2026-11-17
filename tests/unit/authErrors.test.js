@@ -80,6 +80,18 @@ describe('classifySsoError (SSO callback ?error=&code=)', () => {
     expect(classifySsoError({ error: 'x', code: 'brand_new_code' })).toEqual({ cancelled: false, key: 'ssoFailed', reason: 'brand_new_code' });
   });
 
+  it('Sign in with Apple: apple_link_required has its own text in all four languages', () => {
+    expect(classifySsoError({
+      error: 'An account with this e-mail address already exists. Please sign in the way you usually do (password, Google or Microsoft).',
+      code: 'apple_link_required'
+    })).toEqual({ cancelled: false, key: 'appleLinkRequired', reason: 'apple_link_required' });
+    const text = locale => i18n.global.getLocaleMessage(locale).appleLinkRequired;
+    expect(text('en')).toBe('An account with this e-mail address already exists. Please sign in the way you usually do (password, Google or Microsoft).');
+    expect(text('de')).toBe('Für diese E-Mail-Adresse gibt es bereits ein Konto. Bitte melden Sie sich wie gewohnt an (Passwort, Google oder Microsoft).');
+    expect(text('fr')).toBe('Un compte existe déjà avec cette adresse e-mail. Veuillez vous connecter comme d’habitude (mot de passe, Google ou Microsoft).');
+    expect(text('it')).toBe('Esiste già un account con questo indirizzo e-mail. Accedi come di consueto (password, Google o Microsoft).');
+  });
+
   it.each(['sso_cancelled', 'canceled', 'cancelled', 'access_denied',
     'AADSTS65004: User declined to consent to access the app.', 'The user cancelled the sign-in'])(
     'treats %j as a silent cancel', (error) => {
@@ -118,7 +130,7 @@ describe('every mapped text exists in all four languages', () => {
     describeRegisterFailure({ status: 409 }), describeRegisterFailure({ status: 400, serverError: 'Invalid email format' }),
     describeRegisterFailure({ status: 400, serverError: 'at least 8' }), describeRegisterFailure({ status: 400, serverError: 'required' }),
     describeRegisterFailure({ status: 400 }),
-    ...['sso_failed', 'sso_account_exists', 'sso_email_unverified', 'sso_admin_consent', 'account_disabled'].map(code => classifySsoError({ code }))
+    ...['sso_failed', 'sso_account_exists', 'sso_email_unverified', 'sso_admin_consent', 'account_disabled', 'apple_link_required'].map(code => classifySsoError({ code }))
   ];
   for (const f of failures) if (f.key) keys.add(f.key);
 
@@ -127,6 +139,32 @@ describe('every mapped text exists in all four languages', () => {
     for (const key of keys) {
       expect(typeof messages[key], `${locale}.${key}`).toBe('string');
       if (locale === 'de') expect(messages[key]).not.toMatch(/ß/);
+    }
+  });
+});
+
+describe('Sign in with Apple: login page texts in all four languages', () => {
+  const button = { en: 'Sign in with Apple', de: 'Mit Apple anmelden', fr: 'Se connecter avec Apple', it: 'Accedi con Apple' };
+
+  it('covers exactly the four app languages', () => {
+    expect([...SUPPORTED_LOCALES].sort()).toEqual(Object.keys(button).sort());
+  });
+
+  it.each(SUPPORTED_LOCALES)('%s', (locale) => {
+    const messages = i18n.global.getLocaleMessage(locale);
+    expect(messages.signInWithApple).toBe(button[locale]);
+    // The «below» variants name the button as it reads.
+    expect(messages.discoverAppleHintBelow).toContain(button[locale]);
+    expect(messages.discoverAppleRelayHintBelow).toContain(button[locale]);
+    expect(messages.loginUseSsoApple).toContain(button[locale]);
+    // Today's texts stay for an app without the button.
+    for (const key of ['discoverAppleHint', 'discoverAppleHintApp', 'discoverAppleRelayHint', 'discoverAppleRelayHintApp']) {
+      expect(typeof messages[key], `${locale}.${key}`).toBe('string');
+    }
+    if (locale === 'de') {
+      for (const key of ['signInWithApple', 'discoverAppleHintBelow', 'discoverAppleRelayHintBelow', 'appleLinkRequired', 'loginUseSsoApple']) {
+        expect(messages[key]).not.toMatch(/ß/);
+      }
     }
   });
 });

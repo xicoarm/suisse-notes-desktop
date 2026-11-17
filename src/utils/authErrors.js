@@ -121,13 +121,14 @@ export function describeRegisterFailure(failure = {}) {
   return { key: 'registerFailedGeneric', reason: status ? `status_${status}` : safeReason(failure.code) };
 }
 
-/** SSO callback codes of the backend contract (10/2026). */
+/** SSO callback codes of the backend contract (10/2026; apple_link_required 11/2026). */
 const SSO_CODE_KEYS = {
   sso_failed: 'ssoFailed',
   sso_account_exists: 'ssoAccountExists',
   sso_email_unverified: 'ssoEmailUnverified',
   sso_admin_consent: 'ssoAdminConsent',
-  account_disabled: 'accountDisabled'
+  account_disabled: 'accountDisabled',
+  apple_link_required: 'appleLinkRequired'
 };
 const SSO_CANCEL_VALUES = new Set([
   'sso_cancelled', 'sso_canceled', 'canceled', 'cancelled', 'access_denied', 'user_canceled', 'user_cancelled'

@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.22](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.21...v4.7.22) (2026-11-16)
+
+
+### Features
+
+* **login:** Sign in with Apple on desktop (and the phone app login page) ([5b20832](https://github.com/xicoarm/suisse-notes-desktop/commit/5b2083280fdaa49d54c3dc439042dc20a916210b))
+* **recorder:** a microphone that is not heard is announced outside the app window ([fffdeb0](https://github.com/xicoarm/suisse-notes-desktop/commit/fffdeb03700f2bdf8b4e8af94ad45276ba3a46b1))
+
+
+### Bug Fixes
+
+* **recorder:** microphone notices keep a 10-minute distance and name no device ([9743116](https://github.com/xicoarm/suisse-notes-desktop/commit/97431167dbf6fc4b9a915391c88f4223ceea799f))
+* **reporting:** keep owner, count and expiry keys and true/false/null; more credential names ([c9c0de9](https://github.com/xicoarm/suisse-notes-desktop/commit/c9c0de9f7f858a6d5043c98d57b06a5744efceef))
+* **reporting:** main-process failures reach Sentry, as a list of real failures only ([bc91d8d](https://github.com/xicoarm/suisse-notes-desktop/commit/bc91d8d51851db0e1c987213814da0e3058d2a75))
+* **reporting:** recovery failures as errors with their cause, credentials removed by key name and whole value ([4056ad3](https://github.com/xicoarm/suisse-notes-desktop/commit/4056ad3cb36fc7b957d2a57af86f868f0033d0e9))
+* **reporting:** scrub redirected app folders and the user name, and only whole folder names ([324a651](https://github.com/xicoarm/suisse-notes-desktop/commit/324a651f9215d094daad03a09cde154b399171ac))
+* **reporting:** scrub user folders fully, one event per failure, a daily budget per installation ([aae7851](https://github.com/xicoarm/suisse-notes-desktop/commit/aae7851d7479f90e0ee0eb6ca12b66787ee81b96))
+
+### [4.7.21](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.20...v4.7.21) (2026-11-14)
+
+
+### Features
+
+* **login:** e-mail first, then the right sign-in method, when the server switch allows it ([e1e92db](https://github.com/xicoarm/suisse-notes-desktop/commit/e1e92db), [49b5cae](https://github.com/xicoarm/suisse-notes-desktop/commit/49b5cae)), #63
+
+
+### Bug Fixes
+
+* **recorder:** a stalled live mix no longer stops a recording whose lanes still save audio ([9ef35ab](https://github.com/xicoarm/suisse-notes-desktop/commit/9ef35ab), [c042a59](https://github.com/xicoarm/suisse-notes-desktop/commit/c042a59), [7828112](https://github.com/xicoarm/suisse-notes-desktop/commit/7828112)), #60
+
+### [4.7.20](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.19...v4.7.20) (2026-11-14)
+
+
+### Bug Fixes
+
+* **recorder:** rebuild from measured lengths when the predicted length misses (ELECTRON-73) ([b063ade](https://github.com/xicoarm/suisse-notes-desktop/commit/b063adef3cfcdbd792a5fb9a1b0e494de103bbe4))
+* **recorder:** warn when a rebuild exceeds the timing tolerance (ELECTRON-73) ([75e06f9](https://github.com/xicoarm/suisse-notes-desktop/commit/75e06f9c4885b719d5048ba8698edbe1217a1f7c))
+
 ### [4.7.19](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.18...v4.7.19) (2026-11-12)
 
 ### [4.7.18](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.17...v4.7.18) (2026-11-11)

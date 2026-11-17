@@ -65,8 +65,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     refreshToken: () => ipcRenderer.invoke('auth:refreshToken'),
     createWebSession: () => ipcRenderer.invoke('auth:createWebSession'),
     // SSO via system browser + suissenotes:// custom protocol
-    loginWithMicrosoft: () => ipcRenderer.invoke('auth:loginWithMicrosoft'),
-    loginWithGoogle: () => ipcRenderer.invoke('auth:loginWithGoogle'),
+    // Optional address for the provider's login_hint (main checks it again).
+    loginWithMicrosoft: (loginHint) => ipcRenderer.invoke('auth:loginWithMicrosoft', typeof loginHint === 'string' ? loginHint : null),
+    loginWithGoogle: (loginHint) => ipcRenderer.invoke('auth:loginWithGoogle', typeof loginHint === 'string' ? loginHint : null),
+    // Apple ignores a login hint: none is passed.
+    loginWithApple: () => ipcRenderer.invoke('auth:loginWithApple'),
+    // Login recognition (POST /api/auth/discover, GET /api/auth/login-mode).
+    discover: (email) => ipcRenderer.invoke('auth:discover', String(email ?? '')),
+    loginMode: () => ipcRenderer.invoke('auth:loginMode'),
     onSSOCallback: (callback) => {
       ipcRenderer.on('auth:ssoCallback', (_event, data) => callback(data));
     },
@@ -368,6 +374,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // cleared by removeAllListeners so it survives page navigation.
     onRecordingRecovered: (callback) => {
       ipcRenderer.on('recording:recovered', (event, data) => callback(data));
+    },
+    // A running recording's microphone is not heard: system notification plus
+    // dock or taskbar signal, so the warning reaches a person in another
+    // window. alert = { title, body, onRecordPage }, texts already translated.
+    showMicrophoneAlert: (alert) => ipcRenderer.invoke('system:showMicrophoneAlert', alert),
+    clearMicrophoneAlert: () => ipcRenderer.invoke('system:clearMicrophoneAlert'),
+    // That notification was clicked. The subscriber is the app-level safety
+    // net, so this is deliberately NOT cleared by removeAllListeners.
+    onShowRecordPage: (callback) => {
+      ipcRenderer.on('system:show-record-page', () => callback());
     },
     // Remove all system listeners
     removeAllListeners: () => {

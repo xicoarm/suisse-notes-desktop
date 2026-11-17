@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu, Tray, nativeImage, desktopCapturer, systemPreferences, powerMonitor, powerSaveBlocker, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, protocol, shell, dialog, Menu, Tray, nativeImage, desktopCapturer, systemPreferences, powerMonitor, powerSaveBlocker, clipboard, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { writeFileAtomic, writeFileAtomicSync, publishFile, concatenateFiles, archiveChunkBatch, listChunkBatches, syncDirectorySync } = require('./durable-files');
@@ -21,6 +21,7 @@ const ffmpeg = require('fluent-ffmpeg');
 const { Upload } = require('tus-js-client');
 const { autoUpdater } = require('electron-updater');
 const { createUpdateChecks, isPersistentDownloadError, UPDATE_CHECK_INTERVAL_MS, UPDATE_CHECK_AFTER_WAKE_MS, UPDATE_CHECK_MIN_GAP_MS } = require('./update-checks');
+const { createMicrophoneAlert } = require('./microphone-alert');
 const log = require('electron-log');
 const Sentry = require('@sentry/electron/main');
 const { machineIdSync } = require('node-machine-id');
@@ -147,14 +148,36 @@ Sentry.init({
   }
 });
 
-// Everything the main process logs is now reported: an error line becomes a
-// Sentry event, a warning becomes a warning-level event, and info lines become
-// breadcrumbs. Before this, a failed AudioTee start, a failed finalization or a
-// refused IPC call existed only in the user's local main.log.
+// The main log is a reporting channel (sentry-reporting.js): a warning or
+// error on its list of reported lines becomes a Sentry event; every other
+// line, at any level, becomes a breadcrumb that the next event carries as
+// context. Before this, a failed finalization or a recording that could not be
+// recovered existed only in the user's local main.log.
 const sentryReporting = require('./sentry-reporting');
 const twoFactorAuth = require('./auth-two-factor');
-sentryReporting.installLogReporting({ log, Sentry });
-const windowReporting = sentryReporting.installWindowReporting({ Sentry, log });
+// What this installation has already reported today, so a failure that repeats
+// at every start does not report again at every start. The path is resolved
+// when it is used: userData can still be redirected further down.
+const mainLogBudgetFile = () => path.join(app.getPath('userData'), 'main-log-reporting.json');
+// The folders reporting replaces by their names. With a redirected AppData or
+// Documents they are not below the home folder, and their path is named after
+// the user. Asked for at every line, for the same reason as the path above.
+const reportingFolders = () => {
+  const folders = {};
+  for (const name of ['userData', 'appData', 'documents', 'downloads', 'temp']) {
+    try { folders[name] = app.getPath(name); } catch (_) { /* a folder Electron cannot give is skipped */ }
+  }
+  return folders;
+};
+sentryReporting.installLogReporting({
+  log, Sentry,
+  folders: reportingFolders,
+  budgetStore: {
+    read: () => JSON.parse(fs.readFileSync(mainLogBudgetFile(), 'utf8')),
+    write: budget => fs.writeFileSync(mainLogBudgetFile(), JSON.stringify(budget)),
+  },
+});
+const windowReporting = sentryReporting.installWindowReporting({ Sentry, log, folders: reportingFolders });
 
 // === Global Error Handlers ===
 // Catch uncaught exceptions in main process
@@ -171,9 +194,8 @@ process.on('unhandledRejection', (reason, promise) => {
   // sleep/wake). The updater retries internally and surfaces a real failure
   // via autoUpdater.on('error') if it gives up — so this rejection is noise.
   if (/net::ERR_NETWORK_CHANGED|net::ERR_NETWORK_IO_SUSPENDED|net::ERR_INTERNET_DISCONNECTED/i.test(msg)) {
-    // Keep it out of the error stream, but no longer invisible: the log hook
-    // files it as a warning, so a download that really dies in this shape is
-    // still countable.
+    // Keep it out of the error stream, but not invisible: the warning stays in
+    // main.log and travels as a breadcrumb with the next Sentry event.
     log.warn('Transient net:: rejection (likely auto-updater during network change):', msg);
     return;
   }
@@ -473,6 +495,7 @@ if (!app.isPackaged || process.env.SUISSE_E2E_HOOKS === '1') {
 // Uses config.js for environment detection
 const { getApiUrl, getEnvironmentInfo } = require('./config');
 const API_BASE_URL = getApiUrl();
+const loginDiscovery = require('./login-discovery');
 log.info('Environment:', getEnvironmentInfo());
 // Backend restarts answer 502-504 for a few seconds: idempotent requests are
 // retried, and an HTML page in place of JSON becomes a transient error.
@@ -821,7 +844,7 @@ async function restoreRetainedRecording(recordId) {
   }
   const result = await combineChunksForRecovery(recordId);
   if (!result?.success) {
-    log.warn(`Restore of ${recordId} failed; originals retained: ${result?.error}`);
+    log.error(`Restore of ${recordId} failed; originals retained: code=${result?.code || 'none'}`, sentryReporting.failedAttemptError(result));
     markRecoveryFailed(recordId, result?.error);
     return { success: false, code: result?.code || null, diskFull: result?.diskFull === true,
       error: result?.error || 'Saving the recording failed; original audio is retained' };
@@ -968,7 +991,7 @@ async function recoverOrphanedRecordings() {
           if (adopted.upload) recoveredForUpload.push(adopted.upload);
           if (adopted.record) recoveredRecords.push(adopted.record);
         } else {
-          log.warn(`Could not recover recording ${dir}: ${result.error}`);
+          log.error(`Could not recover recording ${dir}: code=${result.code || 'none'}`, sentryReporting.failedAttemptError(result));
           markRecoveryFailed(dir, result.error);
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('system:capture-warning', { kind: 'recovery-failed', recordId: dir });
@@ -1064,11 +1087,15 @@ async function recoverOrphanedRecordings() {
 // Expose recovery state to renderer so it can wait before starting a new recording
 ipcMain.handle('recording:isRecoveryRunning', () => isRecoveryRunning);
 
-// Internal function for recovery - similar to combineChunks but without IPC
+// Internal function for recovery - similar to combineChunks but without IPC.
+// Its two callers (start-up recovery, "Restore and upload") log a failed
+// attempt themselves, as a reported error line with the result's code and the
+// finalization's Error (result.failure); failureReportedByCaller keeps the
+// finalization's own failure line out of reporting, so one failure is one event.
 async function combineChunksForRecovery(recordId) {
   return withRecordingLock(recordId, () => inFlightUploads.has(recordId)
-    ? { success: false, error: 'This recording is still uploading' }
-    : finalizeRecording(recordId, '.webm', 0, { recovery: true }));
+    ? { success: false, code: 'UPLOADING', error: 'This recording is still uploading' }
+    : finalizeRecording(recordId, '.webm', 0, { recovery: true, failureReportedByCaller: true }));
 }
 
 // === Cleanup Old Orphaned Directories ===
@@ -1530,6 +1557,14 @@ function destroyRecordingTray() {
   recordingStartTime = null;
   log.info('Recording tray indicator removed');
 }
+
+// === Microphone alert outside the app window ===
+// The renderer asks for it while a running recording's microphone is not heard
+// and clears it when that ends (see microphone-alert.js).
+const microphoneAlert = createMicrophoneAlert({ Notification, getWindow: () => mainWindow, getDock: () => app.dock, log });
+ipcMain.handle('system:showMicrophoneAlert', (event, alert) => microphoneAlert.show(alert));
+ipcMain.handle('system:clearMicrophoneAlert', () => microphoneAlert.clear());
+app.on('before-quit', () => microphoneAlert.clear());
 
 // Resolve preload path - use environment variable in dev, or relative path in prod
 const preloadPath = process.env.QUASAR_ELECTRON_PRELOAD
@@ -2178,10 +2213,11 @@ function getDeviceId() {
 // redirects through Microsoft/Google and ultimately back to suissenotes://
 // auth/callback, which the OS routes to handleSSOUrl() above. Actual login
 // completion arrives asynchronously via the 'auth:ssoCallback' event.
-async function openSSOBrowser(provider) {
+async function openSSOBrowser(provider, loginHint) {
   try {
-    const url = `${API_BASE_URL}/api/auth/${provider}/login?client=desktop`;
-    log.info(`SSO: launching system browser for ${provider} login`);
+    // A valid address goes along as login_hint (login recognition); anything else is dropped.
+    const url = loginDiscovery.buildSsoLoginUrl(API_BASE_URL, provider, loginHint);
+    log.info(`SSO: launching system browser for ${provider} login${url.includes('login_hint=') ? ' (with login hint)' : ''}`);
     await shell.openExternal(url);
     return { success: true };
   } catch (error) {
@@ -2190,8 +2226,13 @@ async function openSSOBrowser(provider) {
   }
 }
 
-ipcMain.handle('auth:loginWithMicrosoft', () => openSSOBrowser('microsoft'));
-ipcMain.handle('auth:loginWithGoogle', () => openSSOBrowser('google'));
+ipcMain.handle('auth:loginWithMicrosoft', (event, loginHint) => openSSOBrowser('microsoft', loginHint));
+ipcMain.handle('auth:loginWithGoogle', (event, loginHint) => openSSOBrowser('google', loginHint));
+ipcMain.handle('auth:loginWithApple', () => openSSOBrowser('apple', null));
+
+// Login recognition: which method an address uses, and which form the server switch allows.
+ipcMain.handle('auth:discover', (event, email) => loginDiscovery.discover(axios, API_BASE_URL, email));
+ipcMain.handle('auth:loginMode', () => loginDiscovery.loginMode(axios, API_BASE_URL));
 
 // Authentication - Production only (no demo mode)
 ipcMain.handle('auth:login', async (event, email, password) => {
@@ -2321,12 +2362,13 @@ ipcMain.handle('auth:register', async (event, email, password, name) => {
   } catch (error) {
     const failure = authFailureFromAxiosError(error);
     // Until 4.7.15 a failed registration left no trace anywhere: no log line,
-    // no Sentry event (08.10.2026: a prospect failed for 15 minutes). The
-    // log hook (sentry-reporting.js) turns this warning into a Sentry event.
+    // no Sentry event (08.10.2026: a prospect failed for 15 minutes). Now it
+    // is a line in main.log and a breadcrumb on the next Sentry event
+    // (sentry-reporting.js). It is not an event of its own: the warning also
+    // fires for a customer who is offline.
     // Status and codes only - never the e-mail, name or password. Refusals
     // the customer can fix (400 invalid input, 409 account exists, 429 too
-    // many attempts) stay in the local log (info = breadcrumb); server and
-    // network failures become Sentry warnings.
+    // many attempts) are info; server and network failures are warnings.
     const line = `auth:register failed: status=${failure.status || '-'} code=${failure.code || '-'} network=${failure.networkCode || '-'}${failure.nonJson ? ' non-json' : ''}`;
     if (isCustomerFixableRegisterRefusal(failure)) log.info(line);
     else log.warn(line);
@@ -2359,7 +2401,7 @@ function authFailureFromAxiosError(error) {
       success: false,
       status: error.response.status,
       code: authErrorCode(data),
-      provider: isObject && (data.provider === 'google' || data.provider === 'microsoft') ? data.provider : undefined,
+      provider: isObject && ['microsoft', 'google', 'apple'].includes(data.provider) ? data.provider : undefined,
       nonJson: !!error.nonJson || !isObject,
       serverError: isObject && typeof data.error === 'string' ? data.error.slice(0, 200) : undefined
     };
@@ -3361,6 +3403,7 @@ ipcMain.handle('recording:setInProgress', (event, inProgress) => {
     createRecordingTray();
   } else {
     destroyRecordingTray();
+    microphoneAlert.clear(); // no recording, nothing to warn about
   }
 
   return { success: true };
@@ -3758,6 +3801,28 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
         });
       } catch (_) { /* telemetry never breaks saving */ }
     }
+    // The one-command render missed its predicted length and the recording was
+    // rebuilt from measured source lengths (ELECTRON-73). Within the timing
+    // tolerance that is the known timestamp rounding: info, field evidence
+    // only. A larger miss means the one-command render itself lost or added
+    // audio. The rebuild saved the meeting, but if that became the rule every
+    // recording would silently take the slow path: warning, its own issue.
+    const fastPathFallback = result.plan?.fastPathFallback;
+    if (fastPathFallback) {
+      const rounding = fastPathFallback.withinTimingTolerance === true;
+      log[rounding ? 'info' : 'warn'](`Finalization rebuilt ${recordId} from measured source lengths: predicted ${fastPathFallback.expectedDecodedSamples} samples, encoded ${fastPathFallback.observedDecodedSamples}`);
+      try {
+        Sentry.captureMessage(rounding
+          ? 'finalization: predicted length missed, recording rebuilt from measured source lengths'
+          : 'finalization: one-command render missed its length by more than the timing tolerance, recording rebuilt from measured source lengths', {
+          level: rounding ? 'info' : 'warning',
+          fingerprint: [rounding ? 'finalization-fast-path-sample-count-fallback' : 'finalization-fast-path-sample-count-fallback-over-tolerance'],
+          tags: { operation: 'finalization', recovery: String(!!options.recovery) },
+          extra: { recordId, expectedDecodedSamples: fastPathFallback.expectedDecodedSamples,
+            observedDecodedSamples: fastPathFallback.observedDecodedSamples },
+        });
+      } catch (_) { /* telemetry never breaks saving */ }
+    }
     if (result.supersededScratchLeft) log.warn(`Superseded finalization scratch could not be removed for ${recordId}: ${result.supersededScratchLeft}`);
     for (const warning of result.warnings || []) {
       recordCaptureWarning(recordId, typeof warning === 'string' ? warning : warning.kind || warning.code || 'native-source-recovery');
@@ -3769,9 +3834,33 @@ async function finalizeRecording(recordId, ext, expectedDurationSec = 0, options
     if (getActiveRecording()?.recordId === recordId) clearActiveRecording();
     return result;
   } catch (error) {
-    log.error('Recording finalization failed; all source batches retained:', error);
+    // In a recovery the caller reports the failed attempt, its reported line
+    // carrying this Error (result.failure, see combineChunksForRecovery), and
+    // this line is only the breadcrumb that tells why; everywhere else the
+    // second line is the reported one (sentry-reporting.js).
+    if (options.failureReportedByCaller === true) log.warn('Recording finalization failed during recovery; all source batches retained:', error);
+    else log.error('Recording finalization failed; all source batches retained:', error);
+    // The predicted length missed and the rebuild from measured lengths failed
+    // as well (ELECTRON-73). Without both counts this cannot be diagnosed.
+    if (error.fastPathFallback) {
+      log.error(`Finalization of ${recordId} failed after a rebuild from measured source lengths: predicted ${error.fastPathFallback.expectedDecodedSamples} samples, encoded ${error.fastPathFallback.observedDecodedSamples}`);
+      try {
+        Sentry.captureMessage('finalization: predicted length missed and the rebuild from measured source lengths failed', {
+          level: 'warning',
+          fingerprint: ['finalization-fast-path-sample-count-fallback-failed'],
+          tags: { operation: 'finalization', recovery: String(!!options.recovery), code: String(error.code || 'unknown') },
+          extra: { recordId, expectedDecodedSamples: error.fastPathFallback.expectedDecodedSamples,
+            observedDecodedSamples: error.fastPathFallback.observedDecodedSamples,
+            rebuildExpectedDecodedSamples: error.expectedDecodedSamples ?? null, rebuildDecodedSamples: error.actualDecodedSamples ?? null },
+        });
+      } catch (_) { /* telemetry never breaks saving */ }
+    }
     const diskFull = error.code === 'ENOSPC' || /no space left|not enough space|disk full/i.test(error.message || '');
-    return { success: false, diskFull, requiresRecovery: error.code === 'PCM_CAPTURE_RECOVERY_REQUIRED', error: error.message, code: error.code || null };
+    return {
+      success: false, diskFull, requiresRecovery: error.code === 'PCM_CAPTURE_RECOVERY_REQUIRED', error: error.message, code: error.code || null,
+      // Only for the recovery helper, whose result does not cross IPC.
+      ...(options.failureReportedByCaller === true ? { failure: error } : {}),
+    };
   }
 }
 
