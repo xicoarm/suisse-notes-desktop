@@ -13,8 +13,13 @@ import vm from 'node:vm';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const { writeFileAtomic } = require('../../src-electron/durable-files');
+const { writeFileAtomic, listChunkBatches } = require('../../src-electron/durable-files');
 const { tokenUserId, canUploadForUser, verifiedUploadResult } = require('../../src-electron/upload-safety');
+const { readFinalizedRecording, listSessions } = require('../../src-electron/recording-persistence');
+const { usesNativeSources } = require('../../src-electron/native-recording-session');
+const { FINALIZATION_PENDING_MARKER } = require('../../src-electron/recording-upload-eligibility');
+const { withCaptureWarnings } = require('../../src-electron/recording-history-warnings');
+const { repairRecoveredHistoryRecord } = require('../../src-electron/recording-export');
 
 const OWNER = 'owner-account-1';
 const NO_SPEECH = 'In dieser Aufnahme konnte keine Sprache erkannt werden. Ihre Minuten wurden zurückerstattet.';
@@ -30,6 +35,11 @@ function extract(signature) {
     else if (MAIN[index] === '}' && --depth === 0) return MAIN.slice(start + 1, index + 1);
   }
   throw new Error(`Unbalanced ${signature}`);
+}
+function line(prefix) {
+  const start = MAIN.indexOf(`\n${prefix}`);
+  if (start < 0) throw new Error(`Missing ${prefix}`);
+  return MAIN.slice(start + 1, MAIN.indexOf(';\n', start) + 1);
 }
 function memoryStore(initial = {}) {
   const data = JSON.parse(JSON.stringify(initial));
@@ -160,7 +170,7 @@ describe('a final server status ends the upload re-check (ELECTRON-8P)', () => {
     main.context.axios.get.mockResolvedValue(answer('COMPLETED'));
 
     expect(await main.uploadWithRetry(recording.recordId, recording.filePath, {})).toMatchObject({ success: true, verified: true, canDelete: false, pendingVerification: false });
-    expect(main.history()[0]).toMatchObject({ uploadStatus: 'uploaded', audioFileId: 'remote-1', uploadError: null });
+    expect(main.history()[0]).toMatchObject({ uploadStatus: 'uploaded', audioFileId: 'remote-1', uploadError: null, uploadTerminal: null });
     expect(main.context.tryDirectUpload).not.toHaveBeenCalled();
   });
 
@@ -193,5 +203,89 @@ describe('a final server status ends the upload re-check (ELECTRON-8P)', () => {
     expect(main.queue()).toEqual([]);
     expect(main.history()[0]).toMatchObject({ uploadStatus: 'uploaded', audioFileId: 'remote-1' });
     expect(main.completed()).toEqual([expect.objectContaining({ recordId: recording.recordId, success: true, background: true })]);
+  });
+});
+
+// Startup recovery with the real scan and adoption functions. The parked state
+// ('failed' with the server's id, beside an upload receipt) must count as
+// settled there too, or every launch would queue the recording again and
+// announce it as recovered.
+function recoveryProcess(history, queue = []) {
+  const context = {
+    fs, path, JSON, Date, Promise, Number, String, Object, Array, Math, Set, Map, Buffer, parseFloat,
+    setTimeout: (fn, ms) => setTimeout(fn, Math.min(ms, 1)),
+    log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    Sentry: { captureMessage: vi.fn(), captureException: vi.fn() },
+    historyStore: memoryStore({ recordings: history }), uploadQueueStore: memoryStore({ pendingUploads: queue }), activeRecordingStore: memoryStore(),
+    getRecordingsPath: () => root, getRecordingPath: id => path.join(root, id),
+    getActiveRecording: () => null, clearActiveRecording: () => {},
+    inFlightUploads: new Set(), recordingLocks: new Map(),
+    isRecoveryRunning: false, unsavedRecordingId: null, isRecordingInProgress: false,
+    mainWindow: { isDestroyed: () => false, webContents: { send: vi.fn() } },
+    getAuthToken: vi.fn(async () => token(OWNER)), tokenUserId, canUploadForUser,
+    FINALIZATION_PENDING_MARKER, readFinalizedRecording, listSessions, listChunkBatches, usesNativeSources,
+    withCaptureWarnings, repairRecoveredHistoryRecord,
+    // An output without a finalization record is checked before it is adopted.
+    assessRecordingUpload: vi.fn(async () => ({ allowed: true })),
+    validateAudioOutput: file => ({ valid: true, size: fs.statSync(file).size }),
+    getAudioMetadata: async () => ({ format: { duration: 4 } }), safeParseDuration: metadata => Number(metadata?.format?.duration) || 0,
+    combineChunksForRecovery: vi.fn(async () => ({ success: false, error: 'must not run' })),
+    processPendingUploads: vi.fn(async () => {}),
+  };
+  const code = [line('const RECOVERY_TERMINAL_STATUSES'), ...['function recordingOwner(', 'function readUploadReceipt(',
+    'function addToUploadQueue(', 'function removeFromUploadQueue(', 'function adoptRecoveredRecording(',
+    'function markRecoveryFailed(', 'function heldUploadReason(', 'function requeueRecoveredUpload(',
+    'async function recoverOrphanedRecordings('].map(extract)].join('\n\n');
+  const api = vm.runInNewContext(`${code}\n({ recoverOrphanedRecordings, adoptRecoveredRecording });`, context);
+  const announced = () => context.mainWindow.webContents.send.mock.calls.filter(([channel]) => channel === 'recording:recovered');
+  return { ...api, context, announced, history: () => context.historyStore.get('recordings', []), queue: () => context.uploadQueueStore.get('pendingUploads', []) };
+}
+const parked = entry => ({ ...entry, uploadStatus: 'failed', audioFileId: 'remote-1', uploadError: NO_SPEECH, uploadTerminal: true, uploadVerified: false });
+
+describe('startup recovery leaves a recording the server answered for good alone', () => {
+  it('an output of an older release (no finalization record) that is parked is not queued or announced again', async () => {
+    const recording = await acceptedRecording();
+    const main = recoveryProcess([parked(recording.entry)]);
+
+    await main.recoverOrphanedRecordings();
+    await main.recoverOrphanedRecordings();
+
+    expect(main.history()).toEqual([parked(recording.entry)]);
+    expect(main.queue()).toEqual([]);
+    expect(main.announced()).toEqual([]);
+    expect(main.context.assessRecordingUpload).not.toHaveBeenCalled();
+    expect(main.context.processPendingUploads).not.toHaveBeenCalled();
+  });
+
+  it('the same output with a failed entry the server never answered is still adopted and queued', async () => {
+    const recording = await acceptedRecording({ receipt: false, status: 'failed' });
+    const main = recoveryProcess([{ ...recording.entry, uploadError: 'Upload failed after 10 attempts' }]);
+
+    await main.recoverOrphanedRecordings();
+
+    expect(main.history()[0]).toMatchObject({ id: recording.recordId, uploadStatus: 'pending', uploadError: null, recovered: true, filePath: recording.filePath });
+    expect(main.queue().map(item => item.recordId)).toEqual([recording.recordId]);
+    expect(main.announced()).toHaveLength(1);
+    expect(main.context.processPendingUploads).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['parked beside its receipt stays parked', true, true, false],
+    ['failed with a server id but no receipt on this computer is queued again', true, false, true],
+    ['failed without a server id is queued again', false, true, true],
+  ])('a rebuilt recording that is %s', async (_state, serverId, receipt, queuedAgain) => {
+    const recording = await acceptedRecording({ receipt, status: 'failed' });
+    const entry = { ...recording.entry, uploadStatus: 'failed', uploadError: NO_SPEECH, uploadTerminal: true, ...(serverId ? { audioFileId: 'remote-1' } : { audioFileId: undefined }) };
+    const main = recoveryProcess([entry]);
+
+    const adopted = main.adoptRecoveredRecording(recording.recordId, { success: true, outputPath: recording.filePath, duration: 4, fileSize: 2048, fileSizeMb: '0.00' });
+
+    if (queuedAgain) {
+      expect(adopted.upload).toMatchObject({ recordId: recording.recordId, filePath: recording.filePath });
+      expect(main.history()[0]).toMatchObject({ uploadStatus: 'pending', uploadError: null, uploadTerminal: null, recovered: true });
+    } else {
+      expect(adopted).toEqual({ upload: null, record: null });
+      expect(main.history()[0]).toMatchObject({ uploadStatus: 'failed', audioFileId: 'remote-1', uploadError: NO_SPEECH, uploadTerminal: true, recovered: true });
+    }
   });
 });
