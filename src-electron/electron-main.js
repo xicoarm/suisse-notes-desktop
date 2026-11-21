@@ -612,6 +612,18 @@ function saveUploadOutcome(recordId, result) {
       uploadStatus: result.success ? 'uploaded' : 'pending_verification',
       audioFileId: result.audioFileId, transcriptionId: result.transcriptionId || null,
       uploadVerified: result.verified === true, uploadError: result.error || null,
+      // A later check that confirms the recording lifts the latch of an earlier final answer.
+      ...(result.success ? { uploadTerminal: null } : {}),
+    });
+    historyStore.set('recordings', recordings);
+  } else if (result.serverFinal) {
+    // The server holds the recording and has answered for good. 'failed' with
+    // the audioFileId and the terminal latch is what the renderer already
+    // leaves alone; only the user's Retry asks the server again.
+    Object.assign(recording, {
+      uploadStatus: 'failed',
+      audioFileId: result.audioFileId, transcriptionId: result.transcriptionId || null,
+      uploadVerified: false, uploadError: result.error || null, uploadTerminal: true,
     });
     historyStore.set('recordings', recordings);
   }
@@ -753,7 +765,11 @@ function adoptRecoveredRecording(dir, result, activeSession = null) {
   // during the 5h endurance test.) Update it in place so the recovered file
   // becomes visible and gets uploaded. Never clobber a terminal upload status.
   const existing = recordings[existingIndex];
-  const terminal = RECOVERY_TERMINAL_STATUSES.includes(existing.uploadStatus);
+  // 'failed' with the server's id and an upload receipt is settled as well: the
+  // server holds the recording and answered for good. Re-queueing it would only
+  // ask again at every launch. 'failed' WITHOUT that stays recoverable (ELECTRON-7R).
+  const terminal = RECOVERY_TERMINAL_STATUSES.includes(existing.uploadStatus) ||
+    (existing.uploadStatus === 'failed' && !!existing.audioFileId && !!readUploadReceipt(dir)?.audioFileId);
   recordings[existingIndex] = withCaptureWarnings({
     ...repairRecoveredHistoryRecord(existing, { ...result, fileSize: recoveredFileSize, duration: metadataDuration }),
     uploadStatus: terminal ? existing.uploadStatus : 'pending',
@@ -933,7 +949,9 @@ async function recoverOrphanedRecordings() {
         // once for one user). Pending/failed ones still go to the upload queue.
         if (!finalized && hasOutput && !hasChunks && !hasSessions && !hasBatches && !hasPcm && !hasNative &&
             existingRecord?.filePath === audioPath &&
-            ['completed', 'uploaded', 'skipped', 'cancelled', 'pending_verification'].includes(existingRecord.uploadStatus)) continue;
+            (['completed', 'uploaded', 'skipped', 'cancelled', 'pending_verification'].includes(existingRecord.uploadStatus) ||
+             // Settled on the server with its final answer (see adoptRecoveredRecording).
+             (existingRecord.uploadStatus === 'failed' && !!existingRecord.audioFileId && !!readUploadReceipt(dir)?.audioFileId))) continue;
 
         // Never touch a recording that is being written RIGHT NOW. This scan
         // runs ~5s after launch — a recording started inside that window
@@ -4028,7 +4046,10 @@ async function pollServerStatus(audioFileId, maxAttempts = 15, ownerId = null) {
         if (FAILED_STATES.has(status)) {
           const errMsg = response.data.errorMessage || response.data.error || `Server reported status=${status}`;
           log.error(`Server reported upload failed for ${audioFileId}:`, errMsg);
-          return { persisted: false, verified: false, error: errMsg };
+          // FAILED and CANCELLED are final in the server contract. Without
+          // `terminal` the recording stayed in the queue as "verification
+          // pending" and was asked about every five minutes, forever.
+          return { persisted: false, verified: false, terminal: true, error: errMsg };
         }
 
         // RECORDING means the server is still ingesting — keep polling.

@@ -14,6 +14,11 @@ function canUploadForUser(ownerId, currentUserId) {
 
 function verifiedUploadResult(accepted, verification) {
   const confirmed = !!accepted?.audioFileId && verification?.persisted === true && verification?.verified === true;
+  // The server gave its final answer for this recording (FAILED or CANCELLED,
+  // e.g. "no speech recognised"). Asking again returns the same answer, so this
+  // is a result, not a check that is still pending: the queue lets go of it and
+  // History shows the server's reason. The local audio is retained as always.
+  const serverFinal = !confirmed && verification?.terminal === true;
   return {
     ...accepted,
     success: confirmed,
@@ -23,8 +28,9 @@ function verifiedUploadResult(accepted, verification) {
     verified: confirmed,
     contentVerified: false,
     canDelete: false,
-    pendingVerification: !confirmed,
-    canRetry: !verification?.terminal,
+    pendingVerification: !confirmed && !serverFinal,
+    canRetry: !serverFinal,
+    ...(serverFinal ? { serverFinal: true } : {}),
     ...(confirmed ? {} : { error: verification?.error || 'Upload received; server storage confirmation is still pending. The local audio is retained.' }),
   };
 }
