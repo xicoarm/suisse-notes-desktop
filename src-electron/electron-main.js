@@ -614,6 +614,16 @@ function saveUploadOutcome(recordId, result) {
       uploadVerified: result.verified === true, uploadError: result.error || null,
     });
     historyStore.set('recordings', recordings);
+  } else if (result.serverFinal) {
+    // The server holds the recording and has answered for good. 'failed' with
+    // the audioFileId and the terminal latch is what the renderer already
+    // leaves alone; only the user's Retry asks the server again.
+    Object.assign(recording, {
+      uploadStatus: 'failed',
+      audioFileId: result.audioFileId, transcriptionId: result.transcriptionId || null,
+      uploadVerified: false, uploadError: result.error || null, uploadTerminal: true,
+    });
+    historyStore.set('recordings', recordings);
   }
 }
 async function verifyAcceptedUpload(recordId, filePath, accepted, ownerId, remember = true, sourceSnapshot = null) {
@@ -4028,7 +4038,10 @@ async function pollServerStatus(audioFileId, maxAttempts = 15, ownerId = null) {
         if (FAILED_STATES.has(status)) {
           const errMsg = response.data.errorMessage || response.data.error || `Server reported status=${status}`;
           log.error(`Server reported upload failed for ${audioFileId}:`, errMsg);
-          return { persisted: false, verified: false, error: errMsg };
+          // FAILED and CANCELLED are final in the server contract. Without
+          // `terminal` the recording stayed in the queue as "verification
+          // pending" and was asked about every five minutes, forever.
+          return { persisted: false, verified: false, terminal: true, error: errMsg };
         }
 
         // RECORDING means the server is still ingesting — keep polling.

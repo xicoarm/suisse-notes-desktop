@@ -26,6 +26,28 @@ describe('upload ownership and evidence', () => {
     expect(verifiedUploadResult({ success: true, audioFileId: 'remote-id' }, verification))
       .toMatchObject({ success: false, verified: false, canDelete: false, pendingVerification: true, audioFileId: 'remote-id' });
   });
+  it('a final server answer is a result, not a pending check, and still never permits deletion', () => {
+    const result = verifiedUploadResult({ success: true, audioFileId: 'remote-id', canDelete: true },
+      { persisted: false, verified: false, terminal: true, error: 'No speech was recognised' });
+    expect(result).toMatchObject({ success: false, verified: false, contentVerified: false, canDelete: false,
+      pendingVerification: false, canRetry: false, serverFinal: true, audioFileId: 'remote-id', error: 'No speech was recognised' });
+  });
+  it.each([
+    { persisted: false, verified: false, error: '404' },
+    { persisted: false, verified: false, error: 'Timeout' },
+    { persisted: false, verified: false, authError: true },
+    { persisted: false, verified: false, terminal: false },
+    undefined,
+  ])('keeps an answer that is not final retryable and pending: %j', verification => {
+    const result = verifiedUploadResult({ audioFileId: 'remote-id' }, verification);
+    expect(result).toMatchObject({ success: false, pendingVerification: true, canRetry: true, canDelete: false });
+    expect(result).not.toHaveProperty('serverFinal');
+  });
+  it('a confirmed upload stays successful even if the answer also carries the final mark', () => {
+    const result = verifiedUploadResult({ audioFileId: 'remote-id' }, { persisted: true, verified: true, terminal: true });
+    expect(result).toMatchObject({ success: true, verified: true, pendingVerification: false, canRetry: true, canDelete: false });
+    expect(result).not.toHaveProperty('serverFinal');
+  });
   it('requires a remote identifier even if the HTTP request succeeded', () => {
     expect(verifiedUploadResult({ success: true }, { persisted: true, verified: true }).canDelete).toBe(false);
   });
