@@ -170,6 +170,22 @@ let stopCaptureRecoverySystemAudioWatch = null;
 // recovery (handleMicDeviceChange), which this cap does not touch.
 const CAPTURE_RECOVERY_MIC_REACQUIRES_DESKTOP = 6;
 let captureRecoveryMicReacquires = 0;
+// Desktop: an audio engine renders only while its output device asks for
+// audio. When that device stops asking (a headset between two Bluetooth
+// profiles, a dock or display that went away, the system audio service
+// restarting) the engine keeps reporting 'running' while its clock stands
+// still: the live mix receives nothing, the level display and the microphone
+// check go blind, and only the source lanes keep recording. None of these
+// engines plays anything, so each can run on its own clock instead of a
+// device's. The repair is tried once per engine, and only for a clock that
+// was seen standing still: a healthy recording is never touched.
+const SILENT_SINK_TIMEOUT_MS = 3000;
+const audioContextsOnSilentSink = new WeakSet();
+const audioContextsSilentSinkTried = new WeakSet();
+// Once a recording's live mix had to leave the output device, the engines that
+// recording opens later (a microphone change re-opens the microphone check)
+// start off it too. A new recording starts on the device again.
+let recordingOffOutputDevice = false;
 
 // Flush synchronization: resolved when ondataavailable saves the chunk after a flush request
 let flushResolvers = [];
@@ -1812,12 +1828,65 @@ function captureRecoveryLanesRecording(now = Date.now()) {
 }
 
 /**
+ * An engine for the level display or the microphone check. It follows the
+ * live mix off the output device (see recordingOffOutputDevice).
+ */
+function createMonitorAudioContext() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (recordingOffOutputDevice) {
+    try {
+      const ctx = new AudioContextClass({ sampleRate: 48000, sinkId: { type: 'none' } });
+      audioContextsOnSilentSink.add(ctx);
+      audioContextsSilentSinkTried.add(ctx);
+      return ctx;
+    } catch (error) { /* an engine that cannot start that way starts the usual way */ }
+  }
+  return new AudioContextClass({ sampleRate: 48000 });
+}
+
+/**
+ * Desktop: move the recording's audio engines off the output device, onto
+ * their own clock (see SILENT_SINK_TIMEOUT_MS). Each engine is tried once.
+ * Resolves to how many moved in time and, if one did not, why. A move is
+ * booked when the engine answers, so an answer that comes after the time
+ * limit, or after a pause or stop overtook the tick that asked, still counts.
+ */
+async function moveAudioContextsToSilentSink(contextList) {
+  let moved = 0;
+  let failure = null;
+  await Promise.all(contextList.map(async ctx => {
+    if (!ctx || ctx.state === 'closed' || typeof ctx.setSinkId !== 'function') return;
+    if (audioContextsSilentSinkTried.has(ctx)) return;
+    audioContextsSilentSinkTried.add(ctx);
+    let timeout;
+    try {
+      const moving = Promise.resolve(ctx.setSinkId({ type: 'none' })).then(() => {
+        audioContextsOnSilentSink.add(ctx);
+        if (ctx === mixingContext) recordingOffOutputDevice = true;
+      });
+      moving.catch(() => {}); // a refusal after the time limit has nobody left to tell
+      await Promise.race([
+        moving,
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(Object.assign(new Error('The audio engine did not change its output in time'), { name: 'TimeoutError' })), SILENT_SINK_TIMEOUT_MS);
+        })
+      ]);
+      moved++;
+    } catch (error) {
+      failure = error;
+    } finally { clearTimeout(timeout); }
+  }));
+  return { moved, failure };
+}
+
+/**
  * INT-2: one recovery attempt. Ordered so each tick is safe to repeat:
  * 1. Success check — a chunk persisted AFTER the episode began means capture
  *    is flowing again; clear the stall state and stop.
  * 2. Resume the audio contexts (fails while a call holds the session; succeeds
  *    the moment it is released — THE fix for the one-shot resume that failed
- *    44ms into the Nyberg interruption).
+ *    44ms into the Nyberg interruption). Desktop: a context that runs with a
+ *    standing clock is moved off the output device (2b).
  * 3. If the mic track is dead/muted, re-acquire and swap it into the mixing
  *    graph via the existing switchMicrophoneStream machinery (the recorder
  *    records the graph output, so it keeps running across the swap).
@@ -1897,6 +1966,24 @@ async function attemptCaptureRecovery() {
       return;
     }
 
+    // 2b. Desktop: a 'running' engine whose clock stands still renders
+    //     nothing, and no later step reaches that: its output device stopped
+    //     asking for audio. Away from a sleep (a dark wake freezes the clock
+    //     too, and step 5 waits that out) the engines move off the output
+    //     device, once. The probe is asked once per tick.
+    const mixClockRunning = !isElectron() || captureRecoveryClockRunning(mixingContext);
+    if (!mixClockRunning && !hasRecentSuspendEvidence() && typeof mixingContext?.setSinkId === 'function' &&
+      !audioContextsSilentSinkTried.has(mixingContext)) {
+      const episodeReason = captureRecoveryReason;
+      const { moved, failure } = await moveAudioContextsToSilentSink([recoveryContext, mixedAudioContext, micHealthAudioContext]);
+      // Reported even when a pause or stop overtook this tick: it happened.
+      const outcome = audioContextsOnSilentSink.has(recoveryContext)
+        ? 'live mix moved off the output device'
+        : `live mix could not be moved off the output device (${failure?.name || 'unknown'})`;
+      captureMessage(`recording: audio clock stood still while 'running' — ${outcome} (reason=${episodeReason}, savedChunks=${savedChunkCount}, engines=${moved})`, 'warning');
+      if (!isCurrent()) return;
+    }
+
     // 3. Mic track dead or muted (iOS mutes it for the interruption's
     //    lifetime and often does NOT unmute it afterwards) → full re-acquire.
     const micTrack = stream?.getAudioTracks?.()[0];
@@ -1963,7 +2050,7 @@ async function attemptCaptureRecovery() {
     //    about the recorder. Desktop only, and only near a detected sleep:
     //    the native archive keeps the raw microphone meanwhile, while
     //    WKWebView's post-interruption wedge keeps its 30s escalation.
-    if (isElectron() && hasRecentSuspendEvidence() && !captureRecoveryClockRunning(mixingContext)) {
+    if (isElectron() && hasRecentSuspendEvidence() && !mixClockRunning) {
       captureRecoveryHealthyTicks = 0;
       return;
     }
@@ -2040,9 +2127,7 @@ function startLevelMonitoring(mediaStream, micStream, recordingStore) {
   stopLevelMonitoring();
 
   try {
-    mixedAudioContext = new (window.AudioContext || window.webkitAudioContext)({
-      sampleRate: 48000
-    });
+    mixedAudioContext = createMonitorAudioContext();
     mixedAnalyser = mixedAudioContext.createAnalyser();
     mixedSourceNode = mixedAudioContext.createMediaStreamSource(mediaStream);
     mixedSourceNode.connect(mixedAnalyser);
@@ -2172,9 +2257,7 @@ function evaluateLowLevel() {
 
 function startMicHealthMonitoring(micStream, recordingStore) {
   try {
-    micHealthAudioContext = new (window.AudioContext || window.webkitAudioContext)({
-      sampleRate: 48000
-    });
+    micHealthAudioContext = createMonitorAudioContext();
     micHealthAnalyser = micHealthAudioContext.createAnalyser();
     micHealthSourceNode = micHealthAudioContext.createMediaStreamSource(micStream);
     micHealthSourceNode.connect(micHealthAnalyser);
@@ -2611,9 +2694,43 @@ let lastDataEventAt = null;
 const STALL_WARN_MS = 30000; // No persisted chunk while 'recording'.
 const FIRST_CHUNK_WARN_MS = Math.max(10000, MEDIA_RECORDER_TIMESLICE_MS * 3);
 
+// Desktop: what the source lanes have saved. The saved file is built from
+// them, so they are what "captured" means there, not the live mix.
+const LANE_PROGRESS_FRESH_MS = 3 * MEDIA_RECORDER_TIMESLICE_MS;
+let laneProgressChunks = 0; // chunks the lanes had saved at the last look
+let laneProgressLookAt = 0; // when that look was
+let laneProgressAt = 0;     // last time the number was seen to grow between two close looks
+
+/**
+ * Desktop: chunks the source lanes saved. A kind's segments add up (a
+ * re-opened microphone continues in a new one). Where the recording has a
+ * microphone, it alone counts: system audio can keep saving while the user's
+ * voice is gone, and that must neither look fine nor be reported as fine.
+ * Without one, the kind that got furthest counts. Called every second by the
+ * duration display, which keeps `lanesSavingNow` fresh; growth found after a
+ * longer gap between two looks (a sleep) does not say when it happened.
+ */
+function noteLaneProgress(now = Date.now()) {
+  if (!nativeArchive) return 0;
+  const perKind = new Map();
+  for (const source of nativeArchive.getState().sources) {
+    perKind.set(source.kind, (perKind.get(source.kind) || 0) + source.chunkCount);
+  }
+  const chunks = perKind.has('microphone') ? perKind.get('microphone') : Math.max(0, ...perKind.values());
+  if (chunks > laneProgressChunks && now - laneProgressLookAt <= LANE_PROGRESS_FRESH_MS) laneProgressAt = now;
+  laneProgressChunks = chunks;
+  laneProgressLookAt = now;
+  return chunks;
+}
+
+/** Desktop: did the lanes (see noteLaneProgress) save audio within the last three timeslices? */
+function lanesSavingNow(now = Date.now()) {
+  return Boolean(nativeArchive) && laneProgressAt > 0 && now - laneProgressAt < LANE_PROGRESS_FRESH_MS;
+}
+
 function captureProgressSnapshot() {
   const micTrack = stream?.getAudioTracks?.()[0];
-  return {
+  const snapshot = {
     receivedDataEvents, emptyDataEvents, receivedDataBytes, lastDataEventAt,
     savedChunks: savedChunkCount,
     pendingChunks: chunkWriter?.pendingCount || 0,
@@ -2625,6 +2742,16 @@ function captureProgressSnapshot() {
     micTrackMuted: micTrack?.muted ?? null,
     micTrackEnabled: micTrack?.enabled ?? null
   };
+  // Desktop: what tells a standing audio clock from a wedged recorder, and
+  // whether the recording itself (the source lanes) is still being written.
+  if (nativeArchive) {
+    const clock = mixingContext?.currentTime;
+    snapshot.contextClockSec = Number.isFinite(clock) ? Math.round(clock * 10) / 10 : null;
+    snapshot.contextOutput = mixingContext && audioContextsOnSilentSink.has(mixingContext) ? 'none' : 'device';
+    snapshot.laneChunks = noteLaneProgress();
+    snapshot.lanesSaving = lanesSavingNow();
+  }
+  return snapshot;
 }
 
 /**
@@ -2632,10 +2759,13 @@ function captureProgressSnapshot() {
  * the wall clock. Clamped to (captured chunks + one in-flight timeslice) so a
  * healthy recording reads ~wall-clock while a stalled one freezes — making the
  * stall visible instead of silently masked.
+ * Desktop: captured is whichever got further, the live mix or the source
+ * lanes (see noteLaneProgress). A live mix that stands still while the lanes save audio is a
+ * recording that works, and a clock frozen at 0:01 told its user the opposite.
  */
 function capturedDisplaySeconds(wallClockSec) {
   const tsSec = MEDIA_RECORDER_TIMESLICE_MS / 1000;
-  return Math.min(wallClockSec, savedChunkCount * tsSec + tsSec);
+  return Math.min(wallClockSec, Math.max(savedChunkCount, noteLaneProgress()) * tsSec + tsSec);
 }
 
 /**
@@ -2660,8 +2790,12 @@ function checkChunkProgress(recordingStore, isAutoSplitting) {
     // powered down: still handled, but not reported as an app fault.
     const afterSleep = hasRecentSuspendEvidence();
     if (afterSleep) diagnostics.secondsSinceSystemSleep = Math.round((Date.now() - lastSuspendEvidenceAt) / 1000);
-    captureMessage(`recording: capture STALLED${afterSleep ? ' after system sleep' : ''} — no chunk persisted for ${secs}s ${JSON.stringify(diagnostics)}`, afterSleep ? 'warning' : 'error');
-    console.error('Recording capture stalled:', JSON.stringify(diagnostics));
+    // Desktop: while the source lanes save audio nothing is being lost, only
+    // the live mix stands still. An error is a recording that loses audio.
+    const calm = afterSleep || diagnostics.lanesSaving === true;
+    captureMessage(`recording: capture STALLED${afterSleep ? ' after system sleep' : ''} — no chunk persisted for ${secs}s ${JSON.stringify(diagnostics)}`, calm ? 'warning' : 'error');
+    // The report above is the one event; this line stays in the trail of later reports.
+    console.info('Recording capture stalled:', JSON.stringify(diagnostics));
     // A later successful chunk proves that saving resumed, not that this gap
     // was recovered. Keep the warning with the sources through finalization.
     try {
@@ -2700,6 +2834,9 @@ function startDurationTracking(recordingStore, isAutoSplitting, maxSeconds = nul
   // Reset chunk-progress / honest-duration counters for the fresh recording.
   lastSuccessfulChunkAt = Date.now();
   savedChunkCount = 0;
+  laneProgressChunks = 0;
+  laneProgressLookAt = 0;
+  laneProgressAt = 0;
   stallWarned = false;
   lastWallClockSec = 0;
   stallClockBaseAt = 0;
@@ -3253,6 +3390,7 @@ async function startRecordingInternal(options) {
 
     // Reset mute state for new recording
     micMuted = false;
+    recordingOffOutputDevice = false;
 
     // Always use mixing pipeline so system audio can be added/removed dynamically
     // If no mic and no sysStream (macOS AudioTee-only), the pipeline creates a silent
@@ -3686,7 +3824,8 @@ export async function resumeRecording(recordingStore, isAutoSplitting, maxRecord
     setTimeout(() => {
       if (!recordingStoreRef?.isRecording) return;
       if (lastSuccessfulChunkAt !== chunkMarkAtResume) return; // a chunk landed — healthy
-      console.warn('No chunk persisted within 10s of resume — starting capture recovery');
+      // The recovery loop reports its own start; this line stays in the trail of later reports.
+      console.info('No chunk persisted within 10s of resume — starting capture recovery');
       scheduleCaptureRecovery('post-resume-stall');
     }, 10000);
 

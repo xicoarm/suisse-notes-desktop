@@ -68,7 +68,8 @@ describe('stall banner while the recording is still being saved', () => {
     const text = i18n.global.getLocaleMessage('de').captureStalledSavingNotice;
     expect(text).toContain('Die Aufnahme läuft weiter und wird gespeichert.');
     expect(text).toContain('Sie müssen nichts tun.');
-    expect(text).toContain('Die angezeigte Zeit kann stehen bleiben.');
+    // The time shown follows the source lanes now, so the notice no longer excuses a standing clock.
+    expect(text).not.toContain('angezeigte Zeit');
     expect(text).not.toContain('ß');
   });
 });

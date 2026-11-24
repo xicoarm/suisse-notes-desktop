@@ -354,7 +354,8 @@ export function useRecorder() {
 
   // Chunk-progress watchdog: capture appears stalled while still 'recording'.
   const handleCaptureStalled = (data) => {
-    console.warn('Capture stalled (watchdog):', data);
+    // The service has already reported this stall; a warning here would report it again.
+    console.info('Capture stalled (watchdog):', JSON.stringify(data));
     captureStalled.value = data;
   };
   // The service says when a stalled episode enters and leaves "still being
