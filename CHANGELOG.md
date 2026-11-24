@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [4.7.24](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.23...v4.7.24) (2026-11-24)
+
+
+### Bug Fixes
+
+* **recorder:** a standing audio clock no longer freezes the time shown, and the live mix is repaired ([6fcd4cb](https://github.com/xicoarm/suisse-notes-desktop/commit/6fcd4cb3ebdcd6f8d997bbefe27b2c615de51db4))
+* **upload:** a final server status ends the upload re-check ([89f1048](https://github.com/xicoarm/suisse-notes-desktop/commit/89f1048e3a72dd74afdd83fdf800741b1e467ffa))
+* **upload:** startup recovery treats a parked recording as settled ([5f6d78e](https://github.com/xicoarm/suisse-notes-desktop/commit/5f6d78ead9dc72d06f6f3e415d086061f30be341))
+
 ### [4.7.23](https://github.com/xicoarm/suisse-notes-desktop/compare/v4.7.22...v4.7.23) (2026-11-17)
 
 
