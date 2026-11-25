@@ -24,6 +24,7 @@ const { createRecordingPersistence, readFinalizedRecording, listSessions } = req
 const { createNativeSourceFinalization } = require('../../src-electron/native-source-finalization');
 const { validateNativeMedia } = require('../../src-electron/native-media-validation');
 const { assessRecordingUpload, FINALIZATION_PENDING_MARKER } = require('../../src-electron/recording-upload-eligibility');
+const { findFileManagerMetadata } = require('../../src-electron/file-manager-metadata');
 const { writeFileAtomic, syncDirectorySync, listChunkBatches } = require('../../src-electron/durable-files');
 const { withCaptureWarnings } = require('../../src-electron/recording-history-warnings');
 const { repairRecoveredHistoryRecord } = require('../../src-electron/recording-export');
@@ -92,6 +93,7 @@ function mainProcess(history = [], { signedIn = OWNER } = {}) {
     readUploadReceipt: () => null, updateRecordingPowerBlocker: () => {}, saveUploadOutcome: vi.fn(),
     FINALIZATION_PENDING_MARKER, readFinalizedRecording, listSessions, listChunkBatches, usesNativeSources: session.usesNativeSources,
     assessRecordingUpload, withCaptureWarnings, repairRecoveredHistoryRecord, writeFileAtomic, syncDirectorySync,
+    findFileManagerMetadata, nativeSourcePersistence: native,
     validateAudioOutput: file => { const size = fs.statSync(file).size; return { valid: size > 0, size }; },
     getAudioMetadata: probe, safeParseDuration: metadata => Number(metadata?.format?.duration) || 0,
     // finalizeRecording's production dependencies, with the real native builder.
@@ -104,7 +106,7 @@ function mainProcess(history = [], { signedIn = OWNER } = {}) {
   };
   const code = [line('const RECOVERY_TERMINAL_STATUSES'), ...['function recordingOwner(', 'function addToUploadQueue(',
     'function removeFromUploadQueue(', 'function updateUploadQueueRetry(', 'async function processPendingUploads(',
-    'function adoptRecoveredRecording(', 'function markRecoveryFailed(', 'function hasRetainedSourceAudio(',
+    'function adoptRecoveredRecording(', 'function logForeignRecordingEntries(', 'function markRecoveryFailed(', 'function hasRetainedSourceAudio(',
     'function heldUploadReason(', 'async function queueOwnerForUpload(', 'function requeueRecoveredUpload(',
     'async function restoreRetainedRecording(', 'async function recoverOrphanedRecordings(',
     'async function combineChunksForRecovery(', 'async function finalizeRecording('].map(extract)].join('\n\n');
@@ -161,6 +163,53 @@ describe('stranded recording recovery in the main process (ELECTRON-7R)', () => 
     expect(receipt.warnings).toContainEqual(expect.objectContaining({ kind: 'native-source-timestamp-resample-fallback', timeline: 'sample-order-restored-gaps' }));
     expect(Math.abs(Number((await probe(filePath)).format.duration) - (LONG_GAP_SECONDS + 2))).toBeLessThan(0.1);
     expect(originals(stranded.recordPath)[0].equals(stranded.bytes)).toBe(true);
+  }, 180000);
+
+  // ELECTRON-8R: the customer had looked for his audio in Finder after a failed
+  // save; Finder left its .DS_Store in the folders he opened, and from then on
+  // every startup refused the recording ("invalid source ID").
+  it('startup recovery recovers and uploads a recording whose folders hold Finder\'s files, and its log says where they were', async () => {
+    const stranded = await strandedRecording();
+    const sources = path.join(stranded.recordPath, 'native-sources'), source = path.join(sources, stranded.sourceId);
+    const finder = Buffer.from('0000000142756431', 'hex');
+    const strays = [stranded.recordPath, sources, source, path.join(source, 'chunks')].map(directory => path.join(directory, '.DS_Store'));
+    for (const file of strays) await fs.promises.writeFile(file, finder);
+    const main = mainProcess([stranded.entry]);
+    main.context.log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    await main.recoverOrphanedRecordings();
+    await main.settle();
+    const filePath = path.join(stranded.recordPath, 'audio.webm');
+    expect(main.context.log.error).not.toHaveBeenCalled();
+    expect(main.context.uploadWithRetry).toHaveBeenCalledTimes(1);
+    expect(main.context.uploadWithRetry).toHaveBeenCalledWith(stranded.recordId, filePath, expect.anything(), 2);
+    expect(main.history()[0]).toMatchObject({ id: stranded.recordId, userId: OWNER, uploadStatus: 'uploaded', audioFileId: 'remote-1', filePath, recovered: true });
+    expect(main.sent('recovery-failed')).toEqual([]);
+    const said = main.context.log.info.mock.calls.map(call => String(call[0])).find(text => text.includes('file-manager file'));
+    expect(said).toContain(`Recovery: ${stranded.recordId} holds 4 file-manager file(s)`);
+    expect(said).toContain('native-sources/.DS_Store');
+    expect(originals(stranded.recordPath)[0].equals(stranded.bytes)).toBe(true);
+    for (const file of strays) expect(fs.readFileSync(file)).toEqual(finder);
+  }, 180000);
+
+  it('startup recovery still refuses a recording with an unknown folder in its source list, keeps everything and logs what kind of entry it is', async () => {
+    const stranded = await strandedRecording();
+    const unknown = path.join(stranded.recordPath, 'native-sources', 'Interview Hans Muster');
+    await fs.promises.mkdir(unknown);
+    await fs.promises.writeFile(path.join(unknown, 'chunk_0.webm'), 'audio of unknown origin');
+    const main = mainProcess([{ ...stranded.entry, uploadStatus: 'recording', uploadError: undefined }]);
+    main.context.log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    await main.recoverOrphanedRecordings();
+    expect(main.context.uploadWithRetry).not.toHaveBeenCalled();
+    expect(main.history()[0]).toMatchObject({ uploadStatus: 'failed', filePath: null });
+    expect(main.history()[0].uploadError).toMatch(/unexpected directory \(name: 21 characters, mark [0-9a-f]{8}\) in source list/);
+    expect(main.sent('recovery-failed')).toEqual([{ kind: 'recovery-failed', recordId: stranded.recordId }]);
+    const logged = [...main.context.log.info.mock.calls, ...main.context.log.error.mock.calls].map(call => call.map(String).join(' ')).join('\n');
+    expect(logged).toMatch(new RegExp(`Recovery: ${stranded.recordId} has 1 other entry in its source list: directory \\(name: 21 characters, mark [0-9a-f]{8}\\)`));
+    expect(logged).not.toContain('Hans');
+    const chunks = path.join(stranded.recordPath, 'native-sources', stranded.sourceId, 'chunks');
+    expect(Buffer.concat([0, 1].map(index => fs.readFileSync(path.join(chunks, `chunk_${index}.webm`)))).equals(stranded.bytes)).toBe(true);
+    expect(fs.readFileSync(path.join(unknown, 'chunk_0.webm'), 'utf8')).toBe('audio of unknown origin');
+    expect(fs.existsSync(path.join(stranded.recordPath, 'audio.webm'))).toBe(false);
   }, 180000);
 
   it('"Restore and upload" rebuilds it from the retained originals and uploads it into the owner\'s account', async () => {

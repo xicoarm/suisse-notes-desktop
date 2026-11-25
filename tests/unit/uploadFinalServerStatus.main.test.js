@@ -17,6 +17,7 @@ const { writeFileAtomic, listChunkBatches } = require('../../src-electron/durabl
 const { tokenUserId, canUploadForUser, verifiedUploadResult } = require('../../src-electron/upload-safety');
 const { readFinalizedRecording, listSessions } = require('../../src-electron/recording-persistence');
 const { usesNativeSources } = require('../../src-electron/native-recording-session');
+const { findFileManagerMetadata } = require('../../src-electron/file-manager-metadata');
 const { FINALIZATION_PENDING_MARKER } = require('../../src-electron/recording-upload-eligibility');
 const { withCaptureWarnings } = require('../../src-electron/recording-history-warnings');
 const { repairRecoveredHistoryRecord } = require('../../src-electron/recording-export');
@@ -224,7 +225,8 @@ function recoveryProcess(history, queue = []) {
     mainWindow: { isDestroyed: () => false, webContents: { send: vi.fn() } },
     getAuthToken: vi.fn(async () => token(OWNER)), tokenUserId, canUploadForUser,
     FINALIZATION_PENDING_MARKER, readFinalizedRecording, listSessions, listChunkBatches, usesNativeSources,
-    withCaptureWarnings, repairRecoveredHistoryRecord,
+    withCaptureWarnings, repairRecoveredHistoryRecord, findFileManagerMetadata,
+    nativeSourcePersistence: require('../../src-electron/native-source-persistence'),
     // An output without a finalization record is checked before it is adopted.
     assessRecordingUpload: vi.fn(async () => ({ allowed: true })),
     validateAudioOutput: file => ({ valid: true, size: fs.statSync(file).size }),
@@ -234,7 +236,7 @@ function recoveryProcess(history, queue = []) {
   };
   const code = [line('const RECOVERY_TERMINAL_STATUSES'), ...['function recordingOwner(', 'function readUploadReceipt(',
     'function addToUploadQueue(', 'function removeFromUploadQueue(', 'function adoptRecoveredRecording(',
-    'function markRecoveryFailed(', 'function heldUploadReason(', 'function requeueRecoveredUpload(',
+    'function logForeignRecordingEntries(', 'function markRecoveryFailed(', 'function heldUploadReason(', 'function requeueRecoveredUpload(',
     'async function recoverOrphanedRecordings('].map(extract)].join('\n\n');
   const api = vm.runInNewContext(`${code}\n({ recoverOrphanedRecordings, adoptRecoveredRecording });`, context);
   const announced = () => context.mainWindow.webContents.send.mock.calls.filter(([channel]) => channel === 'recording:recovered');

@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { readFinalizedRecording } = require('./recording-persistence');
 const { usesNativeSources } = require('./native-recording-session');
+const { isFileManagerMetadataName } = require('./file-manager-metadata');
 
 // Main should publish this before finalization and remove it only after a new
 // complete receipt is durable. Its presence is authoritative even if an older
@@ -22,7 +23,10 @@ async function sourceDirectory(directory) {
   const stat = await statOptional(directory);
   if (!stat) return null;
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('A recording source directory is malformed');
-  return fs.promises.readdir(directory, { withFileTypes: true });
+  // A file manager's own file (Finder's .DS_Store …) is not source audio: a
+  // recording a person looked at in Finder stays uploadable.
+  return (await fs.promises.readdir(directory, { withFileTypes: true }))
+    .filter(entry => !(entry.isFile() && isFileManagerMetadataName(entry.name)));
 }
 
 function assertSourceFiles(entries, pattern) {

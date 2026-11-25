@@ -7,6 +7,7 @@ const nativeSourcePersistence = require('./native-source-persistence');
 const { createNativeSourceFinalization } = require('./native-source-finalization');
 const { NATIVE_CAPTURE_MODE, usesNativeSources, readNativeCaptureMarker, markNativeCaptureSession } = require('./native-recording-session');
 const { assessRecordingUpload, FINALIZATION_PENDING_MARKER } = require('./recording-upload-eligibility');
+const { findFileManagerMetadata } = require('./file-manager-metadata');
 const { withCaptureWarnings, hydrateHistoryCaptureWarnings } = require('./recording-history-warnings');
 const { createRecordingExporter, repairRecoveredHistoryRecord, assertExportRecoveryReady } = require('./recording-export');
 const { createPcmCapture } = require('./pcm-capture');
@@ -785,6 +786,23 @@ function adoptRecoveredRecording(dir, result, activeSession = null) {
     record: { id: dir, createdAt: finalRec.createdAt, durationSeconds: finalRec.duration || 0 } };
 }
 
+// What a recording's folders hold that this app did not write, for the log. A
+// file manager's own files (Finder's .DS_Store …) and plain files in the source
+// list no longer stop a recovery; what else sits in the source list is named by
+// kind, never by name. Evidence from the field: this never stops a recovery.
+function logForeignRecordingEntries(recordId, recordPath) {
+  try {
+    const fileManagerFiles = findFileManagerMetadata(recordPath);
+    if (fileManagerFiles.length) {
+      log.info(`Recovery: ${recordId} holds ${fileManagerFiles.length} file-manager file(s), passed over: ${fileManagerFiles.join(', ')}`);
+    }
+    const others = nativeSourcePersistence.describeSourceListExtras(recordPath);
+    if (others.length) {
+      log.info(`Recovery: ${recordId} has ${others.length} other entr${others.length === 1 ? 'y' : 'ies'} in its source list: ${others.join('; ')}`);
+    }
+  } catch (_) { /* diagnostics only */ }
+}
+
 // Saving failed and the originals are retained. An unfinished history entry
 // becomes 'failed' with the reason, which offers "Restore and upload" there.
 function markRecoveryFailed(dir, reason) {
@@ -858,6 +876,7 @@ async function restoreRetainedRecording(recordId) {
   if (isRecoveryRunning || unsavedRecordingId === recordId || (isRecordingInProgress && getActiveRecording()?.recordId === recordId)) {
     return { success: false, code: 'BUSY', error: 'The recording is still being saved' };
   }
+  logForeignRecordingEntries(recordId, dirPath);
   const result = await combineChunksForRecovery(recordId);
   if (!result?.success) {
     log.error(`Restore of ${recordId} failed; originals retained: code=${result?.code || 'none'}`, sentryReporting.failedAttemptError(result));
@@ -987,6 +1006,7 @@ async function recoverOrphanedRecordings() {
 
         totalAttempted++;
         log.info(`Attempting to recover orphaned recording: ${dir}`);
+        logForeignRecordingEntries(dir, dirPath);
 
         // Try to combine the chunks
         let result = finalized;

@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { writeFileAtomic, syncFile, syncDirectorySync, renameWithRetry } = require('./durable-files');
+const { isFileManagerMetadata, isRegularFile, describeEntry } = require('./file-manager-metadata');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_OFFSET_MS = 31 * 24 * 60 * 60 * 1000;
@@ -138,7 +139,8 @@ function readMetadata(layout) {
   assertDirectory(layout.directory);
   assertDirectory(layout.chunks);
   for (const name of fs.readdirSync(layout.directory)) {
-    if (!['manifest.json', 'started.json', 'end.json', 'chunks'].includes(name) && !name.endsWith('.tmp')) {
+    if (!['manifest.json', 'started.json', 'end.json', 'chunks'].includes(name) && !name.endsWith('.tmp') &&
+        !isFileManagerMetadata(layout.directory, name)) {
       throw invalid(`unrecognized source entry ${name}`);
     }
   }
@@ -155,7 +157,7 @@ function inspectSource(layout, metadata = readMetadata(layout)) {
   const { manifest, started, terminal } = metadata;
   const chunks = [];
   for (const name of fs.readdirSync(layout.chunks)) {
-    if (name.endsWith('.tmp')) continue;
+    if (name.endsWith('.tmp') || isFileManagerMetadata(layout.chunks, name)) continue;
     const match = /^chunk_(0|[1-9]\d*)\.webm$/.exec(name);
     if (!match) throw invalid(`unrecognized source chunk ${name}`);
     const index = count(Number(match[1]), 'chunk index');
@@ -185,16 +187,53 @@ function inspectSource(layout, metadata = readMetadata(layout)) {
     hasAudio: chunks.length > 0 };
 }
 
+// Does a name in the source list carry the id of a source that has no folder
+// there? "<id>.zip" beside the folder <id> is a by-product of a source that is
+// present. Without that folder it may be all that is left of a source (the
+// folder archived and removed, a conflict copy, the id in capitals), and passing
+// over it would build the recording without that source's audio.
+function namesAbsentSource(root, name) {
+  const ids = name.toLowerCase().match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/g) || [];
+  return ids.some(id => {
+    const stat = statMaybe(path.join(root, id));
+    return !stat || !stat.isDirectory() || stat.isSymbolicLink();
+  });
+}
+
 function inspectNativeSources(recordPath) {
   const layout = paths(recordPath);
   if (!assertDirectory(layout.root, true)) return [];
   const sources = [];
-  for (const sourceId of fs.readdirSync(layout.root)) {
-    if (sourceId.endsWith('.tmp')) continue;
-    sources.push(inspectSource(paths(recordPath, validateId(sourceId))));
+  for (const name of fs.readdirSync(layout.root)) {
+    if (name.endsWith('.tmp')) continue;
+    if (!UUID.test(name)) {
+      // The source list is made of folders. A plain file beside them is not a
+      // source and can never become audio of the recording: a file manager's
+      // own file (Finder's .DS_Store …), an archive someone made there. A
+      // recording a person looked at in Finder stays recoverable.
+      if (isRegularFile(layout.root, name) && !namesAbsentSource(layout.root, name)) continue;
+      // A folder or a link that is not a source stops the inspection, as
+      // before, and so does a plain file that names a source which is not
+      // there: nothing else records which sources a recording has. The
+      // message says what kind of entry it is, never its name.
+      throw invalid(`unexpected ${describeEntry(layout.root, name)} in source list`);
+    }
+    // A plain file that carries a source's name is a broken source, not a
+    // stray file: inspectSource refuses it.
+    sources.push(inspectSource(paths(recordPath, name)));
   }
   return sources.sort((a, b) => (a.startOffsetMs ?? a.reservedStartOffsetMs) -
     (b.startOffsetMs ?? b.reservedStartOffsetMs) || a.sourceId.localeCompare(b.sourceId));
+}
+
+// For a log line: what the source list holds that is neither a source nor a
+// staging folder nor a file manager's own file, described without its name.
+function describeSourceListExtras(recordPath) {
+  const root = path.join(path.resolve(recordPath), 'native-sources');
+  let names;
+  try { names = fs.readdirSync(root); } catch { return []; }
+  return names.filter(name => !name.endsWith('.tmp') && !UUID.test(name) && !isFileManagerMetadata(root, name))
+    .slice(0, 20).map(name => describeEntry(root, name));
 }
 
 async function makeDirectory(directory) {
@@ -337,4 +376,5 @@ function sourceFingerprint(recordPath) {
   return crypto.createHash('sha256').update(JSON.stringify(sourceRecords(recordPath))).digest('hex');
 }
 
-module.exports = { beginSource, markSourceStarted, saveSourceChunk, endSource, inspectNativeSources, sourceRecords, sourceFingerprint };
+module.exports = { beginSource, markSourceStarted, saveSourceChunk, endSource, inspectNativeSources, sourceRecords, sourceFingerprint,
+  describeSourceListExtras };
