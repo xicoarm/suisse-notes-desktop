@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { writeFileAtomic, renameWithRetry, syncFile, syncDirectorySync } = require('./durable-files');
+const { isFileManagerMetadata } = require('./file-manager-metadata');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const EVENTS = ['spawned', 'stream-start', 'first-data', 'stop-requested'];
@@ -117,7 +118,9 @@ function readAttempt(recordPath, attemptId) {
   const paths = layout(recordPath, attemptId);
   directory(paths.root); directory(paths.attempt);
   const allowed = new Set(['manifest.json', 'failure.json', 'end.json', ...EVENTS.map(event => `${event}.json`)]);
-  for (const name of fs.readdirSync(paths.attempt)) if (!allowed.has(name) && !name.endsWith('.tmp')) throw invalid(`unrecognized attempt file ${name}`);
+  for (const name of fs.readdirSync(paths.attempt)) {
+    if (!allowed.has(name) && !name.endsWith('.tmp') && !isFileManagerMetadata(paths.attempt, name)) throw invalid(`unrecognized attempt file ${name}`);
+  }
   const manifest = validateManifest(read(paths.manifest));
   if (manifest.attemptId !== attemptId) throw invalid('attempt manifest does not match directory');
   const events = {};
@@ -222,7 +225,8 @@ async function endPcmAttempt(recordPath, attemptId, options) {
 function inspectPcmCaptureEvidence(recordPath, { recovery = false } = {}) {
   const paths = layout(recordPath), pcm = pcmState(paths.pcm), attempts = [], incompleteReservations = [];
   if (directory(paths.root, true)) {
-    const entries = fs.readdirSync(paths.root).sort();
+    // A file manager's own file (Finder's .DS_Store …) is no attempt and no evidence.
+    const entries = fs.readdirSync(paths.root).filter(name => !isFileManagerMetadata(paths.root, name)).sort();
     // Creating this root is the first durable sign of required capture intent.
     // A failed reservation must not turn into complete microphone-only audio.
     if (!entries.length) incompleteReservations.push({ name: null, files: [] });
@@ -230,7 +234,7 @@ function inspectPcmCaptureEvidence(recordPath, { recovery = false } = {}) {
       if (attemptId.endsWith('.tmp')) {
         const staging = path.join(paths.root, attemptId);
         directory(staging);
-        const files = fs.readdirSync(staging).sort().map(name => {
+        const files = fs.readdirSync(staging).filter(name => !isFileManagerMetadata(staging, name)).sort().map(name => {
           const file = path.join(staging, name), found = stat(file);
           if (!found?.isFile() || found.isSymbolicLink() || found.size > 16384) throw invalid('unsafe incomplete reservation evidence');
           return { name, size: found.size, sha256: crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') };
